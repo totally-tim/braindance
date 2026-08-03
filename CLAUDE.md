@@ -132,6 +132,7 @@ node tools/library-check.mjs --mutate list-swallows-unreadable # ... and must FA
 node tools/library-check.mjs --mutate open-take-swallows-library # ... and must FAIL
 node tools/library-check.mjs --mutate one-refusal-for-older-versions # ... and must FAIL
 node tools/library-check.mjs --mutate open-ignores-format          # ... the capture's generation, at all four doors at once
+node tools/library-check.mjs --mutate exit-keeps-the-child-reference # ... a grabber that exited is not one that is running
 node tools/editor-check.mjs --url http://localhost:8080   # the editor's controls: that they exist, that pressing them changes something
 node tools/editor-check.mjs --mutate lanes-clear-siblings --no-render  # ... and must FAIL
 node tools/editor-check.mjs --mutate plant-unswept-control --no-render # ... and must FAIL
@@ -201,12 +202,19 @@ node tools/vcam-check.mjs --mutate refusal-ignores-webcam # ... what the take is
 node tools/guard-check.mjs                                # the socket's origin rule, the bind, and the rebinding rule
 node tools/guard-check.mjs --mutate upgrade-skips-origin  # ... and must FAIL mutated
 node tools/guard-check.mjs --mutate host-accepts-a-name   # ... and must FAIL mutated
-node tools/jobs-check.mjs                                 # step 8: the queue, the pin, and a real render
+node tools/jobs-check.mjs                                 # step 8: the queue, the pin, and two real renders
 node tools/jobs-check.mjs --mutate claim-ignores-renderer # ... and must FAIL mutated
+node tools/jobs-check.mjs --no-render --mutate codec-read-through-prototype # ... a codec read off Object.prototype
+node tools/jobs-check.mjs --mutate heartbeat-stops-on-first-error # ... the beat, and the one here that needs the render
 ```
 
-`jobs-check` needs a GPU browser and ffprobe and renders one real job through
-`tools/render-worker.mjs`; `--no-render` drops that row. **Six spawn their own servers and need
+`jobs-check` needs a GPU browser and ffprobe and renders two real jobs through
+`tools/render-worker.mjs`; `--no-render` drops both rows, and **it is not a flag to put on every
+mutation run of that tool** — `heartbeat-stops-on-first-error` names a line in the worker's beat
+that only a render reaches, so passing it there runs the check without the thing under test and
+passes green. The block above carries the flag per line for that reason; the mutation lists in it
+are a selection rather than the full set, so take the names from each tool's own refusal.
+**Six spawn their own servers and need
 none running** — `guard-check` on 8321, `jobs-check` on 8231, `level-check` on 8377,
 `monitor-check` on 8341, `vcam-check` on 8361, and `library-check` across the span described
 below — so what each of those needs is a free port rather than a server, and the distinction is
