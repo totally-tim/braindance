@@ -2771,7 +2771,9 @@ function panelRow(name, spec) {
     edit.type = 'text';
     edit.value = currentValue;
     edit.style.cssText = 'width: 42px; text-align: right; font: inherit; background: transparent; color: var(--accent); border: 0; outline: 0; padding: 0; margin: 0;';
+    let cancelled = false;
     const commit = () => {
+      if (cancelled) return;
       const parsed = parseFloat(edit.value);
       // Put the output back first so writeControl can find it.
       edit.replaceWith(out);
@@ -2787,7 +2789,7 @@ function panelRow(name, spec) {
     edit.addEventListener('blur', commit);
     edit.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); commit(); }
-      if (e.key === 'Escape') { e.preventDefault(); edit.replaceWith(out); }
+      if (e.key === 'Escape') { e.preventDefault(); cancelled = true; edit.replaceWith(out); }
     });
     out.replaceWith(edit);
     edit.focus();
@@ -9830,12 +9832,12 @@ function pickerKey(picker, event) {
 }
 
 /** Write the chosen name onto the trigger, which is where every reader looks for it. */
-function choosePicker(picker, name, { close = false } = {}) {
+function choosePicker(picker, name, { close = false, apply = true } = {}) {
   picker.trigger.value = name ?? '';
   paintPicker(picker);
   if (close) closePicker(picker, { restoreFocus: true });
   // Auto-apply the preset when selected, if this picker has that behavior enabled.
-  if (picker.autoApply) {
+  if (picker.autoApply && apply) {
     if (name) {
       withPresetGesture(picker.note ?? ui.note, () => whileWriting(async () => {
         try {
@@ -9991,7 +9993,7 @@ async function refreshPresets() {
     // leave `apply` aimed at a document the server answers 404 for, which is the state
     // the delete above is careful to leave the trigger out of.
     if (appliedPreset && list.some((doc) => doc.name === appliedPreset.name)) {
-      choosePicker(picker, appliedPreset.name);
+      choosePicker(picker, appliedPreset.name, { apply: false });
     } else {
       paintPicker(picker);
     }
@@ -10482,8 +10484,7 @@ function paintEase() {
  */
 function neighbourKeyTime(direction) {
   if (!timeline) return null;
-  const owner = selection?.owner ?? null;
-  if (owner === null) return null;
+  const owner = selection?.owner ?? 'retime';
   const now = playheadSec();
   const tol = keyTolerance();
   const times = keysOf(owner)
@@ -12093,7 +12094,7 @@ function openExportDialog() {
 shell.render.addEventListener('click', openExportDialog);
 shell.export.addEventListener('click', () => {
   closeApplicationMenus();
-  if (lastExport && CAN_SAVE_AS) ui.exportSave.click();
+  if (lastExport && CAN_SAVE_AS && !ui.exportSave.disabled) ui.exportSave.click();
   else openExportDialog();
 });
 shell.saveProject.addEventListener('click', () => {
@@ -12262,11 +12263,11 @@ shell.obsCustomSize.addEventListener('change', () => {
 async function copyObsValue(input) {
   try {
     await navigator.clipboard.writeText(input.value);
-    shell.obsStatus.textContent = 'copied';
+    shell.obsStatusText.textContent = 'copied';
   } catch {
     input.select();
     const copied = document.execCommand('copy');
-    shell.obsStatus.textContent = copied ? 'copied' : 'copy unavailable';
+    shell.obsStatusText.textContent = copied ? 'copied' : 'copy unavailable';
   }
 }
 
@@ -12274,7 +12275,7 @@ shell.obsCopyBrowser.addEventListener('click', () => copyObsValue(shell.obsBrows
 shell.obsCopyWebcam.addEventListener('click', () => copyObsValue(shell.obsWebcamUrl));
 shell.obsOpen.addEventListener('click', () => {
   globalThis.open(shell.obsBrowserUrl.value, '_blank', 'noopener');
-  shell.obsStatus.textContent = 'source opened';
+  shell.obsStatusText.textContent = 'source opened';
 });
 
 function stateSnapshot() {

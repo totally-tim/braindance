@@ -518,6 +518,7 @@
      straight into the shot. The readout stays and is the one deliberate exception:
      it is how somebody checks the source is healthy by opening the URL, and it sits
      in a corner OBS can crop rather than being drawn into the buffer. */
+  body.program-out #appBar,
   body.program-out #panel,
   body.program-out #hint,
   body.program-out #timeline { display: none; }
@@ -1104,6 +1105,7 @@
              written from `retime.rate` at boot for the same reason - a position spelled
              out here would be a second statement of where 1.00x sits. -->
         <label class="tchip">speed<input id="tRate" type="range" min="0" max="1" step="any"><b id="tRateOut">1.00&times;</b></label>
+        <button class="kf" id="tRateKey" type="button" aria-label="Speed keyframe"><i></i></button>
         <button class="tmark" id="tMark" type="button" aria-label="Mark here">
           <svg width="10" height="12" viewBox="0 0 10 12" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path d="M1 1l8 0 0 7-4 3-4-3z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" fill="none"/>
@@ -1179,6 +1181,12 @@
     </div>
   </section>
 
+  <button id="tProjectSave" type="button" hidden>Save project</button>
+  <div class="resume" id="tResume" hidden>
+    <span id="tResumeWhen"></span>
+    <button id="tResumeOpen" type="button">restore</button>
+  </div>
+
   <dialog id="exportDialog" aria-labelledby="exportTitle">
     <div class="dialog-head">
       <h2 id="exportTitle">Export</h2>
@@ -1191,6 +1199,15 @@
     <div class="dialog-field">
       <label for="tExportSize">Resolution</label>
       <select id="tExportSize"></select>
+    </div>
+    <div class="dialog-field">
+      <label for="tFps">Frame rate</label>
+      <select id="tFps">
+        <option value="24">24 fps</option>
+        <option value="30">30 fps</option>
+        <option value="60">60 fps</option>
+        <option value="120">120 fps</option>
+      </select>
     </div>
     <div class="dialog-field">
       <span class="dialog-label">Format</span>

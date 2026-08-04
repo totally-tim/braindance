@@ -367,9 +367,9 @@ const MUTATIONS = {
   'tick-seeks-outside-the-trim': {
     file: 'web/main.js',
     edits: [[
-      "      if (!reachableInClip(at)) {\n"
-      + "        say('that mark is outside the clip range, so the edit cannot reach it');\n"
-      + '        return;\n      }\n',
+      "        if (!reachableInClip(at)) {\n"
+      + "          say('that mark is outside the clip range, so the edit cannot reach it');\n"
+      + '          return;\n        }\n',
       '',
     ]],
   },
@@ -389,11 +389,11 @@ const MUTATIONS = {
   'beyond-mark-loses-focus': {
     file: 'web/index.html',
     edits: [
-      ['  .tmk.beyond { background: var(--faint); }\n  .tmk:hover', '  .tmk:hover'],
+      ['  .tmk.beyond { color: var(--faint); }\n  .tmk:hover', '  .tmk:hover'],
       [
-        '  .tmk:focus-visible { outline: 0; background: var(--ink); }',
-        '  .tmk:focus-visible { outline: 0; background: var(--ink); }\n'
-        + '  .tmk.beyond { background: var(--faint); }',
+        '  .tmk:focus-visible { outline: 0; color: var(--ink); }',
+        '  .tmk:focus-visible { outline: 0; color: var(--ink); }\n'
+        + '  .tmk.beyond { color: var(--faint); }',
       ],
     ],
   },
@@ -600,13 +600,12 @@ const MUTATIONS = {
     file: 'web/main.js',
     edits: [
       [
-        '    const pair = `${want}/${inUse}`;\n'
-        + '    const settled = groupSeen.get(key);\n'
+        '    let prunedClose = false;\n'
         + '    if (settled !== undefined && settled !== pair && want === inUse) {\n'
+        + '      prunedClose = want === false;\n'
         + '      groupOverride.delete(key);\n'
         + '      groupOverrideDirty = true;\n'
-        + '    }\n'
-        + '    groupSeen.set(key, `${groupOverride.get(key)}/${inUse}`);\n',
+        + '    }\n',
         '',
       ],
       [
@@ -690,7 +689,7 @@ const MUTATIONS = {
   'plant-unswept-control': {
     file: 'web/index.html',
     edits: [[
-      '        <span class="tchip" id="tNote"></span>',
+      '        <button id="tDeleteKey" type="button" title="Delete the selected key (Del)">delete</button></span>',
       '        <span class="tchip" id="tNote"></span>\n'
       + '        <button id="tPlantedControl" type="button">planted</button>',
     ]],
@@ -1508,7 +1507,7 @@ const MUTATIONS = {
   'refusal-strands-the-picker': {
     file: 'web/main.js',
     edits: [[
-      "    ui.deliverable.value = ui.deliverable.dataset.adopted ?? '';\n",
+      "    if (ui.deliverable) ui.deliverable.value = ui.deliverable.dataset.adopted ?? '';\n",
       '',
     ]],
   },
@@ -1756,9 +1755,9 @@ const MUTATIONS = {
   'scroller-cannot-shrink': {
     file: 'web/index.html',
     edits: [[
-      '  .tchips { margin-left: auto; display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;\n'
-      + '    min-width: 0; overflow-x: auto; scrollbar-width: none; }',
-      '  .tchips { margin-left: auto; display: flex; gap: 8px; flex-wrap: nowrap; align-items: center; }',
+      '  .tchips { flex: 1; display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;\n'
+      + '    justify-content: center; min-width: 0; overflow-x: auto; scrollbar-width: none; }',
+      '  .tchips { flex: 1; display: flex; gap: 8px; flex-wrap: nowrap; align-items: center; justify-content: center; }',
     ]],
   },
 

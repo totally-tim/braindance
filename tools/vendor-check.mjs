@@ -47,6 +47,11 @@ const DECLARED_EDITS = new Map([
     ours: '70aebcc30122fbefbb73cf6761b70388071deef2',
     marker: null,
   }],
+  ['src/libfreenect2.cpp', {
+    why: 'avoid probing unavailable audio interfaces when opening devices',
+    ours: '4dd892555a917d713f3db6040449a1c6c1ea5c73',
+    marker: null,
+  }],
   ['src/registration.cpp', {
     why: 'thread the occlusion filter, banded by linear index',
     ours: '7e6037cd7e7d6f5496a693adcc44e9c2893ff426',
