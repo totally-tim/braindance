@@ -20,8 +20,8 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile, stat, rm, rename } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, readdir, writeFile, stat, rm, rename } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 
 // Absolute rather than resolved off PATH: this is the encoder the export was
 // measured against, and a different one found on a different PATH would be a
@@ -52,9 +52,10 @@ export const MAX_FRAME_BYTES = 96 * 1024 * 1024;
 export const VALID_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /**
- * The encode a request asks for. Two, and they are a codec choice rather than two
- * paths: the frames, the flow control and the file that comes out are the same
- * either way.
+ * The output a request asks for. Four, and they are a table rather than four paths:
+ * the frames, the flow control, the record that lands beside the artifact and the
+ * unique directory both land in are the same whichever entry is picked, and every
+ * way they differ is a field here that the code below reads.
  *
  * `lossless` exists because it is the only way to prove the file contains the
  * frames the browser rendered. ffv1 in rgb24 decodes back to exactly the bytes
@@ -62,42 +63,89 @@ export const VALID_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
  * about how much codec loss is acceptable - which makes orientation, channel
  * order, frame order and frame count one assertion instead of four proxies.
  *
+ * `prores` is the QuickTime deliverable, and it holds ProRes 422 HQ rather than
+ * h264 in a `.mov` because a mov is asked for by the tool an edit gets handed to
+ * next: an intermediate that survives being cut and graded again, where h264 has
+ * already thrown away what that tool wanted.
+ *
+ * `pngseq` is the entry that is not a file. It writes numbered frames into a
+ * directory through ffmpeg's image2 muxer, which is what `frameExt` is for: it
+ * names what one frame is called, and by being null everywhere else it is also the
+ * answer to "is this artifact a directory". One field rather than a flag beside an
+ * extension, because two fields can disagree about the same thing and one cannot.
+ *
+ * The artifact is `<name>.<ext>` for every entry including that one - `.pngseq` is
+ * a directory wearing an extension - so the sidecar's name, the URL the page is
+ * handed and the per-export directory stay one rule with no branch in them, and
+ * what is actually at that path is a question only the two places that open it ask.
+ *
  * `evenDimensions` is a property of the entry rather than a comparison against its
  * name, because yuv420p subsamples chroma by two in each direction and an odd
  * dimension has no half-pixel to carry - which is a fact about the pixel format an
- * entry names, not about the string `h264`. Stated on **both** entries rather than
- * only on the one that needs it: an entry that may simply omit the field is an entry
- * that opts out of the rule by saying nothing, and a codec added later would then
- * inherit the exemption silently, which is the whole failure this move exists to
- * remove.
+ * entry names, not about the string `h264`. Measured for each entry rather than
+ * inferred from the family it belongs to: libx264 refuses 641x401 outright, while
+ * prores_ks in yuv422p10le encodes it and decodes back to 641x401 byte for byte, so
+ * the entry that looks like it ought to need the rule does not get it for looking.
+ *
+ * Stated on **every** entry rather than only where it bites, and the same for
+ * `frameExt`: an entry that may simply omit a field is an entry that opts out of the
+ * rule by saying nothing, and a format added later would then inherit the exemption
+ * silently, which is the whole failure this move exists to remove.
  *
  * Which is why the loop below exists rather than the convention being left to the
- * example. `spec.evenDimensions && ...` reads a missing field as false, so writing the
- * field on both entries is a habit and not a rule - a third codec added without it
- * would inherit exactly the silent exemption the paragraph above says has been removed,
- * and the sentence would be an assertion about the table rather than a property of it.
- * At module load and throwing, because a malformed entry here is a typo in a constant
- * and not a condition to be handled: the alternative is discovering it at the first
- * odd-dimensioned export, which is the class of late discovery this whole change is
- * about. It has no falsification control for the same reason the dimension rule itself
- * has none - both entries are well formed, so a mutation removing this loop changes
- * nothing observable, and an assertion that cannot fire buys confidence with a number.
+ * example. `spec.evenDimensions && ...` reads a missing field as false and a missing
+ * `frameExt` reads as "not a sequence", so writing them is a habit and not a rule - a
+ * fifth format added without them would inherit exactly the silent exemption the
+ * paragraph above says has been removed, and the sentence would be an assertion about
+ * the table rather than a property of it. At module load and throwing, because a
+ * malformed entry here is a typo in a constant and not a condition to be handled: the
+ * alternative is discovering it at the first odd-dimensioned export, which is the
+ * class of late discovery this whole change is about. It has no falsification control
+ * for the same reason the dimension rule itself has none - every entry is well formed,
+ * so a mutation removing this loop changes nothing observable, and an assertion that
+ * cannot fire buys confidence with a number.
  */
 const CODECS = {
   h264: {
     ext: 'mp4',
+    frameExt: null,
     evenDimensions: true,
     args: ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p'],
   },
   lossless: {
     ext: 'mkv',
+    frameExt: null,
     evenDimensions: false,
     args: ['-c:v', 'ffv1', '-level', '3', '-pix_fmt', 'rgb24'],
+  },
+  prores: {
+    ext: 'mov',
+    frameExt: null,
+    evenDimensions: false,
+    args: ['-c:v', 'prores_ks', '-profile:v', '3', '-pix_fmt', 'yuv422p10le'],
+  },
+  pngseq: {
+    ext: 'pngseq',
+    frameExt: 'png',
+    evenDimensions: false,
+    // **`-f image2` said rather than inferred.** ffmpeg picks the muxer off the last
+    // extension of the output path and does land on image2 for this one - measured,
+    // both spellings write the same three files - but this is the only entry whose
+    // path is a printf pattern inside a directory that carries its own extension, so
+    // the inference is being made over a name with three dots in it and the muxer
+    // that decides whether this is a hundred stills or one animated file is worth a
+    // word. rgb24 because the drawing buffer the frames are read out of has no alpha
+    // channel (the renderer is constructed without one), so an rgba sequence would
+    // store a constant 255 per pixel and call it transparency information.
+    args: ['-c:v', 'png', '-f', 'image2', '-pix_fmt', 'rgb24'],
   },
 };
 for (const [name, spec] of Object.entries(CODECS)) {
   if (typeof spec.evenDimensions !== 'boolean') {
     throw new Error(`codec ${name} does not say whether it needs even dimensions, and a codec that says nothing about a rule is exempt from it by accident`);
+  }
+  if (spec.frameExt !== null && typeof spec.frameExt !== 'string') {
+    throw new Error(`codec ${name} does not say whether its artifact is one file or a directory of frames, and a codec that says nothing is taken for a file`);
   }
   if (typeof spec.ext !== 'string' || !Array.isArray(spec.args)) {
     throw new Error(`codec ${name} is missing the extension or the arguments every export path dereferences`);
@@ -150,6 +198,56 @@ export function validateExport({ name, width, height, fps, frames = null, codec 
 // true, and the determinism claim, which runs two exports through two sockets and
 // compares the finished files, is what keeps it true.
 let sequence = 0;
+
+/**
+ * Where ffmpeg is told to write, given the artifact this export is building.
+ *
+ * A single-file format writes the artifact itself. A sequence writes numbered frames
+ * *inside* it, so the artifact is a directory and the target is a printf pattern under
+ * it - six digits, which runs to nine hours at 30fps and widens rather than wrapping
+ * past that, so the numbers sort in the order the frames were rendered at any length.
+ * The export's name is repeated in every frame because a sequence is the one artifact
+ * that gets taken apart: the frames are dragged into a compositor by the handful, and
+ * a directory of `000001.png` says nothing about which render they came out of.
+ */
+function encodeTarget(spec, artifact, name) {
+  if (spec.frameExt === null) return artifact;
+  return join(artifact, `${name}.%06d.${spec.frameExt}`);
+}
+
+/**
+ * How big the thing this export produced is - and, for a sequence, whether it is all
+ * there.
+ *
+ * `stat` is the size and the existence check at once for a single file, and it is
+ * neither for a directory: it answers with the inode's own size, so a sequence that
+ * wrote nothing at all would report a plausible few hundred bytes and land as a
+ * successful export of an empty directory. So the frames are added up, which is the
+ * same walk that can count them - and the count is worth asserting because it is the
+ * one thing a video file cannot be asked cheaply: image2 writes exactly one file per
+ * frame it is given, so a directory holding a different number is an encoder that
+ * dropped or overwrote frames rather than a deliverable. It throws before the sidecar
+ * is written and before the rename, so a short sequence reaches `fail` and is removed
+ * with the rest of the scratch.
+ *
+ * The sizes are read one `stat` at a time and the bytes are never opened. Nothing here
+ * may read a frame, let alone a capture - `readFileSync` throws above 2 GiB and a
+ * sequence is exactly the artifact that gets there.
+ */
+async function artifactBytes(spec, artifact, frames) {
+  if (spec.frameExt === null) return (await stat(artifact)).size;
+  // Frames rather than entries, because the message this throws blames the encoder and
+  // an entry is not always one: `exports/` is a directory people open in a file
+  // manager, and one `.DS_Store` dropped in by a look around would fail a sequence that
+  // is entirely correct, under a sentence saying the encoder lost a frame.
+  const names = (await readdir(artifact)).filter((n) => n.endsWith(`.${spec.frameExt}`));
+  if (names.length !== frames) {
+    throw new Error(`the sequence at ${artifact} holds ${names.length} frames and the export sent ${frames}`);
+  }
+  let total = 0;
+  for (const name of names) total += (await stat(join(artifact, name))).size;
+  return total;
+}
 
 function ffmpegArgs({ width, height, fps, codec, into }) {
   return [
@@ -223,17 +321,25 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
       frames: msg.frames, codec: msg.codec ?? 'h264',
     });
 
-    const ext = CODECS[codec].ext;
+    const spec = CODECS[codec];
+    const ext = spec.ext;
     // A unique directory per export makes `rename(temp, final)` target a fresh
     // path, so the video and its sidecar land together without replacing any
     // existing artifact. The requested name is the base for both the directory
-    // and the file inside it.
+    // and the artifact inside it, whichever format was asked for: `<name>.<ext>`
+    // is where the deliverable is, and whether that is a file or a directory of
+    // numbered frames is what the entry's `frameExt` says rather than something
+    // any of this arithmetic has to know.
     const dirName = `${msg.name}.${process.pid}-${++sequence}`;
     const outputDir = join(outDir, dirName);
     const output = join(outputDir, `${msg.name}.${ext}`);
     const frameBytes = width * height * 4;
     const temp = join(outDir, `${dirName}.part`);
-    const scratchFile = join(temp, `${msg.name}.${ext}`);
+    const scratchArtifact = join(temp, `${msg.name}.${ext}`);
+    // What ffmpeg is handed, which is the artifact for a file and a pattern inside it
+    // for a sequence. Nothing below reads it except the spawn and the directory that
+    // has to exist first.
+    const target = encodeTarget(spec, scratchArtifact, msg.name);
     // The same file as a URL. `output` is an absolute path on this machine, which is
     // the right thing for a log line and useless to the page that asked for the
     // render - it cannot fetch it, so it could not offer to save a copy of it
@@ -251,16 +357,21 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
     // export's paths. Everything above is arithmetic on validated values, so there is
     // nothing to wait for before claiming the socket.
     job = {
-      width, height, fps, frames, codec, frameBytes, output, outputDir, temp, scratchFile, href, name: msg.name, began: Date.now(),
+      width, height, fps, frames, codec, frameBytes, output, outputDir, temp, scratchArtifact, href, name: msg.name, began: Date.now(),
       project: msg.project ?? null,
       capture: msg.capture ?? null,
       renderer: msg.renderer ?? null,
     };
 
     // Recursive, so this makes the exports directory as well as the scratch inside
-    // it - one call, on the path this run is actually going to write.
-    await mkdir(temp, { recursive: true });
-    const args = ffmpegArgs({ width, height, fps, codec, into: scratchFile });
+    // it - one call, on the path this run is actually going to write. The directory
+    // the *target* is in rather than the scratch directory, which is the same thing
+    // for a single file and one level deeper for a sequence: the image2 muxer opens
+    // each frame by name and creates nothing, so a sequence whose directory is only
+    // made by the rename at the end dies on its first frame with an errno nobody
+    // reading `[export] ffmpeg exited 1` would connect to a missing directory.
+    await mkdir(dirname(target), { recursive: true });
+    const args = ffmpegArgs({ width, height, fps, codec, into: target });
     log(`[export] ${FFMPEG} ${args.join(' ')}`);
     child = spawn(FFMPEG, args, { stdio: ['pipe', 'ignore', 'pipe'] });
     child.stderr.on('data', (chunk) => stderr.push(chunk.toString('utf8')));
@@ -277,7 +388,12 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
       finish().catch((err) => fail(String(err.message ?? err)));
     });
 
-    send({ ready: { output, href, codec, width, height, fps, frames, window: ACK_WINDOW } });
+    // `frameExt` travels to the page for the same reason it exists here: `href` is a
+    // URL the page can fetch to save a copy of the render, and for a sequence it names
+    // a directory, which the static handler answers with a 404 because it serves files.
+    // A page told only the path would discover that by failing at the save button; a
+    // page told the field knows before it offers one.
+    send({ ready: { output, href, codec, frameExt: spec.frameExt, width, height, fps, frames, window: ACK_WINDOW } });
   };
 
   const frame = (data) => {
@@ -340,7 +456,8 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
 
   const finish = async () => {
     if (finished) return;
-    const st = await stat(job.scratchFile);
+    const spec = CODECS[job.codec];
+    const size = await artifactBytes(spec, job.scratchArtifact, received);
     // The renderer class travels with the job from the very first one. There is a
     // single render machine today so the field constrains nothing - but a job
     // record without it cannot be retrofitted once old jobs exist, and provenance
@@ -364,7 +481,7 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
     // Because the final directory is unique per export, the rename never replaces
     // an existing artifact, and a failed run still reaches `fail` which removes
     // only the scratch directory.
-    const sidecar = join(job.temp, `${job.name}.${CODECS[job.codec].ext}.job.json`);
+    const sidecar = join(job.temp, `${job.name}.${spec.ext}.job.json`);
     await writeFile(sidecar, `${JSON.stringify(record, null, 2)}\n`);
     // Past this line nothing may remove the scratch directory, because the next
     // statement is what turns it into the output. Before it, a throw in the stat
@@ -385,12 +502,13 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
       throw err;
     }
     const elapsed = Date.now() - job.began;
-    log(`[export] ${job.output} ${job.frames} frames ${(st.size / 1e6).toFixed(1)}MB in ${(elapsed / 1000).toFixed(1)}s`);
+    log(`[export] ${job.output} ${job.frames} frames ${(size / 1e6).toFixed(1)}MB in ${(elapsed / 1000).toFixed(1)}s`);
     send({
       done: {
         output: job.output,
         href: job.href,
-        bytes: st.size,
+        frameExt: spec.frameExt,
+        bytes: size,
         frames: received,
         rawBytes: bytes,
         elapsedMs: elapsed,

@@ -432,19 +432,26 @@ await page.waitForFunction(() => !!globalThis.__kinect);
 // makes the buffer 640x360 with a 20px offset unless told otherwise. That moves
 // every buffer-size expectation and every pointer coordinate in this file.
 await page.evaluate('globalThis.__kinect.setTargetSize?.("640x400")');
-// And the viewport is sized to whatever the strip actually is, measured rather than
-// assumed. `TIMELINE_H` was a constant that went stale the moment the bar became two
-// rows, and staleness here is silent by construction: every image in this file is
-// compared against another image from the same run, so a stage 44px shorter than the
-// one named above agrees with itself perfectly and the header quietly stops being
-// true. The buffer is then asserted, because a tool whose first line says "640x400"
-// should be the thing that enforces it.
+// And the viewport is sized to whatever fixed furniture actually surrounds the stage,
+// measured rather than assumed. `TIMELINE_H` was a constant that went stale the moment
+// the bar became two rows, and the Pencil shell adds the same risk at the top: every
+// image in this file is compared against another image from the same run, so a shorter
+// stage agrees with itself perfectly and the header quietly stops being true. The
+// buffer is then asserted, because a tool whose first line says "640x400" should be the
+// thing that enforces it.
 {
-  const strip = await page.evaluate(`(() => {
-    const el = document.getElementById('timeline');
-    return el && !el.hidden ? Math.round(el.getBoundingClientRect().height) : 0;
+  const furniture = await page.evaluate(`(() => {
+    const strip = document.getElementById('timeline');
+    const appBar = document.getElementById('appBar');
+    return {
+      strip: strip && !strip.hidden ? Math.round(strip.getBoundingClientRect().height) : 0,
+      shell: appBar && !appBar.hidden ? Math.round(appBar.getBoundingClientRect().height) : 0,
+    };
   })()`);
-  await page.setViewportSize({ width: STAGE.width, height: STAGE.height + strip });
+  await page.setViewportSize({
+    width: STAGE.width,
+    height: STAGE.height + furniture.strip + furniture.shell,
+  });
 }
 await page.waitForFunction(() => !!globalThis.__kinect.timeline.transport(), null, { timeout: 20000 });
 await page.evaluate(INSTALL);
@@ -620,7 +627,18 @@ console.log('\n== 1c. the image at a program position is the frame the index nam
   // leave whatever the previous section selected - and the section before this one runs
   // in Blackwall, whose scan plane sweeps with program time. Every "nothing left that
   // can move the image" claim below would then be measuring a moving image.
-  const FLAT = { ...DEPTH_LOOK, fade: 0, wake: 0, trails: 0, bloom: 0, glitch: 0, scan: 0, noise: 0, rgbSplit: 0, scanlines: 0, grain: 0 };
+  // `vignette` is named here for the same reason every other grade term is, and it is the
+  // one that says why this list cannot be shortened: FLAT spreads over a look that has the
+  // grade up, so a term it does not zero arrives from underneath. When the vignette stopped
+  // being a literal applied whenever the pass ran and became a parameter Blackwall names,
+  // this list went on zeroing the three it knew about and the fourth came through - a flat
+  // look with a corner falloff on it, which is 100% of pixels differing from the bytes.
+  // `duotoneDepth` joins that list ahead of needing to. It is not time-varying, so seek
+  // still equals playback with it up - but it is a tonal transform after the blend, and
+  // this arm compares the rendered image against the frame bytes themselves, so the moment
+  // the shipped Blackwall look names a duotone it would arrive from underneath exactly the
+  // way the vignette did. The list is cheaper to extend than the failure is to diagnose.
+  const FLAT = { ...DEPTH_LOOK, fade: 0, wake: 0, trails: 0, bloom: 0, glitch: 0, scan: 0, noise: 0, rgbSplit: 0, scanlines: 0, grain: 0, vignette: 0, duotoneDepth: 0 };
   const look = { ...FLAT, interpolate: false };
   // A source time sitting just inside a bracket, so which pair it names is not a
   // rounding question. Which *half* of that pair the image comes from is the part
@@ -1164,7 +1182,18 @@ console.log('\n== 4b. 60 fps out of a capture whose median gap is 64ms ==');
   // leave whatever the previous section selected - and the section before this one runs
   // in Blackwall, whose scan plane sweeps with program time. Every "nothing left that
   // can move the image" claim below would then be measuring a moving image.
-  const FLAT = { ...DEPTH_LOOK, fade: 0, wake: 0, trails: 0, bloom: 0, glitch: 0, scan: 0, noise: 0, rgbSplit: 0, scanlines: 0, grain: 0 };
+  // `vignette` is named here for the same reason every other grade term is, and it is the
+  // one that says why this list cannot be shortened: FLAT spreads over a look that has the
+  // grade up, so a term it does not zero arrives from underneath. When the vignette stopped
+  // being a literal applied whenever the pass ran and became a parameter Blackwall names,
+  // this list went on zeroing the three it knew about and the fourth came through - a flat
+  // look with a corner falloff on it, which is 100% of pixels differing from the bytes.
+  // `duotoneDepth` joins that list ahead of needing to. It is not time-varying, so seek
+  // still equals playback with it up - but it is a tonal transform after the blend, and
+  // this arm compares the rendered image against the frame bytes themselves, so the moment
+  // the shipped Blackwall look names a duotone it would arrive from underneath exactly the
+  // way the vignette did. The list is cheaper to extend than the failure is to diagnose.
+  const FLAT = { ...DEPTH_LOOK, fade: 0, wake: 0, trails: 0, bloom: 0, glitch: 0, scan: 0, noise: 0, rgbSplit: 0, scanlines: 0, grain: 0, vignette: 0, duotoneDepth: 0 };
   const walk = `(async (o) => {
     const k = globalThis.__kinect;
     const tl = globalThis.__tl;
@@ -1234,8 +1263,21 @@ console.log('\n== 5. a look change while paused rebuilds the image and the estim
   // bare tag selector now matches both. This is the same element it always was.
   const canvas = page.locator('#stage');
   const image = async () => createHash('sha256').update(await canvas.screenshot()).digest('hex').slice(0, 16);
-  const chip = () => page.evaluate("document.getElementById('tPreroll').textContent");
+  // **There is no pre-roll readout to read any more, and that is a decision rather
+  // than a gap.** The transport's second row used to carry four chips - pre-roll, last
+  // cost, undo depth, mark count - and the rework took the row away; `web/index.html`
+  // records the drop beside the row that replaced it. This section asked the estimate
+  // two questions, and only one of them survives that: *is it recomputed when a look
+  // changes* still has an object, because the plan is what a seek actually runs, while
+  // *does the number on screen agree with the plan* has no second surface left to
+  // disagree with. Reading the plan into both halves would have made the second row a
+  // tautology, which is worse than not asking - so it is gone and this is the note
+  // saying where it went.
   const planned = () => page.evaluate('globalThis.__kinect.timeline.transport().preroll()');
+  const chip = async () => {
+    const plan = await planned();
+    return `${plan.frames} frames / ${plan.sec.toFixed(2)} s (surface ${plan.surface}, trails ${plan.trails})`;
+  };
   // Waited on rather than slept through: the page reports when every scheduled
   // repaint has run and the transport's queue has drained, so a slow repaint is
   // waited for and a fast one is not paid for.
@@ -1263,7 +1305,7 @@ console.log('\n== 5. a look change while paused rebuilds the image and the estim
   })()`);
 
   // The speed slider needs its own, because its travel is logarithmic and its `value`
-  // is therefore a position rather than a rate. Writing 1.05 into it lands at 4x - the
+  // is therefore a position rather than a rate. Writing 1.20 into it lands at 4x - the
   // top of the range - and every assertion downstream would go on passing about a rate
   // nobody asked for. So the rate goes through the page's own mapping, and the rate
   // that came out is checked against the rate that went in rather than assumed.
@@ -1334,15 +1376,15 @@ console.log('\n== 5. a look change while paused rebuilds the image and the estim
     'and does it once for the whole look rather than once per parameter',
     `${blackwallRenders} renders against a ${blackwallPlan.frames}-frame pre-roll`);
   check(blackwallImage !== neutralImage, 'and the rebuilt image is a different one');
-  check(blackwallChip !== neutralChip, 'and recomputes the pre-roll estimate');
-  check(blackwallChip.startsWith(`${blackwallPlan.frames} frames`),
-    'and the estimate on screen is the one a seek would actually run',
-    `"${blackwallChip}" against ${blackwallPlan.frames} frames`);
+  check(blackwallChip !== neutralChip, 'and recomputes the pre-roll estimate',
+    `"${neutralChip}" then "${blackwallChip}"`);
 
   // (c) The control that makes the above mean something. Nudging the rate away
   // and back was what used to correct both surfaces, so if the repaint really
   // happened it has already done everything the nudge would do.
-  await slideRate(1.05);
+  // 1.20x is outside the editor's intentional 1.00x detent. The old 1.05x arm was
+  // correctly snapped back to 1.00x and crashed this proof on an unchanged main.
+  await slideRate(1.2);
   await settle();
   await slideRate(1);
   await settle();
@@ -1355,6 +1397,7 @@ console.log('\n== 5. a look change while paused rebuilds the image and the estim
   // (d) The grading move itself: a slider, dragged on the panel. `wake` because
   // it moves both surfaces at once - the image through the surface memory and the
   // estimate through the fade-and-wake half of the pre-roll.
+  await page.locator('#panelTabLook').click();
   const beforeWake = await renders();
   await slide('wake', 2500);
   await settle();
@@ -1365,7 +1408,7 @@ console.log('\n== 5. a look change while paused rebuilds the image and the estim
   console.log(`  after dragging wake to 2500 on the panel: "${wakeChip}"`);
   check(wakeRenders > 0, 'dragging a look slider rebuilds the image', `${wakeRenders} renders`);
   check(wakeImage !== blackwallImage, 'and the rebuilt image is a different one');
-  check(wakeChip.startsWith(`${wakePlan.frames} frames`) && wakePlan.frames > blackwallPlan.frames,
+  check(wakePlan.frames > blackwallPlan.frames,
     'and the estimate follows it up',
     `${blackwallPlan.frames} frames to ${wakePlan.frames}`);
 }

@@ -98,7 +98,31 @@ export class Webcam {
     return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1';
   }
 
+  /**
+   * Drop any subscriber whose response has already gone, and settle if that changed
+   * anything.
+   *
+   * `res.on('close')` is what normally removes one, and this asks the same question of
+   * the resource rather than of the bookkeeping that claims to track it. The direction
+   * that matters is the one where the set outlives the socket: the operator reads this
+   * count as "something is watching", and the recorder charges a take for every entry
+   * in it, so a subscriber the wire no longer has is a lit dot and a refusal nobody can
+   * account for. Where the event does fire this is a no-op, which is the point - it is
+   * the floor under the bookkeeping and not a second copy of it.
+   */
+  #reap() {
+    let went = false;
+    for (const s of this.subscribers) {
+      if (s.res.destroyed || s.res.writableEnded) {
+        this.subscribers.delete(s);
+        went = true;
+      }
+    }
+    if (went) this.#settle();
+  }
+
   get count() {
+    this.#reap();
     return this.subscribers.size;
   }
 
@@ -112,6 +136,7 @@ export class Webcam {
    * true.
    */
   describe() {
+    this.#reap();
     return [...this.subscribers].map((s) => ({ loopback: s.loopback, behind: s.behind }));
   }
 

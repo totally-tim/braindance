@@ -22,6 +22,15 @@
  *
  * Binary distributions must follow the binary distribution requirements of
  * either License.
+ *
+ * MODIFIED by braindance: on macOS, do not fail the open when either of the two
+ * USB link setup calls at the end of Freenect2DeviceImpl::open is refused. Apple
+ * Silicon's controller answers LIBUSB_ERROR_PIPE to enablePowerStates(), which
+ * negotiates the U1/U2 link power states; the second call, setVideoTransferFunctionState,
+ * is FUNCTION_SUSPEND per USB 3.1 r1 section 9.4.9 and is not a power state at all,
+ * so do not read this notice as saying the two are the same thing.
+ * See third_party/UPSTREAM.md for details, including the one case where letting
+ * enablePowerStates fail silently would be the wrong answer.
  */
 
 /** @file libfreenect2.cpp Freenect2 devices and processing implementation. */
@@ -832,8 +841,28 @@ bool Freenect2DeviceImpl::open()
   // TODO: always fails right now with error 6 - TRANSFER_OVERFLOW!
   //if(usb_control_.setPowerStateLatencies() != UsbControl::Success) return false;
   if(usb_control_.setIrInterfaceState(UsbControl::Disabled) != UsbControl::Success) return false;
+#if defined(__APPLE__)
+  // Apple Silicon's controller answers LIBUSB_ERROR_PIPE to the U1/U2 negotiation, and
+  // upstream returns false from `open` on it, so the sensor enumerates and then refuses
+  // at the last step on the machine this program is developed on. Both calls are still
+  // made and both results are dropped, rather than only the one that is known to fail:
+  // `setVideoTransferFunctionState(Disabled)` sends a different `suspend_options` byte
+  // than the `Enabled` form that `startStreams` hard-requires below, so "the Enabled one
+  // works, therefore this one does" is a guess about a controller nobody here can test,
+  // and guessing it wrong costs the open this edit exists to keep.
+  //
+  // **Dropping the result is not dropping the diagnostic.** Both calls run through
+  // `CHECK_LIBUSB_RESULT`, which is a `LOG_ERROR`, and Error sits below the grabber's
+  // default `--log warning` - so a refusal here still names itself and its libusb error
+  // in the log of a default run. Nothing should add a second log line beside these two;
+  // the first version of this comment claimed to "warn rather than fail" while emitting
+  // no warning of its own, which is the reading that invites one.
+  usb_control_.enablePowerStates(); // result dropped on macOS - see above
+  usb_control_.setVideoTransferFunctionState(UsbControl::Disabled); // ditto
+#else
   if(usb_control_.enablePowerStates() != UsbControl::Success) return false;
   if(usb_control_.setVideoTransferFunctionState(UsbControl::Disabled) != UsbControl::Success) return false;
+#endif
 
   int max_iso_packet_size;
   if(usb_control_.getIrMaxIsoPacketSize(max_iso_packet_size) != UsbControl::Success) return false;

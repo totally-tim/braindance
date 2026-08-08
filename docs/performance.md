@@ -25,6 +25,32 @@ large share of every frame is empty. Removing the fragment `discard` in favour o
 alpha falloff made no difference (0.71 vs 0.74 ms), so it is kept for the look. Bloom runs at
 half buffer resolution, being the most expensive pass in the chain.
 
+### Showing the crop box
+
+The box's own drawing is chrome and costs a 2D canvas nothing measures. What costs is the
+pass that comes with it: while the box is on screen the points the crop cuts are kept alive
+and dimmed instead of returning at the depth test, so they run the whole vertex stage
+including the region weight.
+
+**0.285 ms per draft with the box hidden, 0.518 ms with it shown — up 82%.** Interleaved,
+17 rounds of 60 drafts each alternating shown and hidden, first round discarded, medians
+reported because one hidden round ran 0.45 ms wide. Editor on the `sample` take at a
+512-tall buffer, 434,176 points, playhead parked at 12.0 s, box at ±0.6 m over 0.05–2.0 m,
+which is deliberately tight enough to cut most of the room and so is the worst case rather
+than a typical one.
+
+The proportion is large because the thing it replaces is the cheapest exit in the shader —
+almost every point was leaving at the depth test and now runs to the end — and 0.23 ms is
+still under a hundredth of a 30 fps frame. Nothing pays it unless somebody is looking at the
+box: `cropOutside` is zero everywhere else, and `export-check` holds an exported frame
+byte-identical with the box shown and hidden.
+
+**Measured on the editor, because the same run on the recorder destroys its own health
+number.** A burst of renders starves the main thread, which starves the socket the sensor
+delivers on: `fps in` fell to 2–7 against ~30 and, per `docs/measurement.md`, that run is
+noise whatever its per-segment timings say. The editor's take is a file, so there is no
+delivered-fps to break, and interleaving is what controls for the machine.
+
 ## What did not work, measured rather than assumed
 
 A negative result nobody wrote down is one somebody re-derives. All on a fixed 40-45s window

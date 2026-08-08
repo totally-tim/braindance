@@ -143,6 +143,112 @@ const MUTATIONS = {
     to: '  if (false) {',
     fails: 'readGhost, ghostRim and ghostFill in the drop-one sweep, plus readGhost\'s 1b row',
   },
+  // The duotone's amount reaches no pixel, and it takes the hue and the split down with
+  // it - the `weight-ignored` shape one block up, for the same structural reason. Both of
+  // those are only observable through the block this switches off, so three names land in
+  // the no-effect bucket and none of them is declared there. Three is the right answer
+  // and a fourth would mean some other parameter had quietly become reachable only
+  // through the duotone.
+  'duotone-ignored': {
+    from: '  if (duotoneDepth > 0.0) {',
+    to: '  if (false) {',
+    fails: 'duotoneDepth, duotoneHue and duotoneSplit in the drop-one sweep',
+  },
+  // The sharper half of the one above, and the reason both are kept: the duotone goes on
+  // working as a flat tint, so `duotoneDepth` still moves pixels and only the split stops
+  // meaning anything. That is the difference between "the term is wired up" and "the term
+  // is keyed on depth", and depth is the whole claim - a duotone that is not depth-keyed
+  // cannot draw the silhouette this parameter exists for, which is exactly the shape of
+  // failure that ships looking like a control that works.
+  'duotone-ignores-depth': {
+    from: '    float k = smoothstep(duotoneSplit - 0.5, duotoneSplit + 0.5, t);',
+    to: '    float k = 0.5;',
+    fails: 'duotoneSplit in the drop-one sweep, alone - the amount and the hue still reach pixels',
+  },
+  // The unit conversion dropped, which is a defect no image comparison can see the shape
+  // of: the poles still turn, the picture still changes, and every sweep row that asks
+  // whether the slider reaches a pixel goes on passing. What separates the two builds is
+  // the number at the uniform, so the landing row is the only thing that can fail here.
+  'duotone-hue-in-degrees': {
+    from: '    apply: (v) => { uniforms.duotoneHue.value = THREE.MathUtils.degToRad(v); } },',
+    to: '    apply: (v) => { uniforms.duotoneHue.value = v; } },',
+    fails: 'the duotoneHue row of the one-at-a-time landing sweep, reporting "landed 47 want '
+      + '0.8203047484373349", and the all-at-once row beside it - that second one is the same '
+      + 'comparison over the whole set rather than a separate finding',
+  },
+  // The toe goes back to being the literal it was promoted from. Nothing about the
+  // rendered default changes - that is the point, since the default *is* the literal - so
+  // the only row that can see it is the drop-one sweep, where reverting a parameter that
+  // reaches nothing changes no pixel.
+  'crush-ignored': {
+    from: '      col = max(col - crush, 0.0) * 1.12;',
+    to: '      col = max(col - 0.018, 0.0) * 1.12;',
+    fails: 'crush in the drop-one sweep, alone',
+  },
+  // The guard around the raster's default path removed, so the general form computes what
+  // the old line computed instead of reaching it. Every value stays what it was and the
+  // arithmetic is algebraically the same, which is the whole difficulty: a reader deleting
+  // this branch as a redundant fast path would see nothing wrong, and the shipped Blackwall
+  // document would start drawing a raster a hair off the one it was graded with.
+  //
+  // This control is also how the guard was justified rather than assumed. Run it and read
+  // the raster row: red means the general form genuinely drifts and the branch is load
+  // bearing, green means it does not and the branch should come out, because a fast path
+  // that is bit-identical to the slow one is the second implementation this repo refuses.
+  'raster-recomputes-the-default': {
+    from: '        if (scanAxis.x == 0.0 && scanAxis.y == 1.0 && scanPitch == 1.3 && scanHard == 0.0) {',
+    to: '        if (false) {',
+    fails: 'the raster-at-0.35 row against the pinned build, and nothing else',
+  },
+  // The raster's axis nailed back to the frame's y, which is what it was before the angle
+  // existed. Everything else about the raster goes on working - the pitch still sets the
+  // line frequency and the hardness still squares the wave - so the only row that can see
+  // it is the drop-one sweep, where an angle that reaches nothing changes no pixel when it
+  // is reverted. This is the vertical column grille the whole of D1 is for, so a build
+  // that quietly lost it would be drawing television scanlines under a green run.
+  'raster-ignores-angle': {
+    from: '          float coord = dot(vUv * ref, scanAxis);',
+    to: '          float coord = vUv.y * ref.y;',
+    fails: 'scanAngle in the drop-one sweep, alone',
+  },
+  // The pitch back to the literal it was promoted from. Its default *is* that literal, so
+  // nothing about the shipped picture moves - which is the point, and which leaves the
+  // drop-one sweep as the only thing that can tell the two builds apart.
+  'raster-pitch-fixed': {
+    from: '          float wave = sin(coord * scanPitch + time * 2.0) * 0.5 + 0.5;',
+    to: '          float wave = sin(coord * 1.3 + time * 2.0) * 0.5 + 0.5;',
+    fails: 'scanPitch in the drop-one sweep, alone',
+  },
+  // The duty cycle dropped, leaving the sine the term has always drawn. This is the
+  // control that separates "the raster rotates and crowds" from "the raster is a grille",
+  // and a build without it draws rotated softness at every setting - which looks like a
+  // raster right up until you compare it against a reference frame.
+  'raster-hard-ignored': {
+    from: '          line = mix(wave, smoothstep(0.5 - w, 0.5 + w, wave), scanHard);',
+    to: '          line = wave;',
+    fails: 'scanHard in the drop-one sweep, alone',
+  },
+  // The tempting edit, planted: `crush` joins the four terms that gate the grade pass, so
+  // the pass runs whenever the toe is non-zero, which is always. This is deliberately not
+  // a well-behaved control and the whole set has to be read rather than the count. It
+  // reddens the pass-gate row it is aimed at; then it reddens all five reading rows of
+  // section 1b, because every reading at its defaults is now drawn through a Reinhard
+  // curve the pinned build never applied; and then the boot comparison, because all four
+  // gating terms report their pass on where the pinned build has it off. Seven rows for
+  // one fact, measured rather than predicted - the first draft of this line guessed the
+  // boot failure would arrive as four separate landing rows and it arrives as one row
+  // naming four terms in its detail, which is the sort of thing only a run settles.
+  //
+  // Note what reddening 1b's readGhost row means here, since that row is red in every run
+  // of this tool: it goes from its own standing 2 of 6 frames to 6 of 6. A row already
+  // failing is exactly where a new defect hides, so the count is not the reading - the
+  // frame tally is.
+  'crush-gates-the-grade': {
+    from: '  return grade.uniforms.rgbSplit.value > 0',
+    to: '  return grade.uniforms.crush.value > 0 || grade.uniforms.rgbSplit.value > 0',
+    fails: 'the pass-gate row for crush, all five rows of 1b (readGhost widening from 2 of 6 '
+      + 'frames to 6 of 6), and the boot comparison naming all four gating terms',
+  },
 };
 
 const MUTATE = flag('--mutate');
@@ -197,6 +303,28 @@ const STRIDE = Number(flag('--stride', '4'));
 const SUBSTEPS = Number(flag('--substeps', '3'));
 
 const VIEW = { width: 640, height: 400 };
+// The height the current editor gives its fixed application bar, and it is **measured
+// off the page rather than declared here**. Historical comparison pages have no shell,
+// so their viewport is shortened by the same amount to make both arms render the same
+// content box rather than two different layouts - which means this number is not a
+// note about the design, it is a term in the golden comparison. Written down as a
+// literal it was 32 against a `web/nav.css` that says 38, and the two rows it feeds
+// reddened with `renderScale: 589 -> 579` - a difference that is entirely this drift
+// (`round(640 * (400-38)/400)` is 579) and reads exactly like the buffer regression
+// the golden row exists to catch. So the after arm is opened first, the bar is
+// measured, and the before arm is sized against what was measured.
+let APP_BAR_HEIGHT = null;
+let SHELL_CONTENT = null;
+let COMPARISON_VIEW = null;
+const shellGeometry = (barHeight) => {
+  APP_BAR_HEIGHT = barHeight;
+  SHELL_CONTENT = {
+    width: Math.round(VIEW.width * ((VIEW.height - barHeight) / VIEW.height)),
+    height: VIEW.height - barHeight,
+  };
+  COMPARISON_VIEW = { width: VIEW.width, height: VIEW.height + barHeight };
+};
+let RENDER_BUFFER = { width: VIEW.width, height: VIEW.height };
 const POINTS = 512 * 424;
 // THREE.NormalBlending and THREE.AdditiveBlending, by value, because the check
 // reads the material rather than the registry.
@@ -281,6 +409,7 @@ const LANDING = {
   right: 'k.uniforms.cropR.value',
   bottom: 'k.uniforms.cropB.value',
   top: 'k.uniforms.cropT.value',
+  crop: 'k.uniforms.cropOn.value',
   interpolate: 'k.uniforms.interpolate.value',
   snapDelta: 'k.uniforms.snapDelta.value',
   fade: '[k.uniforms.fadeTime.value, k.geometry.drawRange.count]',
@@ -303,6 +432,11 @@ const LANDING = {
   regionNoise: 'k.uniforms.regionNoise.value',
   regionMask: 'k.uniforms.regionMask.value',
   glitch: 'k.uniforms.glitch.value',
+  glitchDensity: 'k.uniforms.glitchDensity.value',
+  glitchShove: 'k.uniforms.glitchShove.value',
+  glitchTint: 'k.uniforms.glitchTint.value',
+  glitchBands: 'k.uniforms.glitchBands.value',
+  glitchRate: 'k.uniforms.glitchRate.value',
   spin: 'k.controls.autoRotate',
   // The five readings land on uniforms of their own name, which is the one place in
   // this table where the parameter and the uniform were deliberately made to match:
@@ -328,11 +462,37 @@ const LANDING = {
   rim: 'k.uniforms.rimAmount.value',
   thermal: 'k.uniforms.thermal.value',
   edges: 'k.uniforms.edges.value',
+  duotoneDepth: 'k.uniforms.duotoneDepth.value',
+  // Degrees on the slider and radians at the uniform, so this row is the conversion as
+  // much as the arrival. An apply that handed the shader its degrees straight through
+  // would read here as a perfectly ordinary number and spin the poles fifty-seven times
+  // too far, which is a look nobody authored arriving through a slider that works.
+  duotoneHue: 'k.uniforms.duotoneHue.value',
+  duotoneSplit: 'k.uniforms.duotoneSplit.value',
   bloom: '[k.bloom.strength, k.bloom.enabled]',
   trails: '[k.afterimage.uniforms.damp.value, k.afterimage.enabled]',
   rgbSplit: '[k.grade.uniforms.rgbSplit.value, k.grade.enabled]',
   scanlines: '[k.grade.uniforms.scanlines.value, k.grade.enabled]',
+  // The raster's three settings, and like `crush` below none of them carries
+  // `k.grade.enabled` - they are settings of the master above rather than terms beside
+  // it, so the pass is the master's to gate. The angle is degrees on the slider and
+  // radians at the uniform, which makes its row the conversion as well as the arrival.
+  // Named as the pair rather than as an angle, because that is what the registry
+  // actually writes: an apply that moved one component and not the other, or wrote the
+  // sine where the cosine belongs, reads identically at either one on its own.
+  scanAngle: '[k.grade.uniforms.scanAxis.value.x, k.grade.uniforms.scanAxis.value.y].map((v) => Number(v.toFixed(9)))',
+  scanPitch: 'k.grade.uniforms.scanPitch.value',
+  scanHard: 'k.grade.uniforms.scanHard.value',
   grain: '[k.grade.uniforms.grain.value, k.grade.enabled]',
+  vignette: '[k.grade.uniforms.vignette.value, k.grade.enabled]',
+  // The fifth term in that pass, and **the missing `k.grade.enabled` beside it is the
+  // assertion**. The four above gate the pass and so each has to carry whether it is on;
+  // this one is a sub-control inside the pass and deliberately does not, because its
+  // default is the literal it replaced and a gate on a non-zero default would hold the
+  // grade open for every look there is. Pairing it here would make this row agree with a
+  // build that gated it, which is the one build this landing site exists to refuse. What
+  // proves the negative is the row in the pass-gate matrix below.
+  crush: 'k.grade.uniforms.crush.value',
   denoise: 'k.uniforms.denoise.value',
   edgeTol: 'k.uniforms.edgeTol.value',
   renderScale: 'k.renderer.getContext().drawingBufferWidth',
@@ -376,6 +536,7 @@ const EXPECT = {
   right: (v) => v,
   bottom: (v) => v,
   top: (v) => v,
+  crop: (v) => (v ? 1 : 0),
   interpolate: (v) => (v ? 1 : 0),
   snapDelta: (v) => v,
   fade: (v, all) => [v / 1000, v > 0 || all.wake > 0 ? POINTS * 2 : POINTS],
@@ -395,6 +556,11 @@ const EXPECT = {
   regionNoise: (v) => v,
   regionMask: (v) => v,
   glitch: (v) => v,
+  glitchDensity: (v) => v,
+  glitchShove: (v) => v,
+  glitchTint: (v) => v,
+  glitchBands: (v) => v,
+  glitchRate: (v) => v,
   spin: (v) => v,
   readRgb: (v) => v,
   readDepth: (v) => v,
@@ -417,15 +583,45 @@ const EXPECT = {
   rim: (v) => v,
   thermal: (v) => v,
   edges: (v) => v,
+  duotoneDepth: (v) => v,
+  // The degrees-to-radians the registry does on the way through, written out here as the
+  // same double arithmetic rather than read back off the page - three's `degToRad` is a
+  // multiply by `Math.PI / 180` and so is this, which makes the equality exact instead of
+  // nearly exact. A tool that asked the page what conversion it used would agree with the
+  // implementation by construction and could never see a wrong one.
+  duotoneHue: (v) => v * (Math.PI / 180),
+  duotoneSplit: (v) => v,
   bloom: (v) => [v, v > 0],
   trails: (v) => [v, v > 0],
-  rgbSplit: (v, all) => [v, v > 0 || all.scanlines > 0 || all.grain > 0],
-  scanlines: (v, all) => [v, all.rgbSplit > 0 || v > 0 || all.grain > 0],
-  grain: (v, all) => [v, all.rgbSplit > 0 || all.scanlines > 0 || v > 0],
+  // The four that share one pass, so each one's landing carries whether the pass is on
+  // and every one of them has to name the other three. `vignette` joined them when it
+  // stopped being a literal applied whenever the pass happened to run.
+  rgbSplit: (v, all) => [v, v > 0 || all.scanlines > 0 || all.grain > 0 || all.vignette > 0],
+  scanlines: (v, all) => [v, all.rgbSplit > 0 || v > 0 || all.grain > 0 || all.vignette > 0],
+  // Same double arithmetic three's `degToRad` does, so the equality is exact rather than
+  // near - and written out here rather than read back off the page, because a tool that
+  // asked the page what conversion it used could never see a wrong one.
+  // The same double arithmetic the registry does on the way through, so the two agree bit
+  // for bit rather than nearly - and stated here rather than read back off the page,
+  // because a tool that asked the page which axis it built could never see a wrong one.
+  // Rounded on both sides, exactly as the levelling pair above is and for its reason:
+  // the comparison is a `JSON.stringify` equality and this rebuilds the cosine in a
+  // different order of operations from the registry, so the two land a ULP apart -
+  // 0.4539904997395468 against 0.45399049973954686 at the scrambled 63 degrees. A ULP is
+  // not a finding; an axis built the wrong way round still is, and still fails here.
+  scanAngle: (v) => [Math.sin(v * (Math.PI / 180)), Math.cos(v * (Math.PI / 180))]
+    .map((x) => Number(x.toFixed(9))),
+  scanPitch: (v) => v,
+  scanHard: (v) => v,
+  grain: (v, all) => [v, all.rgbSplit > 0 || all.scanlines > 0 || v > 0 || all.vignette > 0],
+  vignette: (v, all) => [v, all.rgbSplit > 0 || all.scanlines > 0 || all.grain > 0 || v > 0],
+  // Reads its own value and nothing else, because it shares the pass without gating it -
+  // so unlike the four above it names none of the others and none of them name it.
+  crush: (v) => v,
   denoise: (v) => (v ? 1 : 0),
   edgeTol: (v) => v,
   // three floors width * pixelRatio, and the context runs at deviceScaleFactor 1.
-  renderScale: (v) => Math.floor(VIEW.width * (v / 100)),
+  renderScale: (v) => Math.floor(RENDER_BUFFER.width * (v / 100)),
   // Both read the whole pair, because both land on the same rotation: a `tilt` set on
   // its own has to compose with whatever `roll` currently is, which the one-at-a-time
   // sweep leaves at its default and the all-at-once pass does not.
@@ -451,6 +647,18 @@ const SCRAMBLE = {
   roll: -21.5,
   near: 0.35,
   far: 4.2,
+  // **Left at its default, which is the one value in this table that is**, and the
+  // reason is the same one the three region effects below give: it is a gate, and the
+  // six faces either side of it are only observable through it. Flipped to `false` the
+  // box stops biting, so `near`, `far` and the four lateral faces all render the same
+  // image whatever they are set to, and six real parameters land in the no-pixel bucket
+  // at once looking like parameters that do nothing.
+  //
+  // What that costs is this sweep's own view of `crop`: dropping it restores the value
+  // it already has, so it changes nothing here and is declared in `NO_PIXEL_EFFECT`. A
+  // drop-one sweep cannot see a parameter whose scrambled value is its default, and the
+  // section below is where the switch is actually proven.
+  crop: true,
   // The four lateral faces, placed against the same fixture the region is placed
   // against rather than picked: the cloud runs x [-2.31, 2.97] and y [-2.26, 1.63],
   // so each of these sits inside the extent on its own side and has something to cull,
@@ -461,6 +669,10 @@ const SCRAMBLE = {
   right: 1.5,
   bottom: -1.5,
   top: 1,
+  // Flipped, and the drop-one sweep is what makes it worth stating. Reverting `crop` to
+  // its default puts all six faces back to work against the four placed above and the
+  // near/far pair above them - so the row it produces is a large one, and a build whose
+  // switch reached the shader and nothing else, or nothing at all, cannot pass it. The
   interpolate: false,
   snapDelta: 410,
   fade: 260,
@@ -468,6 +680,17 @@ const SCRAMBLE = {
   noise: 0.08,
   noiseScale: 5.5,
   noiseSpeed: 1.45,
+  // The master well up, because the five ceilings under it are only observable through
+  // it: at a glitch of 0 no band tears, so density, shove, flare, band height and rate
+  // would every one of them land in the no-pixel bucket together - the same argument the
+  // region's three effects below are set for. The flare is above its default so it is
+  // being raised onto the picture rather than lowered out of it.
+  glitch: 0.31,
+  glitchDensity: 0.62,
+  glitchShove: 1.23,
+  glitchTint: 4.35,
+  glitchBands: 27,
+  glitchRate: 13.5,
   // The region is placed rather than picked, because the sweep below drops each
   // parameter in turn and asserts the image moved - and a region floating in empty
   // space would leave all eight of its geometry parameters inert while looking like a
@@ -503,7 +726,6 @@ const SCRAMBLE = {
   regionPush: 0.35,
   regionNoise: 0.5,
   regionMask: 0.4,
-  glitch: 0.31,
   spin: true,
   // All five readings live at once, which is what keeps every per-reading term in the
   // shader reachable from the one sweep this file runs. They are deliberately unequal:
@@ -544,11 +766,47 @@ const SCRAMBLE = {
   // detail line, because every value matches and only the ordering does not.
   thermal: 0.6,
   edges: 0.45,
+  // The duotone amount well up, because the two below are only observable through it -
+  // the same argument the glitch master and the region's three effects are set on. At a
+  // depth of 0 the poles never reach a pixel, so the hue and the split would both land in
+  // the no-pixel bucket together looking like parameters that do nothing.
+  duotoneDepth: 0.65,
+  // Off the axis in both senses: a rotation big enough to move both poles well clear of
+  // where they started, and not one of the right angles a hardcoded constant would
+  // plausibly be. 47 degrees is on the step grid and is nobody's round number.
+  duotoneHue: 47,
+  // Off centre, so reverting it moves the crossover through the cloud rather than
+  // symmetrically about it. The fixture's points run z [-4.50, -0.50] against a near/far
+  // of 0.35/4.2, so a split at 0.36 puts the meeting plane inside the subject where the
+  // default at 0.5 puts it behind them.
+  duotoneSplit: 0.36,
   bloom: 1.35,
   trails: 0.44,
   rgbSplit: 2.3,
   scanlines: 0.61,
+  // Off every axis the raster has a right angle at, so a build that rounded the angle to
+  // the nearest quarter turn - or dropped it - draws a visibly different grille. The
+  // master above is what makes these three observable at all: at a scanlines of 0 the
+  // block never runs and all three would land in the no-pixel bucket together, which is
+  // the argument the glitch ceilings and the region's three effects are set on.
+  scanAngle: 63,
+  // Well above the 1.3 it defaults to, so the lines are the dense column raster rather
+  // than the television artifact - and a pitch that only moved a hair would be a
+  // parameter the drop-one sweep could not separate from sampling noise.
+  scanPitch: 4.7,
+  // High enough that the wave is a grille rather than a sine, which is the state the
+  // hardness exists to reach. At its default of 0 it is the identity by construction, so
+  // leaving it there would have the sweep record it as a parameter that cannot touch a
+  // pixel - the trap `rgbSaturation` and `depthGamma` above are set off their defaults for.
+  scanHard: 0.82,
   grain: 0.37,
+  vignette: 0.73,
+  // Well above the 0.018 it defaults to, and the four terms above hold the pass open so
+  // it is reachable at all - a toe inside a pass nothing switched on is the dead zone
+  // this table's `rgbSaturation` comment describes, arriving by a different route.
+  // Reverting it to its default lifts every unclamped pixel by 0.044 * 1.12, which is
+  // about 12.6 of 255 and nothing a sampling residual explains.
+  crush: 0.062,
   denoise: false,
   edgeTol: 340,
   renderScale: 85,
@@ -561,6 +819,15 @@ const SCRAMBLE = {
 // Anything else landing in that bucket is a failure, which is what stops the sweep
 // growing holes as later steps add parameters.
 const NO_PIXEL_EFFECT = {
+  // Not a parameter that fails to reach pixels - it is a switch over all six crop faces
+  // and reaches them hard. It is invisible to *this method*: the sweep drops a parameter
+  // and lets it fall back to its default, and `crop` is scrambled to its default because
+  // flipping it would take the six faces beside it out of the picture. A drop-one sweep
+  // cannot see a parameter it cannot drop. The section that does see it is
+  // "the crop switch, which the sweep above cannot see", and this entry is a hole
+  // without it.
+  crop: 'its scrambled value is its default, because releasing the box would make the '
+    + 'six faces it gates unobservable - proven instead by the section below',
   spin: 'auto-orbit only advances when the animation loop calls controls.update, '
     + 'and a pinned run has replaced the loop',
   camera: 'nothing draws the program camera on the pinned run - the viewport is the '
@@ -652,8 +919,16 @@ const fixture = buildFixture(CAPTURE);
 // the mutated one. The arms that name a source are the historical revisions, and they
 // are deliberately left alone: mutating the thing a comparison is measured *against*
 // would move both sides and prove nothing.
-async function openPage({ source = mutatedSource, pin = false } = {}) {
+async function openPage({
+  source = mutatedSource,
+  pin = false,
+  viewportSize = VIEW,
+  comparisonShell = false,
+} = {}) {
   const page = await context.newPage();
+  if (viewportSize.width !== VIEW.width || viewportSize.height !== VIEW.height) {
+    await page.setViewportSize(viewportSize);
+  }
   const errors = [];
   page.on('pageerror', (err) => errors.push(String(err)));
   page.on('console', (msg) => { if (msg.type() === 'error') errors.push(`${msg.text()} @ ${JSON.stringify(msg.location())}`); });
@@ -709,6 +984,24 @@ async function openPage({ source = mutatedSource, pin = false } = {}) {
       + `so the ${BEFORE_REV} arm loaded the tree's own page`);
   }
   await page.waitForFunction(() => !!globalThis.__kinect);
+  if (comparisonShell) {
+    // The comparison build predates the fixed application bar. Canonicalise both
+    // revisions onto its existing bottom-strip allocation before changing target
+    // aspect, so the comparison viewport gives both the same 640x400 content box
+    // through the same layout mechanism. The real current shell is measured separately
+    // below and by editor-check; this arm is about shader identity across the old mode
+    // boundary, at the fixed 640x400 frame it was originally calibrated against.
+    await page.evaluate((height) => {
+      const appBar = document.getElementById('appBar');
+      if (appBar) appBar.style.display = 'none';
+      const timeline = document.getElementById('timeline');
+      timeline.hidden = false;
+      timeline.style.height = `${height}px`;
+      timeline.style.minHeight = `${height}px`;
+      timeline.style.maxHeight = `${height}px`;
+      dispatchEvent(new Event('resize'));
+    }, APP_BAR_HEIGHT);
+  }
   // **The page frames at the stage this tool asked for.** The editor letterboxes
   // itself to the export aspect now, so a viewport alone no longer decides the
   // drawing buffer: a 640x400 stage is 1.6, the menu's default is 16:9, and the fit
@@ -788,10 +1081,25 @@ async function bootState(opts, reader = landingReader) {
   return { out, poses, errors, page };
 }
 
-const beforeArm = await bootState({ source: beforeSource }, tolerantLandingReader);
-await beforeArm.page.close();
+// **The after arm goes first, because it is what says how tall the bar is.** The
+// before arm's viewport is derived from that measurement, so the order is a
+// dependency rather than a preference.
 const afterArm = await bootState({});
+const measuredBar = await afterArm.page.evaluate(
+  "Math.round(document.getElementById('appBar').getBoundingClientRect().height)");
 await afterArm.page.close();
+if (!Number.isFinite(measuredBar) || measuredBar <= 0) {
+  throw new Error(`the application bar measured ${measuredBar}px - the shell this arm is compared against is not on the page`);
+}
+shellGeometry(measuredBar);
+console.log(`  the shell's application bar measures ${APP_BAR_HEIGHT}px, `
+  + `so the content box both arms render is ${SHELL_CONTENT.width}x${SHELL_CONTENT.height}`);
+
+const beforeArm = await bootState(
+  { source: beforeSource, viewportSize: SHELL_CONTENT },
+  tolerantLandingReader,
+);
+await beforeArm.page.close();
 
 // The camera is left out of the landing comparison, alone among the twenty-five,
 // and only here. Every other parameter lands on the same uniform it landed on
@@ -845,6 +1153,14 @@ const GOLDEN_ABSENT = new Set([
   // renders. That equality is the row above, and it is the reason this arm still means
   // something with four more parameters in it.
   'left', 'right', 'bottom', 'top',
+  // The switch over all six of them, and it is excused on the strongest version of the
+  // terms the four faces above are: not merely that the pinned revision has no such
+  // control, but that its default is the state that revision was permanently in. A build
+  // whose box always bites renders exactly what a build with a switch defaulting to
+  // biting renders, so this arm is unchanged by the switch existing. What happens when
+  // it is *off* is not excused anywhere - it is asserted three ways in "the crop switch,
+  // which the sweep above cannot see".
+  'crop',
   // The two levelling angles, excused on exactly the crop faces' terms and for exactly
   // their reason: the pinned revision has no such control, and the default is the
   // identity rotation, so a build that levels the room by nothing renders what a build
@@ -878,6 +1194,45 @@ const GOLDEN_ABSENT = new Set([
   // that drifted moves that reading's image and fails there by name.
   'rgbSaturation', 'depthGamma', 'ghostRim', 'ghostFill',
   'contourBands', 'contourWidth', 'blackwallSweep',
+  // The five ceilings under the glitch master, on exactly those terms: at the pinned
+  // revision each was a literal inside the vertex stage's glitch block, and each
+  // defaults to the literal it replaced, so a build carrying them tears identically to
+  // one without them. What holds them to that is section 1b, which renders at parameter
+  // defaults - a default that drifted off its literal would move whichever readings the
+  // torn bands reach and fail there by name rather than being excused here.
+  'glitchDensity', 'glitchShove', 'glitchTint', 'glitchBands', 'glitchRate',
+  // `vignette` is here on different terms from everything above it, and the difference
+  // is worth the sentence. It was a literal too, but it is the one promoted literal that
+  // does NOT keep its old value: the behaviour it replaces is conditional - 0.55 while
+  // some other grade term held the pass open, 0 while none did - so no default can
+  // reproduce both branches. It defaults to the branch the parameter defaults are in,
+  // which is why section 1b still agrees with a build from before it existed. The look
+  // that did carry a vignette, `blackwall.json`, now names 0.55 for itself.
+  'vignette',
+  // The duotone's three, on the plainest version of these terms: nothing at the pinned
+  // revision resembles them, and all three default to the identity - a depth of 0 never
+  // enters the block, so a build carrying them draws precisely what a build without them
+  // drew. That equality is what this arm measures, and section 1b is where it stops being
+  // an excuse and becomes a framebuffer hash, since the duotone sits after the blend and
+  // would move every one of the five readings if its default reached a pixel.
+  'duotoneDepth', 'duotoneHue', 'duotoneSplit',
+  // `crush` is here on `vignette`'s terms turned the other way up, and the contrast is
+  // the reason it gets its own sentence. It was a literal too, and unlike the vignette it
+  // *keeps* the value it replaced - so the excuse is the strong one rather than the
+  // conditional one: 0.018 is what the grade always subtracted, and a build whose toe is
+  // a uniform sitting at 0.018 draws what a build with the literal drew. What it cannot
+  // be excused for is gating the pass, which nothing here would see and the pass-gate
+  // matrix asserts directly.
+  'crush',
+  // The raster's three, on the terms the glitch ceilings are excused by: at the pinned
+  // revision the pitch was a literal inside the wave and the other two did not exist in
+  // any form, and each defaults to the behaviour that build had - an angle of zero along
+  // the frame's y, the pitch's own 1.3, and a hardness whose zero is the identity. So a
+  // build carrying them draws precisely what a build without them drew, which is the
+  // equality this arm measures. That it holds is not taken on trust: section 1b renders
+  // at parameter defaults, where the raster block does not run at all, and the drop-one
+  // sweep is where the three are shown to reach pixels once the master is up.
+  'scanAngle', 'scanPitch', 'scanHard',
   // The program-out size, on the same terms and for the same reason: not a registry
   // parameter, no such control at the earlier revision, and its own bounds live in the
   // handler that parses it rather than in the markup. What it is held to is
@@ -886,6 +1241,11 @@ const GOLDEN_ABSENT = new Set([
   // and the snapshot walks `#panel input` - if it ever becomes an input it will
   // arrive here as a failure, which is the right way round.
   'progSize',
+  // A file chooser is a control over a document, not a registry parameter. It arrived
+  // with look import and has no earlier value to hold against the pre-registry page;
+  // section 12 of editor-check drives the file through validation and back into the
+  // renderer, while this tool's markup scan still refuses any parameter data in HTML.
+  'tPresetFile',
 ]);
 const absentBefore = (name, before) => GOLDEN_ABSENT.has(name) && before === undefined;
 
@@ -951,6 +1311,18 @@ for (const stage of Object.keys(beforeArm.out)) {
     `and pointSize moved by exactly 1080/600 everywhere it appears, because its unit did`,
     wrong.length ? wrong.join('; ') : seen.join(', '));
 }
+
+// The fixed shell gives the renderer 32 fewer vertical pixels. With the proof's
+// 640x400 target aspect that content box is 589x368. The historical page has no target
+// fit, so it is opened directly at that content size; both arms must then land on the
+// same exact buffer rather than gaining a layout exception in the golden comparison.
+check(
+  beforeArm.out.boot.landing.renderScale === SHELL_CONTENT.width
+    && afterArm.out.boot.landing.renderScale === SHELL_CONTENT.width,
+  'and renderScale lands on exactly the fixed shell content fit',
+  `${beforeArm.out.boot.landing.renderScale}->${afterArm.out.boot.landing.renderScale}, `
+    + `wanted ${SHELL_CONTENT.width}->${SHELL_CONTENT.width}`,
+);
 
 // With no camera keys the pose is a single value the clip holds, so two renders at
 // different program times land on the same place. That is the whole of the
@@ -1030,10 +1402,40 @@ console.log(`\n[registry] each reading renders what its mode rendered, at ${AGAI
     throw new Error(`${AGAINST_REV}:web/main.js has no mode uniform to compare against`);
   }
 
+  // **The old arm is the old readings, not the old geometry.** The unprojection's x sign
+  // changed after this rev: the sensor's frames arrive horizontally mirrored and this build
+  // undoes them, which `unproject` in `web/main.js` carries the reasoning for. Left alone,
+  // the pinned build draws the room reflected and every row below reports 6 of 6 frames
+  // differing over a change that has nothing to do with a reading - measured, before this
+  // was here: all five rows plus the raster, uniformly, where at HEAD five of the six pass.
+  //
+  // **This is the rule the raster arm below already states, arriving at a divergence that
+  // has no parameter to express it.** That one hands the two builds different `vignette`
+  // values because a promotion in `40ab241` baked the corner falloff into one of them, on
+  // the principle that each build has to be given the values that mean the same picture in
+  // its own vocabulary rather than the same numbers. A geometry difference has no value to
+  // hand over, so the vocabulary is the source text and the patch goes here.
+  //
+  // Guarded the way the mutations are, and for the same reason: the text has to appear
+  // exactly once or this refuses to run. A rev where it stopped matching would otherwise
+  // quietly become a comparison against un-normalised geometry that reports differences as
+  // findings about the readings, which is the one failure this whole section is arranged to
+  // avoid. It is one entry because there has been one intentional geometry change; a second
+  // belongs beside it rather than folded into it, so the list stays a readable account of
+  // how this build differs from the one it is held against.
+  const OLD_UNPROJECT_X = '     (pixel.x + 0.5 - center.x) / focal.x * z,';
+  const MIRRORED_UNPROJECT_X = '    -(pixel.x + 0.5 - center.x) / focal.x * z,';
+  const xHits = againstSource.js.split(OLD_UNPROJECT_X).length - 1;
+  if (xHits !== 1) {
+    throw new Error(`${AGAINST_REV}:web/main.js states the unprojection's x ${xHits} times, expected exactly 1`
+      + ' - refusing to compare a mirrored build against an unmirrored one and report it as a reading');
+  }
+  againstSource.js = againstSource.js.replace(OLD_UNPROJECT_X, MIRRORED_UNPROJECT_X);
+
   // Both arms are pinned to the same frames and the same camera, so the only thing
   // that differs between them is the shader. `params.reset()` first on each, because a
   // reading has to be measured against the same defaults the other arm booted with.
-  const hashesFor = async (opts, select) => {
+  const hashesFor = async (opts, select, cases = READING_WAS, extra = '') => {
     const { page: p, errors } = await openPage({ ...opts, pin: true });
     await p.evaluate(async () => {
       const buffer = await (await fetch('/__pinned.bin')).arrayBuffer();
@@ -1043,12 +1445,27 @@ console.log(`\n[registry] each reading renders what its mode rendered, at ${AGAI
       const times = globalThis.__kinect.drive.times();
       return times.slice(0, ${SOURCE_FRAMES});
     })()`);
+    const meta = await p.evaluate(`(() => {
+      const k = globalThis.__kinect;
+      const gl = k.renderer.getContext();
+      const box = k.renderer.domElement.getBoundingClientRect();
+      return {
+        window: [innerWidth, innerHeight],
+        canvas: [gl.drawingBufferWidth, gl.drawingBufferHeight],
+        css: [box.x, box.y, box.width, box.height],
+        composer: [k.composer.renderTarget1.width, k.composer.renderTarget1.height],
+        afterimage: [k.afterimage._textureComp.width, k.afterimage._textureComp.height],
+        cameraAspect: k.freeCamera.aspect,
+        bufferHeight: k.uniforms.bufferHeight.value,
+      };
+    })()`);
     const out = {};
-    for (const [reading, mode] of Object.entries(READING_WAS)) {
+    for (const [reading, mode] of Object.entries(cases)) {
       out[reading] = await p.evaluate(`(async () => {
         ${PAGE_HELPERS}
         k.params.reset();
         ${select}
+        ${extra}
         k.drive.reset();
         pinCamera(k.freeCamera);
         const hashes = [];
@@ -1060,11 +1477,18 @@ console.log(`\n[registry] each reading renders what its mode rendered, at ${AGAI
       })()`.replace(/\$MODE/g, String(mode)).replace(/\$READING/g, JSON.stringify(reading)));
     }
     await p.close();
-    return { out, errors };
+    return { out, errors, meta };
   };
 
-  const oldArm = await hashesFor({ source: againstSource }, 'k.uniforms.mode.value = $MODE;');
-  const newArm = await hashesFor({}, 'k.readings().forEach((n) => k.params.set(n, 0)); k.params.set($READING, 1);');
+  const oldArm = await hashesFor(
+    { source: againstSource, viewportSize: COMPARISON_VIEW, comparisonShell: true },
+    'k.uniforms.mode.value = $MODE;',
+  );
+  const newArm = await hashesFor(
+    { viewportSize: COMPARISON_VIEW, comparisonShell: true },
+    'k.readings().forEach((n) => k.params.set(n, 0)); k.params.set($READING, 1);',
+  );
+  console.log(`  comparison geometry old ${JSON.stringify(oldArm.meta)} new ${JSON.stringify(newArm.meta)}`);
 
   for (const [reading, mode] of Object.entries(READING_WAS)) {
     const a = oldArm.out[reading];
@@ -1072,7 +1496,102 @@ console.log(`\n[registry] each reading renders what its mode rendered, at ${AGAI
     const first = a.findIndex((h, i) => h !== b[i]);
     check(eq(a, b),
       `${reading.padEnd(13)} at 1.0 is bit-identical to mode ${mode} at ${AGAINST_REV}`,
-      first < 0 ? `${a.length} frames` : `frame ${first}: ${a[first].slice(0, 12)} vs ${b[first].slice(0, 12)}`);
+      // **Which frames, not which frame.** Reporting only the first mismatch cannot
+      // tell a transient from a divergence, and those are different findings: one
+      // frame out of a walk is a warm-up the two builds enter differently, while every
+      // frame from some index on is a term that has actually changed. `readGhost` is
+      // the row that needed asking - it disagrees at exactly one frame of however many
+      // are walked - and the old detail line looked identical either way.
+      first < 0
+        ? `${a.length} frames`
+        : `${a.filter((h, i) => h !== b[i]).length} of ${a.length} frames differ, first at `
+          + `${first}: ${a[first].slice(0, 12)} vs ${b[first].slice(0, 12)} `
+          + `(mismatched: ${a.map((h, i) => (h === b[i] ? null : i)).filter((i) => i !== null).join(', ')})`);
+  }
+
+  // ---- the grade term whose default is not zero, at the value the shipped look uses.
+  //
+  // **The five rows above cannot see the raster at all, and that is worth saying plainly
+  // rather than leaving as a gap somebody finds later.** They render at parameter
+  // defaults, `scanlines` defaults to 0, and the whole raster block sits behind
+  // `if (scanlines > 0.0)` - so a run that came back bit-identical has measured the
+  // branch being added and not one line of the arithmetic inside it. Every mutation in
+  // this file's table is likewise blind to it, because the drop-one sweep compares arms
+  // of one build against each other rather than against a build from before.
+  //
+  // What makes that a hole rather than a nicety is `presets-builtin/blackwall.json`,
+  // which names `scanlines: 0.35`. The generalisation replaced an inline expression with
+  // a coordinate through a local, which is exactly the substitution `docs/measurement.md`
+  // records producing a third image out of two that were each bit-identical - so "the
+  // defaults reach the old expression" is a claim about a compiler, and the shipped look
+  // is what pays if it is wrong. `determinism-check` and `export-check` both read that
+  // file and deliberately *follow* it rather than pinning it, so neither would notice.
+  //
+  // One reading, so the raster is the only thing that can differ between the arms, and
+  // **Blackwall rather than colour, which is a correction rather than a preference.**
+  // Written on `readRgb` first, this arm was an arm lit by a single source: the pinned
+  // build selects a reading by integer mode and cannot mix, so one reading is all either
+  // side gets, and `--mutate rgb-contributes-no-alpha` then renders black on both of them.
+  // They compare identical, the control reports `0 of 6 frames differ with the master
+  // off`, and the whole section fires against a mutation with nothing to do with the
+  // raster - which is the last entry in `docs/instruments.md`, reproduced in the tool that
+  // entry is about. Blackwall writes its own alpha and the readRgb block is guarded on a
+  // weight this arm leaves at zero, so no reading's mutation can switch this probe off.
+  //
+  // It is also the more faithful choice: `blackwall.json` is the document that names a
+  // scanlines of 0.35, so this arm now stands where the shipped look actually stands.
+  //
+  // **The two arms are handed different values on purpose, and the first version of this
+  // row was wrong for exactly the reason that sounds like a bug.** Raising the raster
+  // opens the grade pass on both builds, and the pinned one bakes its corner falloff into
+  // that pass as `mix(1.0, vig, 0.55)` where this one reads a `vignette` parameter that
+  // defaults to 0. So the obvious arrangement - the same look on both sides - compares a
+  // frame with a vignette against a frame without one, and reports 6 of 6 frames differing
+  // over a promotion that landed in `40ab241` and has nothing to do with the raster. Named
+  // here, the two arms draw the same corner falloff and the raster is what is left.
+  //
+  // This is the units error `export-check`'s cross-build arm already records, arriving
+  // from the other direction: **each build has to be given the values that mean the same
+  // picture in its own vocabulary**, not the same numbers. `blackwall.json` names 0.55 for
+  // precisely this reason.
+  const RASTER_LOOK = "k.params.set('scanlines', 0.35);";
+  const RASTER_NEW_LOOK = `${RASTER_LOOK} k.params.set('vignette', 0.55);`;
+  {
+    const rasterOld = await hashesFor(
+      { source: againstSource, viewportSize: COMPARISON_VIEW, comparisonShell: true },
+      'k.uniforms.mode.value = $MODE;',
+      { readBlackwall: 4 },
+      RASTER_LOOK,
+    );
+    const rasterNew = await hashesFor(
+      { viewportSize: COMPARISON_VIEW, comparisonShell: true },
+      'k.readings().forEach((n) => k.params.set(n, 0)); k.params.set($READING, 1);',
+      { readBlackwall: 4 },
+      RASTER_NEW_LOOK,
+    );
+    const a = rasterOld.out.readBlackwall;
+    const b = rasterNew.out.readBlackwall;
+    const first = a.findIndex((h, i) => h !== b[i]);
+    check(eq(a, b),
+      `and the raster at the shipped look's 0.35 is bit-identical to the one line it replaced, at ${AGAINST_REV}`,
+      first < 0
+        ? `${a.length} frames, angle 0 pitch 1.3 hardness 0`
+        : `${a.filter((h, i) => h !== b[i]).length} of ${a.length} frames differ, first at `
+          + `${first}: ${a[first].slice(0, 12)} vs ${b[first].slice(0, 12)}`);
+    // The control, and this row is the reason the one above is not vacuous. Two arms that
+    // both drew no raster at all would compare bit-identical just as happily, so the
+    // sweep has to be shown to have something in it: raising the master has to move the
+    // picture on the build under test.
+    const flat = rasterNew.out.readBlackwall;
+    const lit = (await hashesFor(
+      { viewportSize: COMPARISON_VIEW, comparisonShell: true },
+      'k.readings().forEach((n) => k.params.set(n, 0)); k.params.set($READING, 1);',
+      { readBlackwall: 4 },
+      "k.params.set('scanlines', 0.0); k.params.set('vignette', 0.55);",
+    )).out.readBlackwall;
+    check(!eq(flat, lit),
+      'and the raster is actually drawing at that value, so the equality above is about something',
+      `${flat.filter((h, i) => h !== lit[i]).length} of ${flat.length} frames differ with the master off`);
   }
 
   // The falsification control, and it is the reason the five rows above mean anything.
@@ -1098,6 +1617,10 @@ console.log(`\n[registry] each reading renders what its mode rendered, at ${AGAI
 
 const main = await openPage({ pin: true });
 const { page } = main;
+RENDER_BUFFER = await page.evaluate(`(() => {
+  const gl = globalThis.__kinect.renderer.getContext();
+  return { width: gl.drawingBufferWidth, height: gl.drawingBufferHeight };
+})()`);
 
 const declared = await page.evaluate(`(() => {
   const k = globalThis.__kinect;
@@ -1410,12 +1933,37 @@ console.log('\n[registry] the side effects that are not a uniform write');
 
   const gates = [];
   for (const [values, want] of [
-    [{ bloom: 0, trails: 0, rgbSplit: 0, scanlines: 0, grain: 0 }, { bloom: false, trails: false, grade: false }],
+    [{ bloom: 0, trails: 0, rgbSplit: 0, scanlines: 0, grain: 0, vignette: 0 }, { bloom: false, trails: false, grade: false }],
     [{ bloom: 0.05 }, { bloom: true, trails: false, grade: false }],
     [{ trails: 0.01 }, { bloom: false, trails: true, grade: false }],
     [{ rgbSplit: 0.05 }, { bloom: false, trails: false, grade: true }],
     [{ scanlines: 0.01 }, { bloom: false, trails: false, grade: true }],
     [{ grain: 0.01 }, { bloom: false, trails: false, grade: true }],
+    // The fourth term sharing that pass, and the one that used to ride on the other
+    // three: raised on its own it has to bring the pass up by itself, or the vignette
+    // is back to being a thing you can only have by asking for something else.
+    [{ vignette: 0.01 }, { bloom: false, trails: false, grade: true }],
+    // The fifth term in that pass, and the only one whose expectation is `false`. `crush`
+    // shares the grade and deliberately does not gate it, so this row is the negative
+    // asserted rather than left as an omission - an omission would pass on a build that
+    // gated it, and gating it is the tempting edit, because every neighbour above does.
+    //
+    // What it would cost is why the row is worth its line. The toe defaults to 0.018 and
+    // not to 0, so `crush > 0` is true of every document there has ever been: the pass
+    // would run for the four shipped presets that ask for no grade at all, each paying a
+    // full-screen read and write to be put through a Reinhard curve nobody graded them
+    // through, and section 1b would redden on all five readings at once against a build
+    // from before the registry existed.
+    [{ crush: 0.5 }, { bloom: false, trails: false, grade: false }],
+    // The raster's three settings, on `crush`'s terms and each for its own reason. The
+    // pitch is the one that would fail loudest if it gated, since it defaults to 1.3 and
+    // so is non-zero in every document there has ever been; the angle and the hardness
+    // would merely switch a full-screen pass on to rotate and square a raster whose master
+    // is off, which is the no-op this row exists to refuse. All three are settings of
+    // `scanlines`, and the pass is the master's to gate.
+    [{ scanAngle: 90 }, { bloom: false, trails: false, grade: false }],
+    [{ scanPitch: 6 }, { bloom: false, trails: false, grade: false }],
+    [{ scanHard: 1 }, { bloom: false, trails: false, grade: false }],
   ]) {
     const r = await setAndRead(values);
     const got = { bloom: r.bloom, trails: r.trails, grade: r.grade };
@@ -1435,7 +1983,10 @@ console.log('\n[registry] the side effects that are not a uniform write');
   const scales = [];
   for (const v of [40, 100, 200]) {
     const r = await setAndRead({ renderScale: v });
-    const want = [Math.floor(VIEW.width * v / 100), Math.floor(VIEW.height * v / 100)];
+    const want = [
+      Math.floor(RENDER_BUFFER.width * v / 100),
+      Math.floor(RENDER_BUFFER.height * v / 100),
+    ];
     if (!eq(r.buffer, want)) scales.push(`renderScale=${v} -> ${show(r.buffer)} want ${show(want)}`);
   }
   check(scales.length === 0, 'render scale resizes the drawing buffer', scales.join('; '));
@@ -1844,6 +2395,68 @@ console.log('\n[registry] the falsification control: each parameter left out of 
     unexplained.length ? `unexplained: ${unexplained.join(' ')}` : '');
   check(changed.length > 0 && noEffect.length === Object.keys(NO_PIXEL_EFFECT).length,
     `${changed.length} of ${Object.keys(serialised).length} parameters are proven to reach the pixels`);
+}
+
+// The switch that gates the crop, which the sweep above declares it cannot see: it is
+// scrambled to its default so the six faces it gates stay observable, and dropping a
+// parameter that is already at its default changes nothing. So it is proven here
+// instead, and the second row is the one that carries the design decision.
+//
+// **`crop` covers all six faces and not the four lateral ones.** That was very nearly
+// got wrong on the grounds that `nearClip`/`farClip` also normalise the depth ramp, so
+// releasing them would re-grade every point still inside the box - which is true of a
+// switch that opened the values and false of this one, because it gates the discard and
+// leaves the uniforms where the document put them. The second row is what keeps the
+// design honest under a later edit: it authors nothing but the depth pair, so the only
+// thing the switch has left to release is `near` and `far`.
+console.log('\n[registry] the crop switch, which the sweep above cannot see');
+{
+  const released = await run({ ...SCRAMBLE, crop: false });
+  check(!eq(scrambledRun, released),
+    'releasing the crop changes the image, against the six faces the scrambled set authors',
+    eq(scrambledRun, released) ? 'identical' : `first divergence at image ${scrambledRun.findIndex((h, i) => h !== released[i])}`);
+
+  // The scrambled set with the four lateral faces put back to their own defaults, which
+  // are their bounds - so the only thing the switch has left to release is the depth
+  // pair. The bounds are read off the registry rather than named here, which would be
+  // this file carrying a second copy of `CROP_LIMIT`.
+  //
+  // **The rest of the scrambled look comes along, and that is a repair.** The arm was
+  // written as `{ near, far }` alone, which leaves every reading at its default - one
+  // source, `readRgb`, carrying the whole image. `--mutate rgb-contributes-no-alpha`
+  // then renders black on both arms, they compare identical, and this row fired against
+  // a mutation that has nothing to do with the crop. A probe lit by five readings cannot
+  // be switched off by one of them.
+  const depthOnly = {
+    ...SCRAMBLE,
+    left: defaults.left,
+    right: defaults.right,
+    bottom: defaults.bottom,
+    top: defaults.top,
+  };
+  const depthBiting = await run(depthOnly);
+  const depthReleased = await run({ ...depthOnly, crop: false });
+  check(!eq(depthBiting, depthReleased),
+    'and it reaches the depth pair, not only the four lateral faces',
+    eq(depthBiting, depthReleased) ? 'identical with only near/far authored' : 'the box releases in depth too');
+
+  // The control for both rows. Two images that differ prove the switch does something;
+  // they do not prove it does the *right* thing, and the thing it must not do is move
+  // the planes. A build whose release opened `nearClip`/`farClip` instead of skipping
+  // the test would pass both rows above and fail this one, because the depth ramp is
+  // normalised against those two uniforms and every surviving point would be recoloured.
+  const landing = await page.evaluate(`(() => {
+    const k = globalThis.__kinect;
+    k.params.set('near', ${SCRAMBLE.near});
+    k.params.set('far', ${SCRAMBLE.far});
+    k.params.set('crop', false);
+    const off = [k.uniforms.nearClip.value, k.uniforms.farClip.value];
+    k.params.set('crop', true);
+    return { off, on: [k.uniforms.nearClip.value, k.uniforms.farClip.value] };
+  })()`);
+  check(eq(landing.off, landing.on) && eq(landing.on, [SCRAMBLE.near, SCRAMBLE.far]),
+    'and it releases by not testing rather than by moving the planes, so the depth ramp is unchanged',
+    `nearClip/farClip released ${JSON.stringify(landing.off)}, applied ${JSON.stringify(landing.on)}`);
 }
 
 // ------------------------------------------------------------------- verdict

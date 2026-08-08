@@ -51,6 +51,23 @@ zoom about the pointer, `+`/`-` about the playhead, `,`/`.` to pan, `F` to fit t
 to frame the trim. The overview underneath is always the whole clip: drag its box to pan, an
 edge to zoom, click to go there.
 
+**Glitch** tears horizontal bands of the feed sideways, and it is six controls rather than
+one because the interesting looks live off the diagonal. `amount` is the master and the one
+worth keyframing — it scales density and shove together, so corruption fades in and out on a
+single track. `density` is what fraction of the bands tear at a full master and `shove m` is
+how far one travels, in metres in the room: sparse-and-violent and dense-and-subtle are the
+two ends those give you, and neither is reachable from a single slider. `flare` is the cyan
+a torn band burns, per metre it was shoved, so a bigger tear lights harder on its own.
+`band rows` is the height of a band in the sensor's own scanlines — 424 over that many bands,
+so 35 at the default of 12 — and `rate hz` is how often the torn set is redrawn, where 0
+freezes the pattern where it stands rather than switching it off.
+
+The tear is applied in the sensor's frame before the camera sees it, so it is only
+screen-horizontal from head-on: orbit around a torn band and it shoves in depth instead, and
+a levelled room tears along the angle the mount was really at. That is the effect saying the
+*volume* is corrupt rather than the picture, and it is why the group sits at the displacement
+stage next to what moves points rather than in `Post` next to `scanlines`.
+
 `turbulence` displaces points with a noise field. `near`/`far` is the most useful control
 for isolating a person from the room. `cull speckle` drops points whose neighbours disagree,
 cleaning up the sensor's edge noise (sigma ~= 3.5 + 1.3*d mm, so 4.6mm at 0.75m and 10mm at
@@ -64,20 +81,46 @@ leak, so it is kept narrow and cyan. **`rim`** brightens depth discontinuities a
 subject its edge, but under additive blending plus bloom it washes broad surfaces white, so
 turn it down before turning down bloom.
 
+**The four Post terms share one pass, and the pass carries the tonemap.** `rgb split`,
+`scanlines`, `grain` and `vignette` each switch it on, because a full-screen read and write
+that changes nothing is worth skipping. What rides along with it is the highlight rolloff and
+the black-toe crush, so a look with all four at zero is not the same image without four
+effects: it also has lifted blacks and no rolloff, and additive accumulation clips to flat
+white where it would otherwise keep its hue. Raising any one of the four brings the grade back.
+The vignette used to be part of that bundle and is now its own control, which is why a project
+saved before it existed loses its corner falloff until it names one.
+
 ## Levelling a canted mount
 
 A sensor bolted to a dashboard shoots a room that arrives on its side, and nothing measures
 the angle, since libfreenect2 exposes camera intrinsics and no accelerometer. `tilt` and
 `roll` under Framing rotate the *room* rather than the camera, so the turntable's pole, the
-top-down inset, auto-orbit's axis and the exported frame all come level together. Press
-**select floor** and click a flat floor or ceiling plane to derive both angles from that
-surface; `Escape` cancels, and **Reset rotation** zeroes them. A ceiling works like a floor,
-since the fit takes whichever normal disagrees less with the vertical already in force.
-There is no third angle because yaw is what dragging on the picture already does.
+top-down inset, auto-orbit's axis and the exported frame all come level together. Set them
+by eye against the top-down, which is where a canted room reads as canted, and **Reset
+rotation** zeroes both in one press. There is no third angle because yaw is what dragging on
+the picture already does.
 
 Crop faces and the region stay in sensor metres and are tested before the model matrix, so a
 box shrunk onto a subject stays there when the room levels underneath it. `level-check`
 holds that as a bit-identity.
+
+**Show crop box** draws the six faces in the picture and in the top-down, and puts a handle
+on each face you can drag with the pointer. It is a viewer control and writes nothing: the
+drag itself writes, through the same registry door the sliders use, so a dragged face keys,
+undoes and presets exactly as a typed one does. A face is offered a handle in a view that can
+show it moving, which is why the top-down carries `left`, `right`, `near` and `far` and not
+`bottom`/`top`, and why the far plane has no handle when you are looking straight down the
+axis it moves along — turn the orbit and it appears. While the box is on screen the points it
+cuts draw faintly rather than vanishing, so you can see what a face is about to remove and
+drag it onto something deliberately. None of that reaches an exported frame or the OBS
+output, which `export-check` asserts as byte-identity.
+
+**`crop`** is whether the box bites, over all six faces at once, and it is a look value like
+any other — it keys, it presets, and it exports what you see. It releases by not testing
+rather than by moving the planes, so `near` and `far` still normalise the depth ramp while
+the crop is off and the picture you get back is the room, not a re-grade of it. Use it to
+check what a tight box removed without losing the numbers; **revert all to default** is the
+other way back and throws them away. With the crop released the box draws dashed and grey.
 
 ## The five readings
 
@@ -108,6 +151,39 @@ Seven constants that were literals inside the old shader branch are registry par
 so they keyframe: the colour's saturation, the depth ramp's gamma, the ghost shell's rim
 exponent and fill, the contour's bands per metre and line thickness, and the Blackwall scan
 speed. Each defaults to the literal it replaced.
+
+**The duotone sits on top of all five**, beside `thermal` and `edges` and for their reason:
+a term written into one reading is inert in every other. It is a tonal transform rather than
+a tint, because its two poles carry luminance as well as hue — the near one runs toward black
+and the far one toward hot, so one term gives both the depth-keyed palette and the near-black
+figure against a burning core. A plain global toe cannot draw that second thing at all, since
+it darkens near and far alike, which is why there is no separate silhouette control to look
+for. `duotone depth` is how far the image lands between the poles, `duotone hue` turns both of
+them together, and `duotone split` is the depth they meet at, as a fraction of the clip range
+— so the crossover is a place in the room rather than a fraction of the frame. The pair itself
+is baked, the way `heatRamp` and `depthRamp` are: what is parameterised is how you use them.
+
+**The scanlines term is a raster now**, with three settings under it in a `Raster` group of
+its own. `angle` turns it — at 0 it is the horizontal scanline it has always been, at 90 the
+dense vertical column grille the reference frames slice a picture into — and because it keys,
+a raster can rotate under the playhead. `pitch` is the line frequency, promoted from a literal
+and defaulting to it. `hardness` squares the wave into a grille with dark gaps between the
+lines, and it is the one that makes the other two worth having: an angle over a sine only ever
+buys rotated softness, where the references are hard line grilles.
+
+They are settings of `scanlines` rather than terms beside it, so only the master gates the
+grade pass — raise the angle with the master at zero and nothing happens, which is deliberate,
+since switching a full-screen pass on to draw nothing is the no-op the gate exists to refuse.
+The angle is one parameter behind a two-component uniform, computed in double on the way
+through for the reason `contourWidth`'s two band edges are: taking the sine in the shader is
+allowed to be a couple of thousandths off, and a raster meant to run along y then leaks a
+whisker of x.
+
+`crush` is the toe under the grade's Reinhard curve, promoted from a literal and defaulting to
+it. It is a sub-control of the grade pass rather than a fifth term gating it — raise it on its
+own and nothing happens, because the pass only runs when the split, the scanlines, the grain
+or the vignette asks for it. That asymmetry is deliberate: its default is not zero, so gating
+on it would hold the pass open for every look there has ever been.
 
 The panel is generated from the registry at boot. A parameter is one entry naming its group
 and label, and the row, bounds, readout and keyframe control are built from that, so an

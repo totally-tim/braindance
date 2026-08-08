@@ -30,6 +30,13 @@ jobs
 # output describing a tree, which the commit message carries the conclusion of.
 .sweep-all
 
+# Where a browser-driving tool drops its screenshots. Forty of them arrived in one
+# commit during the UI rework - pictures of a surface at a moment, which is the second
+# representation this repo keeps refusing: the shipped program is what the surface
+# looks like, and a PNG of it can only go out of date. Named here rather than deleted
+# again next time, because the tools that write it will keep writing it.
+output
+
 # Claude Code's per-project settings and local state. It is empty today, which is the
 # only reason nobody has committed it - the moment the editor writes
 # settings.local.json into it, a `git add -A` takes one machine's paths and

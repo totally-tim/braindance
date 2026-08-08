@@ -3,11 +3,10 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Kinect v2</title>
-<!-- Before the page's own rules on purpose: nav.css owns how the chips look and the
-     page owns where they sit, so a placement rule here has to win the tie. -->
-<link rel="stylesheet" href="/nav.css" />
+<title>Braindance</title>
+<link rel="icon" href="data:," />
 <style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
   /* The same palette the gallery restates, restated again. web/index.html is
      the system and each page carries its own copy of the names it uses, which is the
      convention library.html already set. */
@@ -26,7 +25,6 @@
     --faint: #828c99;
     --line: rgba(255, 255, 255, 0.1);
     --line-2: rgba(255, 255, 255, 0.2);
-    --line-3: rgba(255, 255, 255, 0.34);
     --accent: #5ad1c4;
     --accent-low: rgba(90, 209, 196, 0.14);
     --rec: #ff3b4e;
@@ -35,26 +33,26 @@
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; background: var(--paper); color: var(--ink);
-    font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-x: clip; }
+    font: 12px/1.4 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; overflow-x: clip; }
   body { display: flex; flex-direction: column; }
 
-  .head { flex: none; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-    padding: 8px 12px; background: var(--paper-1); border-bottom: 1px solid var(--line); }
-  .head h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; }
-  .head .sum { color: var(--dim); font-size: 9px; }
+  .head { flex: none; height: 37px; display: flex; align-items: center; gap: 16px;
+    padding: 0 15px; background: var(--paper-1); border-bottom: 1px solid var(--line); }
+  .head h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 0.14em; }
+  .head .sum { color: var(--dim); font-size: 9px; letter-spacing: 0.02em; }
 
   /* Centred rather than filling, because there are three of them and a grid stretched
      to the viewport puts the labels at the corners of a large display. */
-  .menu { flex: 1; min-height: 0; overflow-y: auto; display: grid; gap: 16px; padding: 12px;
-    align-content: center; justify-content: center; grid-template-columns: minmax(0, 540px); }
+  .menu { flex: 1; min-height: 0; overflow-y: auto; display: grid; gap: 16px; padding: 24px 24px 27px;
+    align-content: center; justify-content: center; grid-template-columns: minmax(0, 638px); }
 
   /* An anchor rather than a button, so the three destinations are real URLs a
      browser can show, open in a tab and go back from. The tile idiom is the
      gallery's: a bordered card on --paper-1 that lifts its border on hover. Sized
      for the node's touch panel, where these are pressed with a finger. */
-  .entry { display: flex; flex-direction: column; gap: 8px; padding: 30px 28px;
-    border: 1px solid var(--line); border-radius: 6px; background: var(--paper-1);
-    color: inherit; text-decoration: none; min-height: 96px; justify-content: center; }
+  .entry { display: flex; flex-direction: column; gap: 8px; padding: 24px 28px;
+    border: 1px solid var(--line); border-radius: 0; background: var(--paper-1);
+    color: inherit; text-decoration: none; justify-content: center; }
   .entry:hover { border-color: var(--line-2); background: var(--paper-2); }
   .entry .what { font-size: 23px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; }
   .entry .why { font-size: 11px; color: var(--dim); }
@@ -80,10 +78,6 @@
   .entry .dest { font-size: 9px; color: var(--faint); letter-spacing: 0.14em; text-transform: uppercase; }
   .entry .dest.fallthrough { color: var(--warn); }
 
-  /* Nothing else in this header competes for the right-hand end, so the nav takes it
-     directly rather than through a neighbour's auto margin the way the gallery's does. */
-  .surfacenav { margin-left: auto; }
-
   @media (max-width: 560px) {
     .menu { grid-template-columns: minmax(0, 1fr); align-content: start; }
   }
@@ -92,16 +86,8 @@
 <body>
 
 <header class="head">
-  <h1>Kinect v2</h1>
-  <div class="sum">record, keep, re-photograph</div>
-  <!-- Here the nav is mostly saying where you are, since the three tiles below it are
-       this page's whole reason to exist. It is drawn anyway, marked as current: two
-       chips in the same corner on every surface is the claim, and a control that
-       vanishes on one of the three is a control people stop looking for. -->
-  <nav class="surfacenav" id="navRow" aria-label="Surfaces">
-    <a id="toMenu" aria-current="page">menu</a>
-    <a id="toLibrary" href="/gallery">gallery</a>
-  </nav>
+  <h1>Braindance</h1>
+  <div class="sum">capture. replay. transcend.</div>
 </header>
 
 <main class="menu" aria-label="Main menu">

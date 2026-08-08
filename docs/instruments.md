@@ -248,6 +248,61 @@ the row asserting that unticking a group heading takes its whole group out was f
 a row that cannot fail, in the middle of a section about rows that cannot fail. It reads the
 panel's own group out of the DOM now and requires the two groupings to be the same grouping.
 
+### A driver rule keyed to a container covers whatever the container grows next
+
+`editor-check`'s `appbar` rule claimed that "section 1 opens every menu, drives the commands that
+stay on this page, and asserts the two real navigation destinations in the markup" — an accurate
+sentence about the menus. It matched on `inGroup(row, '#appBar')`, which is not the menus but the
+bar they happen to sit in, and for as long as the bar held only menus the two were the same set.
+
+Then the status slot moved into the application bar, and the bar stopped being only menus without
+the rule noticing that its sentence had narrowed under it. `--mutate plant-unswept-control` plants
+a bare button beside `#tNote`, which is in that slot: the sweep found it through `.appbar button`,
+`DRIVER_IDS` did not name it, and then the container rule matched it on the strength of sharing an
+ancestor with the File menu. **The run reported 420 assertions, 0 failed, and NOT CAUGHT** — the
+falsification control for the whole "enumerate rather than list" claim, passing. Nothing else was
+red, so section 1 went on reading green while enforcing nothing about any control the bar might
+grow.
+
+The narrowing is to `#navRow` plus a button-or-anchor test, because the nav row is what section 1
+actually walks, and the back link — which sits outside it — moved into `DRIVER_IDS` beside the
+assertion that reads its href. **The general form: a rule's `match` has to name the class its `by`
+describes, and a container is a different claim from the controls that were in it when the rule
+was written.** A rule matching an ancestor is a rule that silently adopts every control added to
+that ancestor afterwards, which is the opposite of what a coverage rule is for. There is already a
+row asserting that no rule matches *nothing*; the mirror of it — that no rule matches more than
+its sentence — is the harder one, and this is the case that says why it is worth having.
+
+### A colour filter whose comment named the exception it did not exclude
+
+`planExtent` in `level-check` reads the top-down inset off the overlay's own backing store and
+keeps pixels that are bright and near-neutral, with a comment saying why: the path is drawn in
+teal and the frustum in orange, "and the cloud is the only near-neutral thing in there." That
+sentence is the assertion, and it was never true. The inset's TOP-DOWN caption is `#6d7683` —
+red 109 against a floor of 90, and 9 and 13 apart on the two neutrality bounds against a
+tolerance of 26 — so the caption cleared every term of the filter and was counted as cloud from
+the day the filter was written.
+
+It cost nothing for years because every row using it measured an **extent**, and a caption
+sitting in a fixed corner perturbs a 159x118px bounding box by a few pixels. The first row to
+ask for a **position** found it immediately, and found it as a wrong answer rather than as a
+red row: with the caption in the average, two bands planted on opposite sides of the optical
+axis both reported left of centre and 0.017 apart, which reads as a real measurement of a real
+displacement and is a measurement of the caption.
+
+The fix is subtraction rather than a tighter threshold, and the distinction is worth keeping.
+Raising the brightness floor to exclude 109 would have put the floor within about twenty of
+what a single splat of `rgba(232, 236, 241, 0.55)` composites to, so the filter would have
+started deciding between the caption and a thin cloud on a margin nobody measured. Reading the
+inset once with an **empty depth grid** and subtracting that reading is exact instead: the
+furniture is whatever the box contains with no cloud in it, and it cancels term by term.
+
+**The general form: a filter's comment enumerating what it excludes is an assertion about the
+whole drawing, and it dates the moment it was written.** Anything added to that canvas
+afterwards — or already there and never checked against the predicate — is admitted silently.
+Where the reading is a position rather than an extent, measure the baseline and subtract it,
+because a position has no tolerance to hide a passenger in.
+
 ## Mutation-test the instrument, don't just reason about it
 
 Deliberately break the thing under test, run the check, and confirm it fails on the
@@ -1183,6 +1238,12 @@ and the right-side row exists to say the gesture works on both ends rather than 
 anything. **Ask of a control set which member would still be green under the mutation, and do
 not mistake it for redundancy: it is measuring a different thing.**
 
+Written in the past tense on purpose: floor selection was removed on 2026-08-08, and with it
+`levelAtStagePoint`, both mutations named above, and the split plant. Nothing in this section
+can be re-run. It is kept because the lesson is about seams and not about levelling — the same
+shape is live wherever a proof tool reaches a hook the shipped surface reaches through a
+handler, and `editor-check`'s driver map exists to make that reach visible.
+
 ### `nav-at-the-foot` stood in a dead zone and then moved the page it measured
 
 Both flaws at once, in one probe, and both were found by running the mutation and reading
@@ -1535,6 +1596,55 @@ the row look grounded: the arm is reading live state through a real seam, and th
 reads simply is not the one the behaviour depends on. Ask what the *subject* reads, not what is
 convenient to read about it.
 
+### The third form: a fixture symmetric under the very transform you are testing
+
+The two forms above are about arms agreeing and about an object nobody looks at. There is a
+third, and it is the quietest of the three: **every fixture in the rig invariant under the
+thing that is wrong.** No arm is switched off, no object is skipped, and every assertion is
+measuring exactly what it says — the fixture simply cannot hold the property.
+
+**The cloud was a mirror image of the room from the first commit, and the entire suite passed
+it for two years.** `web/main.js` ported `Registration::getPointXYZ` faithfully, which is the
+bug: libfreenect2 hands out depth, IR and colour horizontally flipped on purpose to match the
+Microsoft SDK's selfie-view convention, and Microsoft pairs that mirrored image with a camera
+space whose x grows to the sensor's *left*, so their 3D output is chirally correct while
+`getPointXYZ`'s is a reflection. Copy the formula and you get a room with its left and right
+exchanged. Nothing was switched off and nothing was excluded. Ask instead what the fixtures
+had in common:
+
+- `level-check` plants analytic **planes**. Reflect a plane and it is the same plane, so every
+  section in the file drew a bit-identical picture either way round.
+- `sensor-view-check`'s intrinsics and fov arms measure **half-angles** — `(DEPTH_W / 2) / fx`.
+  A half-angle has no side.
+- `cropReach` returns `max(cx, W - cx) / fx * z`, a **magnitude**, so it is invariant too, and
+  the row holding it against the intrinsics was correct at every stage of this.
+- `registration-check` grades `Registration::apply`, which is the colour resample and not the
+  unprojection, and both streams are mirrored the same way in any case.
+- `monitor-check` and section 3 of `level-check` measure **extents** — `maxX - minX`. A width
+  is invariant under a reflection where a position is not.
+
+A mirror has determinant −1, and every one of those quantities is a scalar invariant of the
+transform. So the tell is not a missing arm, it is a **missing asymmetry**: the whole rig was
+built out of quantities that a reflection preserves. What closed it was one deliberately
+asymmetric fixture — a band of constant depth in a column range off to one side of the
+principal point, which `level-check` section 8 plants, with `x-not-mirrored` and
+`plan-x-not-mirrored` as the controls. Adding it to `SURFACES` would not have worked, because
+that list is a list of planes and planes are the thing that could not see it.
+
+**Ask what group your fixtures are invariant under.** Reflections, translations, uniform
+scales and 180-degree rotations are the ones that bite, because each of them leaves some
+natural-looking measurement unchanged — and a suite assembled from extents, magnitudes,
+half-angles and symmetric shapes is invariant under all four at once without any single
+decision looking wrong.
+
+**It also took a physical measurement to settle, and no offline fixture could have.** Section
+8 pins the sign; it cannot see the room. What established which way the flip ran was the
+colour camera's own 1920x1080 frame off `/camera.mjpg`, where branded text on a subject's
+shirt reads only after one horizontal flip — on a JPEG carrying a JFIF APP0 marker and no EXIF
+segment, so no orientation tag downstream could have been applying it. **Record the
+measurement next to the sign it fixed**, because the check can only say the sign has not moved
+since; it cannot say the sign is right.
+
 ## Close the class, not the instance — and have the check enumerate it
 
 A review of step 7 found six HTTP routes that changed something while dispatching on the path
@@ -1820,6 +1930,38 @@ code reads.** If the answer is "the dispatcher", the table is documentation, and
 that looks like enforcement is worse than none — somebody will add a rule to it and believe the
 class is closed.
 
+### The widest rule in the table is not the last resort, and its own predicate says so
+
+Its neighbour above is about rule bodies that never execute. This is the opposite situation
+and worth reading beside it: every body runs, the walk is honest, `covered()` consults the
+table exactly as it claims to — and a whole class of control still lands outside it.
+
+`DRIVER_RULES` is ordered with the widest entry last, and the widest is `look`:
+`inGroup(row, '#panel') && (row.type === 'range' || row.type === 'checkbox')`. Sitting at the
+foot of an ordered table, under a comment explaining that ordering is precedence, it reads
+like the panel's fallback. It is not one. The group test is the half a reader sees and the
+type test is the half that decides, and joined by `&&` the narrower one is the rule — so it
+covers two of the values a panel control's `type` can hold and is silent about every other.
+Sliders and the generated step rows are those two, which is why it looked total for as long
+as the panel held nothing else.
+
+Then the per-parameter resets arrived, one per look scalar, and a reset is a `<button>`:
+`el.type` answers `submit`, which is neither of the two. None of them matched `look`, none
+matched `keyframe`, which wants `row.kf`, and none matched a group rule, because they sit in
+`#panel` and in no narrower group. `covered()` returned null for every one and the sweep
+named them. **That is the loud direction, and it is the whole reason this cost a red run
+rather than a hole** — a control the table cannot attribute fails by name, where a control
+the table attributes *wrongly* is silently counted as driven by a section that has never
+touched it, which is the misattribution the dialog-before-panel ordering already exists to
+stop. The repair is a `reset` rule keyed on `Boolean(row.reset)`.
+
+**Ask what a control would have to *be* to fall through the last row of the table.** If the
+answer is "anything the enumeration does not list", the table has no last row, whatever its
+ordering suggests. And **key a rule on the property that makes the control that kind of
+control**, not on a DOM attribute that happens to sort today's population correctly: `type`
+separated sliders from checkboxes for exactly as long as those were the only two things in
+the panel, and it was never the reason a slider is a look parameter.
+
 **A section that stages its subject one way cannot see a defect that only exists the other
 way.** The gallery's five-second poll was proved by a section that opened the gallery on the
 server holding the recorder, where "this machine's recorder" and "the recorder that owns the
@@ -1839,3 +1981,184 @@ transition the linked station gets out of following the node is disabled Open to
 Download, and a row copied from the local gallery asserts `find('Open').disabled === false`
 against an `undefined` and fails on a build that works perfectly. **`?.field === false` on a
 `find` that returned nothing is a missing element reported as a wrong value.**
+
+## A refusal nobody can read is measured as a fault somewhere else entirely
+
+`web/main.js` built its application shell as an object literal of bare
+`document.getElementById` calls and then dereferenced every entry unguarded a few hundred
+lines below. `getElementById` answers `null`, so an id that stopped existing did not fail
+where it was looked up — it failed at whichever consumer touched it first, as
+`Uncaught TypeError: Cannot read properties of undefined (reading 'addEventListener')`
+against a line number and nothing else.
+
+What that costs is the whole surface, and it costs it in a shape that points away from
+itself. `connect()` is called *below* the shell wiring, so the socket is never opened: the
+header sits on "connecting…" indefinitely, the viewport stays black, and the server — which
+takes `/record/start` over HTTP and has no opinion about whether a browser is attached —
+records a take perfectly happily with `clients=0` beside it in the log. An operator reading
+that sees a sensor or a network problem. The session this came from spent its first hour on
+libfreenect2 packet-loss warnings, which were `[Debug]`-level noise from a link running at
+30.0fps with `dropped=0`, because those were the only lines that looked like a complaint.
+
+Two things generalise, and the second is the one worth carrying:
+
+**A component whose absence is fatal must say which component it was.** The repair is to
+build the shell through a lookup that collects every id that did not resolve and refuses
+once, by name, at construction — and to put the refusal on the status line as well as the
+console, because the console is not where the operator is looking. Refusing stays right; a
+page that boots with half its wiring gone is worse than one that will not boot. Only the
+legibility of the refusal changed.
+
+**`editor-check` could not have caught this, and its own notes said so.** A missing control
+makes the module refuse, `openEditor` never sees `globalThis.__kinect`, and the run reports
+DID NOT RUN with zero assertions — which is the exit-code-without-a-failed-assertion that
+this repo has now written down three times as a bug found. The comment beside
+`panel-row-skips-parameter` already recorded that "a plain omission is caught by `main.js`
+refusing to boot, which is the right behaviour for a user and useless as evidence here",
+and then nothing was placed anywhere else to catch it. **A defect a tool has documented
+itself as unable to see needs a home, not a note.** It went to `syntax-check`, which needs
+no browser and therefore cannot be defeated by the page failing to start, as
+`--mutate shell-id-renamed`.
+
+The row reads the ids out of the module's own `shellElements({...})` literal rather than
+from a list kept beside the check, because a hand-copied set drifts and drifts silently: an
+id added next year would simply not be checked, and the row would go on printing a clean
+line about the ones it still knew. Parsing the literal is what makes a shell entry added
+later asked by existing. It carries its own floor for the same reason — an extraction that
+matched nothing would print `all 0 ids` and read as a pass.
+
+## A rule that walks a table outwards cannot see what the table never held
+
+The row above — every id the application shell drives is one `web/index.html` declares —
+went in to close the class, and then failed to catch the very next instance of it, while
+printing a green line the whole time. It was not wrong. It was answering the other
+question.
+
+A fork of this branch had made *stats for nerds* a dialog on the record surface and an
+overlay in the editor, against a tree where the dialog had been deliberately deleted:
+`index.html` says in as many words that the `#stateDialog` "is gone rather than kept beside
+what replaced it". Merging brought back three references to it, including a *top-level*
+`shell.stateDialog.addEventListener`, so both surfaces threw during module evaluation and
+`connect()` — which runs below that wiring — never opened the socket. Git reported no
+conflict, correctly: one side added consumers, the other left the shell table alone, and
+every line was individually fine.
+
+**The shell row stayed green because `stateDialog` was not in the table to be walked.**
+The rule iterates the declared ids and asks the page about each, so a key the table never
+declares is outside its domain by construction. The distinction that matters is between
+the two absences: an id in the table that the markup dropped resolves to `null` and is
+caught at the lookup, while a key the table never mentions is never looked up at all and
+is plain `undefined` — the same `Cannot read properties of undefined` crash, arriving
+through a door the check was not watching. Both directions are now asserted, with
+`--mutate shell-id-renamed` and `--mutate shell-key-undeclared` as their controls.
+
+Two things to carry past this instance:
+
+**When a rule enumerates one side of a correspondence, ask what the other side can hold
+that the enumeration cannot reach.** A table-driven check is only as wide as its table,
+and the failure it cannot see is the one where the table itself is short. That is not a
+gap you find by reading the rule, because the rule is correct; you find it by asking what
+would have to be true for the rule to pass on a broken tree.
+
+**The scan needed comments stripped, and found that out by reddening on its own
+explanation.** The paragraph documenting the rule names `shell.stateDialog` while
+discussing it, and a raw source scan counted that prose as a dereference. A check that
+fires when somebody writes *about* the thing it guards is a false positive, and false
+positives are how a check stops being read. Stripping can only remove text, so its failure
+mode is a miss rather than a phantom — which is why the rule carries a floor that fails
+when the scan matches nothing at all.
+
+## A modal ends a run the way a healthy suite ends
+
+`editor-check` section 7 typed a name into the export field and then clicked `#tSetIn` on
+the strip to set the range for the render it was about to run. That order was fine while
+the export was a row of chips in the timeline bar. The rework made it a `<dialog>`, and a
+modal dialog is exactly a thing the browser refuses pointer events behind — so the click
+retried against `<dialog open>` for thirty seconds and the process died there.
+
+**What it printed was `160 assertions ran, 0 failed`.** Sections 8 through 20 — the crop,
+the parked orbit, the ruler's window, the splitter, the look round trip, the panel groups,
+the resets, the key walk, the picker and the pinned drive — did not run, and nothing in
+that line says so. The suite's own rule covers this and it is worth restating with a
+second instance behind it: **count failed assertions and read which ones fired, because a
+zero-failure non-zero exit is a crash to investigate rather than a pass.** The number that
+would have caught it immediately is the section count, not the assertion count.
+
+Two things to carry:
+
+**Drive the surface in the order the surface allows.** The README says set in and out on
+the timeline bar, then open Output → Export. A check walking it the other way is not
+testing a stricter path, it is testing a path that does not exist, and the failure it
+produces reads as a hang rather than as a finding.
+
+**A control that moves behind a modal takes every later section with it**, so the cost of
+this class is not one row. It is everything downstream of the first click the modal eats.
+
+## A fixture that is gitignored is a term in the assertion
+
+Two rows failed on this tree and passed for whoever wrote them, and neither was about the
+code under test:
+
+- `editor-check` section 10 plants keys at `t: 2`, `6` and `20`, zooms the ruler to 30–42%
+  of the clip, and asserts that markers outside the window are hidden rather than drawn
+  off the edge. The key at 20 seconds is only outside that window while the capture is
+  shorter than about 48 seconds. On the 49.79s sample this tree holds it lands at 85% of
+  the window — inside it — and the row reddens over a marker that is not outside.
+- `keyframe-check` 6d drags a retime key down by 3, 6, 9 and 12 pixels. The retime lane
+  draws zero to the capture's own length across forty pixels, so those twelve pixels are
+  worth `12 * duration / 40` seconds: fifteen of them here, which takes a key sitting at
+  fifteen to exactly zero. A retime curve flat at zero never advances the source, so the
+  program length falls back to the last key's own time — and the row asserting that
+  slowing a clip makes the program longer read that collapse as the clip failing to slow.
+
+`captures/` is gitignored and `make-fixture` loops the sample to whatever length is asked
+for, so the capture a check runs against is a property of the machine. **A literal in
+seconds or in pixels, measured against a capture nobody committed, is an assertion about
+that machine's `captures/` directory.** Both are fractions of the measured duration now,
+and `keyframe-check` reads the lane's own scale back off where the page drew the key
+rather than assuming it.
+
+The tell for this class is a row that fails on a value *near* a boundary — 85% of a
+window, a value of exactly zero — rather than one that fails by a mile. A build that
+genuinely lost the window would put the marker nowhere near the edge of it.
+
+## A probe placed where both builds answer the same thing
+
+Four instruments written for the crop box in one session were each aimed somewhere the
+correct build and the broken one would have agreed. All four were caught by running the
+mutation rather than by reading the code, which is the argument for the rule that a proof
+tool is mutation-tested rather than reasoned about.
+
+**A counter that is zero in both builds.** The face drag had to be shown to arm a redraw
+rather than render out of its own handler, and the first counter reached for was
+`navigationRedraws` — the one section 9 uses for the same claim about orbiting. A face
+drag moves no camera, so that counter sits at zero whether the handler renders or not, and
+*any* ceiling passes. `counters.renders` is the one that separates them, because the bug is
+an extra frame drawn per pointer move.
+
+**A count taken against a stack with a ceiling.** "One undo snapshot for the gesture" was
+first asserted as `depth === before + 1`. The undo stack is capped, and the session reached
+the cap: a build committing twenty-four times and a build committing once both leave the
+depth at 100. Pressing undo and reading the face back is the assertion that means
+something, and it is a smaller edit than the one that was wrong.
+
+**A ratio measured where the ratio is small.** The row proving a hidden box culls rather
+than fading to alpha zero counts pixels revealed behind cut foreground — an invisible
+occluder cannot reveal anything. At a near plane of 1.5 m the correct build revealed 225
+pixels and the mutated one 154, which no threshold divides. At 2.5 m with the lateral faces
+open it is 3776 against 993. The claim was right at both settings; only the second one can
+be asserted on. A cloud is sprites rather than a surface, so rays get through a stack of
+invisible points and this will never be presence-versus-absence.
+
+**An arm lit by a single source.** `registry-check`'s row proving the crop switch reaches
+`near`/`far` rendered with everything but the depth pair at its defaults — which leaves
+`readRgb` carrying the whole image alone. `--mutate rgb-contributes-no-alpha` renders black
+on both arms, they compare identical, and the row fired against a mutation with nothing to
+do with the crop. Carrying the scrambled readings into the arm fixes it: a probe lit by five
+sources cannot be switched off by one of them. **This is the reason to re-run a tool's
+existing mutations after editing the tool**, not only after editing what it tests.
+
+The shape they share is the one this file keeps arriving at from different directions: ask
+what the broken build would have to do to still pass, and check the probe is somewhere the
+answer differs. Three of the four still measured the right quantity — they measured it where
+it had no range.

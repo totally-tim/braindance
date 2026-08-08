@@ -18,6 +18,7 @@
     "rgbSplit": 1.6,
     "scanlines": 0.35,
     "grain": 0.22,
+    "vignette": 0.55,
     "glitch": 0.18,
     "pointSize": 8.1,
     "scan": 0.35,

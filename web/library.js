@@ -318,7 +318,7 @@ function drawFrame(canvas, take, payload, divisor) {
   const px = img.data;
   // **How many pixels a depth sample covers, and it is exact rather than a proxy.**
   // Two horizontally adjacent samples land `scale / fx` pixels apart on screen - the
-  // depth cancels out of `((x - cx) * z / fx) * scale / z`, so the spacing is the same
+  // depth cancels out of `(-(x - cx) * z / fx) * scale / z`, so the spacing is the same
   // at every distance and is a property of the canvas alone. One pixel each is dense
   // at a 228px tile and threadbare at a viewer four times the size, which is where
   // this was measured: the same take that reads solid on its tile came up a faint dot
@@ -343,7 +343,11 @@ function drawFrame(canvas, take, payload, divisor) {
       if (mm === 0) continue;
       const z = mm / 1000;
       if (z < 0.4 || z > 6) continue;
-      const wx = ((x - cx) * z) / fx;
+      // The negation on x is the mirror correction, and the poster needs it for the same
+      // reason the cloud does: the sensor's frames arrive horizontally flipped, so a
+      // gallery tile drawn without it is a reflection of the take the editor then opens
+      // the right way round. `unproject` in `web/main.js` carries the reasoning.
+      const wx = (-(x - cx) * z) / fx;
       const wy = -((y - cy) * z) / fy;
       const sx = Math.round(ox + (wx * scale) / z);
       const sy = Math.round(oy - (wy * scale) / z);
@@ -1900,7 +1904,7 @@ globalThis.__library = {
    * measurement.
    */
   controls: () => [...document.querySelectorAll(
-    '.head a, .tab, .tile .act, .tile .mi, #viewer .act, #viewer .mi, #viewer .mk, dialog .act, dialog input',
+    '.appbar a, .tab, .tile .act, .tile .mi, #viewer .act, #viewer .mi, #viewer .mk, dialog .act, dialog input',
   )].map((el) => ({
     // `||` and never `??`, because the DOM answers the absent ones with an empty
     // string rather than with undefined - `el.id` on a button that has no id is `''`,
@@ -1915,10 +1919,19 @@ globalThis.__library = {
     disabled: el.disabled === true,
   })),
 
-  /** What the ⋯ menu on a tile offers, opened by pressing the tile's own button. */
+  /**
+   * What the ⋯ menu on a tile offers, opened by pressing the tile's own button.
+   *
+   * **The press is conditional, the way `clickMenuItem`'s is**, because the button is a
+   * toggle and this hook is named for one direction of it. A caller that had already
+   * opened this tile's menu got it shut instead, and a shut menu measures 0x0 at the
+   * origin - so `clipped` read as the whole menu sitting above the grid and the
+   * placement row reddened over a menu that had never been placed. The reading was of
+   * the hook, not of the page.
+   */
   openMenu: (hash) => {
     const tile = grid.querySelector(`.tile[data-hash="${CSS.escape(hash)}"]`);
-    tile.querySelector('.act.more').click();
+    if (tile.querySelector('.menu').hidden) tile.querySelector('.act.more').click();
     const menu = tile.querySelector('.menu');
     const box = menu.getBoundingClientRect();
     const clip = grid.getBoundingClientRect();

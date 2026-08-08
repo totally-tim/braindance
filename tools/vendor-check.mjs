@@ -38,9 +38,10 @@ const MANIFEST = join(ROOT, 'third_party', 'libfreenect2.manifest');
 // rather than asserted, which is the same reading as everything else here.
 //
 // `marker` is a string the edit puts into the *compiled* library, and it is what
-// section 5 reads. Only one of the two edits has one, which is stated here rather
+// section 5 reads. Only one of the three edits has one, which is stated here rather
 // than papered over: the sub-9 fix changes `== 0x3ff` to `& 0x1ff`, which compiles
-// to an immediate and leaves nothing in the binary to look for.
+// to an immediate and leaves nothing in the binary to look for, and the macOS USB
+// edit is inside an `#if` that a Linux build compiles straight out.
 const DECLARED_EDITS = new Map([
   ['src/depth_packet_stream_parser.cpp', {
     why: 'accept depth frames missing only the unused 10th sub-image',
@@ -51,6 +52,16 @@ const DECLARED_EDITS = new Map([
     why: 'thread the occlusion filter, banded by linear index',
     ours: '7e6037cd7e7d6f5496a693adcc44e9c2893ff426',
     marker: 'LIBFREENECT2_REG_THREADS',
+  }],
+  // The third edit, and the one with nothing to look for in the binary for a reason
+  // worth stating rather than leaving to be worked out: it is `#if defined(__APPLE__)`,
+  // so on a Linux capture node the compiler emits upstream's code and there is no
+  // string, no symbol and no observable difference to find. `marker` is null because
+  // the edit is genuinely absent from that build, not because nobody looked.
+  ['src/libfreenect2.cpp', {
+    why: 'let the two USB link setup calls fail without failing the open, on macOS only',
+    ours: 'a89572d9bed79becdea8c61e398803c536b1b6ee',
+    marker: null,
   }],
 ]);
 

@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Kinect v2 · library</title>
-<!-- Before the page's own rules on purpose: nav.css owns how the chips look and the
-     page owns where they sit, so a placement rule here has to win the tie. -->
+<title>Braindance · Gallery</title>
+<link rel="icon" href="data:," />
 <link rel="stylesheet" href="/nav.css" />
 <style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
   /* The system defined in web/index.html, restated in this file's own names the
      way the viewer restates it - two copies of a palette is two things to keep in
      step, and a third file naming them again is a third. */
@@ -40,41 +40,24 @@
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; background: var(--paper); color: var(--ink);
-    font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-x: clip; }
+    font: 12px/1.4 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; overflow-x: clip; }
   body { display: flex; flex-direction: column; }
-
-  .head { flex: none; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-    padding: 8px 12px; background: var(--paper-1); border-bottom: 1px solid var(--line); }
-  .head h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; }
-  .head .sum { color: var(--dim); font-size: 9px; font-variant-numeric: tabular-nums; }
-  .head .sum b { color: var(--ink); font-weight: 500; }
-
-  /* **The way out is `nav.css`'s two chips and not a rule of this page's own.** This
-     branch grew a bespoke `.back` anchor for the same reason #2 grew `surfacenav` -
-     the gallery had no way back to the menu at all, and the only exits were Open,
-     which leaves for the editor, and the browser's own back button, which does not
-     exist on the node's touch panel. Both landed, and merging them kept both: two
-     anchors carrying `id="toMenu"`, which is invalid, and which makes
-     `getElementById` answer with whichever came first while the operator looks at two
-     ways out side by side.
-
-     The chips win because the claim they make is the wider one - the way out of every
-     surface in the same corner, which is worth more than any argument about this
-     page's own corner - and because they say where you *are* as well as where you can
-     go. The reasoning the `.back` rule carried is not lost: it is an anchor with a
-     real URL rather than a button that assigns `location.href`, and so are these. */
 
   /* Which machine you are on. The library spans both, so "here" has to be named or
      the local/node column is unreadable. */
-  .where { margin-left: auto; display: flex; align-items: center; gap: 8px;
+  .appstatus { display: flex; align-items: center; gap: 14px; }
+  .appstatus .sum { color: var(--dim); font-size: 9px; font-variant-numeric: tabular-nums; }
+  .appstatus .sum b { color: var(--ink); font-weight: 500; }
+  .where { display: flex; align-items: center; gap: 8px;
     font-size: 9px; color: var(--dim); white-space: nowrap; }
   .where b { color: var(--ink); font-weight: 500; }
   .where .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
   .where .dot.off { background: transparent; border: 1px solid var(--warn); }
 
-  .tabs { flex: none; display: flex; gap: 8px; padding: 8px 12px; background: var(--paper-1); flex-wrap: wrap; }
+  .tabs { flex: none; min-height: 48px; display: flex; align-items: center; gap: 8px;
+    margin-top: 32px; padding: 8px 12px; background: var(--paper); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   .tab { appearance: none; height: 32px; padding: 0 12px; border: 1px solid var(--line);
-    border-radius: 4px; background: transparent; color: var(--dim); font: inherit; font-size: 9px;
+    border-radius: 0; background: transparent; color: var(--dim); font: inherit; font-size: 9px;
     letter-spacing: 0.14em; text-transform: uppercase; cursor: pointer; white-space: nowrap; }
   .tab:hover { color: var(--ink); border-color: var(--line-2); }
   .tab[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
@@ -88,15 +71,15 @@
      is a claim a proof tool measures here. Content-sized rows mean a tile that grows
      is visible as a ragged row rather than absorbed. */
   .grid { flex: 1; min-height: 0; overflow-y: auto; display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(228px, 1fr)); gap: 12px; padding: 12px;
-    align-content: start; align-items: start; }
+    grid-template-columns: repeat(auto-fill, 252px); gap: 12px; padding: 12px;
+    align-content: start; align-items: start; justify-content: start; }
 
   /* No overflow:hidden on the tile, deliberately - it would make the tile a scroll
      container, whose intrinsic height excludes overflowing content, and the grid
      would then size its rows from the definite parts alone and the rows would
      overlap. The ⋯ menu opens upward inside the tile's own footprint for the same
      reason: nothing here escapes the tile. */
-  .tile { border: 1px solid var(--line); border-radius: 6px; background: var(--paper-1);
+  .tile { border: 1px solid var(--line); border-radius: 0; background: var(--paper-1);
     display: flex; flex-direction: column; }
   .tile:hover { border-color: var(--line-2); }
 
@@ -120,7 +103,7 @@
      Measured across three viewport widths and a resize: rows never overlap and the
      poster is 16:9 at every width. */
   .skim { position: relative; flex: none; aspect-ratio: 16 / 9; overflow: hidden;
-    border-radius: 6px 6px 0 0; background: var(--well); cursor: ew-resize; touch-action: pan-y; }
+    border-radius: 0; background: var(--well); cursor: ew-resize; touch-action: pan-y; }
   .skim canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
   .skim .t { position: absolute; top: 6px; right: 7px; font-size: 9px; color: var(--dim);
     font-variant-numeric: tabular-nums; pointer-events: none; background: var(--paper);
@@ -190,7 +173,7 @@
      showing. */
   .acts { display: flex; gap: 8px; margin-top: 3px; flex-wrap: nowrap; }
   .act { appearance: none; flex: 1; min-width: 0; height: 34px; padding: 0 8px;
-    border: 1px solid var(--line-2); border-radius: 4px; background: var(--paper-2); color: var(--ink);
+    border: 1px solid var(--line-2); border-radius: 0; background: var(--paper-2); color: var(--ink);
     font: inherit; font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; cursor: pointer;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .act:hover { background: var(--paper-3); border-color: var(--line-3); }
@@ -223,12 +206,12 @@
      the larger, and caps the height at what is there - which is why the offsets below
      are only a starting point and `max-height` is written by script. */
   .menu { position: absolute; right: 12px; bottom: 54px; z-index: 3; min-width: 172px;
-    padding: 4px; border: 1px solid var(--line-3); border-radius: 5px; background: var(--paper-2);
+    padding: 4px; border: 1px solid var(--line-3); border-radius: 0; background: var(--paper-2);
     box-shadow: 0 8px 22px rgba(0, 0, 0, 0.55); display: flex; flex-direction: column; gap: 2px;
     overflow-y: auto; overscroll-behavior: contain; }
   .menu[hidden] { display: none; }
   .mi { appearance: none; display: block; width: 100%; text-align: left; padding: 7px 9px;
-    border: 0; border-radius: 3px; background: transparent; color: var(--ink); font: inherit;
+    border: 0; border-radius: 0; background: transparent; color: var(--ink); font: inherit;
     font-size: 10px; cursor: pointer; white-space: nowrap; }
   .mi:hover:not(:disabled) { background: var(--paper-3); }
   .mi:disabled { color: var(--faint); cursor: not-allowed; }
@@ -249,9 +232,9 @@
      real confirm naming the take rather than an optimistic delete with an Undo
      toast, because undo windows expire. Reclaiming a node copy that is already
      downloaded is a different action with a different weight, and says so. */
-  dialog { border: 1px solid var(--line-2); border-radius: 10px; background: var(--paper-1);
+  dialog { border: 1px solid var(--line-2); border-radius: 0; background: var(--paper-1);
     color: var(--ink); padding: 20px; max-width: 380px; width: calc(100% - 32px);
-    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    font: 12px/1.5 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
   dialog::backdrop { background: var(--scrim); }
   dialog h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; }
   dialog p { margin: 0 0 12px; color: var(--dim); font-size: 11px; }
@@ -275,7 +258,7 @@
     border-color: var(--line); color: var(--faint); background: var(--paper-1); }
 
   #rName { width: 100%; height: 38px; padding: 0 10px; border: 1px solid var(--line-2);
-    border-radius: 4px; background: var(--well); color: var(--ink); font: inherit; font-size: 12px; }
+    border-radius: 0; background: var(--well); color: var(--ink); font: inherit; font-size: 12px; }
   #rName:focus { outline: none; border-color: var(--accent); }
   #rName.bad { border-color: var(--rec); }
   #rWhy { margin: 8px 0 0; min-height: 30px; font-size: 10px; }
@@ -333,28 +316,44 @@
 
   @media (max-width: 560px) {
     .grid { grid-template-columns: minmax(0, 1fr); }
-    /* `.where` takes a row of its own here and gives up the auto margin that was
-       right-aligning it, which would leave the nav starting a third row at the left
-       edge - so the nav takes the margin over, and top-right stays top-right. */
-    .where { margin-left: 0; width: 100%; }
     .vfoot .vacts { margin-left: 0; }
-    .surfacenav { margin-left: auto; }
+    /* Truncated rather than hidden. This bar is what the capture node's touch panel
+       shows, and `display: none` took the take count and the byte total off that screen
+       entirely at the width the panel actually runs at - so the one surface that most
+       needs to know how much has been shot was the one surface not told. Letting it
+       shrink and ellipsize keeps the leading figures, which are the ones read at a
+       glance, and lets the node link beside it keep its own width. */
+    .appstatus { min-width: 0; gap: 8px; }
+    .appstatus .sum { flex: 0 0 auto; }
+    /* The link status is what yields, and the take count is what does not. Both were
+       competing for the same shrinking row and the count lost, collapsing to nothing
+       while the longest string on the bar - "· no node linked" - kept its full width. On
+       the panel that runs at this size the count is the thing being watched and the link
+       state is already carried by the dot beside it, which costs six pixels and survives
+       any truncation. */
+    .appstatus .where { min-width: 0; overflow: hidden; }
+    .appstatus .where b, .appstatus .where span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* The dot is pinned out of the shrinking, because it is the part of the link status
+       that has to survive it. Without this it is a flex item like the words beside it and
+       goes to zero width first, which would leave the row saying nothing at all about the
+       node - the opposite of what the truncation above is for. */
+    .appstatus .where .dot { flex: 0 0 6px; }
   }
 </style>
 </head>
 <body>
 
-<header class="head">
-  <h1>Library</h1>
-  <div class="sum" id="sum">reading…</div>
-  <div class="where" id="where"></div>
-  <!-- The same two chips as the editor's sidebar head and the menu's, in the same
-       order and the same corner. This page had no way back to the menu at all before
-       it, which is the half of "hidden at the bottom of a sidebar" that was worse. -->
-  <nav class="surfacenav" id="navRow" aria-label="Surfaces">
-    <a id="toMenu" href="/">menu</a>
-    <a id="toLibrary" aria-current="page">gallery</a>
+<header class="appbar" id="appBar">
+  <nav id="navRow" aria-label="Surface navigation">
+    <!-- The mark is on the name rather than on the anchor for the reason index.html
+         gives at the same place: this anchor goes to the menu, so the page it is
+         current for is not the page it leads to. -->
+    <a class="appback" id="toMenu" href="/"><span class="arrow">&lt;</span><span aria-current="page">Gallery</span></a>
   </nav>
+  <div class="appstatus">
+    <span class="sum" id="sum">reading…</span>
+    <span class="where" id="where"></span>
+  </div>
 </header>
 
 <div class="tabs" id="tabs">

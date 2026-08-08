@@ -2303,12 +2303,31 @@ console.log('\n== 6d. a retime key dragged down changes the speed, not when it i
     const el = [...document.querySelectorAll('#tBeds .tlane')].find((l) => l.dataset.owner === 'retime');
     const key = el.querySelectorAll('.tkey')[1];
     const r = key.getBoundingClientRect();
-    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    const box = el.getBoundingClientRect();
+    return {
+      x: r.left + r.width / 2, y: r.top + r.height / 2,
+      top: box.top, height: box.height,
+      value: globalThis.__kinect.timeline.retime.keys[1].value,
+    };
   })()`);
+  // **The walk is in seconds converted to pixels, not in pixels.** The retime lane draws
+  // zero to the capture's own length across its forty pixels, so what a pixel is worth
+  // depends on the fixture: on the 49.79s sample this tree holds, the old fixed walk of
+  // 3, 6, 9 and 12 pixels was worth 15 seconds, which took a key sitting at 15 exactly
+  // to zero. That is the floor - a curve flat at zero never advances the source, so the
+  // program length stops being "longer" and falls back to the last key's own time - and
+  // the row below read the collapse as the clip failing to slow down. So the drop is
+  // three quarters of wherever the key is, in four equal steps, and the pixels for it
+  // come from where the page actually drew the key: `value / (1 - frac)` is the top of
+  // the lane's range read back off the drawing rather than assumed.
+  const frac = (lane.y - lane.top) / lane.height;
+  const perPx = (lane.value / Math.max(1e-6, 1 - frac)) / lane.height;
+  const dropPx = (lane.value * 0.75) / Math.max(1e-9, perPx);
+  const steps = [1, 2, 3, 4].map((i) => Math.round((dropPx * i) / 4));
   const walk = [];
   await page.mouse.move(lane.x, lane.y);
   await page.mouse.down();
-  for (const dy of [3, 6, 9, 12]) {
+  for (const dy of steps) {
     await page.mouse.move(lane.x, lane.y + dy);
     walk.push(await page.evaluate(`(() => {
       const k = globalThis.__kinect;
@@ -2318,7 +2337,8 @@ console.log('\n== 6d. a retime key dragged down changes the speed, not when it i
   }
   await page.mouse.up();
   await settle();
-  console.log(`  four vertical moves: t ${walk.map((w) => w.t.toFixed(3)).join(' ')}`);
+  console.log(`  four vertical moves of ${steps.join(', ')}px, at ${perPx.toFixed(3)}s per pixel: `
+    + `t ${walk.map((w) => w.t.toFixed(3)).join(' ')}`);
   console.log(`  against value ${walk.map((w) => w.value.toFixed(2)).join(' ')} `
     + `and program length ${walk.map((w) => w.duration.toFixed(1)).join(' ')}s`);
   const slid = worst(walk.map((w) => Math.abs(w.t - 15)));
@@ -2347,6 +2367,10 @@ console.log('\n== 6e. keying from the panel, and dragging a handle ==');
   await setTracks({});
   await applyLook(BLACKWALL_LOOK);
   await settle();
+  // Bloom now lives on the Look inspector. The look above opens Optical through the
+  // document-derived group rule; this selects the parent surface a hand must cross
+  // before the diamond is visible.
+  await page.click('#panelTabLook');
 
   // (a) the keyframe button, clicked.
   const seekTo = (sec) => page.evaluate(

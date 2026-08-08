@@ -64,7 +64,7 @@ function rememberOpened() {
       takeId: openTakeId,
       // The picker is where the open project's name already lives, so this reads it
       // rather than keeping a second copy that could disagree with what is on screen.
-      project: ui.project.value || null,
+      project: ui.project?.value || null,
     }));
   } catch {
     // Private browsing, a full quota, storage disabled by policy. Resuming is a
@@ -74,6 +74,7 @@ function rememberOpened() {
 }
 
 const statusEl = document.getElementById('status');
+const appStatusEl = document.getElementById('appStatus');
 // Read here rather than beside the rest of the timeline, because `resize` runs at
 // boot and has to know how much of the window the strip is taking. Hidden it
 // measures zero, which is what keeps the live viewer's viewport exactly what it
@@ -401,6 +402,25 @@ const uniforms = {
   cropR: { value: 7 },
   cropB: { value: -7 },
   cropT: { value: 7 },
+  // Whether those six faces actually cut, and what a point on the wrong side of them
+  // looks like while somebody is editing them. The two are deliberately different
+  // kinds of thing and the split is the whole design.
+  //
+  // `cropOn` is the `crop` parameter's landing site: document state, keyed and
+  // exported like every other look value, and it **gates the discard rather than
+  // moving the planes**. That is what lets one switch cover all six faces including
+  // the depth pair, which the fragment stage also normalises its depth ramp against -
+  // a switch that opened `nearClip`/`farClip` instead would re-grade every point still
+  // inside the box, and the A/B would stop being an A/B.
+  //
+  // `cropOutside` is the alpha a cut point draws at instead of vanishing, and it is
+  // viewer-only: derived from the crop box being on screen, never assigned, and zero
+  // in every path that produces a deliverable because those paths already take the
+  // chrome off. Zero also means the discard comes back, which is not a shortcut - a
+  // surviving point at alpha zero still writes depth and would punch invisible holes
+  // in the cloud behind it.
+  cropOn: { value: 1 },
+  cropOutside: { value: 0 },
   // The turbulence field. Amplitude is metres, scale is cycles per metre and speed is
   // how fast the field drifts through the scene in program seconds - all three world
   // units, so none of them owes the 1080p reference every screen-space term here does.
@@ -416,7 +436,28 @@ const uniforms = {
   regionPush: { value: 0 },
   regionNoise: { value: 0 },
   regionMask: { value: 0 },
+  // Datastream corruption, and the five numbers one slider used to hide. `glitch` is
+  // the master and the only one of the six that is meant to be keyframed in anger: a
+  // clip brings the corruption in and out on one track, where five absolute values
+  // would have to be animated in step and reach zero together to stop. The rest are
+  // ceilings - what a fully open master means - and every default below is exactly the
+  // literal it replaced, so a document that names none of them draws what it drew.
+  //
+  // The pair that earns its keep is `glitchDensity` against `glitchShove`. Fused into
+  // the master they could only ever travel the diagonal, which made sparse-and-violent
+  // and dense-and-subtle both unaskable - the complaint that started this. Because the
+  // master still multiplies both, perceived intensity ramps as roughly the square of
+  // the fader, which is an ease-in you would otherwise keyframe by hand.
   glitch: { value: 0 },
+  glitchDensity: { value: 0.45 },
+  glitchShove: { value: 0.45 },
+  glitchTint: { value: 1.8 },
+  glitchBands: { value: 12 },
+  // Hertz, and zero is a state rather than an off switch: `floor(time * 0.0)` is a
+  // constant, so the tear pattern freezes where it stands instead of stopping. A held
+  // corruption is a different picture from no corruption, and because the rate
+  // keyframes it can be stopped and started.
+  glitchRate: { value: 7 },
   time: { value: 0 },
   // The five readings of the take, as weights rather than as a mode. Each one is a
   // complete answer to "what colour is this point", and the fragment stage mixes
@@ -462,6 +503,32 @@ const uniforms = {
   // sixth and seventh one. Unitless mixes.
   thermal: { value: 0 },
   edges: { value: 0 },
+  // The duotone, which sits beside those two for their reason and carries a second one
+  // of its own. It is a tonal transform rather than a palette: the two poles it lands
+  // between hold **luminance as well as hue**, the near one running toward black and the
+  // far one toward hot, so the near-black figure against a burning core comes out of the
+  // same term that decides what colour the room is.
+  //
+  // That pairing is the design rather than an economy, and it was reached by asking what
+  // the obvious shape could not draw. A global toe darkens near and far by the same
+  // amount, so a parameter named for the silhouette would have shipped unable to produce
+  // one - a control that appears to work, arriving at the level of the look instead of at
+  // the level of the wiring, which is the harder place to notice it. Keying the poles on
+  // depth is the whole of what makes a subject go black while the space behind it burns,
+  // and once the poles carry luminance there is nothing left for a second parameter to do.
+  //
+  // The pair itself is baked, following the precedent `heatRamp` and `depthRamp` set:
+  // both are hardcoded ramps and what is parameterised is how you use them. A `colour`
+  // registry kind would be the first new kind since `pose` and would drag a keyframe
+  // interpolation in with it - two saturated hues lerped through sRGB pass through grey
+  // on the way, so the honest version interpolates perceptually and the document format
+  // then carries that choice forever. `duotoneHue` turns both poles together instead,
+  // which is the one degree of freedom a look actually reaches for, and it keyframes.
+  //
+  // Radians here and degrees on the slider, the way the levelling angles are.
+  duotoneDepth: { value: 0 },
+  duotoneHue: { value: 0 },
+  duotoneSplit: { value: 0.5 },
   stateTex: { value: statePrev.texture },
   fadeTime: { value: 0.12 },
   wakeTime: { value: 0 },
@@ -477,11 +544,12 @@ uniform sampler2D stateTex;
 uniform vec2 focal, center, resolution;
 uniform float bufferHeight;
 uniform float pointSize, nearClip, farClip, time, edgeTol;
-uniform float cropL, cropR, cropB, cropT;
+uniform float cropL, cropR, cropB, cropT, cropOn, cropOutside;
 uniform float noise, noiseScale, noiseSpeed;
 uniform vec3 regionCentre, regionHalf;
 uniform float regionRound, regionSoft, regionPush, regionNoise, regionMask;
 uniform float mixT, snapDelta, glitch;
+uniform float glitchDensity, glitchShove, glitchTint, glitchBands, glitchRate;
 uniform float fadeTime, wakeTime, sinceFrameSec;
 uniform int denoise, interpolate;
 
@@ -546,11 +614,37 @@ float regionWeight(vec3 p) {
   return 1.0 - smoothstep(0.0, max(1e-4, regionSoft), sd);
 }
 
-// libfreenect2's pinhole model, matching Registration::getPointXYZ. Image y grows
-// downward, so it is flipped into the right-handed scene here.
+// libfreenect2's pinhole model, with the single deliberate departure from
+// Registration::getPointXYZ this build makes. Image y grows downward, so it is flipped
+// into the right-handed scene here.
+//
+// **x is negated because the frames arrive mirrored, and upstream's formula does not
+// undo it.** libfreenect2 hands out depth, IR and colour horizontally flipped on
+// purpose, to match the Microsoft SDK's selfie-view convention. Microsoft pairs that
+// mirrored image with a camera space whose x grows to the sensor's *left*, so their
+// cloud comes out chirally correct; getPointXYZ pairs the same mirrored image with an x
+// that grows right, so a faithful port of it renders the room reflected. This was a
+// faithful port of it from the first commit, and the symptom is that a raised right hand
+// appears on the right of the picture where a passport photo would put it on the left.
+// What settled it was not the cloud but the colour camera's own 1920x1080 frame off
+// /camera.mjpg: the branded text on a subject's shirt reads only after one horizontal
+// flip, and that JPEG carries a JFIF APP0 marker and no EXIF segment at all, so there is
+// no orientation tag anything downstream could have been applying.
+//
+// **The correction is one sign, and cx is deliberately not rebased with it.** The true
+// column of a mirrored pixel is W - (col + 0.5) and the true principal point is W - cx,
+// so the difference is (W - col - 0.5) - (W - cx), the grid width cancels, and what is
+// left is exactly -(col + 0.5 - cx). Rebasing cx as well would double-count the flip and
+// translate the whole cloud by the principal point's offset from centre - 1.8px here,
+// which is small enough to read as noise rather than as a bug.
+//
+// **Flipping the texture instead, or as well, would be wrong.** The texel lookup is what
+// pairs a point with its registered colour, and that colour arrives mirrored in exactly
+// the same way the depth does; mirroring the sampling would either re-mirror the picture
+// or peel the colour off the geometry. The geometry moves here and the sampling does not.
 vec3 unproject(vec2 pixel, float z) {
   return vec3(
-     (pixel.x + 0.5 - center.x) / focal.x * z,
+    -(pixel.x + 0.5 - center.x) / focal.x * z,
     -(pixel.y + 0.5 - center.y) / focal.y * z,
     -z
   );
@@ -631,7 +725,27 @@ void main() {
     vFade = fadeTime > 0.0 ? clamp(age / fadeTime, 0.0, 1.0) : 1.0;
   }
 
-  if (z < nearClip || z > farClip) {
+  // **One question asked in two places, because half of it needs the unprojection and
+  // half of it cannot wait for it.** The depth pair is a property of the sample and is
+  // known here; the lateral four are positions in the room and are not known until
+  // below. So outsideCrop accumulates rather than being decided once, and everything
+  // downstream reads the accumulated answer instead of re-testing a face.
+  //
+  // The early return survives, and it is what keeps the box free when nobody is looking
+  // at it: with cropOutside at zero this is the same hard cull the shader has always
+  // done, and the far half of a room never reaches the unprojection or the region weight
+  // below it. Only a viewer with the box on screen pays for keeping cut points alive, and
+  // no exported frame ever does.
+  //
+  // **What that viewer pays is large in proportion and small in the budget**, which is
+  // not obvious either way and so was measured rather than argued: 0.285ms per draft
+  // rises to 0.518ms, up 82%, on a box tight enough to cut most of the room. The
+  // proportion is that big because the cull it replaces is the cheapest exit in this
+  // shader - almost every point was leaving at the depth test and now runs the whole
+  // vertex stage - and 0.23ms is still under a hundredth of a 30fps frame. See
+  // docs/performance.md for the method.
+  bool outsideCrop = cropOn == 1.0 && (z < nearClip || z > farClip);
+  if (outsideCrop && cropOutside <= 0.0) {
     gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
     gl_PointSize = 0.0;
     return;
@@ -649,10 +763,13 @@ void main() {
   // Tested on the undisplaced position, for the reason the region gives below: a
   // boundary read after turbulence lets points wander across it, and the edge
   // crawls along itself as the noise rises rather than holding still.
-  if (pos.x < cropL || pos.x > cropR || pos.y < cropB || pos.y > cropT) {
-    gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
-    gl_PointSize = 0.0;
-    return;
+  if (cropOn == 1.0 && (pos.x < cropL || pos.x > cropR || pos.y < cropB || pos.y > cropT)) {
+    if (cropOutside <= 0.0) {
+      gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+      gl_PointSize = 0.0;
+      return;
+    }
+    outsideCrop = true;
   }
 
   // The region is read at the *undisplaced* position, and both things below use this
@@ -688,20 +805,42 @@ void main() {
   // Positive hides what is inside the region, negative what is outside. Carried to the
   // fragment stage rather than culled here, because the whole point of the falloff is
   // that the edge is soft.
-  vMask = regionMask > 0.0
+  //
+  // The crop's own dimming rides here rather than on a varying of its own, and it is
+  // the same idea rather than a similar one: both are a boundary the vertex stage knows
+  // about attenuating a fragment it cannot discard. A second varying would be a second
+  // spelling of "how much is this point attenuated", and the two would then have to be
+  // multiplied together somewhere anyway.
+  vMask = (regionMask > 0.0
     ? 1.0 - regionMask * rw
-    : 1.0 + regionMask * (1.0 - rw);
+    : 1.0 + regionMask * (1.0 - rw))
+    * (outsideCrop ? cropOutside : 1.0);
 
   // Datastream corruption: horizontal bands tear sideways, the way a failing
   // feed shears. Bands are picked stochastically so it stutters rather than pulses.
+  //
+  // The shove is sensor-frame X applied before the view matrix, and the bands are
+  // depth-image rows, so the tear belongs to the feed rather than to the display. That
+  // is the point rather than an oversight: orbit around a torn band and it shoves in
+  // depth, which is what says the volume is corrupt, and under a levelled room the
+  // bands run at the angle the bracket was actually at. Screen-locked tearing is a
+  // different effect and would belong at the grade stage beside the scanlines.
+  //
+  // The floor of time times the rate is written twice rather than hoisted into a local,
+  // and the shove's ceiling is parenthesised as twice glitchShove rather than folded
+  // into the chain. Both are here to hold the float arithmetic at the defaults exactly
+  // where the literals left it - this file has already measured that handing a value
+  // through a variable licenses a contraction the inline expression does not get, and
+  // doubling 0.45 is exact in float32 where a re-associated product need not be. At the
+  // defaults this block is bit-identical to the one-slider version it replaces.
   vGlitch = 0.0;
   if (glitch > 0.0) {
-    float band = floor(position.y / 12.0);
-    float roll = hash(band + floor(time * 7.0) * 31.7);
-    if (roll > 1.0 - glitch * 0.45) {
-      float shove = (hash(band * 3.1 + floor(time * 7.0)) - 0.5) * glitch * 0.9;
+    float band = floor(position.y / glitchBands);
+    float roll = hash(band + floor(time * glitchRate) * 31.7);
+    if (roll > 1.0 - glitch * glitchDensity) {
+      float shove = (hash(band * 3.1 + floor(time * glitchRate)) - 0.5) * glitch * (2.0 * glitchShove);
       pos.x += shove;
-      vGlitch = abs(shove) * 3.0;
+      vGlitch = abs(shove) * glitchTint;
     }
   }
 
@@ -735,6 +874,20 @@ void main() {
   // keep the same alpha - normalising against the drawn size instead would make
   // the identical look sum four times too bright at twice the resolution.
   vSize = gl_PointSize / k;
+
+  // Cut-away points draw at half the size, and **this has to come after vSize or it
+  // undoes the dimming it is meant to help.** The fragment stage normalises a splat's
+  // additive energy against vSize squared, so a point reported at half size gets four
+  // times the alpha back - which is right for a point that is genuinely small and wrong
+  // for one that has merely been shrunk to get out of the way. vSize therefore keeps
+  // the size a kept point would have had, and only the rasterised sprite shrinks.
+  //
+  // The size is what makes this scaffolding rather than a second cloud. Alpha alone is
+  // not enough: depthWrite is on, so a faint point still occludes at full strength,
+  // and cut-away furniture orbiting in front of the subject would flicker through it
+  // order-dependently. A quarter of the footprint is a quarter of the occlusion, and it
+  // reads as dust instead of as surface.
+  if (outsideCrop) gl_PointSize *= 0.5;
 }
 `;
 
@@ -744,6 +897,7 @@ precision highp float;
 uniform sampler2D colorPrev, colorCurr;
 uniform float opacity, exposure, nearClip, farClip, mixT, time;
 uniform float scanAmount, rimAmount, thermal, edges;
+uniform float duotoneDepth, duotoneHue, duotoneSplit;
 uniform float readRgb, readDepth, readGhost, readContour, readBlackwall;
 uniform float rgbSaturation, depthGamma, ghostRim, ghostFill;
 uniform float contourBands, contourLo, contourHi, blackwallSweep;
@@ -782,6 +936,29 @@ vec3 depthRamp(float t) {
   return t < 0.33 ? mix(a, b, t / 0.33)
        : t < 0.66 ? mix(b, c, (t - 0.33) / 0.33)
                   : mix(c, d, (t - 0.66) / 0.34);
+}
+
+// Turning both duotone poles by one angle, as a rotation about the grey axis.
+//
+// Rodrigues rather than a trip through HSV, and the axis is what makes it the right
+// arithmetic rather than the cheap one: rotating about the diagonal leaves the
+// component along it alone, so a pole that is nearly black stays nearly black however
+// far the hue is turned. A round trip through HSV would rebuild the value from a
+// maximum and hand the dark pole back lifted, which is precisely the luminance the
+// silhouette is made of.
+//
+// What is deliberately *not* claimed here is that a hue of zero is the exact identity.
+// It collapses to one where the driver returns exact values at zero, and GLSL ES permits
+// a couple of thousandths of absolute error on a trigonometric function, so that would be
+// a premise about this GPU wearing the clothes of a fact about the language - which is the
+// shape this repo has already been bitten by at the power of one. Nothing rests on it: the
+// block below guards on the *amount*, so at the defaults this function is never reached at
+// all, and the bit-exactness the pinned comparison measures is the branch's rather than
+// this arithmetic's.
+vec3 hueSpin(vec3 c, float a) {
+  const vec3 axis = vec3(0.5773502691896258);
+  float ca = cos(a), sa = sin(a);
+  return c * ca + cross(axis, c) * sa + axis * dot(axis, c) * (1.0 - ca);
 }
 
 void main() {
@@ -934,9 +1111,6 @@ void main() {
     float scan = smoothstep(0.988, 1.0, sweep);
     bw += vec3(0.10, 0.62, 0.78) * scan * scanAmount;
 
-    // Torn bands flare cyan where the feed shears.
-    bw += vec3(0.2, 0.9, 1.0) * vGlitch;
-
     bw *= 0.55 + 0.75 * lum;
 
     // Shed points run hotter than the surface they left, so a wake reads as the
@@ -981,6 +1155,74 @@ void main() {
     col = mix(col, mix(vec3(0.02, 0.03, 0.05), vec3(0.82, 0.94, 1.0), e), edges);
     alpha *= mix(1.0, 0.05 + 0.95 * e, edges);
   }
+
+  // The duotone, and it is the governing tonal transform rather than a tint over one:
+  // the near pole runs toward black and the far pole toward hot, so a single term
+  // produces both the depth-keyed palette and the near-black silhouette against a
+  // burning core. The note beside the uniforms has why those are one parameter.
+  //
+  // It sits here, after the blend, for the reason thermal and edges above it do - a term
+  // written into one reading is inert in every other, and is then exercised only by
+  // whichever sweep arm happens to select that reading. And it sits *before* the glitch
+  // flare below rather than after it, which is a decision rather than an ordering
+  // accident: a torn band is emitted light, so it belongs on top of the tonal transform
+  // and not underneath one that would crush it back toward black.
+  //
+  // Read off t, the point's position inside the near/far clip range, so the split is a
+  // place in the room the way the crop faces are and not a fraction of a frame. The split
+  // is where the two poles meet, with the ramp spanning the clip range either side of it -
+  // at the default of 0.5 that is exactly a smoothstep from zero to one over t, and moving
+  // it decides which half of the room the subject falls in.
+  //
+  // Guarded, and the shape was measured rather than chosen. Both shapes are arithmetically
+  // clean here, which is not obvious and is worth writing down: a mix at zero is a plus
+  // zero times b minus a, which is exact whether or not the compiler contracts it, where
+  // the mix at one this file guards elsewhere is the one that is not. So the question was
+  // never the identity but what a branch does to the contractions either side of it, which
+  // the flare below records going the surprising way. Measured here, guarded, against the
+  // pinned pre-registry build: readRgb, readDepth, readContour and readBlackwall all came
+  // back bit-identical over six frames, and readGhost reproduced its own pre-existing
+  // failure unchanged - the same two frames, 2 and 3, and the same pair of hashes
+  // 55d01311394e against 36fb79d8fa45. That last part is the half that matters, because a
+  // row already red is where a new perturbation would hide.
+  if (duotoneDepth > 0.0) {
+    vec3 cold = hueSpin(vec3(0.020, 0.030, 0.075), duotoneHue);
+    vec3 heat = hueSpin(vec3(1.000, 0.380, 0.120), duotoneHue);
+    float k = smoothstep(duotoneSplit - 0.5, duotoneSplit + 0.5, t);
+    col = mix(col, mix(cold, heat, k), duotoneDepth);
+  }
+
+  // Torn bands flare cyan where the feed shears - and it sits here, after the blend,
+  // for the reason thermal and edges two blocks up sit here. This line used to live
+  // inside the Blackwall branch, which made it inert in the other four readings while
+  // the displacement that earns it kept firing in all five: the geometry tore under
+  // Colour and Depth and nothing lit up, so a slider that plainly worked in one reading
+  // looked broken in the rest. Worse than inert, it was coupled to something nobody
+  // asked it to be - the readings normalise by their weight sum, so a dissolve from
+  // Blackwall into Depth dimmed the corruption on the way past and the flare rode the
+  // colour crossfade.
+  //
+  // Moving it changes what the Blackwall preset draws, because inside the branch the
+  // flare was multiplied by that reading's 0.55 + 0.75 * lum shading before the
+  // normalisation reached it. glitchTint absorbs the difference at a default measured
+  // against the old build rather than carried over from it - a term reconstructing the
+  // old inside-the-branch arithmetic would be a second implementation of this line,
+  // which is the thing this file refuses. Colour only, no alpha term: that is what the
+  // old line did, and an additive splat shows a brighter colour without being asked to
+  // cover more.
+  //
+  // Unconditional, and the missing guard on vGlitch is a measurement rather than an
+  // oversight. Guarded, this line reddened three of registry-check's five reading rows
+  // against the pinned pre-readings build - readDepth and readContour at frame 4 and
+  // readBlackwall at frames 0 and 1 - at parameter defaults, where glitch is 0 and the
+  // guard means the add never runs at all. Nothing mathematical moved: adding zero is
+  // exact, and the branch was never taken. What moved was the code around it, because a
+  // branch dropped into the common path costs the compiler contractions it was making
+  // across the lines either side. Written straight through, all five rows are bit-identical
+  // again and only the pre-existing readGhost failure remains. So the cost of a fragment
+  // being able to skip a multiply-add it does not need is three false regressions in a
+  // check with no tolerance and no way to re-baseline, and the multiply-add is cheaper.
+  col += vec3(0.2, 0.9, 1.0) * vGlitch;
 
   // Cross-fade. A dying point thins out where it stood instead of blinking off,
   // and its replacement comes up over the same window.
@@ -1093,7 +1335,7 @@ for (let k = 1; k <= 16; k++) {
  * the sampling `decimatePayload` did on the node run backwards.
  *
  * A texel only means anything at the pixel it was measured at: the shader unprojects
- * `(col + 0.5 - cx) / fx * z` against intrinsics the sensor reported for a 512x424
+ * `-(col + 0.5 - cx) / fx * z` against intrinsics the sensor reported for a 512x424
  * grid, so where a sample sits in the texture *is* the ray it is claimed to lie on.
  * Writing a smaller grid straight into the larger one is therefore not a coarser
  * picture, it is a different scene. At ÷4 the 13,568 samples land in the first 27 of
@@ -1185,7 +1427,62 @@ const GradeShader = {
     tDiffuse: { value: null },
     rgbSplit: { value: 0 },
     scanlines: { value: 0 },
+    // The three that turn one scanline term into a raster, and they are settings of
+    // `scanlines` rather than terms beside it. A raster is one idea and a sine is its
+    // softest duty cycle, so two terms that both darken the frame in stripes would be the
+    // drifting twin this file keeps refusing - and the hardness is what makes the other
+    // two reach anything, because adding an angle to a sine only ever gets you rotated
+    // softness where the reference frames are hard line grilles with dark gaps.
+    //
+    // The angle arrives as its own axis rather than as an angle, and that is a rounding
+    // measurement rather than a preference - the same shape `contourLo`/`contourHi` are
+    // two uniforms for. Taking `sin` and `cos` in the shader looked obviously right and
+    // was measured wrong: GLSL ES permits a couple of thousandths of absolute error on a
+    // trigonometric function, so `sin(0.0)` is not promised to be exactly zero, and a
+    // whisker of x leaking into a raster that is supposed to run along y moved all six
+    // frames of the comparison against the build this replaces. Done here, `Math.sin(0)`
+    // is exactly 0 and `Math.cos(0)` exactly 1 in double, they survive the cast, and the
+    // dot below collapses to the frame's own y the way the old line's expression did.
+    //
+    // Degrees on the slider, and at zero the raster runs along y - the scanline this has
+    // always drawn. At a right angle it is the dense vertical column grille the reference
+    // frames slice their picture into, and because it keyframes a raster can *rotate*
+    // under the playhead, which is a capability rather than parity with a still frame.
+    //
+    // `scanPitch` was the literal 1.3 baked into the wave, and it defaults to it.
+    scanAxis: { value: new THREE.Vector2(0, 1) },
+    scanPitch: { value: 1.3 },
+    scanHard: { value: 0 },
     grain: { value: 0 },
+    // The corner falloff, which was the literal 0.55 and applied whenever this pass ran
+    // at all. That made it a hidden function of the three terms above: a look with all
+    // of them at zero switched the pass off and lost its vignette, so the comment below
+    // claiming the frame "always closes down on the subject" was false in exactly the
+    // state the four shipped presets other than Blackwall are in.
+    //
+    // It defaults to 0 rather than to the 0.55 it was, and that is the one place in this
+    // file where a promoted literal does not keep its value. It cannot: the behaviour it
+    // replaces is not a constant but a conditional - 0.55 when something else was on, 0
+    // when nothing was - and no single default reproduces both branches. Zero is the
+    // branch that keeps the parameter defaults drawing what they drew, which is what
+    // registry-check hashes against a build from before any of this existed.
+    // `blackwall.json` names 0.55 explicitly so the one shipped look that had a vignette
+    // keeps it. A project saved before this that raised any grade term is the case that
+    // does change: it loses its corner falloff until it names one.
+    vignette: { value: 0 },
+    // The toe under the Reinhard curve, promoted from the literal 0.018 - and unlike
+    // `vignette` above it this one keeps the value it replaced, because the behaviour it
+    // replaces is a constant rather than a conditional. That difference decides the whole
+    // of how it is wired: a non-zero default cannot gate the pass, so `crush` is a
+    // sub-control inside the grade rather than a fifth term beside the four that gate it.
+    // See its registry entry for what gating it would have cost.
+    //
+    // **It is not the silhouette crush, whatever the name suggests**, and the comment is
+    // here to stop the next reader concluding that it is. This darkens near and far alike,
+    // so it cannot separate a subject from the space behind it; the term that does that is
+    // the duotone in the point shader. What this is for is the thing it always did - keep
+    // the empty background genuinely black after Reinhard lifts it.
+    crush: { value: 0.018 },
     time: { value: 0 },
     resolution: { value: new THREE.Vector2(1, 1) },
   },
@@ -1197,7 +1494,9 @@ const GradeShader = {
   // a full-screen read and write each.
   fragmentShader: /* glsl */ `
     uniform sampler2D tDiffuse;
-    uniform float rgbSplit, scanlines, grain, time;
+    uniform float rgbSplit, scanlines, grain, vignette, crush, time;
+    uniform vec2 scanAxis;
+    uniform float scanPitch, scanHard;
     uniform vec2 resolution;
     varying vec2 vUv;
 
@@ -1228,7 +1527,44 @@ const GradeShader = {
       }
 
       if (scanlines > 0.0) {
-        float line = sin(vUv.y * ref.y * 1.3 + time * 2.0) * 0.5 + 0.5;
+        // **The default path is the old line itself, not an expression that computes what
+        // the old line computed**, and that distinction is a measurement rather than
+        // caution. The shipped Blackwall document names a scanlines of 0.35, so this block
+        // runs in the one shipped look that is a look, and a raster a hair off the one it
+        // replaces is that document quietly re-grading itself.
+        //
+        // Two things were tried before this and both failed, which is worth recording
+        // because each looked like the answer. Taking the sine and cosine of the angle in
+        // the shader leaked a whisker of x into a raster meant to run along y, since GLSL
+        // ES does not promise the sine of zero is zero - that is real and is why the axis
+        // is built on the CPU, but fixing it moved nothing here. What moves the frame is
+        // the substitution docs/measurement.md already records: handing the wave a
+        // coordinate through a local is not the same as handing it the expression, because
+        // the compiler contracts the whole of y times the reference times 1.3 plus the
+        // clock across one line and will not do so through a variable. Measured at the
+        // shipped 0.35, all six frames differed, 054b99215d9f against 44e1ccf8, with every
+        // parameter at its default.
+        //
+        // So the branch goes around the whole statement and the default path *is* the old
+        // one - the same shape, and for the same reason, as the depth reading's gamma. It
+        // is not a legacy path beside a new one: the general form below is the
+        // implementation, and this is the one input for which the arithmetic has to be
+        // reached rather than reproduced.
+        float line;
+        if (scanAxis.x == 0.0 && scanAxis.y == 1.0 && scanPitch == 1.3 && scanHard == 0.0) {
+          line = sin(vUv.y * ref.y * 1.3 + time * 2.0) * 0.5 + 0.5;
+        } else {
+          // The raster's own axis, as a direction in reference pixels, built on the CPU
+          // for the reason beside the uniform.
+          float coord = dot(vUv * ref, scanAxis);
+          float wave = sin(coord * scanPitch + time * 2.0) * 0.5 + 0.5;
+          // Hardness is a duty cycle rather than a second term. It narrows a smoothstep
+          // about the middle of the wave until the sine becomes a grille of hard lines
+          // with dark gaps between them, which is what the reference frames actually
+          // carry and what no amount of rotating a sine will ever reach.
+          float w = mix(0.5, 0.004, scanHard);
+          line = mix(wave, smoothstep(0.5 - w, 0.5 + w, wave), scanHard);
+        }
         col *= 1.0 - scanlines * 0.35 * line;
       }
 
@@ -1248,16 +1584,26 @@ const GradeShader = {
         col += (n - 0.5) * grain * 0.22 * (0.15 + lum);
       }
 
-      // Vignette is tied to the grade so the frame always closes down on the subject.
+      // How far the frame closes down on the subject, which used to be the literal 0.55
+      // and therefore a hidden function of whether any of the three terms above was up.
+      // The extent is still fixed - a vignette this look wants is a corner falloff and
+      // not a shape to author - so the parameter is the depth alone.
       float vig = smoothstep(1.05, 0.32, length(vUv - 0.5));
-      col *= mix(1.0, vig, 0.55);
+      col *= mix(1.0, vig, vignette);
 
       // Roll highlights off per channel instead of letting additive accumulation
       // clip to flat white - hot areas keep their hue this way.
       col = col / (1.0 + col);
       // Then crush the toe back down: Reinhard lifts blacks, and this look needs
       // the empty space to stay genuinely black rather than dark red.
-      col = max(col - 0.018, 0.0) * 1.12;
+      //
+      // The gain stays a literal while the toe becomes a parameter, and that asymmetry is
+      // measured rather than lazy. The obvious reading - that 1.12 normalises the toe back
+      // out and so should follow it - is wrong: a toe of 0.018 would normalise at 1.018,
+      // so 1.12 is an independent graded lift that happens to sit near it. Tying the two
+      // together would re-grade every look ever authored the moment anybody moved the toe,
+      // which is a whole preset library drifting to buy a tidier-looking line.
+      col = max(col - crush, 0.0) * 1.12;
 
       gl_FragColor = vec4(col, 1.0);
     }
@@ -1356,6 +1702,37 @@ function buildExportMenu(select) {
   }
   select.value = DEFAULT_EXPORT_SIZE;
   return select;
+}
+
+/** The ratio controls are another view over `EXPORT_SIZES`, never another list. */
+function buildExportRatios(container, select) {
+  if (!container || !select) return [];
+  const buttons = EXPORT_SIZES.map((group) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.ratio = group.ratio;
+    button.textContent = group.ratio.replace(' DCI', '');
+    button.addEventListener('click', () => {
+      const values = new Set(group.sizes.map(([w, h]) => `${w}x${h}`));
+      if (!values.has(select.value)) {
+        const [w, h] = group.sizes[0];
+        select.value = `${w}x${h}`;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      paintExportRatioSelection(buttons, select);
+    });
+    container.appendChild(button);
+    return button;
+  });
+  paintExportRatioSelection(buttons, select);
+  return buttons;
+}
+
+function paintExportRatioSelection(buttons, select) {
+  const selected = select.selectedOptions[0]?.parentElement?.label ?? '';
+  for (const button of buttons) {
+    button.setAttribute('aria-pressed', String(button.dataset.ratio === selected));
+  }
 }
 
 /**
@@ -1492,10 +1869,10 @@ function resize() {
   // ask whether this call actually reallocated it. See the comment there for why the
   // question is worth asking rather than assuming the answer is always yes.
   const wasBuffer = renderer.getDrawingBufferSize(new THREE.Vector2());
-  // The stage is the window less whatever the timeline strip is taking, which is
-  // nothing at all while it is hidden. Overlaying it on the image instead would
-  // have cost nothing here and hidden the bottom of every frame being graded.
-  // The stage is the window less the timeline strip, and then the largest box of the
+  // The stage is the window less the application bar and whatever the timeline strip
+  // is taking, which is nothing at all while it is hidden. Overlaying either on the
+  // image would hide part of every frame being graded.
+  // Inside that space it is the largest box of the
   // target aspect that fits inside it. The letterbox is what makes the editor
   // WYSIWYG: the camera's aspect is the canvas's aspect is the file's aspect, so
   // nothing is stretched and nothing is cropped between here and the export.
@@ -1505,7 +1882,8 @@ function resize() {
   // wider than the window sees *more* world than the window is showing, and no mask
   // can draw what was never rendered.
   const availW = innerWidth;
-  const availH = Math.max(1, innerHeight - timelineEl.offsetHeight);
+  const appBarHeight = document.getElementById('appBar')?.offsetHeight ?? 0;
+  const availH = Math.max(1, innerHeight - timelineEl.offsetHeight - appBarHeight);
   const fitH = Math.max(1, Math.min(availH, Math.round(availW / targetAspect())));
   const fitW = Math.max(1, Math.round(fitH * targetAspect()));
   const width = outputSize ? outputSize.w : fitW;
@@ -1533,7 +1911,7 @@ function resize() {
   // this function is a temporal-dead-zone throw on the very first `resize()`.
   if (!outputSize) {
     stageBox.left = Math.round((availW - fitW) / 2);
-    stageBox.top = Math.round((availH - fitH) / 2);
+    stageBox.top = appBarHeight + Math.round((availH - fitH) / 2);
     renderer.domElement.style.position = 'fixed';
     renderer.domElement.style.left = `${stageBox.left}px`;
     renderer.domElement.style.top = `${stageBox.top}px`;
@@ -1697,7 +2075,8 @@ function updateDrawRange() {
 function gradeNeeded() {
   return grade.uniforms.rgbSplit.value > 0
     || grade.uniforms.scanlines.value > 0
-    || grade.uniforms.grain.value > 0;
+    || grade.uniforms.grain.value > 0
+    || grade.uniforms.vignette.value > 0;
 }
 
 /**
@@ -1725,6 +2104,36 @@ const cropReach = (maxDepth = 9.5) => {
   };
 };
 
+/**
+ * Whether a sensor-space sample is on the wrong side of the crop box.
+ *
+ * **The crop is asked about in two places and this is one of them.** The vertex shader
+ * has to keep its own copy because it is in another language, but the plan inset's
+ * density map used to spell the six comparisons out for itself - so a switch wired to
+ * the shader alone left the top-down drawing a cropped cloud underneath a picture
+ * drawing everything, and the top-down is exactly where the depth faces get dragged.
+ * A second spelling of one rule is a second place for the next face, or the next
+ * switch, to be forgotten, which is why the plan asks here rather than deciding.
+ *
+ * It had a third caller while the room could be levelled by selecting a floor in the
+ * picture, and that gesture is gone; the sharing is what survived it, because the one
+ * reader left is the one the switch was originally wired past.
+ *
+ * Sensor metres and before the levelling rotation, matching the shader: the box is a
+ * place in the room, so testing a rotated position would move all six faces every time
+ * the room was levelled underneath them.
+ *
+ * `depth` is positive metres from the sensor, which is what every caller already has in
+ * hand from the depth texture - the room's own z is its negation, and asking for the
+ * value nobody has to flip is what keeps a sign error out of the callers.
+ */
+function croppedOut(x, y, depth) {
+  if (uniforms.cropOn.value !== 1) return false;
+  if (depth < uniforms.nearClip.value || depth > uniforms.farClip.value) return true;
+  return x < uniforms.cropL.value || x > uniforms.cropR.value
+    || y < uniforms.cropB.value || y > uniforms.cropT.value;
+}
+
 // The panel's groups, in the order they appear down the panel, and nothing about
 // which parameters are in them - that is the `group` field on each registry entry
 // below, so a parameter joins a group by naming it rather than by being added to a
@@ -1734,19 +2143,10 @@ const cropReach = (maxDepth = 9.5) => {
 // belong to. A group's design argument belongs beside the group, and the group is
 // now this entry.
 //
-// `lookgroup` is the class the CSS hides on the shooting surface until `extended
-// settings` is pressed, and it also decides where the group lands: everything
-// without it goes above that button, everything with it below. That is one property
+// `lookgroup` decides where the group lands: everything without it goes before
+// `#sensorGroup`, everything with it after `#gradeAnchor`. That is one property
 // rather than two, because it is one question - is this group part of the grade, or
-// is it something you need while shooting - and the two Reading groups answer it the
-// way the five mode buttons they replaced did. Which reading you are shooting
-// against is the whole reason the preset library is reachable from the recorder at
-// all, so those two stay on both surfaces.
-//
-// Which means the order below is read within each of those two runs rather than
-// straight down the panel: `Reading · detail` sits beside the two groups it belongs
-// with here and renders first among the grade's, because it is a look group and they
-// are not.
+// is it something you need while shooting.
 //
 // `collapses` is the second such property, and it is declared here for the same reason
 // `lookgroup` is: a group added next year answers the question by existing rather than
@@ -1774,72 +2174,41 @@ const PANEL_GROUPS = [
   // blend of the camera image and the range ramp, and each one keyframes, so a clip
   // can dissolve from one reading into another under the playhead.
   //
-  // Source is what the point is coloured *by* and treatment is what is then made of
-  // it, which is the axis worth seeing on the panel - picking a treatment used to
-  // mean picking its source with it and there was no way to say otherwise.
-  { key: 'source', label: 'Reading · source' },
-  { key: 'treatment', label: 'Reading · treatment' },
-  // What each reading is *made of*, rather than which reading you are in. Every one of
-  // these was a literal in the fragment shader, so a reading was a picture you could
-  // select and not adjust - and because they are ordinary registry parameters they
-  // keyframe, so the band spacing or the rim falloff can move under the playhead.
-  //
-  // Below the extended button rather than beside the two groups above, and the
-  // shooting surface is what decides that: seven more sliders where the recorder wants
-  // record, mark, remaining time and a preview range would push the crop controls off
-  // the bottom of a laptop panel to buy nothing anybody needs before a take. Which
-  // reading you are shooting against is a shooting decision; how wide its bands are is
-  // grading.
-  {
-    key: 'detail',
-    label: 'Reading · detail',
-    lookgroup: true,
-    collapses: true,
-    // The one group the default rule is not enough for, and it *widens* that rule rather
-    // than replacing it. Every one of these seven sits at the shader literal it replaced,
-    // so a fresh project has them all at their defaults - and choosing a reading writes
-    // `source` and `treatment` and never these, so on the default rule alone the group
-    // would stay shut whichever reading is live. Which reading you are shooting is
-    // exactly when these constants become worth reading, so the readings are a second
-    // way in and not a different door.
-    //
-    // **The `revealsItself('detail')` term is the load-bearing half of the widening.**
-    // Without it this group stops answering the question every other group answers -
-    // which groups are open is the look's diff against its defaults, so "what is this
-    // look made of" is a thing you can read off the panel - and a preset naming
-    // `contourBands` and no reading would leave a live value behind a closed heading
-    // while the panel had room to show it. Keeping the term is what holds that invariant
-    // across all four groups instead of three, and it is what lets the in-use mark be
-    // keyed on this rule alone rather than on a wider condition of its own.
-    //
-    // The obvious phrasing is wrong and is worth naming so nobody writes it back: "open
-    // when a reading is non-zero" fires on a page nobody has touched, because `readRgb`
-    // defaults to 1 and a default reading is the absence of a decision. Comparing
-    // against the defaults is the whole of what keeps a fresh project shut, on this
-    // group exactly as on the other three.
-    reveals: () => revealsItself('detail') || revealsItself('source') || revealsItself('treatment'),
-  },
+  // Colour: what the point is coloured by (the source blend) and the core colour
+  // adjustments. The source weights mix rather than exclude, so `readRgb` at 0.6
+  // against `readDepth` at 0.4 is a 60/40 blend of the camera image and the range
+  // ramp, and each one keyframes.
+  { key: 'colour', label: 'Colour', tab: 'look', collapses: true },
+  // Style: the treatments applied to the colour (ghost, contour, blackwall), the
+  // secondary colour effects (scan, rim, thermal, edges), and the tuning parameters
+  // for each. Everything that stylises the image lives here, and the tuning params
+  // reveal naturally when their parent effect is enabled because they share a group.
+  { key: 'style', label: 'Style', tab: 'look', lookgroup: true, collapses: true },
   // Framing: what you can see, and where you are seeing it from. `sensor view` is
   // navigation and writes nothing - distinct from `look through it` in the camera
   // group, which adopts the program camera whose pose is document state.
   {
     key: 'framing',
-    label: 'Framing (metres)',
-    // Levelling sits above the box rather than below it, and it is a button and a note
-    // around two ordinary sliders rather than a group of its own. Document state,
-    // unlike the `sensor view` it sits under - the angle a bracket ended up at belongs
-    // to the take, so it rotates the room and not the camera, and the top-down,
-    // auto-orbit and the exported frame come level with the picture.
+    label: '',
+    tab: 'framing',
+    collapses: false,
+    // Levelling sits above the sliders. Document state, unlike the `sensor view` it
+    // sits under - the angle a bracket ended up at belongs to the take, so it rotates
+    // the room and not the camera, and the top-down, auto-orbit and the exported frame
+    // come level with the picture.
     before: () => [
       panelButtonRow(['camSensor', 'sensor view']),
-      panelButtonRow(['camLevel', 'select floor'], ['camLevelReset', 'reset rotation']),
-      panelNote('levelNote', 'Select floor, then click a flat floor or ceiling plane in the picture. '
-        + 'The selection levels the room; tilt and roll below remain available for small corrections.'),
+      // Beside `sensor view` because it is the same kind of thing: a control that
+      // changes what the person at the screen can see and writes nothing into the
+      // take. It is in this group rather than in the View menu with the other two
+      // furniture toggles because it is the tool for the six sliders underneath it,
+      // and a control you reach for while dragging a face should not be two clicks
+      // into a menu that closes when you press it.
+      panelButtonRow(['cropBox', 'show crop box']),
+      panelButtonRow(['camLevelReset', 'reset rotation']),
     ],
     after: () => [
-      panelButtonRow(['cropReset', 'open the box']),
-      panelNote('cropNote', 'The top-down draws this box in x and z. It has no y, so the '
-        + 'bottom and top faces do not show there — judge those in the picture.'),
+      panelButtonRow(['cropReset', 'revert all to default']),
       panelNote('recRange', 'preview only'),
     ],
   },
@@ -1848,22 +2217,41 @@ const PANEL_GROUPS = [
   // signal is conditioned into, where the points are moved to, how they are drawn,
   // what colour they take, what persists between frames, and what the optics do to
   // the result.
-  { key: 'conditioning', label: 'Depth conditioning', lookgroup: true },
-  { key: 'displacement', label: 'Displacement', lookgroup: true, collapses: true },
+  { key: 'signal', label: 'Signal', tab: 'look', lookgroup: true, collapses: true },
+  // Two groups at one stage of the pipeline, on two tabs, and the split is the honest
+  // one rather than a tidy one. Both displace points before projection, so both are the
+  // displacement stage - but `displacement` is the turbulence field, and the region's
+  // scramble adds into its amplitude and reuses its scale and speed, so those two have
+  // to be readable together or a look gets tuned against half of itself. Glitch shares
+  // no uniform with either of them and reads no region. It sat in `displacement` for
+  // long enough that its slider was somewhere nobody stylising an image would think to
+  // look, which is the whole of what "we cannot control the glitches" turned out to
+  // mean, and being adjacent in the render order is not a reason to be adjacent on a
+  // tab. It is not in `post` either: that group is the full-screen grade and this moves
+  // geometry, so filing it there would be the subject-heading move these groups exist
+  // to refuse.
+  { key: 'glitch', label: 'Glitch', tab: 'look', lookgroup: true, collapses: true },
+  { key: 'displacement', label: 'Displacement', tab: 'region', lookgroup: true, collapses: true },
   // One region in the room, read three ways: it displaces, it scrambles, and it
   // masks. Everything here is metres in the sensor frame, so a look holds at any
   // output size without being referred to 1080p the way the screen-space terms are.
   // Half-extents at zero with a radius is a sphere; raise them and it becomes a
   // rounded box; take two to zero and it is a capsule. No shape selector, because an
   // enum could not keyframe and these sliders can.
-  { key: 'region', label: 'Region (metres)', lookgroup: true, collapses: true },
-  { key: 'points', label: 'Points', lookgroup: true },
-  { key: 'colour', label: 'Colour & tone', lookgroup: true },
+  { key: 'region', label: 'Region (metres)', tab: 'region', lookgroup: true, collapses: true },
+  { key: 'points', label: 'Points', tab: 'look', lookgroup: true, collapses: true },
   // The three terms that accumulate across frames, together. Fade and wake are the
   // surface memory and trails is the afterimage buffer; they were two groups apart
   // while doing one thing, which is how a look gets tuned twice.
-  { key: 'time', label: 'Time (ms)', lookgroup: true },
-  { key: 'optical', label: 'Optical', lookgroup: true, collapses: true },
+  { key: 'motion', label: 'Motion', tab: 'look', lookgroup: true, collapses: true },
+  { key: 'post', label: 'Post', tab: 'look', lookgroup: true, collapses: true },
+  // The raster gets a group of its own, following the precedent the glitch rework set: a
+  // term that grows sub-controls gets a group rather than crowding its neighbours. It
+  // sits immediately under `post` because it is the same pass - the grade - and the four
+  // controls in it are one idea, where the five left in `post` are five separate ones.
+  // Splitting on that basis rather than on "these are all post effects" is the same call
+  // the glitch made when it left `displacement`.
+  { key: 'raster', label: 'Raster', tab: 'look', lookgroup: true, collapses: true },
   // The two parameters that are not part of the clip, in the one group that says so.
   // They are tagged `view` in the registry, they get no keyframe control and no
   // preset carries them - and while they sat inside look groups that read as an
@@ -1871,7 +2259,9 @@ const PANEL_GROUPS = [
   {
     key: 'viewer',
     label: 'Viewer',
+    tab: 'camera',
     lookgroup: true,
+    collapses: true,
     after: () => [panelNote('viewNote', 'Not saved with the clip and not exported: these '
       + 'change what you are looking at, not what the frame is.')],
   },
@@ -1901,12 +2291,12 @@ const PARAMS = {
   // belongs to the take and every project on it wants the same answer - see the long
   // note above `applyWorldTilt` for why it rotates the world instead of the camera.
   //
-  // The ranges are the whole of what the plane fit can ever produce and not a
-  // judgement about how far a bracket can lean: `roll` comes out of an `atan2` over
-  // the full turn, and `tilt` out of an `atan2` against a non-negative horizontal
-  // component, so it cannot leave the quarter turn either side. That means selecting
-  // a floor can never write a value its own slider would clamp, which would otherwise
-  // be a silent disagreement between the button and the panel.
+  // The ranges are the whole of what the pair can mean and not a judgement about how
+  // far a bracket can lean. `roll` turns the picture in its frame, so it needs the full
+  // turn; `tilt` pitches the room onto its vertical, and a quarter turn either side
+  // already reaches every orientation a surface can have, because past that the same
+  // room is described by a roll of the other sign. A range chosen by taste instead
+  // would refuse a mount somebody actually built.
   tilt: { def: 0, min: -90, max: 90, step: 0.5, kind: 'scalar', tag: 'look',
     group: 'framing', label: 'tilt',
     apply: (v) => { worldTiltAngles.tilt = v; applyWorldTilt(); } },
@@ -1919,6 +2309,23 @@ const PARAMS = {
   far: { def: 6, min: 0.05, max: 9.5, step: 0.05, kind: 'scalar', tag: 'look',
     group: 'framing', label: 'far',
     apply: (v) => { uniforms.farClip.value = v; } },
+
+  // Whether the box cuts at all, over all six faces at once.
+  //
+  // **This is not a second spelling of "the faces are at their bounds".** The faces say
+  // where the box is and this says whether it bites, so releasing it keeps the numbers
+  // where a reset throws them away - which is the whole reason to have it, because
+  // cropping tight and then wanting to see what you removed is otherwise four remembered
+  // values. A document that has touched neither is uncropped under both readings, so the
+  // ±`CROP_LIMIT` defaults below go on meaning exactly what their own comment says.
+  //
+  // A look parameter and not a viewer switch, deliberately. Bypassing in the viewer alone
+  // would let the editor's picture and the exported frame disagree, and the render is
+  // where you would find that out. Here it keys like anything else, so a clip can open
+  // its box mid-shot, and `kind: 'step'` makes that a cut rather than a ramp.
+  crop: { def: true, kind: 'step', tag: 'look',
+    group: 'framing', label: 'crop',
+    apply: (on) => { uniforms.cropOn.value = on ? 1 : 0; } },
 
   // The other four faces. Same units and the same step as the two above, because they
   // are the same box - and the defaults sit at the bounds so a clip that was authored
@@ -1939,10 +2346,10 @@ const PARAMS = {
     apply: (v) => { uniforms.cropT.value = v; } },
 
   interpolate: { def: true, kind: 'step', tag: 'look',
-    group: 'conditioning', label: 'interpolate frames',
+    group: 'signal', label: 'interpolate frames',
     apply: (on) => { uniforms.interpolate.value = on ? 1 : 0; } },
   snapDelta: { def: 250, min: 20, max: 1200, step: 10, kind: 'scalar', tag: 'look',
-    group: 'conditioning', label: 'snap mm',
+    group: 'signal', label: 'snap mm',
     apply: (v) => { uniforms.snapDelta.value = v; } },
 
   // Both drive the same memory: fade is the honest cross-fade, wake is how much
@@ -1951,10 +2358,10 @@ const PARAMS = {
   // ghost half of the geometry is left out of the draw range entirely when neither
   // can shed, so a look with no persistence costs nothing to have the option.
   fade: { def: 120, min: 0, max: 1500, step: 10, kind: 'scalar', tag: 'look',
-    group: 'time', label: 'fade',
+    group: 'motion', label: 'fade',
     apply: (v) => { uniforms.fadeTime.value = v / 1000; updateDrawRange(); } },
   wake: { def: 0, min: 0, max: 4000, step: 10, kind: 'scalar', tag: 'look',
-    group: 'time', label: 'wake',
+    group: 'motion', label: 'wake',
     apply: (v) => { uniforms.wakeTime.value = v / 1000; updateDrawRange(); } },
 
   // The turbulence field, in world units throughout: amplitude in metres, scale in
@@ -1971,6 +2378,73 @@ const PARAMS = {
   noiseSpeed: { def: 0.7, min: 0, max: 3, step: 0.05, kind: 'scalar', tag: 'look',
     group: 'displacement', label: 'speed',
     apply: (v) => { uniforms.noiseSpeed.value = v; } },
+
+  // Datastream corruption: one master and five ceilings, where there used to be one
+  // scalar carrying all six meanings at fixed ratios. The comment beside the uniforms
+  // has the argument for the shape; what belongs here is why the ceilings are ceilings
+  // and not absolute values. An absolute set would need a clip to animate density,
+  // shove and tint on three tracks that all reach zero on the same frame just to fade
+  // corruption out, and one that missed by a frame leaves a tear standing in a clean
+  // plate. The master is the fade, and these say what a full one means.
+  //
+  // Every default is exactly the literal it replaced. That is the rule the readings'
+  // seven constants are held to, and it is load-bearing the same way here: a preset
+  // written before this existed - `blackwall.json` names `glitch: 0.18` and nothing
+  // else - has to draw the picture it drew, and the only thing making that true is
+  // that 0.45, 0.45, 12 and 7 are the numbers the shader already had.
+  glitch: { def: 0, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look',
+    group: 'glitch', label: 'amount',
+    apply: (v) => { uniforms.glitch.value = v; } },
+  // How much of the frame tears at a full master, as a fraction of the bands. The
+  // shove's other half: this one is how *often* the feed fails and the next is how
+  // badly, and the two were the same number until now.
+  glitchDensity: { def: 0.45, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look',
+    group: 'glitch', label: 'density',
+    apply: (v) => { uniforms.glitchDensity.value = v; } },
+  // Metres a band travels at a full master, half of it either way. World units like
+  // the turbulence field and unlike every screen-space term here, because a tear is a
+  // distance in the room: the same look draws the same shear at any output size, and a
+  // shove referred to 1080p would change how far the feed failed when you exported.
+  glitchShove: { def: 0.45, min: 0, max: 2, step: 0.01, kind: 'scalar', tag: 'look',
+    group: 'glitch', label: 'shove m',
+    apply: (v) => { uniforms.glitchShove.value = v; } },
+  // What a torn band flares, per metre it was shoved. Deliberately per metre rather
+  // than normalised against `glitchShove`, so a bigger tear burns harder on its own -
+  // the alternative decouples them and then wants a second slider to couple them back.
+  // The default is not the 3.0 the literal was, and the arithmetic says what it is
+  // instead. Inside the Blackwall branch the flare was added to `bw` and then scaled by
+  // that reading's `0.55 + 0.75 * lum` on the way out, so the tint reproducing the old
+  // picture is `3.0 * (0.55 + 0.75 * lum)` over the torn pixels: 1.65 where a tear falls
+  // on black, 2.10 at a luminance of 0.2, 3.0 only where it crosses something as bright
+  // as 0.6. Which end of that applies is a fact about the footage rather than about the
+  // shader, and this look is graded for rooms shot dark - `docs/reference.md` says the
+  // sample was shot unlit and that colour "reads a signal the sensor barely produced" -
+  // so the torn bands land near the bottom of the range and 1.8 is the match at a
+  // luminance of about 0.07.
+  //
+  // Stated as arithmetic and not as an A/B of rendered frames, deliberately, because at
+  // the value anything ships with the choice barely resolves: `blackwall.json` asks for
+  // a master of 0.18, where the largest shove is 8.1cm and the whole flare spans 0.13 to
+  // 0.19 across that entire luminance range. It is at a full master that the end of the
+  // range starts to matter, and a full master is a slider anybody setting it is watching.
+  glitchTint: { def: 1.8, min: 0, max: 8, step: 0.05, kind: 'scalar', tag: 'look',
+    group: 'glitch', label: 'flare',
+    apply: (v) => { uniforms.glitchTint.value = v; } },
+  // Depth-image rows per band, so the count of bands is 424 over this - 35 of them at
+  // the default. Rows and not a fraction of the frame, because a band is a run of the
+  // sensor's own scanlines and that is what makes the tear read as the feed failing
+  // rather than as a shape drawn over the picture.
+  glitchBands: { def: 12, min: 1, max: 64, step: 1, kind: 'scalar', tag: 'look',
+    group: 'glitch', label: 'band rows',
+    apply: (v) => { uniforms.glitchBands.value = v; } },
+  // Hertz: how often the torn set is redrawn, 7 by default, so a state holds for 143ms
+  // or about 4.3 frames at 30fps. The phase is `floor(time * rate)` and stays a pure
+  // function of program time - integrating a rate for a smoother phase would make the
+  // frame depend on how the playhead got there, and seek-equals-playback dies the
+  // moment it does. Keyframing the rate therefore jumps the pattern, which is in genre.
+  glitchRate: { def: 7, min: 0, max: 30, step: 0.5, kind: 'scalar', tag: 'look',
+    group: 'glitch', label: 'rate hz',
+    apply: (v) => { uniforms.glitchRate.value = v; } },
 
   // One region, authored once and read three ways. Three scalars rather than a new
   // `point` kind, which is the awkward part and is deliberate: the design doc argues
@@ -2021,9 +2495,6 @@ const PARAMS = {
   regionMask: { def: 0, min: -1, max: 1, step: 0.01, kind: 'scalar', tag: 'look',
     group: 'region', label: 'mask',
     apply: (v) => { uniforms.regionMask.value = v; } },
-  glitch: { def: 0, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look',
-    group: 'displacement', label: 'glitch',
-    apply: (v) => { uniforms.glitch.value = v; } },
   // Still what it always was - orbit the view you are looking at - and still view
   // state rather than an edit: the controls advance it on the program delta the
   // render loop hands them, so the same orbit renders the same way at any output
@@ -2057,19 +2528,19 @@ const PARAMS = {
   // between enumerating and listing - and this file has been bitten by the listing
   // version often enough to be worth the one extra field.
   readRgb: { def: 1, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look', reading: true,
-    group: 'source', label: 'colour',
+    group: 'colour', label: 'colour',
     apply: (v) => { uniforms.readRgb.value = v; } },
   readDepth: { def: 0, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look', reading: true,
-    group: 'source', label: 'depth',
+    group: 'colour', label: 'depth',
     apply: (v) => { uniforms.readDepth.value = v; } },
   readGhost: { def: 0, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look', reading: true,
-    group: 'treatment', label: 'ghost',
+    group: 'style', label: 'ghost',
     apply: (v) => { uniforms.readGhost.value = v; } },
   readContour: { def: 0, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look', reading: true,
-    group: 'treatment', label: 'contour',
+    group: 'style', label: 'contour',
     apply: (v) => { uniforms.readContour.value = v; } },
   readBlackwall: { def: 0, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look', reading: true,
-    group: 'treatment', label: 'blackwall',
+    group: 'style', label: 'blackwall',
     apply: (v) => { uniforms.readBlackwall.value = v; } },
 
   // The seven constants each reading was built out of. Every default is exactly the
@@ -2087,23 +2558,23 @@ const PARAMS = {
   // colour reading - so the reachability problem that rule exists to avoid is answered
   // instead by the sweep running with all five readings live at once.
   rgbSaturation: { def: 1, min: 0, max: 2, step: 0.01, kind: 'scalar', tag: 'look',
-    group: 'detail', label: 'saturation',
+    group: 'colour', label: 'saturation',
     apply: (v) => { uniforms.rgbSaturation.value = v; } },
   depthGamma: { def: 1, min: 0.25, max: 4, step: 0.05, kind: 'scalar', tag: 'look',
-    group: 'detail', label: 'gamma',
+    group: 'colour', label: 'gamma',
     apply: (v) => { uniforms.depthGamma.value = v; } },
   ghostRim: { def: 0.7, min: 0.2, max: 3, step: 0.01, kind: 'scalar', tag: 'look',
-    group: 'detail', label: 'ghost rim',
+    group: 'style', label: 'ghost rim',
     apply: (v) => { uniforms.ghostRim.value = v; } },
   ghostFill: { def: 0.35, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look',
-    group: 'detail', label: 'ghost fill',
+    group: 'style', label: 'ghost fill',
     apply: (v) => { uniforms.ghostFill.value = v; } },
   // Bands per metre of depth, so the spacing is a distance in the room rather than a
   // number of stripes across whatever the clip range happens to be - the same reasoning
   // the turbulence field is in cycles per metre for. Its step is 1 because a fraction of
   // a band per metre is not a thing anybody is grading towards.
   contourBands: { def: 12, min: 1, max: 60, step: 1, kind: 'scalar', tag: 'look',
-    group: 'detail', label: 'bands /m',
+    group: 'style', label: 'bands /m',
     apply: (v) => { uniforms.contourBands.value = v; } },
   // The one parameter here that is not a uniform: it is half the width of the drawn
   // line, and the two band edges are computed from it in double precision on the way
@@ -2111,49 +2582,143 @@ const PARAMS = {
   // than the literal it replaces. The arithmetic is stated once, here, so a check can
   // hold the pair against it rather than against a second copy of the sum.
   contourWidth: { def: 0.08, min: 0.01, max: 0.4, step: 0.01, kind: 'scalar', tag: 'look',
-    group: 'detail', label: 'thickness',
+    group: 'style', label: 'thickness',
     apply: (v) => { uniforms.contourLo.value = 0.5 - v; uniforms.contourHi.value = 0.5 + v; } },
   blackwallSweep: { def: 0.28, min: 0, max: 2, step: 0.01, kind: 'scalar', tag: 'look',
-    group: 'detail', label: 'wall sweep',
+    group: 'style', label: 'wall sweep',
     apply: (v) => { uniforms.blackwallSweep.value = v; } },
 
   scan: { def: 0, min: 0, max: 1.5, step: 0.01, kind: 'scalar', tag: 'look',
-    group: 'colour', label: 'scan',
+    group: 'style', label: 'scan',
     apply: (v) => { uniforms.scanAmount.value = v; } },
   rim: { def: 0.55, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look',
-    group: 'colour', label: 'rim',
+    group: 'style', label: 'rim',
     apply: (v) => { uniforms.rimAmount.value = v; } },
   // The same argument the readings above were rebuilt on, made here first.
   thermal: { def: 0, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look',
-    group: 'colour', label: 'thermal',
+    group: 'style', label: 'thermal',
     apply: (v) => { uniforms.thermal.value = v; } },
   edges: { def: 0, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look',
-    group: 'colour', label: 'edges',
+    group: 'style', label: 'edges',
     apply: (v) => { uniforms.edges.value = v; } },
+  // The duotone: how far the image lands between the two poles, which way they are
+  // turned, and where they meet. Three amounts and no source selector, which is the same
+  // argument `thermal` and the readings above are built on - a shading idea expressed as
+  // a mode is refused during evaluation as a user action and can therefore never move
+  // under the playhead, where three scalars each key like anything else.
+  //
+  // `duotoneDepth` is an amount rather than a switch for the reason every other term here
+  // is one: a clip brings the tonal transform in and out on one track. It is the term the
+  // rest of this look sits on top of, because in the frames this is graded against the
+  // light is emitted by the data rather than reflected off surfaces - so the interiors
+  // have to fall toward black before a raster over the top reads as a reconstruction
+  // instead of as a filter laid over a video.
+  duotoneDepth: { def: 0, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look',
+    group: 'style', label: 'duotone depth',
+    apply: (v) => { uniforms.duotoneDepth.value = v; } },
+  // Degrees on the slider and radians at the uniform, the way `tilt` and `roll` are, so
+  // the panel reads in the unit a person turns a hue in and the shader gets the unit a
+  // trigonometric function takes. The full turn either way rather than a half, because
+  // the two poles are asymmetric - the near one is nearly black - so +90 and -90 are
+  // genuinely different pictures and a half-range would hide one of them.
+  duotoneHue: { def: 0, min: -180, max: 180, step: 1, kind: 'scalar', tag: 'look',
+    group: 'style', label: 'duotone hue',
+    apply: (v) => { uniforms.duotoneHue.value = THREE.MathUtils.degToRad(v); } },
+  // Where the poles meet, as a fraction of the near/far clip range. A place in the room
+  // rather than a fraction of the frame, which is what lets a subject keep its silhouette
+  // when the camera moves - and it is the same reasoning `contourBands` is per metre for.
+  duotoneSplit: { def: 0.5, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look',
+    group: 'style', label: 'duotone split',
+    apply: (v) => { uniforms.duotoneSplit.value = v; } },
   // Each post pass costs a full-screen read and write whether or not it changes
   // anything, so a zero value switches its pass off rather than running it as a
   // no-op. The three grade terms share one pass, so they gate it together.
   bloom: { def: 0, min: 0, max: 6, step: 0.05, kind: 'scalar', tag: 'look',
-    group: 'optical', label: 'bloom',
+    group: 'post', label: 'bloom',
     apply: (v) => { bloom.strength = v; bloom.enabled = v > 0; } },
   trails: { def: 0, min: 0, max: 0.97, step: 0.01, kind: 'scalar', tag: 'look',
-    group: 'time', label: 'trails',
+    group: 'motion', label: 'trails',
     apply: (v) => { afterimage.uniforms.damp.value = v; afterimage.enabled = v > 0; } },
   rgbSplit: { def: 0, min: 0, max: 6, step: 0.05, kind: 'scalar', tag: 'look',
-    group: 'optical', label: 'rgb split',
+    group: 'post', label: 'rgb split',
     apply: (v) => { grade.uniforms.rgbSplit.value = v; grade.enabled = gradeNeeded(); } },
+  // The raster's master, and the only one of the four that gates the pass. It keeps the
+  // name `scanlines`, which now describes one of its settings rather than the whole term:
+  // a rename is the one change `registry-check` cannot make bit-exact against its pinned
+  // commit, and it would break every preset anybody has authored. Accepted rather than
+  // overlooked.
   scanlines: { def: 0, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look',
-    group: 'optical', label: 'scanlines',
+    group: 'raster', label: 'scanlines',
     apply: (v) => { grade.uniforms.scanlines.value = v; grade.enabled = gradeNeeded(); } },
+  // The three settings under it, and none of them gates the pass - for `crush`'s reason
+  // in the case of the pitch, whose default is 1.3 and so is true of every document there
+  // is, and for a plainer one in the case of the other two: raising an angle while the
+  // master sits at zero rotates a raster nobody asked for, and switching a full-screen
+  // pass on to draw nothing is exactly the no-op the gate exists to refuse.
+  //
+  // Degrees on the slider and radians at the uniform. The full half-turn either way is
+  // the whole of a raster's range, because a line grille at 180 degrees is the grille at
+  // 0 - what the sign buys is which way a *rotating* raster turns under the playhead.
+  // One parameter, one vec2 uniform, and the trigonometry happens here rather than in
+  // the shader. The comment beside the uniform carries the measurement that forced it;
+  // what belongs here is that the arithmetic is stated once, in this file, so a check can
+  // hold the axis against it rather than against a second copy of the same sum.
+  scanAngle: { def: 0, min: -180, max: 180, step: 1, kind: 'scalar', tag: 'look',
+    group: 'raster', label: 'angle',
+    apply: (v) => {
+      const r = THREE.MathUtils.degToRad(v);
+      grade.uniforms.scanAxis.value.set(Math.sin(r), Math.cos(r));
+    } },
+  // Cycles per reference pixel along the raster's own axis, and the default is exactly
+  // the literal it replaces. The reference frames are far denser than our scanline
+  // period, which is the whole reason this is a control: at 1.3 the lines are a television
+  // artifact and by 6 they are the column raster a frame gets sliced into.
+  scanPitch: { def: 1.3, min: 0.1, max: 12, step: 0.1, kind: 'scalar', tag: 'look',
+    group: 'raster', label: 'pitch',
+    apply: (v) => { grade.uniforms.scanPitch.value = v; } },
+  // How square the wave is, from the sine it has always been to a hard grille with dark
+  // gaps. This is the control that makes the other two reach the look at all - an angle
+  // over a sine is rotated softness, and softness is not what the references show.
+  scanHard: { def: 0, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look',
+    group: 'raster', label: 'hardness',
+    apply: (v) => { grade.uniforms.scanHard.value = v; } },
   grain: { def: 0, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look',
-    group: 'optical', label: 'grain',
+    group: 'post', label: 'grain',
     apply: (v) => { grade.uniforms.grain.value = v; grade.enabled = gradeNeeded(); } },
+  // The corner falloff, which was a literal inside the grade shader and so arrived with
+  // whichever of the three above you happened to raise. The uniform beside it carries
+  // why this is the one promoted literal that does not keep its old value; what belongs
+  // here is that it gates the pass like the other three, so the vignette can be had on
+  // its own and a look wanting none of the four still pays for no pass at all.
+  vignette: { def: 0, min: 0, max: 1, step: 0.01, kind: 'scalar', tag: 'look',
+    group: 'post', label: 'vignette',
+    apply: (v) => { grade.uniforms.vignette.value = v; grade.enabled = gradeNeeded(); } },
+  // The toe under the grade's Reinhard curve, and **the one term sharing that pass which
+  // deliberately does not gate it** - note the missing `grade.enabled` beside the four
+  // above. That is the whole of its wiring and it is worth the paragraph, because the
+  // symmetry is the thing a reader will reach to restore.
+  //
+  // Its default is the literal it replaces, so gating on it would be gating on
+  // `0.018 > 0`: the pass held open for every look there has ever been, the four shipped
+  // presets that ask for no grade at all suddenly paying a full-screen read and write and
+  // drawing a tone curve they were never graded through, and `registry-check` red on all
+  // five readings at once against a build from before any of this existed. `vignette`
+  // escaped the same trap in the other direction, by defaulting to 0 because no single
+  // default reproduces the conditional it replaced. `crush` has no such escape - its old
+  // behaviour is a constant, and the constant is not zero.
+  //
+  // What that costs is honest and small: the toe is reachable only while some other term
+  // is holding the pass open, exactly as it was when it was a literal. The drop-one sweep
+  // still sees it, because `SCRAMBLE` has the grade up.
+  crush: { def: 0.018, min: 0, max: 0.2, step: 0.001, kind: 'scalar', tag: 'look',
+    group: 'post', label: 'crush',
+    apply: (v) => { grade.uniforms.crush.value = v; } },
 
   denoise: { def: true, kind: 'step', tag: 'look',
-    group: 'conditioning', label: 'cull speckle',
+    group: 'signal', label: 'cull speckle',
     apply: (on) => { uniforms.denoise.value = on ? 1 : 0; } },
   edgeTol: { def: 120, min: 10, max: 1200, step: 10, kind: 'scalar', tag: 'look',
-    group: 'conditioning', label: 'edge tol',
+    group: 'signal', label: 'edge tol',
     apply: (v) => { uniforms.edgeTol.value = v; } },
   renderScale: { def: 100, min: 40, max: 200, step: 5, kind: 'scalar', tag: 'view',
     group: 'viewer', label: 'render %',
@@ -2325,19 +2890,69 @@ function normalise(name, spec, value) {
 
 const values = new Map();
 const panelControls = new Map();
+// Declared up here beside `panelControls` rather than down with the button that fills
+// it, because `writeControl` reads it and `params.set` calls `writeControl` while the
+// registry is being seeded - long before the panel generator further down has run. A
+// `const` read before its own declaration is a TDZ error rather than an empty map, so
+// the map that gets read during boot has to be declared where boot can already see it.
+const resetButtons = new Map();
+
+/**
+ * What a reset puts back, asked of the same function that decides what `set` stores.
+ *
+ * Not the registry's `def` literal. `set` puts every value through `normalise`, which
+ * clamps to the bounds and snaps to the step grid, and several defaults do not survive
+ * that untouched - `rim` is declared `0.55` against a `0.01` step and `exposure` `1.15`
+ * against `0.05`. Comparing a stored value against the raw literal would report a row as
+ * modified while it sits exactly where a reset would leave it, so the row would offer to
+ * revert a parameter already on its default and go on offering after the press. One
+ * function deciding both what gets stored and what "default" means is the only shape in
+ * which those two cannot drift apart.
+ */
+function resetTarget(name) {
+  const spec = specOf(name);
+  return normalise(name, spec, spec.def);
+}
+
+/**
+ * Whether this row is offering a reset, re-derived from the write that moved the value.
+ *
+ * The state is read off the registry every time rather than remembered beside it. A
+ * boolean kept here would be a second answer to "has this parameter been moved", and the
+ * registry is reached by presets, by project files, by undo and by step 5's tracks as
+ * well as by the slider - so a remembered flag would be right only for the writes that
+ * happened to go through the panel, and silently wrong for every other door.
+ */
+function refreshReset(name, value) {
+  const button = resetButtons.get(name);
+  if (!button) return;
+  const modified = value !== resetTarget(name);
+  button.dataset.modified = modified ? 'yes' : 'no';
+  // `disabled` rather than `hidden`, and the CSS hides it by visibility: the slot is
+  // reserved whether or not the control occupies it, so a row does not change width the
+  // moment a parameter leaves its default. A row that reflows under the pointer is how a
+  // drag that began on a slider ends on the control that slid into its place.
+  button.disabled = !modified;
+}
 
 function writeControl(name, value) {
   const el = panelControls.get(name);
   if (!el) return;
   if (el.type === 'checkbox') {
     el.checked = value;
-    return;
+  } else {
+    el.value = String(value);
+    // Read the value back off the element rather than formatting the number here,
+    // so the readout says exactly what the slider says even if they ever disagree.
+    const out = el.parentElement.querySelector('output');
+    if (out) out.textContent = el.value;
   }
-  el.value = String(value);
-  // Read the value back off the element rather than formatting the number here,
-  // so the readout says exactly what the slider says even if they ever disagree.
-  const out = el.parentElement.querySelector('output');
-  if (out) out.textContent = el.value;
+  // Refreshed here for the reason `writeControl` exists at all: this is the one place a
+  // scalar's shown state is brought level with the registry, so a reset offered on a row
+  // whose value has gone back to its default would be the panel and the registry
+  // disagreeing about what modified means. Every door into the registry ends up on this
+  // line, which is what makes a preset and an undo move the control as surely as a drag.
+  refreshReset(name, value);
 }
 
 // Announced after every registry write, so whatever is showing the image can
@@ -2530,6 +3145,87 @@ function makeKeyButton(name) {
   return button;
 }
 
+// The reset glyph, drawn as a stroked path rather than set as a background image. The
+// panel's controls take their colour from the state around them - dim at rest, brighter
+// under the pointer, and gone while the row is on its default - and a background image
+// needs one copy of the asset per colour it appears in, which is how the state nobody
+// looks at ends up wearing the wrong one. A stroke of `currentColor` is one asset that
+// cannot disagree with the rule that coloured it.
+function resetGlyph() {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '2.5');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  // Decorative: the button already carries the whole of what this means in its label,
+  // and a screen reader reading the glyph as well would announce the control twice.
+  svg.setAttribute('aria-hidden', 'true');
+  for (const d of ['M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8', 'M3 3v5h5']) {
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', d);
+    svg.append(path);
+  }
+  return svg;
+}
+
+/**
+ * One reset control per keyframable slider, built in the pass that built the row.
+ *
+ * It writes through `params.set` and nothing else. A reset that assigned the default
+ * straight into the value map would be a second write path around the registry's one
+ * door - it would skip `apply`, so the image would keep the old value; it would skip
+ * `paramWritten`, so nothing downstream would rebuild; and it would skip the group
+ * reveal, so a group open only because this parameter was carrying something would stay
+ * open over a parameter that is no longer carrying anything.
+ */
+function makeResetButton(name) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'reset';
+  // The parameter name, so a sweep can credit any row's reset by the attribute instead
+  // of naming the rows that have one today - a rule listing the rows that happen to be
+  // off their defaults stops covering the row moved tomorrow.
+  button.dataset.reset = name;
+  button.setAttribute('aria-label', `${name} reset to default`);
+  button.append(resetGlyph());
+  button.addEventListener('click', () => {
+    params.set(name, resetTarget(name));
+    history.commit();
+    // The press removes its own control: writing the default makes the row unmodified,
+    // which takes the button out of the tab order while it is the focused element, and
+    // focus falls to the document body with no way back into the panel short of tabbing
+    // from the top. It moves to the slider this reset just changed, which is both the
+    // control the operator was reasoning about and the one whose value now needs reading.
+    const slider = panelControls.get(name);
+    slider.focus();
+    // And the slider is not always there to take it. `params.set` ends in
+    // `groupRevealChanged`, and a collapsible group is open *because* one of its
+    // parameters is carrying something - so resetting the last one that was takes away
+    // the evidence holding the group open, the group shuts, and `.group.shut` puts
+    // `display: none` on every row in it. That happens inside the write above, before
+    // the line above this ran, and `focus()` on a node that is not being displayed is a
+    // no-op that reports nothing: the caret is left on the body exactly as if this
+    // handler had never tried. The group's own toggle is the nearest thing still on
+    // screen, and it is what the operator would press to get the row back.
+    if (document.activeElement !== slider) {
+      const toggle = button.closest('.group')?.querySelector('.grouptoggle');
+      if (toggle) toggle.focus();
+    }
+  });
+  // Born closed, the way the keyframe button beside it is born `none`. `params.reset()`
+  // runs after this generator and writes every parameter, so the first real answer
+  // arrives through `writeControl` before anything is painted - but a control whose
+  // state is undefined until some later write is a control that is briefly neither
+  // shown nor hidden, and the CSS rule that hides it keys off this attribute.
+  button.dataset.modified = 'no';
+  button.disabled = true;
+  resetButtons.set(name, button);
+  return button;
+}
+
 // The panel is a view on the registry and holds no parameter data of its own, and it
 // is now built from the registry rather than written out beside it. A parameter used
 // to cost three edits that had to agree: an entry here, a hand-written row in
@@ -2597,24 +3293,57 @@ function panelRow(name, spec) {
   input.max = String(spec.max);
   input.step = String(spec.step);
   const row = panelNode('div', 'row');
-  row.append(panelNode('span', null, spec.label), input, document.createElement('output'));
+  const out = document.createElement('output');
+  out.style.cursor = 'pointer';
+  // Clicking the readout opens it for direct number entry. The value is clamped to
+  // the slider's range on commit, so typing a number outside the range snaps it in.
+  out.addEventListener('click', () => {
+    const currentValue = out.textContent;
+    const edit = document.createElement('input');
+    edit.type = 'text';
+    edit.value = currentValue;
+    edit.style.cssText = 'width: 42px; text-align: right; font: inherit; background: transparent; color: var(--accent); border: 0; outline: 0; padding: 0; margin: 0;';
+    // **One way out, and whether it writes is an argument to it.** Escape used to put the
+    // output back on its own, which detaches the focused input - and detaching a focused
+    // element blurs it, so the blur listener committed the value the press had just
+    // cancelled. It left nothing on screen to show for it either: the commit's own
+    // `replaceWith` was a no-op against an orphan, so the readout kept the old number
+    // while the slider had already been dispatched the new one. Routing both exits
+    // through here means the blur a cancel *causes* arrives to find the editor closed.
+    let editing = true;
+    const close = (write) => {
+      if (!editing) return;
+      editing = false;
+      const parsed = parseFloat(edit.value);
+      // Put the output back first so writeControl can find it.
+      edit.replaceWith(out);
+      if (!write || isNaN(parsed)) return;
+      // Clamp to the slider's range.
+      const clamped = Math.max(spec.min, Math.min(spec.max, parsed));
+      input.value = String(clamped);
+      out.textContent = input.value;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    edit.addEventListener('blur', () => close(true));
+    edit.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); close(true); }
+      if (e.key === 'Escape') { e.preventDefault(); close(false); }
+    });
+    out.replaceWith(edit);
+    edit.focus();
+    edit.select();
+  });
+  row.append(panelNode('span', null, spec.label), input, out);
   return { input, node: row };
 }
 
-// Where a generated group lands: the grade below the extended-settings button, and
+// Where a generated group lands: the grade at the end of the panel body, and
 // everything a shooting surface needs above it. Asserted rather than assumed because
 // `insertBefore` with a missing anchor appends instead of throwing, so a renamed
 // anchor would quietly move every generated group to the bottom of the panel.
-//
-// The lookgroup anchor was `#navRow` until the nav was pinned into `#panelHead`, and
-// that move took it out of the scrolling column entirely - a group inserted before it
-// now lands in the head, above the status line, which is a placement no assertion here
-// would have objected to because the anchor still existed. `#extendedRow` is the last
-// static node in `#panelBody` and is the boundary the sentence above always meant, so
-// the grade is stated against it rather than appended to the column: an append says
-// only "at the end", and would go on saying it if a static group were ever added below.
 function panelAnchor(group) {
-  const id = group.lookgroup ? 'extendedRow' : 'sensorGroup';
+  const id = group.lookgroup ? 'gradeAnchor' : 'sensorGroup';
   const anchor = document.getElementById(id);
   if (!anchor) throw new Error(`the panel group ${group.key} has no anchor: no #${id} in the markup`);
   return anchor;
@@ -2622,7 +3351,7 @@ function panelAnchor(group) {
 
 // Placing after a fixed anchor reverses what placing before it preserves: each `before`
 // against `#sensorGroup` lands under the last one, while each `after` against
-// `#extendedRow` would land above it and build the grade upside down. So the grade
+// `#gradeAnchor` would land above it and build the grade upside down. So the grade
 // walks a cursor - the first group goes after the anchor, every later one after its
 // predecessor - and `PANEL_GROUPS` order survives down the panel either way.
 const panelTail = new Map();
@@ -2652,8 +3381,14 @@ const panelGroupParams = new Map();
 // groups at once in a tool that has nothing to do with this feature.
 function panelHead(group) {
   const head = panelNode('div', 'grouphead');
-  head.append(panelNode('label', null, group.label));
+  const label = panelNode('label', null, group.label);
+  head.append(label);
   if (!group.collapses) return { head, button: null, mark: null };
+
+  // The label is clickable too, so the whole heading row toggles the group rather
+  // than only the small triangle. Cursor indicates the affordance.
+  label.style.cursor = 'pointer';
+  label.addEventListener('click', () => toggleGroup(group.key));
 
   // A count of the parameters in this group that are carrying something, shown only
   // while the group is shut. Without it a collapsed group in use is the panel lying
@@ -2678,16 +3413,17 @@ function panelHead(group) {
 let panelRowsEmitted = 0;
 for (const group of PANEL_GROUPS) {
   const groupNode = panelNode('div', group.lookgroup ? 'group lookgroup' : 'group');
-  // A data attribute and not an id, because the six hand-written groups in the markup
+  // A data attribute and not an id, because the hand-written groups in the markup
   // are already `#cameraGroup`, `#sensorGroup`, `#monitorGroup`, `#programOutGroup`,
-  // `#recordGroup` and `#recLookGroup`, and a generated group minting ids in the same
-  // shape is one registry key away from colliding with one of them silently.
+  // and `#recordGroup`, and a generated group minting ids in the same shape is one
+  // registry key away from colliding with one of them silently.
   groupNode.dataset.group = group.key;
+  groupNode.dataset.panelTab = group.tab;
   // Named apart from the keyframe button the row loop below declares, which is a
   // different button in a narrower scope: one `button` meaning two things in one loop
   // is how the wrong element ends up registered.
   const { head, button: headButton, mark: headMark } = panelHead(group);
-  groupNode.append(head);
+  if (group.label || group.collapses) groupNode.append(head);
   if (group.before) groupNode.append(...group.before());
   const names = [];
   panelGroupParams.set(group.key, names);
@@ -2715,22 +3451,35 @@ for (const group of PANEL_GROUPS) {
       input.addEventListener('change', () => history.commit());
     }
 
-    // The keyframe control, in the same pass that built the row it sits in. Only on
-    // the editor and only for look parameters: a keyframe is a position on a clip,
-    // the recorder has no clip, and view state is not part of one - so a control
-    // implying otherwise is the split leaking whichever of the two reasons applies.
-    if (EDITING && spec.tag === 'look') {
-      const button = makeKeyButton(name);
+    // The two controls that ride beside a look row, and **they are gated by different
+    // questions**, which is the whole of this block.
+    //
+    // The keyframe is on the editor alone: a keyframe is a position on a clip, the
+    // recorder has no clip, and view state is not part of one - so a control implying
+    // otherwise is the split leaking whichever of the two reasons applies.
+    //
+    // The reset is on both, and it was on neither but the editor because it was written
+    // inside the keyframe's condition rather than beside it. Nothing about putting a
+    // slider back needs a clip: the recorder grades the live cloud through these same
+    // sliders, and having moved one there, the way back was to remember the number.
+    // `README.md` describes the ↺ under the recorder's *Look* tab, which is where this
+    // was found - the page and the page's own documentation disagreeing about a control,
+    // with the condition above naming the reason for the other one.
+    if (spec.tag === 'look') {
+      const keyButton = EDITING ? makeKeyButton(name) : null;
+      // After the keyframe control where there is one, which is the order the design
+      // puts them in and the order the row reads in: what this value is, whether it is
+      // keyed, and how to put it back.
+      const beside = [...(keyButton ? [keyButton] : []), makeResetButton(name)];
       if (input.type === 'checkbox') {
         // The control is the whole `<label class="check">` and a button inside a
         // label would toggle the checkbox when clicked, so the two are siblings in a
-        // row of their own. The recorder gets the bare label, which is what keeps
-        // `.check`'s own layout rather than `.checkrow`'s.
+        // row of their own.
         const checkrow = panelNode('div', 'checkrow');
-        checkrow.append(row, button);
+        checkrow.append(row, ...beside);
         groupNode.append(checkrow);
       } else {
-        row.append(button);
+        row.append(...beside);
         groupNode.append(row);
       }
     } else {
@@ -2781,6 +3530,40 @@ for (const group of PANEL_GROUPS) {
       + 'parameters: a panel that is not the registry is a look nothing can reach');
   }
 }
+
+// The four Pencil inspectors are views over the one registry-built panel. Groups are
+// tagged where they are declared above, so adding a parameter to a group inherits its
+// inspector without another list of control ids. Hiding never removes a row from the
+// document: the registry and proof sweeps still see the complete surface.
+const panelTabsEl = document.getElementById('panelTabs');
+const panelTabButtons = [...panelTabsEl.querySelectorAll('.paneltab')];
+// Default to 'record' on the record surface, 'look' on the editor.
+let activePanelTab = EDITING ? 'look' : 'record';
+
+function setPanelTab(tab) {
+  if (!['record', 'camera', 'framing', 'look', 'region'].includes(tab)) return false;
+  activePanelTab = tab;
+  for (const button of panelTabButtons) {
+    button.setAttribute('aria-selected', String(button.dataset.panelTab === tab));
+  }
+  for (const group of document.querySelectorAll('#panelBody > [data-panel-tab]')) {
+    group.hidden = group.dataset.panelTab !== tab;
+  }
+  document.getElementById('panelBody').scrollTop = 0;
+  return true;
+}
+
+for (const button of panelTabButtons) {
+  button.addEventListener('click', () => setPanelTab(button.dataset.panelTab));
+}
+
+function showInspector() {
+  panelTabsEl.hidden = false;
+  setPanelTab(activePanelTab);
+}
+
+// On the record surface, initialize the tabs immediately since they're always visible.
+if (!EDITING) setPanelTab(activePanelTab);
 
 params.reset();
 
@@ -2905,6 +3688,18 @@ function applyDeliverable(deliverable) {
   }
   timingChanged();
   paintDeliverable();
+  // The format segments, beside the readout that was already repainted here. They read
+  // the codec off the deliverable and are painted nowhere else, so adopting a stored
+  // document moved the codec the render will use while the buttons went on showing
+  // whichever one was last pressed - the dialog disagreeing with the document about what
+  // it is about to encode, in the one direction where the document is right.
+  //
+  // This is the rule `paintExportFormats` states in its own comment, and the same shape as
+  // the reset rows: a control that shows document state has to be repainted by every door
+  // into that state, not only by the door it happens to sit next to. A project file, an
+  // autosave and this dialog all reach a deliverable, and only one of them is these three
+  // buttons.
+  paintExportFormats();
 }
 
 function setClipInOut(values) {
@@ -3530,6 +4325,18 @@ function refreshGroups() {
       groupOverrideDirty = true;
     }
     groupSeen.set(key, `${groupOverride.get(key)}/${inUse}`);
+    // **Nothing here may author an override.** A rule that pinned a group open when the
+    // derivation went false underneath it - so that resetting a group's last value did
+    // not collapse it under the hand that reset it - was here, and it fabricated a
+    // disagreement nobody had expressed. The state it read was the panel's own
+    // `shut` class, which no group carries until this pass has painted one, so on the
+    // very first refresh every group read as open against a derivation that answers
+    // false for all of them before a document exists. It wrote `true` for every group
+    // in the panel, persisted that to `kinect.panelGroupsOpen`, and the editor booted
+    // with the whole inspector open and every collapse it had ever been taught
+    // overwritten. That is the stored panel layout this design refuses, arriving as a
+    // convenience: the derivation is the rule, and the only thing allowed to disagree
+    // with it is somebody pressing the toggle.
     const open = groupIsOpen(group);
     const touched = groupTouchedCount(key);
     const state = `${open}/${inUse}/${touched}`;
@@ -3542,9 +4349,15 @@ function refreshGroups() {
     button.setAttribute('aria-label', `${open ? 'collapse' : 'expand'} ${group.label}`);
     // The count only where it is the only thing that can say so. An open group has its
     // rows on screen and a number over them would be a second, worse copy of them; a
-    // shut group that is genuinely at its defaults has nothing to announce. The one
-    // case with nothing to count is `detail` revealed by a reading, which shows the
-    // mark without a number rather than a misleading zero.
+    // shut group that is genuinely at its defaults has nothing to announce.
+    //
+    // The empty string is still written rather than assumed, because a group can be in
+    // use with nothing of its own to count: that is what a `reveals` closure answering
+    // a wider question than its own parameters does, and it showed the mark without a
+    // number rather than a misleading zero. No group declares one today - the rework
+    // folded `detail` into `style` and its closure went with it - so the branch is
+    // reachable only by the next group that needs one, which is why `groupRevealed`
+    // stays a call rather than becoming `revealsItself`.
     mark.hidden = open || !inUse;
     mark.textContent = touched > 0 ? String(touched) : '';
     mark.title = touched > 0
@@ -4066,7 +4879,6 @@ const history = {
   begin() {
     this.stack.length = 0;
     this.baseline = this.snapshot();
-    paintUndoCount();
   },
 
   commit() {
@@ -4083,12 +4895,6 @@ const history = {
     this.stack.push(this.baseline);
     if (this.stack.length > UNDO_LIMIT) this.stack.shift();
     this.baseline = now;
-    // Said here rather than left to the next repaint. A commit is the end of an
-    // interaction and usually the last thing that happens in it - a node drag
-    // repaints on every pointer move and then commits on release - so a readout
-    // that waited for a repaint would sit one level behind for as long as nothing
-    // else moved.
-    paintUndoCount();
     // Auto-save the project after every change. Fire-and-forget: a failed save is
     // logged in the UI but it must not block the interaction that caused it.
     const workingBody = { ...serialiseProject(), take: { id: openTakeId, hash: openTakeHash } };
@@ -4141,7 +4947,6 @@ const history = {
     // The playhead deliberately does not move. Undo is about what the clip is, and
     // walking the playhead backwards on every press is the behaviour that teaches
     // people not to trust it.
-    paintUndoCount();
     if (resume) {
       timeline.seek(timeline.programSec)
         .then(() => { if (gen === transportGen) return timeline.play(); })
@@ -4183,6 +4988,10 @@ function setStatus() {
     nodes.push(document.createElement('br'), note);
   }
   statusEl.replaceChildren(...nodes);
+  if (appStatusEl) {
+    appStatusEl.textContent = `${sensorLabel}${sensorLabel ? ' · ' : ''}${rate.textContent} fps in`
+      + (sensorState ? ` · ${sensorState}` : '');
+  }
 }
 
 async function pumpColorDecode() {
@@ -4579,6 +5388,8 @@ function connect() {
       if (msg.recording) {
         recordState = msg.recording;
         paintRecord(null);
+        chromeStale = true;
+        drawChrome();
         return;
       }
 
@@ -5242,6 +6053,9 @@ function liveLoop() {
   const t = liveTransport.positionAt(performance.now());
   advanceNavigation(t);
   renderProgramFrame(t);
+  // The top-down and stats overlays, redrawn after the frame that marked them stale.
+  // Without this, chrome on the record surface freezes while the main picture moves.
+  if (chromeOn) drawChrome();
   // Mirror mode's pose, sent from the loop because that is where the orbit camera
   // has finished moving for this frame. Rate-limited to the sensor's own cadence
   // rather than the display's: the source draws once per arrival, so a pose sent at
@@ -5605,7 +6419,6 @@ const CATCHUP_FRAMES = 4;
 // How far behind real time playback has to fall before it says so. About eight
 // frames at 30fps: below that it is a hitch, above it the rate on screen is not
 // the rate the readout claims.
-const BEHIND_NOTICE_MS = 250;
 // How many times an operation re-plans itself around a curve that moved while it
 // was fetching, before standing down and leaving the job to the repaint the same
 // mutation queued. Two, which is the smallest number that absorbs one
@@ -5811,6 +6624,25 @@ class TimelineTransport {
   }
 
   /**
+   * An accurate render at wherever the playhead is **when this runs**, rather than at
+   * where it was when the call was made.
+   *
+   * The difference is the whole of it, and it is a bug that shipped. A caller that
+   * means "repaint properly, here" has no position of its own to name - it wants the
+   * playhead's, and reading that at call time captures a number another seek queued
+   * ahead of it is about to change. `pumpParkedDraft` is the caller: when the orbit's
+   * damping stops it asks for one true image at the pose the camera arrived at, and if
+   * a person pressed Home during that glide the queue then held their seek to zero
+   * followed by this one to four - so the playhead travelled to the position they
+   * asked for and was pulled straight back off it, once, with nothing on screen saying
+   * why. Reading the position inside the queued work instead makes this what it always
+   * claimed to be: a render, not a move.
+   */
+  seekHere(options = {}) {
+    return this.exclusive(() => this.seekNow(this.programSec, options));
+  }
+
+  /**
    * Which output frames a seek renders and which source frames they need. Split
    * out because it has to be answered twice - see `seekNow`.
    */
@@ -6011,8 +6843,23 @@ class TimelineTransport {
    * so the same frame can be drawn directly unless another draft left incomplete
    * state behind it.
    */
-  redraw(programSec) {
-    return this.exclusive(() => this.redrawNow(programSec));
+  /**
+   * A navigation redraw at wherever the playhead is **when this runs**, which is the
+   * same distinction `seekHere` above draws and for the same reason.
+   *
+   * `redrawNow` is not the read-only operation its name suggests: it assigns
+   * `this.frame`, and on any of the four conditions it tests it hands off to a full
+   * `seekNow`. So a position captured at call time is a *move* scheduled for later, and
+   * the queue is exactly where later happens. The orbit's pump is the only caller: it
+   * arms a flag during a drag and resolves the position when the loop gets its turn,
+   * which is correct against the drag and still one link short of correct against
+   * somebody pressing Home during it. That seek queues first, the redraw queues behind
+   * it carrying the position the drag was leaving, and the playhead travels to the
+   * start and is pulled straight back. Measured as one landing in five before this,
+   * every time on the run that had not settled first.
+   */
+  redrawHere() {
+    return this.exclusive(() => this.redrawNow(this.programSec));
   }
 
   async redrawNow(programSec) {
@@ -6487,10 +7334,6 @@ const ui = {
   rateOut: document.getElementById('tRateOut'),
   rateKey: document.getElementById('tRateKey'),
   fps: document.getElementById('tFps'),
-  preroll: document.getElementById('tPreroll'),
-  cost: document.getElementById('tCost'),
-  undo: document.getElementById('tUndo'),
-  behind: document.getElementById('tBehind'),
   bed: document.getElementById('tBed'),
   rail: document.getElementById('tRail'),
   beds: document.getElementById('tBeds'),
@@ -6512,16 +7355,20 @@ const ui = {
   shadeIn: document.getElementById('tShadeIn'),
   shadeOut: document.getElementById('tShadeOut'),
   note: document.getElementById('tNote'),
-  cameraGroup: document.getElementById('cameraGroup'),
   camKey: document.getElementById('camKey'),
   camClear: document.getElementById('camClear'),
   camView: document.getElementById('camView'),
+  // Timeline camera controls (duplicate of panel controls for quick access)
+  tCamKey: document.getElementById('tCamKey'),
+  tCamView: document.getElementById('tCamView'),
   camSensor: document.getElementById('camSensor'),
-  camLevel: document.getElementById('camLevel'),
   camLevelReset: document.getElementById('camLevelReset'),
-  levelNote: document.getElementById('levelNote'),
+  cropBox: document.getElementById('cropBox'),
   cropReset: document.getElementById('cropReset'),
   exportSize: buildExportMenu(document.getElementById('tExportSize')),
+  exportRatios: document.getElementById('exportRatios'),
+  exportFormats: document.getElementById('exportFormats'),
+  exportDialog: document.getElementById('exportDialog'),
   exportGo: document.getElementById('tExport'),
   exportNote: document.getElementById('tExportNote'),
   exportName: document.getElementById('tExportName'),
@@ -6534,6 +7381,8 @@ const ui = {
   setOut: document.getElementById('tSetOut'),
   clearRange: document.getElementById('tClearRange'),
   ease: document.getElementById('tEase'),
+  prevKey: document.getElementById('tPrevKey'),
+  nextKey: document.getElementById('tNextKey'),
   deleteKey: document.getElementById('tDeleteKey'),
   deliverable: document.getElementById('tDeliverable'),
   deliverableNew: document.getElementById('tDeliverableNew'),
@@ -6542,7 +7391,6 @@ const ui = {
   markCount: document.getElementById('tMarkCount'),
   mark: document.getElementById('tMark'),
   preset: document.getElementById('tPreset'),
-  presetApply: document.getElementById('tPresetApply'),
   presetSave: document.getElementById('tPresetSave'),
   presetExport: document.getElementById('tPresetExport'),
   presetImport: document.getElementById('tPresetImport'),
@@ -6556,7 +7404,6 @@ const ui = {
   pickGo: document.getElementById('ppGo'),
   project: document.getElementById('tProject'),
   projectOpen: document.getElementById('tProjectOpen'),
-  projectSave: document.getElementById('tProjectSave'),
   resume: document.getElementById('tResume'),
   resumeWhen: document.getElementById('tResumeWhen'),
   resumeOpen: document.getElementById('tResumeOpen'),
@@ -6564,12 +7411,58 @@ const ui = {
   recMark: document.getElementById('recMark'),
   recNote: document.getElementById('recNote'),
   recSpace: document.getElementById('recSpace'),
-  recPreset: document.getElementById('recPreset'),
-  recPresetApply: document.getElementById('recPresetApply'),
-  recLookNote: document.getElementById('recLookNote'),
   recRange: document.getElementById('recRange'),
-  extended: document.getElementById('extended'),
 };
+
+const exportRatioButtons = buildExportRatios(ui.exportRatios, ui.exportSize);
+
+/**
+ * The output format, as one segmented control over the deliverable's `codec`.
+ *
+ * The three buttons carry the codec name the server's table is keyed by rather than a
+ * label the dialog translates: a translation table here would be a second place that has
+ * to agree with `CODECS` in `server/export.js`, and the one that drifts is the one nobody
+ * exports with. MP4 was markup and the other two were disabled buttons carrying a
+ * `title` that said the renderer could not do it - which stopped being true when the
+ * server learned prores and the image sequence, and a control that lies about a
+ * capability is worse than one that is missing, because nobody goes looking for it.
+ *
+ * The selection is painted from the document and never remembered here, for the same
+ * reason the row resets are: the deliverable is reached by the project file and by the
+ * autosave as well as by this dialog, so a pressed state kept beside it would be right
+ * only for the presses that came through these three buttons.
+ */
+// The keys are the server's, not this file's: `CODECS` in `server/export.js` is where a
+// codec is declared and `validateExport` is what refuses an unknown one at both doors.
+// This list exists only to say which of them the dialog puts on screen - `lossless` is a
+// real codec the dialog does not offer - so a name added here that the table does not
+// carry is a button that fails at the end of a render rather than at the press.
+// `editor-check` reads the table out of that file and asserts these are a subset of it,
+// so the two cannot drift in silence.
+const EXPORT_CODECS = ['h264', 'prores', 'pngseq'];
+
+function paintExportFormats() {
+  const codec = activeDeliverable?.codec ?? 'h264';
+  for (const button of ui.exportFormats.querySelectorAll('button[data-codec]')) {
+    button.setAttribute('aria-pressed', String(button.dataset.codec === codec));
+  }
+}
+
+function setExportCodec(codec) {
+  // Refused here rather than trusted, because the value comes off an attribute in the
+  // markup and a typo there would otherwise travel all the way to ffmpeg's argument list.
+  if (!EXPORT_CODECS.includes(codec)) {
+    throw new Error(`unknown export codec ${JSON.stringify(codec)}: the dialog offers ${EXPORT_CODECS.join(', ')}`);
+  }
+  ensureActiveDeliverable();
+  activeDeliverable.codec = codec;
+  paintDeliverable();
+  paintExportFormats();
+}
+
+for (const button of ui.exportFormats.querySelectorAll('button[data-codec]')) {
+  button.addEventListener('click', () => setExportCodec(button.dataset.codec));
+}
 
 // The chips strip hides its scrollbar so the bar keeps its 51px and the lanes stay
 // where a dragged key expects them - which also hid the only evidence that anything
@@ -6599,20 +7492,20 @@ const sayExport = (text) => {
 /**
  * The editor's one line of prose, and the only way anything writes it.
  *
- * `#tNote` is a chip in `.tchips`, which scrolls horizontally with its scrollbar
- * hidden so the bar keeps its 51px - so a sentence wider than the strip has nothing
- * to drag, and the fade `.tchips.more` paints says that something is off the right
- * edge without ever saying what. The whole of the editor's error channel wrote into
- * that element and nothing else, which left a long refusal unreadable by any means
- * available to the person it was written for, and a refusal is exactly the message
- * that runs long. `title` is the same sentence somewhere it cannot be cut off, which
- * is the repair `sayExport` above already made for the export note beside it.
+ * `#tNote` is a chip in the application bar's status slot, which ellipsises - so a
+ * sentence wider than the slot is cut off with nothing to drag and no way to ask for
+ * the rest. The whole of the editor's error channel writes into that element and
+ * nothing else, which left a long refusal unreadable by any means available to the
+ * person it was written for, and a refusal is exactly the message that runs long.
+ * `title` is the same sentence somewhere it cannot be cut off, which is the repair
+ * `sayExport` above already made for the export note beside it.
  *
- * **The scroll is why every note comes through here and not only the errors.** A
- * message that has just arrived should be the part of the strip on screen, and the
- * strip is wherever the last one left it. Taken after the text lands, because
- * `scrollWidth` read before the write is the previous message's width and would park
- * the strip at the end of a sentence that is no longer there.
+ * **There is no scroll to do any more, and that is why one came out of here.** The note
+ * was a chip in `.tchips` when this was written, a strip that scrolls with its scrollbar
+ * hidden, so a message that had just arrived had to be scrolled to or it stayed off the
+ * right edge behind a fade. In the bar the slot holds one message at a time and the
+ * ellipsis is where it ends, so the scroll had nothing left to move and `closest`
+ * answered null on every call - a line that reads as behaviour and performs none.
  *
  * A declaration rather than a `const` arrow like its neighbour, and that is about the
  * auto-save fifteen hundred lines above this line: it reports a failed save through
@@ -6620,13 +7513,9 @@ const sayExport = (text) => {
  * throw out of the fetch handler - a save failure eating its own message.
  */
 function say(text) {
+  if (!ui.note) return;
   ui.note.textContent = text;
   ui.note.title = text;
-  // An empty note is the strip being cleared, and scrolling a cleared strip to its
-  // end moves it for no reason anybody watching could account for.
-  if (!text) return;
-  const chips = ui.note.closest('.tchips');
-  if (chips) chips.scrollLeft = chips.scrollWidth;
 }
 
 const timecode = (sec) => {
@@ -6812,10 +7701,6 @@ const view = {
   },
 };
 
-function paintUndoCount() {
-  ui.undo.textContent = String(history.depth);
-}
-
 function paintDeliverable() {
   if (!ui.deliverableReadout) return;
   if (!activeDeliverable) {
@@ -6881,26 +7766,9 @@ function paintTimeline(t) {
   // `view.duration` here and `view.pct` in the positions above, and the split is the
   // distinction the rename was for: this is a *length*, which the window cannot change,
   // where a marker is a *place*, which is all the window changes.
-  ui.inOut.textContent = timecode(clipIn);
-  ui.outOut.textContent = clipOut === null ? 'end' : timecode(clipOut);
-  ui.clipLen.textContent = `${Math.max(0, (clipOut ?? view.duration) - clipIn).toFixed(2)}s`;
-  const plan = t.preroll(program);
-  // Both halves, because which one wins is the whole point of computing it: the
-  // surface half moves with fade, wake, speed and output rate, the trails half
-  // only with damp, and a reader who sees one number cannot tell them apart.
-  ui.preroll.textContent = `${plan.frames} frames · ${plan.sec.toFixed(2)} s `
-    + `(surface ${plan.surface}, trails ${plan.trails})`;
-  ui.cost.textContent = t.lastCostMs
-    ? `${t.drafted ? 'draft' : 'seek'} ${t.lastCostMs.toFixed(1)} ms`
-    : '—';
-  // Playback never drops a frame to keep up, so falling behind is a fact about
-  // the machine rather than about the edit, and it belongs on screen for the same
-  // reason the decimation setting does: an instrument that silently changes its
-  // own scale is worse than none.
-  ui.behind.textContent = t.playing && t.behindMs > BEHIND_NOTICE_MS
-    ? `${(t.behindMs / 1000).toFixed(1)}s behind`
-    : '';
-  paintUndoCount();
+  if (ui.inOut) ui.inOut.textContent = timecode(clipIn);
+  if (ui.outOut) ui.outOut.textContent = clipOut === null ? 'end' : timecode(clipOut);
+  if (ui.clipLen) ui.clipLen.textContent = `${Math.max(0, (clipOut ?? view.duration) - clipIn).toFixed(2)}s`;
   paintDeliverable();
   paintLanes();
   // Editor furniture - the camera path, its nodes and the top-down - is drawn
@@ -7135,6 +8003,8 @@ let scrubbing = false;
 
 ui.bed.addEventListener('pointerdown', (e) => {
   if (!timeline) return;
+  // Clicking the bed deselects any selected mark
+  if (selectedMark) { selectedMark = null; paintMarks(); }
   ui.bed.setPointerCapture(e.pointerId);
   scrubbing = true;
   pauseTransport();
@@ -7571,9 +8441,9 @@ function setClipRangeFromPlayhead(which) {
   history.commit();
 }
 
-ui.setIn.addEventListener('click', () => setClipRangeFromPlayhead('in'));
-ui.setOut.addEventListener('click', () => setClipRangeFromPlayhead('out'));
-ui.clearRange.addEventListener('click', () => {
+ui.setIn?.addEventListener('click', () => setClipRangeFromPlayhead('in'));
+ui.setOut?.addEventListener('click', () => setClipRangeFromPlayhead('out'));
+ui.clearRange?.addEventListener('click', () => {
   // `null` rather than the duration, so the range keeps meaning "to the end" if the
   // retime later makes the program longer.
   setClipInOut({ in: 0, out: null });
@@ -7637,6 +8507,28 @@ addEventListener('keydown', (e) => {
     history.undo();
     return;
   }
+  // Start or stop recording - the same action the sidebar button takes. The button's
+  // disabled state is the authority on whether the action is available. Require an
+  // unmodified press so Ctrl+R / Cmd+R still reloads the page.
+  if ((e.key === 'r' || e.key === 'R') && !e.metaKey && !e.ctrlKey && !e.altKey && !EDITING && ui.recGo && !ui.recGo.disabled) {
+    e.preventDefault();
+    ui.recGo.click();
+    return;
+  }
+  // Mark during recording - the same action the sidebar button takes, before the editing
+  // surface claims the key for its own marks. The button's disabled state is the authority
+  // on whether there is a recording to mark. Require an unmodified press for the same
+  // reason as the record shortcut above.
+  if ((e.key === 'm' || e.key === 'M') && !e.metaKey && !e.ctrlKey && !e.altKey && !EDITING && ui.recMark && !ui.recMark.disabled) {
+    e.preventDefault();
+    (async () => {
+      const body = await (await fetch('/record/mark', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      })).json();
+      ui.recNote.textContent = body.error ?? `${body.label} at ${(body.sourceMs / 1000).toFixed(1)}s`;
+    })();
+    return;
+  }
   // Everything below is about a clip, and the recorder has none.
   if (!EDITING || !timeline) return;
   // A modifier other than shift means the key belongs to the browser or the OS.
@@ -7685,7 +8577,12 @@ addEventListener('keydown', (e) => {
       if (e.shiftKey) goTo(clipOut ?? timeline.duration);
       else setClipRangeFromPlayhead('out');
       return;
-    case 'Delete': case 'Backspace': e.preventDefault(); deleteSelectedKey(); return;
+    case 'Delete': case 'Backspace':
+      e.preventDefault();
+      // Delete selected mark first, then try keyframe selection
+      if (selectedMark) { deleteMark(selectedMark).catch(showTimelineError); return; }
+      deleteSelectedKey();
+      return;
     case 'm': case 'M': e.preventDefault(); markHere().catch(showTimelineError); return;
     // The other half of item three, and the half that is actually usable: a tick is
     // five pixels of diamond, so pressing one is a gesture and stepping through them
@@ -8109,7 +9006,7 @@ ui.rate.addEventListener('input', () => {
   pumpDraft();
 });
 
-ui.fps.addEventListener('change', () => {
+ui.fps?.addEventListener('change', () => {
   if (!timeline) return;
   const held = timeline.programSec;
   const fps = Number(ui.fps.value);
@@ -8244,7 +9141,7 @@ function pumpParkedDraft() {
   if (orbitRedrawWanted && !draftBusy) {
     orbitRedrawWanted = false;
     draftBusy = true;
-    timeline.redraw(timeline.programSec)
+    timeline.redrawHere()
       .catch(showTimelineError)
       .finally(() => { draftBusy = false; });
     return;
@@ -8255,7 +9152,11 @@ function pumpParkedDraft() {
     // The redraws above are already accurate. This last seek closes the race between
     // the final redraw and the last damping step and makes release an explicit
     // accuracy boundary, the same rule the scrubber follows.
-    timeline.seek(timeline.programSec).catch(showTimelineError);
+    //
+    // `seekHere` and not `seek(timeline.programSec)`, because the position this wants
+    // is the playhead's at the moment the queue reaches it - see the note there for
+    // the seek this used to undo.
+    timeline.seekHere().catch(showTimelineError);
   }
 }
 
@@ -8591,6 +9492,7 @@ function paintLanes() {
   }
   for (const [name, btn] of keyButtons) paintKeyButton(name, btn);
   paintRateKey();
+  paintMarkButton();
   paintEase();
 }
 
@@ -8669,7 +9571,7 @@ function timingChanged({ moved = false } = {}) {
   // has nothing left to say: it would set a slope only the extrapolated ends read.
   // Saying so is better than leaving a live control that moves nothing visible.
   ui.rate.disabled = retime.keys.length > 0;
-  ui.fps.value = String(timeline.outputFps);
+  if (ui.fps) ui.fps.value = String(timeline.outputFps);
   buildRuler();
   paintMarks();
   // The window is fractions of a duration this may just have changed, so everything
@@ -8689,6 +9591,7 @@ function timingChanged({ moved = false } = {}) {
 // gallery can draw them without loading anything that knows about edits.
 let takeMarks = [];
 let openTakeId = null;
+let selectedMark = null; // The currently selected mark object, or null
 
 // Where a mark is allowed to be on the ruler. A mark past the end of the edit stacks
 // at the edge rather than being dropped, and the tick and the key that jumps to it
@@ -8732,7 +9635,6 @@ function paintMarks() {
   const host = ui.marks;
   if (!host) return;
   host.replaceChildren();
-  ui.markCount.textContent = String(takeMarks.length);
   if (!timeline) return;
   // The clip's length, not the window's: whether a mark is past the end of the edit is
   // a fact about the edit, and it must not change because somebody scrolled.
@@ -8751,13 +9653,15 @@ function paintMarks() {
     // from being the control it looks like.
     const el = document.createElement('button');
     el.type = 'button';
+    el.innerHTML = '<svg width="10" height="12" viewBox="0 0 10 12" fill="none"><path d="M1 1l8 0 0 7-4 3-4-3z" fill="currentColor"/></svg>';
     // A mark the edit never reaches is drawn at the edge in the dim colour rather
     // than dropped. `programSecAt` returns where the curve ends for a source
     // position it never gets to, so this is the honest reading of that answer: the
     // moment is still in the footage, and a tick that silently vanished when
     // somebody shortened the clip would be worse than one that needs explaining.
     const beyond = program >= total - 1e-9 && mark.sourceMs / 1000 > retime.sourceSecAt(total) + 1e-9;
-    el.className = beyond ? 'tmk beyond' : 'tmk';
+    const selected = selectedMark?.id === mark.id;
+    el.className = (beyond ? 'tmk beyond' : 'tmk') + (selected ? ' sel' : '');
     const at = clampToClip(program, total);
     el.style.left = `${view.pct(at)}%`;
     el.hidden = !view.holds(at);
@@ -8768,28 +9672,57 @@ function paintMarks() {
     // never reaches it has to seek to the edge it is drawn at, or pressing it lands
     // the playhead somewhere the tick is not.
     //
-    // Both events are stopped, and the pointerdown is the one that matters. The bed
-    // scrubs on `pointerdown` rather than on `click`, so a click-only guard leaves
-    // the press starting a scrub to wherever the pointer was, and the tick's own seek
-    // arriving afterwards reads as a drag that happened to end on a mark.
-    el.addEventListener('pointerdown', (e) => e.stopPropagation());
-    // **A tick outside the trim declines and says so, rather than seeking somewhere it
-    // is not.** The seek would be clamped to the boundary, so pressing a diamond drawn
-    // inside the shading moved the playhead to the edge of the edit - a control that
-    // answers, in the one way that is worse than not answering, by doing something
-    // other than what it shows. The keys already refuse these; a class closed on one
-    // surface and left open on the other is the same defect with a second address.
-    //
-    // Said out loud rather than declined in silence, because a press is a person
-    // pointing at a specific thing: a key that steps past nothing has nothing to report,
-    // and a diamond that was aimed at does.
-    el.addEventListener('click', (e) => {
+    // Pointerdown handles both selection and the start of a drag. Stopping propagation
+    // prevents the bed from starting a scrub.
+    let dragging = false;
+    let dragStartX = 0;
+    el.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
-      if (!reachableInClip(at)) {
-        say('that mark is outside the clip range, so the edit cannot reach it');
-        return;
+      // Select this mark, clear keyframe selection
+      selectedMark = mark;
+      if (selection) { selection = null; lanesChanged(); }
+      // Add selection styling directly instead of rebuilding - paintMarks() would
+      // destroy this element and break the drag.
+      for (const sib of host.querySelectorAll('.tmk.sel')) sib.classList.remove('sel');
+      el.classList.add('sel');
+      // Prepare for potential drag
+      dragging = false;
+      dragStartX = e.clientX;
+      el.setPointerCapture(e.pointerId);
+    });
+    el.addEventListener('pointermove', (e) => {
+      if (!el.hasPointerCapture(e.pointerId)) return;
+      // Start dragging after a small threshold to distinguish from clicks
+      if (!dragging && Math.abs(e.clientX - dragStartX) > 3) {
+        dragging = true;
       }
-      goTo(at);
+      if (dragging) {
+        // Update the mark position visually during drag
+        const programSec = Math.max(0, Math.min(view.duration, view.timeAt(e.clientX)));
+        el.style.left = `${view.pct(programSec)}%`;
+      }
+    });
+    el.addEventListener('pointerup', (e) => {
+      if (!el.hasPointerCapture(e.pointerId)) return;
+      el.releasePointerCapture(e.pointerId);
+      if (dragging) {
+        // Compute new source position from drop location using view.timeAt
+        const programSec = Math.max(0, Math.min(view.duration, view.timeAt(e.clientX)));
+        const sourceSec = retime.sourceSecAt(programSec);
+        const newSourceMs = Math.round(sourceSec * 1000);
+        moveMark(mark, newSourceMs).catch(showTimelineError);
+      } else {
+        // Just a click - seek to the mark position
+        if (!reachableInClip(at)) {
+          say('that mark is outside the clip range, so the edit cannot reach it');
+          return;
+        }
+        goTo(at);
+      }
+    });
+    el.addEventListener('lostpointercapture', () => {
+      // If capture is lost without pointerup, repaint to reset position
+      if (dragging) paintMarks();
     });
     host.appendChild(el);
   }
@@ -8808,6 +9741,7 @@ function paintMarks() {
 }
 
 async function loadMarks(id) {
+  selectedMark = null;
   try {
     const res = await fetch(`/capture/${encodeURIComponent(id)}/marks`);
     takeMarks = res.ok ? (await res.json()).marks : [];
@@ -8815,6 +9749,7 @@ async function loadMarks(id) {
     takeMarks = [];
   }
   paintMarks();
+  paintMarkButton();
 }
 
 /**
@@ -8833,6 +9768,43 @@ async function markHere() {
   });
   takeMarks = (await res.json()).marks;
   paintMarks();
+  paintMarkButton();
+}
+
+/** Deletes the given mark by writing a tombstone. */
+async function deleteMark(mark) {
+  if (!openTakeId || !mark) return;
+  const rec = { id: mark.id, deleted: true, at: Date.now() };
+  const res = await fetch(`/capture/${encodeURIComponent(openTakeId)}/marks`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ marks: [rec] }),
+  });
+  takeMarks = (await res.json()).marks;
+  if (selectedMark?.id === mark.id) selectedMark = null;
+  paintMarks();
+  paintMarkButton();
+}
+
+/** Moves a mark to a new source position. */
+async function moveMark(mark, newSourceMs) {
+  if (!openTakeId || !mark) return;
+  // Don't move if position hasn't changed
+  if (mark.sourceMs === newSourceMs) { paintMarks(); return; }
+  const rec = { ...mark, sourceMs: newSourceMs, at: Date.now() };
+  const res = await fetch(`/capture/${encodeURIComponent(openTakeId)}/marks`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ marks: [rec] }),
+  });
+  if (!res.ok) { paintMarks(); return; }
+  takeMarks = (await res.json()).marks;
+  // Keep the mark selected after moving
+  if (selectedMark?.id === mark.id) {
+    selectedMark = takeMarks.find((m) => m.id === mark.id) ?? null;
+  }
+  paintMarks();
+  paintMarkButton();
 }
 
 // ------------------------------------------------------------- the preset library
@@ -9291,6 +10263,303 @@ const documentsIn = async (kind) => {
   return body[kind];
 };
 
+/**
+ * The preset picker: a trigger that names the chosen preset and a listbox that can hold
+ * what a native `<option>` cannot - a mark on the entry currently applied, and a delete on
+ * the entries that have one.
+ *
+ * **The trigger keeps `value`, and that is deliberate rather than incidental.** A
+ * `<button>` has a `value` IDL attribute, so `el.value` goes on meaning exactly what it
+ * meant when this was a `<select>`: the name of the chosen preset. Every reader downstream
+ * and every tool that drives this surface is unchanged, and the failure recorded in
+ * `docs/instruments.md` about a control whose `value` stops meaning the quantity it is
+ * named after does not arise, because the quantity did not move.
+ *
+ * **Only user presets get a delete.** A shipped look lives in a second directory the store
+ * reads and never writes, so `DELETE` on one is refused at the server; drawing a control
+ * that is always refused would be worse than drawing none. The slot is not reserved for it
+ * either - unlike the panel's reset, where a row moving sideways mid-drag was the failure
+ * being avoided, nothing here is dragged and a missing glyph on a shipped look reads as
+ * "this one is not yours" rather than as a gap.
+ *
+ * The add button is on the editor's picker and not on the recorder's, because "add" is the
+ * save flow under another name and the recorder has no save control to open. Pencil draws
+ * it the same way - the add button is in the editor's menu and the Record surface's preset
+ * row has none - so this is the design being followed rather than a corner being cut.
+ */
+// Built the way `resetGlyph` above builds its own, and for the same reason: a stroke of
+// `currentColor` is one asset that cannot disagree with the rule that coloured it, and it
+// is nodes rather than a string of markup, so nothing here is ever parsed as HTML.
+// `lucide/trash-2`, which is what the design names.
+function trashGlyph() {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '2');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  // Decorative: the button's own label already says which preset this deletes.
+  svg.setAttribute('aria-hidden', 'true');
+  for (const d of ['M3 6h18', 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6',
+    'M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2', 'M10 11v6', 'M14 11v6']) {
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', d);
+    svg.append(path);
+  }
+  return svg;
+}
+
+const TYPE_AHEAD_MS = 700;
+const pickers = [];
+
+function definePicker(trigger, list, { adds = null, note = null, autoApply = false } = {}) {
+  const picker = { trigger, list, adds, note, autoApply, docs: [], typed: '', typedAt: 0 };
+  pickers.push(picker);
+
+  trigger.addEventListener('click', () => (list.hidden ? openPicker(picker) : closePicker(picker)));
+  trigger.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      openPicker(picker);
+    }
+  });
+  list.addEventListener('keydown', (event) => pickerKey(picker, event));
+  // On the list rather than on each option, so an option built by a later rebuild is
+  // driven by existing rather than by having had a listener attached to it.
+  list.addEventListener('click', (event) => {
+    const remove = event.target.closest('.pickerdelete');
+    const option = event.target.closest('.pickeroption');
+    if (remove && option) {
+      event.stopPropagation();
+      deletePreset(picker, option.dataset.name);
+      return;
+    }
+    if (option) choosePicker(picker, option.dataset.name, { close: true });
+  });
+  return picker;
+}
+
+function openPicker(picker) {
+  for (const other of pickers) if (other !== picker) closePicker(other);
+  picker.list.hidden = false;
+  picker.trigger.setAttribute('aria-expanded', 'true');
+  const here = picker.list.querySelector('.pickeroption.here') ?? picker.list.querySelector('.pickeroption');
+  if (here) here.focus();
+  else picker.list.focus();
+}
+
+function closePicker(picker, { restoreFocus = false } = {}) {
+  if (picker.list.hidden) return;
+  picker.list.hidden = true;
+  picker.trigger.setAttribute('aria-expanded', 'false');
+  // The caret has to land somewhere it can be seen. A list that shuts while holding focus
+  // strands it on the body, which is the class `menu-close-strands-focus` already polices
+  // on the application menus.
+  if (restoreFocus || picker.list.contains(document.activeElement)) picker.trigger.focus();
+}
+
+/** Every option currently in the list, in the order a keyboard walks them. */
+const pickerOptions = (picker) => [...picker.list.querySelectorAll('.pickeroption')];
+
+function pickerKey(picker, event) {
+  const options = pickerOptions(picker);
+  if (!options.length) return;
+  const at = options.indexOf(document.activeElement.closest('.pickeroption'));
+  const move = (to) => {
+    event.preventDefault();
+    options[Math.max(0, Math.min(options.length - 1, to))].focus();
+  };
+  if (event.key === 'ArrowDown') return move(at + 1);
+  if (event.key === 'ArrowUp') return move(at - 1);
+  if (event.key === 'Home') return move(0);
+  if (event.key === 'End') return move(options.length - 1);
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    return closePicker(picker, { restoreFocus: true });
+  }
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    const option = document.activeElement.closest('.pickeroption');
+    if (option) choosePicker(picker, option.dataset.name, { close: true });
+    return;
+  }
+  // Type-ahead. One printable character at a time, accumulated inside a window, which is
+  // what makes `bl` reach blackwall rather than landing on whatever begins with `l`.
+  if (event.key.length !== 1 || event.altKey || event.ctrlKey || event.metaKey) return;
+  const now = performance.now();
+  picker.typed = now - picker.typedAt > TYPE_AHEAD_MS ? event.key : picker.typed + event.key;
+  picker.typedAt = now;
+  const wanted = picker.typed.toLowerCase();
+  const hit = options.find((option) => option.dataset.name.toLowerCase().startsWith(wanted));
+  if (hit) {
+    event.preventDefault();
+    hit.focus();
+  }
+}
+
+/**
+ * Write a name onto the trigger, which is where every reader looks for it, and repaint
+ * the list so the mark moves with it. This is the *display* half and nothing else.
+ *
+ * It is a function of its own because "the operator picked this" and "the library was
+ * rebuilt and the selection has to be put back" are two different sentences that used
+ * to be one call. `refreshPresets` rebuilds after every save, import and delete and then
+ * restores the visible selection - so with the apply folded into the write, a look that
+ * had been applied and then tweaked by hand was fetched and re-applied by the refresh,
+ * silently discarding the tweaks in the middle of the gesture that saved them. Repainting
+ * a control is not choosing what it shows.
+ */
+function showPickerChoice(picker, name) {
+  picker.trigger.value = name ?? '';
+  paintPicker(picker);
+}
+
+/** The operator chose this entry: show it, and on a picker that applies, apply it. */
+function choosePicker(picker, name, { close = false } = {}) {
+  showPickerChoice(picker, name);
+  if (close) closePicker(picker, { restoreFocus: true });
+  if (picker.autoApply) {
+    if (name) {
+      withPresetGesture(picker.note ?? ui.note, () => whileWriting(async () => {
+        try {
+          const applied = applyStoredPreset(await (await fetch(`/presets/${encodeURIComponent(name)}`)).json());
+          say(presetAppliedNote(name, applied));
+        } catch (err) {
+          showTimelineError(err);
+        }
+      }));
+    } else {
+      // "none" selected: reset all look parameters to their defaults, and clear the
+      // stamp so autosaves stop claiming a preset and refreshPresets does not restore
+      // the old name onto the picker.
+      appliedPreset = null;
+      params.reset(params.names('look'));
+      history.commit();
+      say('reset to defaults');
+    }
+  }
+}
+
+function paintPicker(picker) {
+  const chosen = picker.trigger.value;
+  picker.trigger.querySelector('.pickervalue').textContent = chosen || 'none';
+  for (const option of pickerOptions(picker)) {
+    const here = option.dataset.name === chosen;
+    option.classList.toggle('here', here);
+    option.setAttribute('aria-selected', String(here));
+  }
+}
+
+function buildPicker(picker, docs) {
+  picker.docs = docs;
+  // The "none" option at the top, clearing any applied preset.
+  const noneOption = document.createElement('div');
+  noneOption.className = 'pickeroption';
+  noneOption.setAttribute('role', 'option');
+  noneOption.setAttribute('aria-selected', 'false');
+  noneOption.tabIndex = -1;
+  noneOption.dataset.name = '';
+  noneOption.dataset.builtin = 'false';
+  const noneLabel = document.createElement('span');
+  noneLabel.className = 'pickerlabel';
+  noneLabel.textContent = 'none';
+  noneOption.append(noneLabel);
+
+  const rows = docs.map((doc) => {
+    const option = document.createElement('div');
+    option.className = 'pickeroption';
+    option.setAttribute('role', 'option');
+    option.setAttribute('aria-selected', 'false');
+    option.tabIndex = -1;
+    option.dataset.name = doc.name;
+    option.dataset.builtin = String(Boolean(doc.builtin));
+    const label = document.createElement('span');
+    label.className = 'pickerlabel';
+    label.textContent = doc.name;
+    option.append(label);
+    if (!doc.builtin) {
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'pickerdelete';
+      remove.setAttribute('aria-label', `Delete preset ${doc.name}`);
+      remove.tabIndex = -1;
+      remove.append(trashGlyph());
+      option.append(remove);
+    }
+    return option;
+  });
+  picker.list.replaceChildren(noneOption, ...rows);
+  if (picker.adds) {
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'pickeradd';
+    add.id = picker.adds;
+    add.setAttribute('aria-label', 'Save the current look as a new preset');
+    add.textContent = '+';
+    add.addEventListener('click', () => {
+      closePicker(picker, { restoreFocus: true });
+      ui.presetSave.click();
+    });
+    picker.list.append(add);
+  }
+  paintPicker(picker);
+}
+
+/**
+ * Delete a user preset, and put the caret somewhere afterwards.
+ *
+ * The rebuild is the whole difficulty: the row holding focus is the row being removed, so
+ * the list that comes back has no element the browser could have kept the caret on. The
+ * name of the row that will take its place is worked out *before* the refresh and looked up
+ * after, which is the shape `viewer-drops-focus-on-rebuild` already polices in the gallery -
+ * a rebuild that strands focus leaves a keyboard with nowhere to be.
+ */
+async function deletePreset(picker, name) {
+  const options = pickerOptions(picker);
+  const at = options.findIndex((option) => option.dataset.name === name);
+  const successor = options[at + 1]?.dataset.name ?? options[at - 1]?.dataset.name ?? null;
+  await withPresetGesture(picker.note ?? ui.note, () => whileWriting(async () => {
+    // The content type is declared even though a delete carries no body, because every
+    // route in the table that changes something requires it - the rule is about the
+    // request being a deliberate one from a page that meant it, not about there being
+    // JSON to read. Without it the server answers 415 and the entry stays in the list,
+    // which is exactly how this arrived: section 19 deleted nothing and said so.
+    const res = await fetch(`/presets/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!res.ok) throw new Error(`${res.status} ${(await res.text()).trim() || res.statusText}`);
+    // The chosen name goes with the document it named. Leaving it on the trigger would
+    // leave `apply` pointed at a preset the server would answer 404 for.
+    if (picker.trigger.value === name) picker.trigger.value = '';
+    await refreshPresets();
+  })).catch((err) => {
+    if (picker.note) picker.note.textContent = `could not delete ${name}: ${err.message}`;
+    else showTimelineError(err);
+    console.error(err);
+  });
+  if (picker.list.hidden) return;
+  const back = successor
+    ? picker.list.querySelector(`.pickeroption[data-name="${CSS.escape(successor)}"]`)
+    : null;
+  if (back) back.focus();
+  else closePicker(picker, { restoreFocus: true });
+}
+
+definePicker(ui.preset, document.getElementById('tPresetList'), { adds: 'tPresetAdd', autoApply: true });
+
+// A press outside any open list shuts it, which is what makes this behave like the menu it
+// replaces rather than like a box that has to be dismissed by its own control.
+addEventListener('pointerdown', (event) => {
+  for (const picker of pickers) {
+    if (!picker.list.hidden && !picker.trigger.contains(event.target) && !picker.list.contains(event.target)) {
+      closePicker(picker);
+    }
+  }
+});
+
 async function refreshPresets() {
   const list = await documentsIn('presets');
   // Both selectors, because the preset library is one library and the recorder is
@@ -9298,14 +10567,21 @@ async function refreshPresets() {
   // grade towards is the whole reason presets are a library rather than two
   // hardcoded modes. The two are never visible at once, so this is one list with two
   // views rather than two lists that could drift.
-  for (const el of [ui.preset, ui.recPreset]) {
-    el.replaceChildren(new Option('—', ''));
-    // A shipped look is marked rather than segregated into its own group, because it
-    // is the same kind of document and saving over one forks it: a separator implying
-    // two libraries would be describing the storage rather than what you can do. The
-    // value stays the bare name, so everything downstream is unchanged.
-    for (const doc of list) el.appendChild(new Option(doc.builtin ? `${doc.name} ·` : doc.name, doc.name));
-    if (appliedPreset) el.value = appliedPreset.name;
+  // A shipped look is marked rather than segregated into its own group, because it is
+  // the same kind of document and saving over one forks it: a separator implying two
+  // libraries would be describing the storage rather than what you can do. The value
+  // stays the bare name, so everything downstream is unchanged.
+  for (const picker of pickers) {
+    buildPicker(picker, list);
+    // Only when the applied preset is still in the library. It is not, the moment one is
+    // deleted - and writing a name the list no longer offers back onto the trigger would
+    // leave `apply` aimed at a document the server answers 404 for, which is the state
+    // the delete above is careful to leave the trigger out of.
+    if (appliedPreset && list.some((doc) => doc.name === appliedPreset.name)) {
+      showPickerChoice(picker, appliedPreset.name);
+    } else {
+      paintPicker(picker);
+    }
   }
   return list;
 }
@@ -9404,7 +10680,7 @@ async function importPresetFile(file) {
 let offeredWorkingBody = null;
 
 function offerWorkingDocument(projects) {
-  ui.resume.hidden = true;
+  if (ui.resume) ui.resume.hidden = true;
   offeredWorkingBody = null;
   const working = projects?.find((doc) => doc.name === WORKING_PROJECT);
   if (!working) return;
@@ -9433,31 +10709,36 @@ function offerWorkingDocument(projects) {
   // The store still has one slot, so a reload before the offer is taken still loses the
   // older document - that is a property of autosaving to a single name and is not what
   // this is fixing. What is fixed is a button that advertised one thing and did another.
+  if (!ui.resume) return;
   offeredWorkingBody = JSON.parse(JSON.stringify(working.body));
-  ui.resumeWhen.textContent = `autosaved ${new Date(working.savedAt).toLocaleString()}`;
+  if (ui.resumeWhen) ui.resumeWhen.textContent = `autosaved ${new Date(working.savedAt).toLocaleString()}`;
   ui.resume.hidden = false;
 }
 
 async function refreshProjects() {
   const list = await documentsIn('projects');
-  ui.project.replaceChildren(new Option('—', ''));
-  // The auto-save is not a document anybody chose, and it is always the newest file
-  // in the directory, so listing it beside real projects offers "the thing you were
-  // just doing" under a name that reads like a mistake. It stays on disk and stays
-  // loadable by name; it is simply not something the picker proposes.
-  for (const doc of list) {
-    if (doc.name === WORKING_PROJECT) continue;
-    ui.project.appendChild(new Option(doc.name, doc.name));
+  if (ui.project) {
+    ui.project.replaceChildren(new Option('—', ''));
+    // The auto-save is not a document anybody chose, and it is always the newest file
+    // in the directory, so listing it beside real projects offers "the thing you were
+    // just doing" under a name that reads like a mistake. It stays on disk and stays
+    // loadable by name; it is simply not something the picker proposes.
+    for (const doc of list) {
+      if (doc.name === WORKING_PROJECT) continue;
+      ui.project.appendChild(new Option(doc.name, doc.name));
+    }
   }
   return list;
 }
 
 async function refreshDeliverables() {
   const list = await documentsIn('deliverables');
-  const current = ui.deliverable.value;
-  ui.deliverable.replaceChildren(new Option('—', ''));
-  for (const doc of list) ui.deliverable.appendChild(new Option(doc.name, doc.name));
-  if (list.some((d) => d.name === current)) ui.deliverable.value = current;
+  if (ui.deliverable) {
+    const current = ui.deliverable.value;
+    ui.deliverable.replaceChildren(new Option('—', ''));
+    for (const doc of list) ui.deliverable.appendChild(new Option(doc.name, doc.name));
+    if (list.some((d) => d.name === current)) ui.deliverable.value = current;
+  }
   return list;
 }
 
@@ -9475,6 +10756,7 @@ async function refreshDeliverables() {
  * clip is actually on" rather than "the one somebody remembered to record".
  */
 function showAdoptedDeliverable(name) {
+  if (!ui.deliverable) return;
   ui.deliverable.value = name;
   ui.deliverable.dataset.adopted = name;
 }
@@ -9534,6 +10816,8 @@ ui.beds.addEventListener('pointerdown', (e) => {
     // Read before anything in the drag can change it - see `view.duration`.
     duration: timeline.duration,
   };
+  // Clear mark selection when selecting a keyframe
+  if (selectedMark) { selectedMark = null; paintMarks(); }
   selection = { owner: el.__row.owner, key: el.__key };
   lanesChanged();
 });
@@ -9765,6 +11049,47 @@ function paintEase() {
   ui.ease.classList.toggle('off', !selected);
   for (const btn of ui.ease.querySelectorAll('button[data-ease]')) btn.disabled = !shapeable;
   ui.deleteKey.disabled = !selected;
+  // A third condition, and deliberately not `selected`: walking to the next key is
+  // meaningful the moment the track has one to walk to, and it is how you *reach* a key
+  // in order to select it. Tying it to a selection would make the control that finds a
+  // key require a key to have been found.
+  ui.prevKey.disabled = neighbourKeyTime(-1) === null;
+  ui.nextKey.disabled = neighbourKeyTime(1) === null;
+}
+
+/**
+ * The nearest key strictly before or after the playhead on the selected parameter's
+ * track, or null when there is none that way.
+ *
+ * Strictly, and by more than the key tolerance: a key the playhead is already sitting on
+ * is not somewhere to go, and `keyAt` uses the same tolerance to decide the playhead is
+ * *at* a key, so anything closer than that would be a press that appears to do nothing.
+ * The owner is the selection's when there is one and the retime otherwise, because the
+ * retime curve is the one track that exists without anything in the panel being chosen.
+ */
+function neighbourKeyTime(direction) {
+  if (!timeline) return null;
+  // The fallback is the whole of what makes these buttons a way to *reach* a key. With
+  // `null` here they were dead until a key had already been selected, which is a control
+  // for finding something that first has to be found - and it left the retime keys of an
+  // opened project unreachable by anything but a click in the lane, on the one track that
+  // is always there whether or not the panel has a parameter chosen.
+  const owner = selection?.owner ?? 'retime';
+  const now = playheadSec();
+  const tol = keyTolerance();
+  const times = keysOf(owner)
+    .map((k) => k.t)
+    .filter((t) => (direction < 0 ? t < now - tol : t > now + tol));
+  if (times.length === 0) return null;
+  return direction < 0 ? Math.max(...times) : Math.min(...times);
+}
+
+for (const [button, direction] of [[ui.prevKey, -1], [ui.nextKey, 1]]) {
+  button.addEventListener('click', () => {
+    const t = neighbourKeyTime(direction);
+    if (t === null) return;
+    goTo(t);
+  });
 }
 
 ui.deleteKey.addEventListener('click', () => { deleteSelectedKey(); });
@@ -9803,7 +11128,7 @@ function paintKeyButton(name, btn) {
 
 // The retime's own key control, beside the speed slider rather than in a lane,
 // because the lane only exists once there is a curve to draw in it.
-ui.rateKey.addEventListener('click', () => {
+ui.rateKey?.addEventListener('click', () => {
   if (!timeline) return;
   const t = playheadSec();
   const tol = keyTolerance();
@@ -9839,11 +11164,36 @@ ui.rateKey.addEventListener('click', () => {
 });
 
 function paintRateKey() {
+  if (!ui.rateKey) return;
   const t = playheadSec();
   const tol = keyTolerance();
   ui.rateKey.dataset.kf = retime.keys.length === 0
     ? 'none'
     : (retime.keys.some((k) => Math.abs(k.t - t) <= tol) ? 'here' : 'some');
+}
+
+/** Updates the mark button icon: filled when playhead is on a mark, stroked otherwise. */
+function paintMarkButton() {
+  if (!ui.mark) return;
+  const t = playheadSec();
+  const tol = keyTolerance();
+  // Marks are stored in source milliseconds. Convert each to program time and compare.
+  const onMark = takeMarks.some((m) => {
+    const program = retime.programSecAt(m.sourceMs / 1000);
+    return Math.abs(program - t) <= tol;
+  });
+  // Toggle between stroked (default) and filled (on mark) by updating the SVG path.
+  const svg = ui.mark.querySelector('svg');
+  if (!svg) return;
+  const path = svg.querySelector('path');
+  if (!path) return;
+  if (onMark) {
+    path.setAttribute('fill', 'currentColor');
+    path.setAttribute('stroke', 'none');
+  } else {
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', 'currentColor');
+  }
 }
 
 // --------------------------------------------- composition in the world
@@ -9896,9 +11246,39 @@ const planVec = new THREE.Vector3();
 // Whether the furniture is on screen at all. Off in the live viewer, because there
 // is no clip there to compose.
 let chromeOn = false;
+let topViewVisible = true;
+let statsVisible = false;
+// The crop box and its handles, and with them the faint pass that shows what the box
+// is cutting.
+//
+// **A plain module flag rather than a `tag: 'view'` registry parameter**, which is the
+// one thing about it worth arguing. `spin` and `renderScale` are view parameters and
+// would have given this a generated row and the control sweep for free - but a generated
+// step row commits history on its `change`, so undo would start flipping furniture on and
+// off. Ctrl+Z means "put my edit back"; a second meaning for it is worse than a rule this
+// file states once. `topViewVisible` and `statsVisible` beside it are module flags for
+// the same reason.
+let showCropBox = false;
 // Whether anything has rendered since the furniture was last drawn, so a paint
 // that produced no image does not redraw a path over a frame that never changed.
 let chromeStale = false;
+
+// How faintly a cut point draws while the box is on screen, and the one function
+// allowed to write the uniform.
+//
+// **Derived on every call rather than assigned at the toggle**, because the two things
+// it reads change independently and from a long way apart: the button, an export, a
+// program-out boot. Assigning it at the button would mean every one of those places had
+// to remember to clear it, and the day one forgot is the day scaffolding renders into
+// somebody's deliverable. Read `chromeOn` and the flag together and the export path
+// clears it by clearing the chrome it already clears.
+//
+// Not "ghost": `readGhost` is a look treatment and the fade half of the geometry is the
+// ghost cloud, so the word is twice taken already.
+const CROP_FAINT = 0.14;
+function syncCropOutside() {
+  uniforms.cropOutside.value = chromeOn && showCropBox ? CROP_FAINT : 0;
+}
 
 const scratchVec = new THREE.Vector3();
 
@@ -10017,8 +11397,6 @@ function drawPlanCloud(rect) {
   const fy = uniforms.focal.value.y;
   const cx = uniforms.center.value.x;
   const cy = uniforms.center.value.y;
-  const near = uniforms.nearClip.value;
-  const far = uniforms.farClip.value;
   const s = planScale(rect);
   chromeCtx.fillStyle = 'rgba(232, 236, 241, 0.55)';
   for (let row = 0; row < DEPTH_H; row += PLAN_STRIDE) {
@@ -10026,11 +11404,13 @@ function drawPlanCloud(rect) {
       const mm = depth[row * DEPTH_W + col];
       if (mm === 0) continue;
       const z = mm * 0.001;
-      if (z < near || z > far) continue;
       // libfreenect2's pinhole model, the same one the vertex shader unprojects
       // with, and reading the same two uniforms so there is one set of intrinsics
-      // rather than two that can drift.
-      const wx = ((col + 0.5 - cx) / fx) * z;
+      // rather than two that can drift. The negation on x is the mirror correction the
+      // shader's `unproject` carries the reasoning for: the sensor's frames arrive
+      // horizontally flipped, and a plan drawn without it would put the room's left on
+      // the plan's right while the cloud beside it disagreed.
+      const wx = (-(col + 0.5 - cx) / fx) * z;
       const wy = -((row + 0.5 - cy) / fy) * z;
       // All four lateral faces, applied here for the same reason `near`/`far` are: a
       // plan that drew points the renderer discards would be a second view disagreeing
@@ -10051,8 +11431,12 @@ function drawPlanCloud(rect) {
       // shader has and has to be: the box is a place in the room in sensor metres, so
       // testing it against a rotated position would move all six faces every time the
       // room was levelled underneath them.
-      if (wx < uniforms.cropL.value || wx > uniforms.cropR.value) continue;
-      if (wy < uniforms.cropB.value || wy > uniforms.cropT.value) continue;
+      //
+      // Through `croppedOut` rather than spelled out here, which is also what carries
+      // the `crop` switch into this view: a plan still culling by the faces while the
+      // picture had released them would be the disagreement this test exists to stop,
+      // arriving from the other direction.
+      if (croppedOut(wx, wy, z)) continue;
       // A top-down of a canted room drawn about the sensor's axes is a slanted section
       // labelled TOP-DOWN, and that is what this drew before levelling existed: the
       // second visible symptom of the same bug, and the reason this loop needs the
@@ -10065,6 +11449,392 @@ function drawPlanCloud(rect) {
       chromeCtx.fillRect(px, py, 1, 1);
     }
   }
+}
+
+// ------------------------------------------------------------- the crop box
+
+// Six numbers describe a box and nothing on screen was ever that box. You found out
+// where a face had landed by what disappeared, which makes framing a subject a
+// guess-and-check loop against a boundary that is invisible by construction - the
+// points that would have shown you where it is are exactly the ones it removed.
+//
+// So the box is drawn, and its faces are dragged. Both happen on the chrome canvas
+// rather than as an object in the scene, and that is the same argument the top-down
+// makes one screen up: furniture that lives in the scene has to be remembered out of
+// every path that produces a picture somebody keeps, and this one would go through the
+// bloom and the grade on its way there. On its own canvas it cannot reach an exported
+// pixel at all, so there is no flag to forget.
+//
+// What that costs is depth: a projected wireframe draws over the cloud rather than
+// being occluded by it. The faint pass is what gives it back, and gives back more than
+// a depth test would - where the box's plane cuts through the subject, the boundary
+// between full points and dim ones *is* the intersection, drawn by the cloud itself at
+// the resolution the cloud has.
+
+// Indexed `axis * 2 + side`, side 0 being the low face. The order is the order the
+// panel lists them in, and the depth pair carries `flip` because a room's z runs
+// backwards from a sensor's depth: `near` at 0.5m is the plane at z = -0.5.
+const CROP_FACES = [
+  { param: 'left', axis: 0, side: 0, flip: false },
+  { param: 'right', axis: 0, side: 1, flip: false },
+  { param: 'bottom', axis: 1, side: 0, flip: false },
+  { param: 'top', axis: 1, side: 1, flip: false },
+  { param: 'far', axis: 2, side: 0, flip: true },
+  { param: 'near', axis: 2, side: 1, flip: true },
+];
+
+// A corner is three bits, one per axis, set when that axis is at its high bound. An
+// edge varies along one axis and fixes the other two, which is also what names the two
+// faces it belongs to - so the twelve edges and their face pairs are derived from that
+// definition rather than typed out, and a typo in a hand-written table cannot put an
+// edge between two faces that do not meet.
+const CROP_EDGES = [];
+for (let axis = 0; axis < 3; axis++) {
+  const b = (axis + 1) % 3;
+  const c = (axis + 2) % 3;
+  for (const sb of [0, 1]) {
+    for (const sc of [0, 1]) {
+      const from = (sb << b) | (sc << c);
+      CROP_EDGES.push({ from, to: from | (1 << axis), faces: [b * 2 + sb, c * 2 + sc] });
+    }
+  }
+}
+
+// The four corners of each face, in ring order, as indices into the corner array.
+const CROP_FACE_CORNERS = CROP_FACES.map(({ axis, side }) => {
+  const b = (axis + 1) % 3;
+  const c = (axis + 2) % 3;
+  const base = side << axis;
+  return [base, base | (1 << b), base | (1 << b) | (1 << c), base | (1 << c)];
+});
+
+// Reused across the drawing and the hit test, which both run on every paint. One name
+// per role rather than two shared ones: the previous shape had `cropSegment` and its
+// caller writing the same vector, which is a bug that only shows up as a face drawn in
+// the wrong place once somebody reorders two lines.
+const cropCorners = Array.from({ length: 8 }, () => new THREE.Vector3());
+const cropSegA = new THREE.Vector3();
+const cropSegB = new THREE.Vector3();
+const cropCentre = new THREE.Vector3();
+const cropNormal = new THREE.Vector3();
+const cropProbe = new THREE.Vector3();
+const cropEye = new THREE.Vector3();
+
+// The face being dragged, or null. Declared up here beside the geometry rather than
+// with the pointer handlers below, because the drawing reads it to mark which handle is
+// held and a `let` read before its declaration is evaluated throws.
+let cropDrag = null;
+
+/** The box's low and high bounds per axis, in sensor metres. */
+function cropBoxBounds() {
+  return {
+    lo: [uniforms.cropL.value, uniforms.cropB.value, -uniforms.farClip.value],
+    hi: [uniforms.cropR.value, uniforms.cropT.value, -uniforms.nearClip.value],
+  };
+}
+
+/**
+ * The eight corners of the box, in the room's frame.
+ *
+ * **The rotation is the whole of this function and the reason it exists.** The crop is
+ * tested on the undisplaced sensor-space position, before the model matrix, while the
+ * cloud it is cutting carries `worldTilt` - so the box a levelled room actually has is
+ * the sensor's axis-aligned box turned by that quaternion, and a drawing that skipped
+ * the turn would be a box in one frame over points in another. The top-down's old crop
+ * rectangle did exactly that, and on a canted take it sat visibly beside the cloud it
+ * was describing.
+ */
+function cropBoxCorners() {
+  const { lo, hi } = cropBoxBounds();
+  for (let i = 0; i < 8; i++) {
+    cropCorners[i].set(
+      (i & 1) ? hi[0] : lo[0],
+      (i & 2) ? hi[1] : lo[1],
+      (i & 4) ? hi[2] : lo[2],
+    ).applyQuaternion(worldTilt);
+  }
+  return cropCorners;
+}
+
+/** A face's outward normal in the room's frame, written into `out`. */
+function cropFaceNormal(face, out) {
+  return out
+    .set(face.axis === 0 ? 1 : 0, face.axis === 1 ? 1 : 0, face.axis === 2 ? 1 : 0)
+    .multiplyScalar(face.side === 1 ? 1 : -1)
+    .applyQuaternion(worldTilt);
+}
+
+/**
+ * How a room-space point lands in the view being drawn, in stage pixels.
+ *
+ * One signature for both views, because everything below - the edges, the handles, the
+ * leverage test and the drag itself - is the same geometry seen through a different
+ * projection, and writing it twice is how the two would come to disagree about which
+ * face you grabbed.
+ */
+function cropProjector(plan, rect) {
+  if (plan) return (p) => planPoint(rect, p.x, p.z);
+  const stage = { x: 0, y: 0, ...stageSize() };
+  return (p) => projectThrough(p.toArray(), viewCamera, stage);
+}
+
+/**
+ * A segment of the box, clipped so it can be drawn at all.
+ *
+ * `projectThrough` answers per point and answers `null` behind the camera, which is
+ * right for a node and wrong for an edge: an edge with one end behind the eye is not
+ * absent, it is shortened, and dropping it makes the box lose whole sides whenever you
+ * orbit inside it. So the perspective case clips against the near plane in view space
+ * first and projects what survives. The plan has no eye to be behind and needs none.
+ */
+function cropSegment(a, b, plan, rect, project) {
+  if (plan) return [project(a), project(b)];
+  const va = cropSegA.copy(a).applyMatrix4(viewCamera.matrixWorldInverse);
+  const vb = cropSegB.copy(b).applyMatrix4(viewCamera.matrixWorldInverse);
+  // View space looks down -z, so a point in front of the near plane has z below it.
+  const near = -(viewCamera.near + 1e-4);
+  if (va.z > near && vb.z > near) return null;
+  if (va.z > near) va.lerp(vb, (va.z - near) / (va.z - vb.z));
+  else if (vb.z > near) vb.lerp(va, (vb.z - near) / (vb.z - va.z));
+  const { w, h } = stageSize();
+  const at = (v) => {
+    v.applyMatrix4(viewCamera.projectionMatrix);
+    return { x: (w * (v.x + 1)) / 2, y: (h * (1 - v.y)) / 2 };
+  };
+  return [at(va), at(vb)];
+}
+
+/** Sutherland-Hodgman against one half-plane, used for both the near plane and the frame. */
+function clipPolygon(points, inside, intersect) {
+  const out = [];
+  for (let i = 0; i < points.length; i++) {
+    const cur = points[i];
+    const prev = points[(i + points.length - 1) % points.length];
+    const curIn = inside(cur);
+    const prevIn = inside(prev);
+    if (curIn !== prevIn) out.push(intersect(prev, cur));
+    if (curIn) out.push(cur);
+  }
+  return out;
+}
+
+/**
+ * The middle of a projected face.
+ *
+ * The area centroid where there is an area, and **the mean of the points where there is
+ * not, which is the case that matters rather than a guard.** Seen from directly above,
+ * the four upright faces of a box are lines: the top-down collapses exactly the axis
+ * they have no extent along, so their projected quads have zero area and an area
+ * centroid divides by it. Those four are `left`, `right`, `near` and `far` - which is to
+ * say every face the plan exists to let you drag. Returning null there gave the top-down
+ * no handles at all.
+ */
+function polygonCentroid(points) {
+  if (points.length === 0) return null;
+  let area = 0;
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    const q = points[(i + 1) % points.length];
+    const cross = p.x * q.y - q.x * p.y;
+    area += cross;
+    cx += (p.x + q.x) * cross;
+    cy += (p.y + q.y) * cross;
+  }
+  if (Math.abs(area) > 1e-6) return { x: cx / (3 * area), y: cy / (3 * area) };
+  let mx = 0;
+  let my = 0;
+  for (const p of points) { mx += p.x; my += p.y; }
+  return { x: mx / points.length, y: my / points.length };
+}
+
+// Below this a face is too edge-on to drag: one metre of movement would travel fewer
+// than this many pixels, so the pointer has nothing to resolve the distance against and
+// a drag would jump by metres per pixel. Stated in pixels per metre because that is the
+// quantity the drag divides by, and it is the same test that decides whether a handle is
+// offered at all - a handle you can see but cannot usefully move is worse than none.
+//
+// Six, which is a seventh of the top-down's own resolution. The inset shows seven metres
+// across a hundred and eighteen pixels, so its faces sit at about 17 px/m and everything
+// it can draw at all clears this comfortably - a threshold set near that number would
+// mean resizing the inset by a few pixels silently took its handles away. What it does
+// still refuse is the genuinely degenerate case: a face pointing straight at the eye
+// projects its own movement onto nothing, which is why the far plane offers no handle
+// head-on and why the top-down offers none for `bottom` and `top`. That last one is the
+// old "a plan has no y" rule arriving as a consequence rather than as a special case,
+// and it stays right on a levelled take, where the rotation gives the vertical faces
+// some plan leverage back and the rule hands them a handle without being told to.
+const CROP_LEVERAGE_MIN = 6;
+const CROP_GRAB_PX = 11;
+
+/**
+ * Where each face's handle sits and how far a metre of it travels on screen.
+ *
+ * The handle is the centroid of the face **as the frame actually shows it** rather than
+ * the centre of the face itself, and that is not a refinement. A face sitting at its
+ * `CROP_LIMIT` default is seven metres out: its true centre is off the stage or behind
+ * the eye, so a handle drawn there is a handle nobody can reach on the one face most
+ * likely to need pulling in. Clipped first, the handle walks along the face and stays
+ * on the part of it you can see.
+ */
+function cropHandles(plan, rect) {
+  // Nothing to grab while nothing is drawn, and this is the function that says so
+  // rather than each of its three callers. The drawing, the hit test and the handle
+  // list a check reads are then one answer: a build that offered a handle over an
+  // invisible box would be offering a press with nothing on screen to explain it.
+  if (!showCropBox) return [];
+  const corners = cropBoxCorners();
+  const project = cropProjector(plan, rect);
+  const frame = plan
+    ? { x: rect.x, y: rect.y, w: rect.w, h: rect.h }
+    : { x: 0, y: 0, ...stageSize() };
+  const near = -(viewCamera.near + 1e-4);
+  const out = [];
+  for (let f = 0; f < CROP_FACES.length; f++) {
+    const face = CROP_FACES[f];
+    let poly = CROP_FACE_CORNERS[f].map((i) => corners[i]);
+    if (!plan) {
+      // Against the near plane in view space, then projected. The order matters: a quad
+      // straddling the eye has no projection to clip.
+      poly = poly.map((p) => p.clone().applyMatrix4(viewCamera.matrixWorldInverse));
+      poly = clipPolygon(poly, (p) => p.z <= near, (a, b) => a.clone().lerp(b, (a.z - near) / (a.z - b.z)));
+      if (poly.length < 3) continue;
+      poly = poly.map((p) => {
+        const q = p.clone().applyMatrix4(viewCamera.projectionMatrix);
+        return { x: frame.w * (q.x + 1) / 2, y: frame.h * (1 - q.y) / 2 };
+      });
+    } else {
+      poly = poly.map((p) => project(p));
+      if (poly.some((p) => !p)) continue;
+    }
+    for (const [inside, cut] of [
+      [(p) => p.x >= frame.x, (a, b) => lerpPoint(a, b, (frame.x - a.x) / (b.x - a.x))],
+      [(p) => p.x <= frame.x + frame.w, (a, b) => lerpPoint(a, b, (frame.x + frame.w - a.x) / (b.x - a.x))],
+      [(p) => p.y >= frame.y, (a, b) => lerpPoint(a, b, (frame.y - a.y) / (b.y - a.y))],
+      [(p) => p.y <= frame.y + frame.h, (a, b) => lerpPoint(a, b, (frame.y + frame.h - a.y) / (b.y - a.y))],
+    ]) {
+      poly = clipPolygon(poly, inside, cut);
+      if (poly.length < 3) break;
+    }
+    const at = polygonCentroid(poly);
+    if (!at) continue;
+
+    // How far one metre along the face's own normal moves that point, as a screen
+    // vector. It is the drag's scale and its direction at once, and its length is the
+    // leverage test - so the answer to "can this be dragged" and the answer to "by how
+    // much" are the same measurement rather than two that could disagree.
+    const normal = cropFaceNormal(face, cropNormal);
+    // Probed at the face's own middle where that lands in the picture, and at whichever
+    // of its corners does when it does not. A face reaching past the eye has a middle
+    // with no projection - the near plane at five centimetres is one on any normal orbit
+    // - and skipping it there would take the handle off a face that is perfectly visible
+    // and perfectly draggable along the part of it you can see.
+    let centre = cropFaceCentre(f, corners, cropCentre);
+    let a = project(centre);
+    if (!a) {
+      for (const i of CROP_FACE_CORNERS[f]) {
+        a = project(corners[i]);
+        if (a) { centre = cropCentre.copy(corners[i]); break; }
+      }
+    }
+    if (!a) continue;
+    // A quarter of a metre rather than a whole one, so the probe stays in front of the
+    // camera on a face already close to it, and scaled back up afterwards. A perspective
+    // projection is not linear, but over a quarter metre against a box metres across the
+    // difference is far below the pixel this is measured in.
+    const b = project(cropProbe.copy(centre).addScaledVector(normal, 0.25));
+    if (!b) continue;
+    const sx = (b.x - a.x) * 4;
+    const sy = (b.y - a.y) * 4;
+    if (Math.hypot(sx, sy) < CROP_LEVERAGE_MIN) continue;
+    out.push({ face: f, param: face.param, at, sx, sy });
+  }
+  return out;
+}
+
+function lerpPoint(a, b, t) {
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
+/** The middle of a face, in the room's frame. */
+function cropFaceCentre(f, corners, out) {
+  const ring = CROP_FACE_CORNERS[f];
+  out.set(0, 0, 0);
+  for (const i of ring) out.add(corners[i]);
+  return out.multiplyScalar(0.25);
+}
+
+/**
+ * The box, its faces shaded by which way they face, and its handles.
+ *
+ * The back edges are drawn thinner and dimmer because a wireframe box with every edge
+ * equal is a Necker cube: it reads inside-out as readily as the right way round, and a
+ * box you cannot tell the orientation of is worse than useless when the whole job is
+ * judging where its faces sit relative to a subject. An edge is at the back when both
+ * faces meeting along it are, which is exact for a box because a box is convex.
+ */
+function drawCropBox(plan, rect) {
+  const corners = cropBoxCorners();
+  const project = cropProjector(plan, rect);
+  const cutting = uniforms.cropOn.value === 1;
+
+  // Front-facing is decided from the eye in the picture and from straight above in the
+  // plan, which is what makes the plan's answer "the floor and ceiling faces are the
+  // back ones" rather than an accident of where the camera happens to be.
+  if (plan) cropEye.set(0, 1000, 0);
+  else viewCamera.getWorldPosition(cropEye);
+  const frontFacing = CROP_FACES.map((face, f) => {
+    const centre = cropFaceCentre(f, corners, cropCentre);
+    const normal = cropFaceNormal(face, cropNormal);
+    return normal.dot(cropProbe.copy(cropEye).sub(centre)) > 0;
+  });
+
+  chromeCtx.save();
+  // Amber, the colour the top-down's rectangle already used for this - and dashed while
+  // the crop is released, so the one state where the box is a drawing of something not
+  // happening says so without a second control to read.
+  const hue = cutting ? '240, 176, 74' : '150, 160, 172';
+  if (!cutting) chromeCtx.setLineDash([4, 3]);
+  for (const edge of CROP_EDGES) {
+    const back = !frontFacing[edge.faces[0]] && !frontFacing[edge.faces[1]];
+    const seg = cropSegment(corners[edge.from], corners[edge.to], plan, rect, project);
+    if (!seg || !seg[0] || !seg[1]) continue;
+    chromeCtx.strokeStyle = `rgba(${hue}, ${back ? 0.28 : 0.9})`;
+    chromeCtx.lineWidth = back ? 0.75 : 1.2;
+    chromeCtx.beginPath();
+    chromeCtx.moveTo(seg[0].x, seg[0].y);
+    chromeCtx.lineTo(seg[1].x, seg[1].y);
+    chromeCtx.stroke();
+  }
+
+  chromeCtx.setLineDash([]);
+  for (const handle of cropHandles(plan, rect)) {
+    const held = cropDrag && cropDrag.param === handle.param;
+    chromeCtx.beginPath();
+    chromeCtx.rect(handle.at.x - 3.5, handle.at.y - 3.5, 7, 7);
+    chromeCtx.fillStyle = '#0d1014';
+    chromeCtx.fill();
+    chromeCtx.strokeStyle = held ? '#e8ecf1' : `rgba(${hue}, 0.95)`;
+    chromeCtx.lineWidth = 1.4;
+    chromeCtx.stroke();
+  }
+
+  // **On the recorder the box is a preview and has to say so.** `near`/`far` there are
+  // viewer uniforms and reach nothing the grabber is writing - that is the whole of the
+  // `nearClip` versus `--min-depth` distinction, and `#recRange` carries the warning
+  // under the sliders for exactly this reason. A confident box drawn over a live sensor
+  // reads as "this is the frame I am shooting", which is the one misreading that costs
+  // footage, so the words come with the drawing rather than being left to a note in a
+  // panel that may be scrolled away or hidden.
+  // Top left rather than along the bottom, where the recorder already prints its
+  // keyboard hints and the two overprinted each other into an unreadable smear.
+  if (!plan && !EDITING) {
+    chromeCtx.fillStyle = `rgba(${hue}, 0.9)`;
+    chromeCtx.font = '9px ui-monospace, Menlo, monospace';
+    chromeCtx.fillText('CROP BOX · PREVIEW ONLY, NOT WHAT IS RECORDED', 8, 16);
+  }
+  chromeCtx.restore();
 }
 
 function drawChrome() {
@@ -10089,19 +11859,30 @@ function drawChrome() {
   const path = pathPoints();
 
   // ── over the picture: the path, its nodes and the shot the program camera has.
-  chromeCtx.lineWidth = 1.4;
-  chromeCtx.strokeStyle = 'rgba(90, 209, 196, 0.85)';
-  strokePolyline(path.map((p) => projectThrough(p, viewCamera, stage)));
-  chromeCtx.strokeStyle = 'rgba(255, 157, 90, 0.9)';
-  chromeCtx.lineWidth = 1;
-  for (const [a, b] of frustumSegments()) {
-    strokePolyline([projectThrough(a, viewCamera, stage), projectThrough(b, viewCamera, stage)]);
+  // Editor only - the recorder has no clip to compose and no path to show.
+  if (EDITING) {
+    chromeCtx.lineWidth = 1.4;
+    chromeCtx.strokeStyle = 'rgba(90, 209, 196, 0.85)';
+    strokePolyline(path.map((p) => projectThrough(p, viewCamera, stage)));
+    chromeCtx.strokeStyle = 'rgba(255, 157, 90, 0.9)';
+    chromeCtx.lineWidth = 1;
+    for (const [a, b] of frustumSegments()) {
+      strokePolyline([projectThrough(a, viewCamera, stage), projectThrough(b, viewCamera, stage)]);
+    }
+    drawNodes((p) => projectThrough(p, viewCamera, stage));
   }
-  drawNodes((p) => projectThrough(p, viewCamera, stage));
 
   // ── the top-down. A camera move is the one thing you cannot judge from inside
   // the camera, so this is where the path is actually edited.
   const rect = insetRect();
+
+  // The box over the picture, and **outside the `EDITING` branch above deliberately**:
+  // the path and its nodes belong to a clip and the recorder has none, but framing a
+  // shot is exactly what the recorder is for and the box is the same box there. Drawn
+  // before the inset so the top-down lands on top of it rather than under it.
+  if (showCropBox) drawCropBox(false, rect);
+
+  if (topViewVisible) {
   chromeCtx.save();
   chromeCtx.beginPath();
   chromeCtx.rect(rect.x, rect.y, rect.w, rect.h);
@@ -10122,30 +11903,16 @@ function drawChrome() {
 
   drawPlanCloud(rect);
 
-  // The crop box, in the one view that can show where it sits in the room. Drawn only
-  // when it is actually cropping something, so a clip nobody has trimmed does not get
-  // a rectangle around the whole plan implying it has been.
+  // The crop box from above, the same eight corners the picture draws.
   //
-  // Three of its four sides are the faces this view has: left, right, and the near and
-  // far planes. The fourth pair, bottom and top, is in y and a plan has no y - the note
-  // under the sliders says so rather than letting this rectangle read as the whole box.
-  {
-    const l = uniforms.cropL.value;
-    const r = uniforms.cropR.value;
-    const n = uniforms.nearClip.value;
-    const f = uniforms.farClip.value;
-    const reach = cropReach(f);
-    if (l > -reach.x || r < reach.x) {
-      const a = planPoint(rect, l, -n);
-      const b = planPoint(rect, r, -f);
-      chromeCtx.save();
-      chromeCtx.strokeStyle = 'rgba(240, 176, 74, 0.85)';
-      chromeCtx.setLineDash([4, 3]);
-      chromeCtx.lineWidth = 1;
-      chromeCtx.strokeRect(a.x, a.y, b.x - a.x, b.y - a.y);
-      chromeCtx.restore();
-    }
-  }
+  // **This used to be a rectangle of its own and decide for itself whether to appear**,
+  // drawn when `cropL`/`cropR` had moved off the reach. Both halves of that were wrong
+  // in the same way: it was a second rule about when the box is visible, which an
+  // explicit toggle would immediately disagree with, and it was a second piece of
+  // geometry, built straight from the uniforms without the levelling rotation the cloud
+  // beside it was carrying - so on a canted take the plan drew a box in the sensor's
+  // axes over a cloud in the room's.
+  if (showCropBox) drawCropBox(true, rect);
 
   chromeCtx.strokeStyle = 'rgba(90, 209, 196, 0.9)';
   chromeCtx.lineWidth = 1.4;
@@ -10168,10 +11935,107 @@ function drawChrome() {
   chromeCtx.fillStyle = '#6d7683';
   chromeCtx.font = '9px ui-monospace, Menlo, monospace';
   chromeCtx.fillText('TOP-DOWN', rect.x + 5, rect.y + rect.h - 5);
+  }
+
+  // ── stats overlay, below the top-down view or in its place when hidden.
+  if (statsVisible) {
+    const statsY = topViewVisible ? rect.y + rect.h + INSET.margin : rect.y;
+    const statsH = 156;
+    const statsRect = { x: rect.x, y: statsY, w: rect.w, h: statsH };
+
+    chromeCtx.fillStyle = 'rgba(13, 16, 20, 0.92)';
+    chromeCtx.fillRect(statsRect.x, statsRect.y, statsRect.w, statsRect.h);
+    chromeCtx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    chromeCtx.lineWidth = 1;
+    chromeCtx.strokeRect(statsRect.x + 0.5, statsRect.y + 0.5, statsRect.w - 1, statsRect.h - 1);
+
+    chromeCtx.font = '9px ui-monospace, Menlo, monospace';
+    const lineH = 11;
+    const col1 = statsRect.x + 8;
+    const col2 = statsRect.x + 90;
+    let y = statsRect.y + 12;
+
+    // Performance
+    chromeCtx.fillStyle = '#6d7683';
+    chromeCtx.fillText('PERF', col1, y);
+    chromeCtx.fillStyle = '#e8ecf1';
+    chromeCtx.fillText(`${fps.toFixed(1)} fps`, col2, y); y += lineH;
+    chromeCtx.fillStyle = '#6d7683';
+    chromeCtx.fillText('renders', col1, y);
+    chromeCtx.fillStyle = '#e8ecf1';
+    chromeCtx.fillText(`${counters.renders}`, col2, y); y += lineH;
+    chromeCtx.fillStyle = '#6d7683';
+    chromeCtx.fillText('frames in', col1, y);
+    chromeCtx.fillStyle = '#e8ecf1';
+    chromeCtx.fillText(`${framesSeen}`, col2, y); y += lineH;
+
+    // Resolution
+    chromeCtx.fillStyle = '#6d7683';
+    chromeCtx.fillText('output', col1, y);
+    chromeCtx.fillStyle = '#e8ecf1';
+    chromeCtx.fillText(`${targetSize.w}x${targetSize.h}`, col2, y); y += lineH;
+    chromeCtx.fillStyle = '#6d7683';
+    chromeCtx.fillText('buffer', col1, y);
+    chromeCtx.fillStyle = '#e8ecf1';
+    chromeCtx.fillText(`${Math.round(uniforms.bufferHeight.value)}p`, col2, y); y += lineH;
+
+    // Geometry
+    const drawCount = geometry.drawRange.count;
+    const shedding = drawCount > POINTS;
+    chromeCtx.fillStyle = '#6d7683';
+    chromeCtx.fillText('points', col1, y);
+    chromeCtx.fillStyle = '#e8ecf1';
+    chromeCtx.fillText(`${(drawCount / 1000).toFixed(0)}k${shedding ? ' +shed' : ''}`, col2, y); y += lineH;
+
+    // Post effects
+    const posts = [afterimage.enabled && 'trail', bloom.enabled && 'bloom', grade.enabled && 'grade'].filter(Boolean);
+    chromeCtx.fillStyle = '#6d7683';
+    chromeCtx.fillText('post', col1, y);
+    chromeCtx.fillStyle = '#e8ecf1';
+    chromeCtx.fillText(posts.length ? posts.join(' ') : 'none', col2, y); y += lineH;
+
+    // Timeline
+    if (timeline) {
+      chromeCtx.fillStyle = '#6d7683';
+      chromeCtx.fillText('time', col1, y);
+      chromeCtx.fillStyle = '#e8ecf1';
+      chromeCtx.fillText(`${timeline.programSec.toFixed(2)}s${timeline.playing ? ' \u25B6' : ''}`, col2, y); y += lineH;
+      chromeCtx.fillStyle = '#6d7683';
+      chromeCtx.fillText('tracks', col1, y);
+      chromeCtx.fillStyle = '#e8ecf1';
+      chromeCtx.fillText(`${tracks.size}`, col2, y); y += lineH;
+    }
+
+    // Undo
+    chromeCtx.fillStyle = '#6d7683';
+    chromeCtx.fillText('undo', col1, y);
+    chromeCtx.fillStyle = '#e8ecf1';
+    chromeCtx.fillText(`${history.depth}`, col2, y); y += lineH;
+
+    // Camera position
+    chromeCtx.fillStyle = '#6d7683';
+    chromeCtx.fillText('cam xyz', col1, y);
+    chromeCtx.fillStyle = '#e8ecf1';
+    const cp = viewCamera.position;
+    chromeCtx.fillText(`${cp.x.toFixed(1)} ${cp.y.toFixed(1)} ${cp.z.toFixed(1)}`, col2, y);
+  }
+
+  // ── recording indicator: a red outline around the viewport while recording.
+  if (recordState.recording) {
+    const inset = 2;
+    chromeCtx.strokeStyle = 'rgba(220, 38, 38, 0.9)';
+    chromeCtx.lineWidth = 4;
+    chromeCtx.strokeRect(inset, inset, w - inset * 2, h - inset * 2);
+  }
 }
 
 function placeChrome() {
   chromeCanvas.hidden = !chromeOn;
+  // Here because this is the line every path that takes the furniture off already runs -
+  // the export around its render, the program-out source at boot, a resize. The faint
+  // pass is furniture, so it leaves when the rest of it does without any of those places
+  // having to know it exists.
+  syncCropOutside();
   if (!chromeOn) return;
   chromeStale = true;
   drawChrome();
@@ -10202,49 +12066,10 @@ function viewUnder(clientX, clientY) {
   const y = clientY - canvas.top;
   if (x < 0 || y < 0 || x > canvas.width || y > canvas.height) return null;
   const inset = insetRect();
-  const plan = x >= inset.x && x <= inset.x + inset.w && y >= inset.y && y <= inset.y + inset.h;
+  const plan = topViewVisible
+    && x >= inset.x && x <= inset.x + inset.w && y >= inset.y && y <= inset.y + inset.h;
   return { plan, x, y };
 }
-
-// Floor selection is a one-shot mode because its first press is in the panel and the
-// point it names is in the picture. The state is visible on both ends of that gap: the
-// button changes face and the frame gets a crosshair cursor. `Escape` and pressing the
-// button again are explicit ways out, so hiding the panel or deciding not to select a
-// surface cannot strand the next orbit inside a mode the user forgot was armed.
-let levelSelectionArmed = false;
-
-function setLevelSelection(on, note) {
-  levelSelectionArmed = on;
-  ui.camLevel.setAttribute('aria-pressed', String(on));
-  ui.camLevel.textContent = on ? 'cancel selection' : 'select floor';
-  document.body.classList.toggle('selecting-level', on);
-  if (note) ui.levelNote.textContent = note;
-}
-
-// On the window and in capture phase for the same reason the node drag below lives
-// there: OrbitControls owns pointerdown on the canvas. The selecting press must reach
-// exactly one owner or the room levels while the camera begins orbiting underneath it.
-// Registered before the node handler, with stopImmediatePropagation, because the
-// editor's camera nodes are drawn over the same picture and floor selection wins while
-// it is visibly armed.
-addEventListener('pointerdown', (e) => {
-  if (!levelSelectionArmed || e.target !== renderer.domElement || e.button !== 0) return;
-  e.preventDefault();
-  e.stopImmediatePropagation();
-  const view = viewUnder(e.clientX, e.clientY);
-  if (!view) return;
-  if (chromeOn && view.plan) {
-    ui.levelNote.textContent = 'Select the floor in the main picture, outside the top-down inset.';
-    return;
-  }
-  const result = levelAtStagePoint(view.x, view.y);
-  if (!result.ok) {
-    ui.levelNote.textContent = `${result.reason}. Choose another point or press Escape to cancel.`;
-    return;
-  }
-  setLevelSelection(false,
-    `levelled on ${result.samples} samples, ${(result.rms * 1000).toFixed(1)}mm from flat`);
-}, true);
 
 function nodeUnder(view) {
   let best = null;
@@ -10321,7 +12146,102 @@ for (const type of ['pointerup', 'pointercancel']) {
   });
 }
 
-ui.camKey.addEventListener('click', () => {
+// ------------------------------------------------ dragging a face of the crop box
+
+/** The nearest crop handle to a press, in whichever view the press landed in. */
+function cropHandleUnder(view) {
+  const rect = insetRect();
+  let best = null;
+  for (const handle of cropHandles(view.plan, rect)) {
+    const d = Math.hypot(handle.at.x - view.x, handle.at.y - view.y);
+    if (d <= CROP_GRAB_PX && (!best || d < best.d)) best = { ...handle, d };
+  }
+  return best;
+}
+
+// The same gesture as the node drag above and for the same reasons: window-level
+// capture because OrbitControls listens on the canvas and registration order beats the
+// capture flag, and `finishOrbitDrift` before the hit test because a camera still
+// draining its release would be a different camera by the second move.
+//
+// Registered after the node handler so a camera node wins where the two overlap, and
+// `nodeDrag` is checked rather than relied on: the node handler calls `stopPropagation`,
+// which stops other elements and not other listeners on this one.
+addEventListener('pointerdown', (e) => {
+  if (!showCropBox || !chromeOn || nodeDrag) return;
+  if (e.target !== renderer.domElement || e.button !== 0) return;
+  finishOrbitDrift();
+  const view = viewUnder(e.clientX, e.clientY);
+  if (!view) return;
+  const hit = cropHandleUnder(view);
+  if (!hit) return;
+  e.preventDefault();
+  e.stopPropagation();
+  renderer.domElement.setPointerCapture(e.pointerId);
+  controls.enabled = false;
+  // **The projection is read once and held for the gesture**, which is the same rule the
+  // node drag's captured depth follows. Recomputing the leverage on every move would
+  // change the metres-per-pixel underneath a hand that had not changed what it was
+  // doing, so a steady drag would accelerate as the face turned away from the eye.
+  //
+  // The value is held too, and the move sets `from + delta` rather than accumulating.
+  // An accumulating drag walks: `params.set` snaps to the slider's step, so each move
+  // would compound the rounding of the one before it and the face would end up somewhere
+  // the pointer never asked for.
+  cropDrag = {
+    param: hit.param,
+    face: hit.face,
+    sx: hit.sx,
+    sy: hit.sy,
+    x: view.x,
+    y: view.y,
+    from: params.get(hit.param),
+    pointerId: e.pointerId,
+  };
+  chromeStale = true;
+  requestRepaint();
+}, true);
+
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (!cropDrag) return;
+  const canvas = renderer.domElement.getBoundingClientRect();
+  const x = e.clientX - canvas.left;
+  const y = e.clientY - canvas.top;
+  // How far the pointer travelled along the face's own normal, in metres. `(sx, sy)` is
+  // where one metre of the face lands on screen, so the pointer's component along it
+  // divided by its squared length is the distance in the face's units - which is also
+  // why a face too edge-on to have a usable `(sx, sy)` was never offered a handle.
+  const { sx, sy } = cropDrag;
+  const metres = ((x - cropDrag.x) * sx + (y - cropDrag.y) * sy) / (sx * sx + sy * sy);
+  const face = CROP_FACES[cropDrag.face];
+  // Outward is +axis for the high face of a pair and -axis for the low one, and the
+  // depth pair's parameter is the negation of its room coordinate - `near` at 0.5 is the
+  // plane at z = -0.5. Two sign flips, each derived from the table rather than written
+  // out per face, so the six faces cannot disagree about which way is out.
+  const coord = face.side === 1 ? metres : -metres;
+  params.set(cropDrag.param, cropDrag.from + (face.flip ? -coord : coord));
+  chromeStale = true;
+  // Never a render from here. `renderProgramFrame` advances navigation, so a handler
+  // that rendered would be asking for the next render itself and the drag would run at
+  // a fraction of the frame rate it was driving.
+  requestRepaint();
+});
+
+for (const type of ['pointerup', 'pointercancel']) {
+  renderer.domElement.addEventListener(type, () => {
+    if (!cropDrag) return;
+    cropDrag = null;
+    controls.enabled = viewCamera === freeCamera;
+    // One snapshot for the gesture, the way the sliders coalesce a drag onto `change`.
+    // Nothing is pushed if the face came back to where it started.
+    history.commit();
+    chromeStale = true;
+    requestRepaint();
+  });
+}
+
+// Camera keyframe handler used by both panel and timeline controls
+function keyCameraHere() {
   if (!timeline) return;
   const track = trackFor('camera');
   // The pose you are looking from, which is what makes orbiting to a shot and
@@ -10344,7 +12264,9 @@ ui.camKey.addEventListener('click', () => {
   lanesChanged();
   requestRepaint();
   history.commit();
-});
+}
+ui.camKey.addEventListener('click', keyCameraHere);
+ui.tCamKey?.addEventListener('click', keyCameraHere);
 
 ui.camClear.addEventListener('click', () => {
   const track = tracks.get('camera');
@@ -10440,100 +12362,15 @@ function sensorView() {
 
 ui.camSensor.addEventListener('click', () => { sensorView(); });
 
-// How far either side of the winning sample the plane is fitted, in depth pixels. At
-// two metres on this sensor's 366px focal length a 25x25 patch spans about 14cm -
-// wide enough that the fit is reading a surface rather than the depth quantisation,
-// narrow enough that a headliner does not take the windscreen in with it.
-const LEVEL_PATCH = 12;
-// How close to the selected point a sample has to land to be a candidate, in stage
-// pixels. Generous, because asking for sub-pixel aim on a cloud full of holes would
-// make a visible surface answer as though there were nothing under the pointer.
-const LEVEL_PICK_PX = 60;
-// The grid is walked at this stride hunting for the selected sample - two rather than
-// the plan view's four, because this decides which surface gets levelled and a miss
-// here is a wrong answer rather than a coarse drawing.
-const LEVEL_PICK_STRIDE = 2;
-// Below this many valid samples in the patch there is no plane to speak of. This is
-// the only thing that refuses: see `levelAtStagePoint` on why the flatness is reported
-// rather than judged.
-const LEVEL_MIN_SAMPLES = 32;
-
-const levelVec = new THREE.Vector3();
-const levelUp = new THREE.Vector3();
-const levelNormal = new THREE.Vector3();
-const levelInverse = new THREE.Quaternion();
-
-/**
- * The plane through a patch of the depth image around one sample, as a unit normal in
- * sensor metres, or null where the patch is too empty or too degenerate to have one.
- *
- * The normal is the smallest axis of the patch's covariance, taken by the determinant
- * route rather than by an eigen solver: for a 3x3 symmetric matrix the three cofactor
- * columns are each proportional to that axis, and the one belonging to the largest
- * determinant is the numerically stable one to read it off. That matters here rather
- * than being a micro-optimisation - a patch on a wall dead ahead is near-degenerate in
- * two of the three columns, and picking blindly reads the answer out of the noise.
- */
-function fitPatchNormal(col0, row0, depth, fx, fy, cx, cy, near, far) {
-  let n = 0;
-  let sx = 0;
-  let sy = 0;
-  let sz = 0;
-  const xs = [];
-  const ys = [];
-  const zs = [];
-  for (let row = Math.max(0, row0 - LEVEL_PATCH); row <= Math.min(DEPTH_H - 1, row0 + LEVEL_PATCH); row++) {
-    for (let col = Math.max(0, col0 - LEVEL_PATCH); col <= Math.min(DEPTH_W - 1, col0 + LEVEL_PATCH); col++) {
-      const mm = depth[row * DEPTH_W + col];
-      if (mm === 0) continue;
-      const z = mm * 0.001;
-      if (z < near || z > far) continue;
-      const x = ((col + 0.5 - cx) / fx) * z;
-      const y = -((row + 0.5 - cy) / fy) * z;
-      xs.push(x); ys.push(y); zs.push(-z);
-      sx += x; sy += y; sz += -z;
-      n++;
-    }
-  }
-  if (n < LEVEL_MIN_SAMPLES) return null;
-  const mx = sx / n;
-  const my = sy / n;
-  const mz = sz / n;
-  let xx = 0; let xy = 0; let xz = 0; let yy = 0; let yz = 0; let zz = 0;
-  for (let i = 0; i < n; i++) {
-    const dx = xs[i] - mx;
-    const dy = ys[i] - my;
-    const dz = zs[i] - mz;
-    xx += dx * dx; xy += dx * dy; xz += dx * dz;
-    yy += dy * dy; yz += dy * dz; zz += dz * dz;
-  }
-  const detX = yy * zz - yz * yz;
-  const detY = xx * zz - xz * xz;
-  const detZ = xx * yy - xy * xy;
-  const detMax = Math.max(detX, detY, detZ);
-  if (!(detMax > 0)) return null;
-  if (detMax === detX) levelNormal.set(detX, xz * yz - xy * zz, xy * yz - xz * yy);
-  else if (detMax === detY) levelNormal.set(xz * yz - xy * zz, detY, xy * xz - yz * xx);
-  else levelNormal.set(xy * yz - xz * yy, xy * xz - yz * xx, detZ);
-  if (levelNormal.lengthSq() === 0) return null;
-  levelNormal.normalize();
-  // How far the patch actually is from the plane it was given, in metres. Reported
-  // rather than used, for the reason `levelAtStagePoint` gives.
-  let sq = 0;
-  for (let i = 0; i < n; i++) {
-    const d = (xs[i] - mx) * levelNormal.x + (ys[i] - my) * levelNormal.y + (zs[i] - mz) * levelNormal.z;
-    sq += d * d;
-  }
-  return { normal: levelNormal, samples: n, rms: Math.sqrt(sq / n) };
-}
-
 /**
  * Writes both world-rotation controls as one interaction.
  *
- * This is the door used by both the plane selection and reset. Keeping them on the
- * same `writeFromControl` path matters when either angle is keyed: a direct registry
- * reset would be overwritten on the next evaluated frame while its button and sliders
- * briefly claimed it had succeeded.
+ * The pair is written through `writeFromControl` rather than straight into the
+ * registry, and that matters when either angle is keyed: a direct registry write would
+ * be overwritten on the next evaluated frame while the button and its sliders briefly
+ * claimed it had succeeded. The two angles go in one commit for the same reason they
+ * are one gesture - an undo after `reset rotation` puts the room back where it was,
+ * rather than handing back one axis and leaving the other at neutral.
  */
 function writeWorldRotation(tilt, roll) {
   writeFromControl('roll', roll);
@@ -10547,126 +12384,7 @@ function resetWorldRotation() {
   return writeWorldRotation(0, 0);
 }
 
-/**
- * Levels the room on the surface selected at one point in the rendered picture.
- *
- * The button exists because the two sliders are two numbers nobody can guess: the
- * angle a bracket ended up at is not a thing anybody knows to half a degree, and
- * hunting for it by eye on a cloud is slow enough that people would rather work
- * canted. Selecting the floor names the surface directly, and it writes the same two
- * parameters the sliders do - so it is a way of *saying* the value rather than a
- * second place the value lives, which is what keeps this one implementation and lets
- * the user nudge afterwards.
- *
- * **A surface has two normals and both of them make it level.** Picking the one that
- * disagrees least with the vertical already in force is what stops levelling on a
- * ceiling from turning the room over, and it is why the fit is compared against the
- * current tilt taken back into sensor space rather than against a constant.
- *
- * **The flatness is reported and never judged.** A threshold that refused a patch for
- * being too rough would be a number invented at a desk, and this repo has the scars
- * from those; the honest thing is to hand back the RMS so somebody can see the fit was
- * taken across the gap between two seats and press again somewhere better. The one
- * refusal is an empty patch, which is an impossibility rather than an opinion.
- */
-function levelAtStagePoint(stageX, stageY) {
-  const depth = depthCurr.image.data;
-  const fx = uniforms.focal.value.x;
-  const fy = uniforms.focal.value.y;
-  const cx = uniforms.center.value.x;
-  const cy = uniforms.center.value.y;
-  const near = uniforms.nearClip.value;
-  const far = uniforms.farClip.value;
-  const size = stageSize();
-  if (!Number.isFinite(stageX) || !Number.isFinite(stageY)
-      || stageX < 0 || stageY < 0 || stageX > size.w || stageY > size.h) {
-    return { ok: false, reason: 'the selected point is outside the picture' };
-  }
-  viewCamera.updateMatrixWorld(true);
-
-  // Candidates are projected through the camera that is actually drawing rather than
-  // through the one in front of the sensor, because the gesture names a surface by
-  // where it sits in the picture and the picture is whatever the view happens to be.
-  let best = null;
-  for (let row = 0; row < DEPTH_H; row += LEVEL_PICK_STRIDE) {
-    for (let col = 0; col < DEPTH_W; col += LEVEL_PICK_STRIDE) {
-      const mm = depth[row * DEPTH_W + col];
-      if (mm === 0) continue;
-      const z = mm * 0.001;
-      if (z < near || z > far) continue;
-      levelVec.set(((col + 0.5 - cx) / fx) * z, -((row + 0.5 - cy) / fy) * z, -z);
-      // The same six faces the renderer applies, so a surface cropped out of the
-      // picture cannot be levelled on. Sensor space and before the rotation, matching
-      // the vertex shader.
-      if (levelVec.x < uniforms.cropL.value || levelVec.x > uniforms.cropR.value) continue;
-      if (levelVec.y < uniforms.cropB.value || levelVec.y > uniforms.cropT.value) continue;
-      levelVec.applyQuaternion(worldTilt).project(viewCamera);
-      if (levelVec.z < -1 || levelVec.z > 1) continue;
-      const d = Math.hypot(
-        (levelVec.x * 0.5 + 0.5) * size.w - stageX,
-        (0.5 - levelVec.y * 0.5) * size.h - stageY,
-      );
-      if (d > LEVEL_PICK_PX) continue;
-      // Nearest to the camera among the candidates rather than nearest to the
-      // crosshair: this footage is full of holes, and a hole in the surface being
-      // aimed at lets the wall behind it through, where levelling on the wall behind
-      // is the one answer nobody wanted.
-      if (!best || levelVec.z < best.ndcZ) best = { col, row, ndcZ: levelVec.z };
-    }
-  }
-  if (!best) return { ok: false, reason: 'nothing near the selected point to level on' };
-
-  const fit = fitPatchNormal(best.col, best.row, depth, fx, fy, cx, cy, near, far);
-  if (!fit) return { ok: false, reason: 'too few samples around the selected point to fit a surface' };
-
-  levelUp.set(0, 1, 0).applyQuaternion(levelInverse.copy(worldTilt).invert());
-  if (fit.normal.dot(levelUp) < 0) fit.normal.negate();
-
-  // The closed form of "which pair of angles carries this normal onto +Y", under the
-  // `Rx(tilt) * Rz(roll)` order the cloud is turned by. `roll` is whatever takes the
-  // normal into the YZ plane, which leaves a non-negative horizontal component behind;
-  // `tilt` is whatever then swings that onto the axis. Two angles for two degrees of
-  // freedom, with the yaw that would be the third left where it belongs, on the drag.
-  const horizontal = Math.hypot(fit.normal.x, fit.normal.y);
-  const roll = THREE.MathUtils.radToDeg(Math.atan2(fit.normal.x, fit.normal.y));
-  const tilt = THREE.MathUtils.radToDeg(Math.atan2(-fit.normal.z, horizontal));
-  const written = writeWorldRotation(tilt, roll);
-  return {
-    ok: true,
-    // Read back rather than returned as computed, so the answer is the value the
-    // registry holds after snapping to the slider's step and not the one before it.
-    ...written,
-    normal: fit.normal.toArray(),
-    samples: fit.samples,
-    rms: fit.rms,
-    pixel: [best.col, best.row],
-  };
-}
-
-ui.camLevel.addEventListener('click', () => {
-  if (levelSelectionArmed) {
-    setLevelSelection(false, 'Floor selection cancelled.');
-    return;
-  }
-  // The second press names a pixel in the picture, so the camera cannot keep coasting
-  // between arming and selection. Finish the orbit here, while there is still a frame
-  // before the user can click the surface, rather than moving it underneath that click.
-  finishOrbitDrift();
-  setLevelSelection(true, 'Click a flat floor or ceiling plane in the picture. Press Escape to cancel.');
-});
-
-ui.camLevelReset.addEventListener('click', () => {
-  setLevelSelection(false);
-  resetWorldRotation();
-  ui.levelNote.textContent = 'World rotation reset to 0° tilt and 0° roll.';
-});
-
-addEventListener('keydown', (e) => {
-  if (!levelSelectionArmed || e.key !== 'Escape') return;
-  e.preventDefault();
-  setLevelSelection(false, 'Floor selection cancelled.');
-});
-setLevelSelection(false);
+ui.camLevelReset.addEventListener('click', () => { resetWorldRotation(); });
 
 // Four planes back to their defaults, which are their bounds. Cropping is easy to do
 // by accident and hard to undo by hand once all four have moved - and a box closed
@@ -10674,11 +12392,41 @@ setLevelSelection(false);
 // to "no crop" has to be one press rather than four remembered numbers. `near`/`far`
 // deliberately stay where they are: they are a depth range somebody usually chose on
 // purpose, and this button is about the four that were opened together.
+// `crop` is in the list because it is the switch over exactly the four faces this
+// button reverts. Left out, "revert all to default" could hand back four faces at their
+// bounds with the box still released - a document carrying a non-default value, keyed
+// and exported and drawn dashed, after a press whose label says everything is back.
 ui.cropReset.addEventListener('click', () => {
-  params.reset(['left', 'right', 'bottom', 'top']);
+  params.reset(['left', 'right', 'bottom', 'top', 'crop']);
   requestRepaint();
   history.commit();
 });
+
+// Show the box, its handles, and what it is cutting.
+//
+// **Three effects and one control, because a third switch would buy one state that is a
+// lie.** Splitting the faint pass out would allow "box drawn, nothing dimmed, crop on",
+// which is a wireframe around content that is not there - the box says a boundary is
+// here and the picture shows nothing crossing it. Coupled, every reachable state is
+// truthful, and the useful one is the default: while you can see the box you can see
+// what it removes, which is the only way to drag a face onto something deliberately
+// rather than by watching it disappear.
+//
+// `aria-pressed` rather than `aria-checked`: this is a toggle button, where `#menuTopView`
+// beside it is a menu item with a checked state.
+ui.cropBox.addEventListener('click', () => {
+  showCropBox = !showCropBox;
+  ui.cropBox.setAttribute('aria-pressed', String(showCropBox));
+  // Both, and they are not the same repaint. `syncCropOutside` changes a uniform, so the
+  // cloud has to be rendered again; the box itself lives on the chrome canvas, which is
+  // redrawn from `chromeStale` and would otherwise keep the last frame's furniture until
+  // something else happened to move.
+  syncCropOutside();
+  chromeStale = true;
+  drawChrome();
+  requestRepaint();
+});
+ui.cropBox.setAttribute('aria-pressed', 'false');
 
 // ------------------------------------------------------------- the export controls
 
@@ -10722,11 +12470,35 @@ ui.exportName.addEventListener('input', paintExportName);
 // the static handler serves.
 let lastExport = null;
 
+// **When a copy can be handed over, stated once.** The button's disabled state and the
+// Output > Export command both need this answer, and for a while they each carried their
+// own version of it: the command tested `lastExport && CAN_SAVE_AS`, which is this rule
+// minus the directory clause below, so after a PNG sequence it synthesised a click on a
+// button `paintExportSave` had already disabled - and a disabled button dispatches
+// nothing, so the menu entry that produces the deliverable silently did nothing at all.
+// One predicate, read by both, is what makes the two answers the same answer.
+const canSaveExportCopy = () => Boolean(lastExport) && CAN_SAVE_AS && lastExport.frameExt == null;
+
 function paintExportSave() {
-  ui.exportSave.disabled = !lastExport || !CAN_SAVE_AS;
-  ui.exportSave.title = CAN_SAVE_AS
-    ? (lastExport ? `Save a copy of ${lastExport.file}` : 'Render something first')
-    : 'This browser has no file picker - the render is in the exports directory on the server';
+  // **A sequence is a directory, and this button hands over one file.** `done.href` for
+  // the image-sequence codec names the directory the numbered frames were written into,
+  // not a file, so the fetch behind this button would ask the static handler for a
+  // directory and be answered with a 404 - a save that fails at the end, after the
+  // picker has already asked the operator where to put it. `frameExt` is the server's
+  // own answer to "is this artifact a directory", carried on `done` for exactly this,
+  // so the refusal is read off the export rather than inferred from the file name.
+  //
+  // Refused rather than quietly saving the first frame, and refused here rather than
+  // inside the click, because a button that opens a picker and then fails is worse than
+  // one that says beforehand why it cannot: the frames are already on the server, and
+  // saying where they are is more use than a sheet that leads nowhere.
+  const sequence = lastExport?.frameExt != null;
+  ui.exportSave.disabled = !canSaveExportCopy();
+  ui.exportSave.title = !CAN_SAVE_AS
+    ? 'This browser has no file picker - the render is in the exports directory on the server'
+    : sequence
+      ? `${lastExport.file} is a directory of ${lastExport.frameExt} frames - it is in the exports directory on the server`
+      : (lastExport ? `Save a copy of ${lastExport.file}` : 'Render something first');
 }
 
 // The export control: one size, a name and one button. What is exported is the clip,
@@ -10750,7 +12522,7 @@ ui.exportGo.addEventListener('click', async () => {
         sayExport(`export ${Math.round((n / total) * 100)}% · frame ${n}/${total}`);
       },
     });
-    lastExport = { href: done.href, file: done.href.split('/').pop() };
+    lastExport = { href: done.href, file: done.href.split('/').pop(), frameExt: done.frameExt ?? null };
     sayExport(`${lastExport.file} · ${done.frames} frames · ${(done.bytes / 1e6).toFixed(1)} MB `
       + `in ${(done.elapsedMs / 1000).toFixed(1)}s`);
   } catch (err) {
@@ -10762,7 +12534,11 @@ ui.exportGo.addEventListener('click', async () => {
   }
 });
 
-ui.exportSave.addEventListener('click', async () => {
+// Called rather than clicked, by the button beside the render and by Output > Export.
+// A driver that synthesises a click on another control inherits that control's disabled
+// state and its continued existence, and neither of those is anything the caller can see
+// going wrong - which is exactly how the menu command above lost its effect.
+async function saveExportCopy() {
   if (!lastExport) return;
   try {
     // **The picker opens before anything is awaited, and that ordering is the whole
@@ -10783,7 +12559,9 @@ ui.exportSave.addEventListener('click', async () => {
     if (err?.name === 'AbortError') return;
     sayExport(`save failed: ${err.message}`);
   }
-});
+}
+
+ui.exportSave.addEventListener('click', saveExportCopy);
 
 paintExportSave();
 
@@ -10791,7 +12569,11 @@ paintExportSave();
 
 // Changing the export size reframes the editor, because the point of letterboxing
 // the stage is that the two are never allowed to disagree.
-ui.exportSize.addEventListener('change', () => { setTargetSize(ui.exportSize.value); history.commit(); });
+ui.exportSize.addEventListener('change', () => {
+  setTargetSize(ui.exportSize.value);
+  paintExportRatioSelection(exportRatioButtons, ui.exportSize);
+  history.commit();
+});
 setTargetSize(DEFAULT_EXPORT_SIZE, { fromDocument: true });
 
 ui.mark.addEventListener('click', () => { markHere().catch(showTimelineError); });
@@ -10836,7 +12618,7 @@ function paintPreviewRange(minDepth, maxDepth) {
 // sits on the handlers rather than inside `applyStoredPreset`, because that function and
 // `restoreProject` beside it are exposed raw for the proof tools to drive: a guard
 // pushed down there would start silently dropping calls that are not gestures at all.
-const PRESET_WRITERS = [ui.presetSave, ui.presetExport, ui.presetApply, ui.presetImport, ui.recPresetApply];
+const PRESET_WRITERS = [ui.presetSave, ui.presetExport, ui.presetImport];
 
 // Whether one of those gestures is running. It is a flag on the program rather than a
 // state of a control, because what has to be true is that there is one gesture, not that
@@ -10913,33 +12695,6 @@ async function whileWriting(run) {
     if (stranded && PRESET_WRITERS.includes(held) && held.isConnected) held.focus();
   }
 }
-
-ui.recPresetApply.addEventListener('click', () => withPresetGesture(ui.recLookNote, () => whileWriting(async () => {
-  const name = ui.recPreset.value;
-  if (!name) return;
-  try {
-    const applied = applyStoredPreset(await (await fetch(`/presets/${encodeURIComponent(name)}`)).json());
-    ui.recLookNote.textContent = presetAppliedNote(name, applied);
-  } catch (err) {
-    // The recorder has no timeline bar, so `showTimelineError` would write into a
-    // strip nobody on this surface can see. Kept at the call site rather than folded
-    // into the guard for that reason: one shared `catch` would move this sentence to a
-    // surface the person pressing the button cannot see.
-    ui.recLookNote.textContent = `could not apply ${name}: ${err.message}`;
-    console.error(err);
-  }
-})));
-
-ui.presetApply.addEventListener('click', () => withPresetGesture(ui.note, () => whileWriting(async () => {
-  const name = ui.preset.value;
-  if (!name) return;
-  try {
-    const applied = applyStoredPreset(await (await fetch(`/presets/${encodeURIComponent(name)}`)).json());
-    say(presetAppliedNote(name, applied));
-  } catch (err) {
-    showTimelineError(err);
-  }
-})));
 
 /** Pick a subset, then do one thing with it, inside the one gesture the program allows. */
 async function withPresetSubset(ask, run) {
@@ -11021,7 +12776,13 @@ ui.presetFile.addEventListener('change', () => {
     try {
       const saved = await importPresetFile(file);
       await refreshPresets();
-      ui.preset.value = saved.name;
+      // Through the picker rather than by assigning `value`, so the name on the trigger
+      // and the mark in the list are written by one call. Assigning the property alone
+      // would leave the control reading its old name over a library that has the new one.
+      // The display half and not `choosePicker`, because `importPresetFile` has already
+      // applied what it read - going through the choosing path would fetch the document
+      // back off the server and apply it a second time.
+      showPickerChoice(pickers.find((p) => p.trigger === ui.preset), saved.name);
       say(`imported ${saved.name} · ${saved.rev.slice(7, 15)}`);
     } catch (err) {
       showTimelineError(err);
@@ -11029,8 +12790,20 @@ ui.presetFile.addEventListener('change', () => {
   }));
 });
 
-ui.projectSave.addEventListener('click', async () => {
-  const name = prompt('save this edit as', ui.project.value || `${openTakeId ?? 'clip'}-edit`);
+/**
+ * Save the open edit under a name the operator gives, which is what File > Save as and
+ * Shift+Cmd+S both do.
+ *
+ * A function and not a button with two things clicking it. The timeline's project chip
+ * carried a `save` button and the menu command and the shortcut both reached the flow by
+ * synthesising a click on it; when the app bar replaced that chip the button went with
+ * it, `ui.projectSave` became null, and the optional chaining turned both drivers into
+ * no-ops that reported nothing. The lesson is which way the arrow points - a driver that
+ * presses another control depends on that control still existing, and nothing says so
+ * when it stops. Calling the flow is a dependency the parser can see.
+ */
+async function saveProjectAs() {
+  const name = prompt('save this edit as', ui.project?.value || `${openTakeId ?? 'clip'}-edit`);
   if (!name) return;
   try {
     // The take is named by content hash rather than by path, which is what makes a
@@ -11046,16 +12819,16 @@ ui.projectSave.addEventListener('click', async () => {
     const saved = await res.json();
     if (saved.error) throw new Error(saved.error);
     await refreshProjects();
-    ui.project.value = saved.name;
+    if (ui.project) ui.project.value = saved.name;
     say(`saved ${saved.name} · ${saved.bytes} bytes`);
     rememberOpened();
   } catch (err) {
     showTimelineError(err);
   }
-});
+}
 
-ui.projectOpen.addEventListener('click', async () => {
-  const name = ui.project.value;
+ui.projectOpen?.addEventListener('click', async () => {
+  const name = ui.project?.value;
   if (!name) return;
   try {
     await loadProjectNamed(name);
@@ -11070,7 +12843,7 @@ ui.projectOpen.addEventListener('click', async () => {
 // The offer withdraws itself on success because the document on screen is now the one
 // it was offering, and an offer to restore what is already there is a button that
 // looks like it does something.
-ui.resumeOpen.addEventListener('click', async () => {
+ui.resumeOpen?.addEventListener('click', async () => {
   try {
     const accepted = offeredWorkingBody;
     await loadProjectNamed(WORKING_PROJECT, accepted);
@@ -11094,7 +12867,7 @@ ui.resumeOpen.addEventListener('click', async () => {
     // finishes first.
     const kept = await writeWorking(accepted);
     if (!kept.ok) throw new Error(`restored on screen, but the auto-save could not be rewritten: ${(await kept.text().catch(() => '')).slice(0, 80)}`);
-    ui.resume.hidden = true;
+    if (ui.resume) ui.resume.hidden = true;
     offeredWorkingBody = null;
     say('restored the autosaved edit');
   } catch (err) {
@@ -11102,7 +12875,7 @@ ui.resumeOpen.addEventListener('click', async () => {
   }
 });
 
-ui.deliverable.addEventListener('change', async () => {
+ui.deliverable?.addEventListener('change', async () => {
   const name = ui.deliverable.value;
   if (!name) return;
   try {
@@ -11128,7 +12901,7 @@ ui.deliverable.addEventListener('change', async () => {
   }
 });
 
-ui.deliverableNew.addEventListener('click', async () => {
+ui.deliverableNew?.addEventListener('click', async () => {
   const name = prompt('name this deliverable', `deliverable-${Date.now()}`);
   if (!name) return;
   ensureActiveDeliverable();
@@ -11141,6 +12914,416 @@ ui.deliverableNew.addEventListener('click', async () => {
     say(`saved deliverable ${name}`);
   } catch (err) {
     showTimelineError(err);
+  }
+});
+
+// ---------------------------------------------------------- application shell
+
+/**
+ * Every element the shell drives, looked up so that a missing one names itself.
+ *
+ * `document.getElementById` answers `null`, and this table used to be an object literal
+ * of bare calls whose entries are then dereferenced unguarded a few hundred lines below.
+ * So an id that stopped existing - renamed in `index.html`, moved into a surface this
+ * page does not draw, dropped by a merge - did not fail here. It failed at whichever
+ * consumer happened to touch it first, as
+ * `Uncaught TypeError: Cannot read properties of undefined (reading 'addEventListener')`,
+ * naming a line number and nothing else.
+ *
+ * **What that costs is the whole page, silently.** `connect()` is called *below* this
+ * block, so a throw anywhere in the shell wiring means the socket is never opened: the
+ * header sits on "connecting..." for as long as anyone leaves it, the viewport stays
+ * black, and the server - which takes `/record/start` over HTTP and has no opinion about
+ * whether a browser is attached - records a take perfectly happily with `clients=0`
+ * beside it in the log. That combination reads as a sensor or a network fault and is
+ * neither, and it cost a real session: the operator was looking at USB packet-loss
+ * warnings while the actual failure was one absent element id.
+ *
+ * Refusing is still the right answer and this does not soften it - a surface missing a
+ * control is a broken build, and a page that boots with half its wiring gone is worse
+ * than one that will not boot. What changes is that the refusal happens *here*, where
+ * the cause is, and carries the ids rather than a line number; and that it reaches the
+ * status line as well as the console, because the console is not where the operator is
+ * looking. Collected across the whole table rather than thrown on the first miss, since
+ * a rename usually takes more than one id with it and one round trip should name all of
+ * them.
+ */
+function shellElements(ids) {
+  const found = {};
+  const missing = [];
+  for (const [key, id] of Object.entries(ids)) {
+    const el = document.getElementById(id);
+    if (el === null) missing.push(`#${id}`);
+    found[key] = el;
+  }
+  if (missing.length > 0) {
+    const what = `${EDITING ? 'editor' : 'record'} surface is missing ${missing.join(', ')}`;
+    // Written straight to the element rather than through `setStatus`, which reads
+    // sensor state this page will never now receive.
+    if (statusEl !== null) statusEl.textContent = what;
+    throw new Error(`${what} - the page cannot finish starting, so nothing below this ran`);
+  }
+  return found;
+}
+
+const shell = shellElements({
+  surfaceName: 'surfaceName',
+  saveProject: 'menuSaveProject',
+  render: 'menuRender',
+  export: 'menuExport',
+  obs: 'menuObs',
+  cameraReset: 'menuCameraReset',
+  topView: 'menuTopView',
+  lookImport: 'menuLookImport',
+  lookExport: 'menuLookExport',
+  state: 'menuState',
+  exportClose: 'exportClose',
+  obsDialog: 'obsDialog',
+  obsClose: 'obsClose',
+  obsDone: 'obsDone',
+  obsProgram: 'obsProgramMode',
+  obsViewport: 'obsViewportMode',
+  obsResolution: 'obsResolution',
+  obsCustomSize: 'obsCustomSize',
+  obsBrowserUrl: 'obsBrowserUrl',
+  obsWebcamUrl: 'obsWebcamUrl',
+  obsCopyBrowser: 'obsCopyBrowser',
+  obsCopyWebcam: 'obsCopyWebcam',
+  obsOpen: 'obsOpen',
+  obsStatus: 'obsStatus',
+  obsStatusText: 'obsStatusText',
+});
+
+// `menus` is a query rather than an id, so it sits outside the table above: an empty
+// list is a legitimate answer to `querySelectorAll` and there is no missing name to
+// report. It stays a plain read for that reason and not by oversight.
+shell.menus = [...document.querySelectorAll('.appmenu')];
+
+shell.surfaceName.textContent = EDITING ? 'Editor' : 'Record';
+for (const control of [shell.saveProject, shell.render, shell.export, shell.lookImport, shell.lookExport]) {
+  control.disabled = !EDITING;
+}
+
+function closeApplicationMenus({ restore = false } = {}) {
+  for (const menu of shell.menus) {
+    const trigger = menu.querySelector('.appmenu-trigger');
+    const popover = menu.querySelector('.appmenu-popover');
+    const wasOpen = !popover.hidden;
+    popover.hidden = true;
+    trigger.setAttribute('aria-expanded', 'false');
+    if (restore && wasOpen) trigger.focus();
+  }
+}
+
+for (const menu of shell.menus) {
+  const trigger = menu.querySelector('.appmenu-trigger');
+  const popover = menu.querySelector('.appmenu-popover');
+  trigger.addEventListener('click', () => {
+    const opening = popover.hidden;
+    closeApplicationMenus();
+    popover.hidden = !opening;
+    trigger.setAttribute('aria-expanded', String(opening));
+    if (opening) popover.querySelector('[role="menuitem"]:not(:disabled)')?.focus();
+  });
+}
+
+document.addEventListener('pointerdown', (event) => {
+  if (!event.target.closest('.appmenu')) closeApplicationMenus();
+});
+
+function openDialog(dialog) {
+  // A menu command is hidden before the modal opens. Native dialog focus restoration
+  // cannot return to that hidden command, so remember its visible trigger instead.
+  // Without this, closing Export, OBS or State leaves focus on the body and the next
+  // keyboard gesture starts from nowhere in the application shell.
+  const active = document.activeElement;
+  const returnFocus = active instanceof HTMLElement
+    ? active.closest('.appmenu')?.querySelector('.appmenu-trigger') ?? active
+    : null;
+  closeApplicationMenus();
+  if (!dialog.open) {
+    const restoreFocus = () => {
+      dialog.removeEventListener('close', restoreFocus);
+      returnFocus?.focus();
+    };
+    dialog.addEventListener('close', restoreFocus);
+    dialog.showModal();
+  }
+}
+
+function openExportDialog() {
+  paintExportRatioSelection(exportRatioButtons, ui.exportSize);
+  openDialog(ui.exportDialog);
+}
+
+shell.render.addEventListener('click', openExportDialog);
+shell.export.addEventListener('click', () => {
+  closeApplicationMenus();
+  // Straight into the save, and only when the same predicate the button reads says a
+  // copy can be handed over. A sequence render cannot, so this falls through to the
+  // dialog - which is the useful answer anyway: the frames are already on the server
+  // and what is left to do with them is render something else.
+  if (canSaveExportCopy()) saveExportCopy();
+  else openExportDialog();
+});
+shell.saveProject.addEventListener('click', () => {
+  closeApplicationMenus();
+  saveProjectAs();
+});
+shell.lookImport.addEventListener('click', () => {
+  closeApplicationMenus();
+  ui.presetImport.click();
+});
+shell.lookExport.addEventListener('click', () => {
+  closeApplicationMenus();
+  ui.presetExport.click();
+});
+
+shell.cameraReset.addEventListener('click', () => {
+  closeApplicationMenus();
+  controls.reset();
+  requestRepaint();
+});
+
+shell.topView.addEventListener('click', () => {
+  topViewVisible = !topViewVisible;
+  shell.topView.setAttribute('aria-checked', String(topViewVisible));
+  chromeStale = true;
+  drawChrome();
+  closeApplicationMenus();
+});
+
+function setObsMode(mode) {
+  const value = mode === 'viewport' ? 'mirror' : 'camera';
+  if (progModeEl.value !== value) {
+    progModeEl.value = value;
+    progModeEl.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  shell.obsProgram.setAttribute('aria-pressed', String(value === 'camera'));
+  shell.obsViewport.setAttribute('aria-pressed', String(value === 'mirror'));
+}
+
+/**
+ * The footer's dot, driven by what the server is actually serving.
+ *
+ * It replaces the literal `ready`, which was wired to nothing: it said the same word on
+ * a machine with nothing reading the stream and on one where OBS had been pulling for
+ * an hour, so it could not be wrong because it was not about anything.
+ *
+ * `/record/state` rather than a route invented for this, because it already carries
+ * `webcam.subscribers` - the recorder's refusal is made of the same list, and a second
+ * route answering the same question is the second copy that drifts. It is memory the
+ * process already holds, measured on this rig at 1.2ms against the library listing's
+ * 145ms, which is what makes a two-second cadence affordable while somebody is looking
+ * at the dialog. Nothing polls while it is shut.
+ *
+ * **Loopback subscribers count.** The costing rule filters them out, correctly, because
+ * a stream that never leaves the machine is not competing with the depth packets for a
+ * radio. This is a different question - the operator is asking whether anything is
+ * reading - and OBS on the same machine is the ordinary answer, so a dot that ignored
+ * loopback would be dark in exactly the case it exists for.
+ */
+const OBS_POLL_MS = 2000;
+let obsPollTimer = null;
+let obsPollInFlight = false;
+
+async function refreshObsStatus() {
+  // One question outstanding at a time. A tick landing on an unanswered one would queue
+  // behind it and paint the older of the two answers last.
+  if (obsPollInFlight) return;
+  obsPollInFlight = true;
+  try {
+    const state = await (await fetch('/record/state')).json();
+    const webcam = state?.webcam ?? {};
+    const n = (webcam.subscribers ?? []).length;
+    shell.obsStatus.classList.toggle('live', n > 0);
+    // A server with no colour camera is a third state and not a quiet kind of idle.
+    // `idle` over a replay server invites somebody to go looking for the source that
+    // is not reading, where the server already knows the answer and says it in a
+    // sentence - so the sentence is what goes on screen.
+    shell.obsStatusText.textContent = webcam.unavailable
+      ? webcam.unavailable
+      : (n === 0
+        ? 'idle - nothing is reading'
+        : `streaming to ${n} ${n === 1 ? 'source' : 'sources'}`);
+  } catch {
+    // Say so rather than holding the last answer. A stale count left on screen after the
+    // server went away reads as a live stream, which is the one reading this dot must
+    // never produce.
+    shell.obsStatus.classList.remove('live');
+    shell.obsStatusText.textContent = 'status unavailable';
+  } finally {
+    obsPollInFlight = false;
+  }
+}
+
+function startObsStatusPoll() {
+  stopObsStatusPoll();
+  refreshObsStatus();
+  obsPollTimer = setInterval(refreshObsStatus, OBS_POLL_MS);
+}
+
+function stopObsStatusPoll() {
+  if (obsPollTimer !== null) clearInterval(obsPollTimer);
+  obsPollTimer = null;
+}
+
+// On the dialog's own `close` rather than on the done button, because Escape and the
+// close glyph are doors too and a poll left running behind a shut dialog is a request
+// every two seconds for a number nobody can see.
+shell.obsDialog.addEventListener('close', stopObsStatusPoll);
+
+function paintObsDialog() {
+  shell.obsBrowserUrl.value = new URL('/program', location.href).href;
+  shell.obsWebcamUrl.value = new URL('/camera.mjpg', location.href).href;
+  for (const option of shell.obsResolution.querySelectorAll('option[data-current]')) option.remove();
+  if (![...shell.obsResolution.options].some((option) => option.value === progSizeEl.value)) {
+    const option = document.createElement('option');
+    option.value = progSizeEl.value;
+    option.textContent = `${progSizeEl.value} · current`;
+    option.dataset.current = '';
+    shell.obsResolution.appendChild(option);
+  }
+  shell.obsResolution.value = progSizeEl.value;
+  // Shut on every open, because the synthesised `· current` entry above already shows a
+  // size that is not one of the three - so a dialog reopened on a custom size shows it in
+  // the picker rather than in a field the operator has to be looking at to read.
+  shell.obsCustomSize.hidden = true;
+  setObsMode(progModeEl.value === 'mirror' ? 'viewport' : 'program');
+  startObsStatusPoll();
+}
+
+shell.obs.addEventListener('click', () => {
+  paintObsDialog();
+  openDialog(shell.obsDialog);
+});
+shell.obsProgram.addEventListener('click', () => setObsMode('program'));
+shell.obsViewport.addEventListener('click', () => setObsMode('viewport'));
+shell.obsResolution.addEventListener('change', () => {
+  // `custom` names no size, so it writes nothing. It reveals the field beside it and hands
+  // it the caret; the write happens when that field is committed, through the same
+  // `#progSize` the fixed options go through. Writing the literal string here would put
+  // "custom" into the output size and let the recorder refuse it, which is a refusal the
+  // dialog invented rather than one the operator asked for.
+  if (shell.obsResolution.value === 'custom') {
+    shell.obsCustomSize.hidden = false;
+    shell.obsCustomSize.value = progSizeEl.value;
+    shell.obsCustomSize.focus();
+    shell.obsCustomSize.select();
+    return;
+  }
+  shell.obsCustomSize.hidden = true;
+  progSizeEl.value = shell.obsResolution.value;
+  progSizeEl.dispatchEvent(new Event('change', { bubbles: true }));
+});
+
+// The custom size, committed through the one control that validates it. `#progSize`
+// already refuses anything that is not WIDTHxHEIGHT and puts the previous value back, so
+// this deliberately does not test the string first: a second parser here would be a second
+// opinion about what an output size is, and the one that drifts is the one nothing writes
+// through. Repainting afterwards is what shows the operator which of the two answers it
+// took - the size it typed, or the one it was given back.
+shell.obsCustomSize.addEventListener('change', () => {
+  progSizeEl.value = shell.obsCustomSize.value;
+  progSizeEl.dispatchEvent(new Event('change', { bubbles: true }));
+  paintObsDialog();
+});
+
+// **Into the span, never onto the node that holds it.** `#obsStatus` is a container -
+// the live dot and `#obsStatusText` are its children, and the two-second poll writes
+// the second of them. Assigning `textContent` on the container replaces both with a
+// text node, so the dot goes and the poll spends the rest of the session writing a
+// span no document contains: the status freezes on whatever the last press said and
+// reads as a stuck OBS connection rather than as a copy that happened once. The span
+// is where every other writer of this message already writes, which is what makes one
+// writer rather than two.
+function sayObs(message) {
+  shell.obsStatusText.textContent = message;
+}
+
+async function copyObsValue(input) {
+  try {
+    await navigator.clipboard.writeText(input.value);
+    sayObs('copied');
+  } catch {
+    input.select();
+    const copied = document.execCommand('copy');
+    sayObs(copied ? 'copied' : 'copy unavailable');
+  }
+}
+
+shell.obsCopyBrowser.addEventListener('click', () => copyObsValue(shell.obsBrowserUrl));
+shell.obsCopyWebcam.addEventListener('click', () => copyObsValue(shell.obsWebcamUrl));
+shell.obsOpen.addEventListener('click', () => {
+  globalThis.open(shell.obsBrowserUrl.value, '_blank', 'noopener');
+  sayObs('source opened');
+});
+
+// Stats for nerds is the overlay `drawChrome` paints under the top-down view, and it is
+// the only one. A `stateSnapshot()` used to build the same numbers as a JSON dump for a
+// `#stateDialog`, and when the overlay arrived that pair stayed behind with nothing
+// opening the dialog and nothing writing the dump - two representations of one state,
+// the dead one silently unable to disagree with the live one. Both are gone, which is
+// why this listener only flips a flag and asks for a repaint.
+//
+// **The dialog half of this came back in a merge and is gone again.** A fork of this
+// branch had `#menuState` open a `#stateDialog` on the record surface and toggle the
+// overlay only when editing, and merging it produced code referring to three things that
+// do not exist: the element, which `index.html` says in as many words was deleted rather
+// than left beside what replaced it; `updateStatsDialog`, which is defined nowhere in
+// this tree; and `statsInterval`, which was never declared. None of that is a design
+// disagreement to settle - restoring it would mean writing the feature, not restoring it.
+//
+// It is worth naming what the fragment cost, because the shape recurs. The surviving
+// reference was a *top-level* `shell.stateDialog.addEventListener`, so it threw during
+// module evaluation, and `connect()` runs below here: both surfaces died at boot with the
+// socket unopened, showing "connecting..." over a black viewport while the server went on
+// recording perfectly well with `clients=0`. Git merged it without a conflict, because
+// each side's lines were individually fine.
+shell.state.addEventListener('click', () => {
+  closeApplicationMenus();
+  statsVisible = !statsVisible;
+  shell.state.setAttribute('aria-checked', String(statsVisible));
+  chromeStale = true;
+  drawChrome();
+});
+
+shell.exportClose.addEventListener('click', () => ui.exportDialog.close());
+shell.obsClose.addEventListener('click', () => shell.obsDialog.close());
+shell.obsDone.addEventListener('click', () => shell.obsDialog.close());
+
+addEventListener('keydown', (event) => {
+  // **Asked before anything below it, Escape included.** A key another control has already
+  // consumed is not this handler's to act on a second time, and Escape is the one key in
+  // this program that more than one thing listens for: the level selection arms on a press
+  // and cancels on Escape, calling `preventDefault` when it does. That listener is
+  // registered earlier, so it runs first - and with this test below the Escape branch, a
+  // press meant to cancel a floor selection also shut whichever application menu happened
+  // to be open, which reads as the menu closing itself. `shortcuts-ignore-consumed` is the
+  // mutation this repo already carries for the class, and the guard belongs above every
+  // branch rather than in front of most of them.
+  if (event.defaultPrevented) return;
+  if (event.key === 'Escape') {
+    closeApplicationMenus({ restore: true });
+    return;
+  }
+  // `isTyping` stays below Escape rather than above it: shutting an open menu is the right
+  // answer to Escape wherever the caret is, and with no menu open the call is a no-op. The
+  // command keys below are the ones a text field has a claim on.
+  if (isTyping(event.target) || !(event.metaKey || event.ctrlKey)) return;
+  const key = event.key.toLowerCase();
+  if (key === 'o' && EDITING) {
+    event.preventDefault();
+    location.assign('/gallery');
+  } else if (key === 's' && event.shiftKey && EDITING) {
+    event.preventDefault();
+    saveProjectAs();
+  } else if (key === 'r' && EDITING) {
+    event.preventDefault();
+    openExportDialog();
+  } else if (key === 'e' && EDITING) {
+    event.preventDefault();
+    shell.export.click();
   }
 });
 
@@ -11199,14 +13382,13 @@ async function loadProjectNamed(name, offered = null) {
   } else {
     history.begin();
   }
-  paintUndoCount();
   // A freshly loaded project gets a default deliverable unless one is already
   // selected, so export always has a target.
   ensureActiveDeliverable();
   applyDeliverable(activeDeliverable);
   await timeline.seek(timeline.programSec);
   if (resume && gen === transportGen) timeline.play();
-  ui.project.value = name;
+  if (ui.project) ui.project.value = name;
   say(`opened ${name}`);
   rememberOpened();
   return doc;
@@ -11307,22 +13489,16 @@ if (ui.recGo) {
 // but a big screen and a quiet moment before a take is a good place to find out where
 // a look wants to go, and refusing that would be the panel deciding how people work.
 //
-// Hidden with a class rather than by leaving the controls out of the document,
-// because the registry stamps every slider's bounds at boot and throws if any look
-// parameter has no control: a surface that built a subset would either need its own
-// second registry pass or would silently stop being checkable against the first.
-ui.extended.addEventListener('click', () => {
-  const on = document.body.classList.toggle('extended');
-  ui.extended.setAttribute('aria-pressed', String(on));
-  ui.extended.textContent = on ? 'fewer settings' : 'extended settings';
-});
-
-ui.camView.addEventListener('click', () => {
+// Camera view toggle handler used by both panel and timeline controls
+function toggleCameraView() {
   const program = viewCamera === freeCamera;
   setViewCamera(program ? programCamera : freeCamera);
   ui.camView.setAttribute('aria-pressed', String(program));
+  ui.tCamView?.setAttribute('aria-pressed', String(program));
   requestRepaint();
-});
+}
+ui.camView.addEventListener('click', toggleCameraView);
+ui.tCamView?.addEventListener('click', toggleCameraView);
 
 /**
  * Opens a take on the timeline. The live socket is never opened on this path.
@@ -11430,7 +13606,7 @@ async function openTake(id) {
   view.fit();
   document.body.classList.add('editing');
   ui.root.hidden = false;
-  ui.cameraGroup.hidden = false;
+  showInspector();
   // The path, its nodes and the top-down go on with the timeline and only with it.
   // A live viewer has no clip to compose and the pinned drive hashes images, so
   // furniture in either would be furniture nobody asked for in pixels somebody is
@@ -11574,6 +13750,12 @@ if (EDITING && !REQUESTED_TAKE) {
   document.body.classList.add('program-out');
   controls.enabled = false;
   chromeOn = false;
+  // The module-level resize() ran before this branch added program-out, so the
+  // canvas was positioned below the appbar that is now hidden. Clear it: the
+  // export path keeps the existing box because the editor is still present, but
+  // here the editor is gone and the canvas fills the source window.
+  renderer.domElement.style.top = '0px';
+  renderer.domElement.style.left = '0px';
   outputSize = { ...programOutSize };
   resize();
   setViewCamera(programCamera);
@@ -11595,11 +13777,15 @@ if (EDITING && !REQUESTED_TAKE) {
   // look accidental when it is a requirement.
   connect();
   renderer.setAnimationLoop(liveLoop);
-  // The preset library on the surface the design wants it on. Failing softly because
-  // a node may be shooting with nothing connected to it and an empty selector is a
-  // worse shoot than a missing one, but not silently: the note says which it was.
+  // The top-down and stats overlays, on the recorder as well as the editor. The
+  // comment that used to say "only with the timeline" was written when there was
+  // no timeline on the recorder - now there is a preview, and the same furniture
+  // that helps compose a shot helps frame one.
+  chromeOn = true;
+  placeChrome();
+  // The preset library, refreshed at startup.
   refreshPresets().catch((err) => {
-    ui.recLookNote.textContent = `preset library unavailable: ${err.message}`;
+    console.error('preset library unavailable:', err.message);
   });
   // Until the hello lands there is nothing truthful to say about the kept range, and
   // the label still has to say the part that does not depend on the sensor.
@@ -11617,6 +13803,8 @@ if (EDITING && !REQUESTED_TAKE) {
   askRecordState = pollRecordState((state) => {
     recordState = state;
     paintRecord(state.storage);
+    chromeStale = true;
+    drawChrome();
   });
 }
 
@@ -11631,8 +13819,8 @@ globalThis.__kinect = {
   // would work on screen while every assertion read the corpse.
   get controls() { return controls; },
 
-  // Levelling: the rotation the room is carrying, the selected-plane fit that derives
-  // it, and the neutral-state action that uses the same control write path.
+  // Levelling: the rotation the room is carrying, and the neutral-state action that
+  // writes the pair back through the same control path a slider does.
   //
   // Read off **the cloud** rather than off the quaternion the parameters compose into,
   // and the difference is the whole value of the row. `registry-check` calls this the
@@ -11641,8 +13829,6 @@ globalThis.__kinect = {
   // been computed correctly and never applied, which is one edit away at all times and
   // is exactly what `level-check --mutate tilt-ignored` does.
   worldTilt: () => cloud.quaternion.toArray(),
-  levelAtStagePoint,
-  levelSelection: () => levelSelectionArmed,
   resetWorldRotation,
 
   // The sensor's own view, and the numbers it derived. Returned rather than left to
@@ -11656,6 +13842,23 @@ globalThis.__kinect = {
   // this sensor rather than about the constant, and a check should be able to hold
   // the two against each other for the take that is open.
   cropReach,
+
+  // The crop box as the chrome actually draws it, which is the distinction that makes
+  // these worth exposing at all. `cropBoxCorners` is the array the edges and the handles
+  // are built from, so a check reading it is reading the geometry on screen rather than
+  // recomputing the same eight corners beside it and agreeing with itself - and the
+  // rotation is the thing worth asking about, since a box drawn in the sensor's axes
+  // over a levelled cloud is exactly the bug the top-down's old rectangle had.
+  //
+  // `cropHandles` answers per view because which faces can be dragged is a fact about
+  // the projection rather than about the box: a face seen edge-on has no leverage for a
+  // pointer to resolve against and is offered no handle, and that rule is what a check
+  // has to be able to see to know it is a rule rather than a hardcoded list.
+  cropBoxCorners: () => cropBoxCorners().map((v) => v.toArray()),
+  cropHandles: (plan = false) => cropHandles(plan, insetRect())
+    .map(({ param, at, sx, sy }) => ({ param, x: at.x, y: at.y, sx, sy })),
+  cropBoxShown: () => showCropBox,
+  cropOutside: () => uniforms.cropOutside.value,
 
   // The sizes the export menu offers, and the way to adopt one.
   //
@@ -11747,6 +13950,7 @@ globalThis.__kinect = {
     /** The furniture, so a check can prove it is out of the frame and not merely small. */
     chrome: {
       on: () => chromeOn,
+      topView: () => topViewVisible,
       set(on) { chromeOn = on; placeChrome(); },
       inset: insetRect,
     },
@@ -11807,6 +14011,7 @@ globalThis.__kinect = {
     setMarks(list) {
       takeMarks = list.map((m) => ({ ...m }));
       paintMarks();
+      paintMarkButton();
     },
     selection: () => (selection ? { owner: selection.owner, t: selection.key.t } : null),
     select(owner, index) {
@@ -11916,6 +14121,11 @@ globalThis.__kinect = {
     loadProject: loadProjectNamed,
     applyStoredPreset,
     presetFromCurrentLook,
+    // The product's own re-list, exposed rather than re-implemented. A proof tool that
+    // plants a preset on the server needs the page to read the library again, and the
+    // alternative is a reload - which this suite already has one crash from, and which
+    // would throw away the document the section under it is standing on.
+    refreshPresets,
     setActiveDeliverable,
     activeDeliverable: () => activeDeliverable,
     appliedPreset: () => appliedPreset,

@@ -849,7 +849,11 @@ try {
             if (mm <= 0 || mm === 65535) continue;
             const z = mm * 0.001;
             const col = i % DW, row = (i / DW) | 0;
-            const X = (col + 0.5 - cx) / fx * z, Y = -(row + 0.5 - cy) / fy * z;
+            // x negated: the mirror correction unproject in web/main.js carries the
+          // reasoning for. Width and height are invariant under it and the centroid is
+          // not, so an oracle left un-negated would agree with the page on the rows that
+          // happen to measure extents and disagree on the one that measures a position.
+          const X = -(col + 0.5 - cx) / fx * z, Y = -(row + 0.5 - cy) / fy * z;
             if (X < minX) minX = X; if (X > maxX) maxX = X;
             if (Y < minY) minY = Y; if (Y > maxY) maxY = Y;
             sx += X; sy += Y; sz += z; n++;
@@ -958,7 +962,11 @@ try {
           const z = mm * 0.001;
           if (z < k.uniforms.nearClip.value || z > k.uniforms.farClip.value) continue;
           const col = i % DW, row = (i / DW) | 0;
-          const X = (col + 0.5 - cx) / fx * z, Y = -(row + 0.5 - cy) / fy * z;
+          // x negated: the mirror correction unproject in web/main.js carries the
+          // reasoning for. Width and height are invariant under it and the centroid is
+          // not, so an oracle left un-negated would agree with the page on the rows that
+          // happen to measure extents and disagree on the one that measures a position.
+          const X = -(col + 0.5 - cx) / fx * z, Y = -(row + 0.5 - cy) / fy * z;
           if (X < minX) minX = X; if (X > maxX) maxX = X;
           if (Y < minY) minY = Y; if (Y > maxY) maxY = Y;
           n++;

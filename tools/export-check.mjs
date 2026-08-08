@@ -255,6 +255,24 @@ const CONTROL_MARGIN = 5;
 // exactly-once refusal below is the whole safety property, so splitting the
 // namespace would only make it possible to have two rules about it.
 const MUTATIONS = {
+  // **The container kept and the stream swapped.** `prores` goes on writing a `.mov`,
+  // so the extension row and every path the sidecar builds are untouched, and only what
+  // is inside it moves - which is the half a row asking about the filename cannot see.
+  // Aimed at `server/export.js` rather than at the bundle because the codec table is the
+  // thing that decides, and the browser never sees it.
+  'prores-writes-h264': { file: 'server/export.js', edits: [[
+    "    args: ['-c:v', 'prores_ks', '-profile:v', '3', '-pix_fmt', 'yuv422p10le'],",
+    "    args: ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p'],",
+  ]] },
+  // The sequence stops being a sequence: `frameExt` null is what `export.js` documents as
+  // the answer to "is this artifact a directory", so nulling it writes one animated file
+  // at the path the row expects a directory at. `readdirSync` then throws ENOTDIR, loudly,
+  // which is the direction this row is built to fail in - a PNG sequence that quietly
+  // became one file is the defect the count exists to refuse.
+  'pngseq-writes-one-file': { file: 'server/export.js', edits: [[
+    "    ext: 'pngseq',\n    frameExt: 'png',",
+    "    ext: 'pngseq',\n    frameExt: null,",
+  ]] },
   // The dominant screen-space term goes back to framebuffer pixels.
   'pointsize-absolute': { file: 'web/main.js', edits: [[
     'gl_PointSize = clamp(pointSize * k / max(0.15, -mv.z), 1.0, 64.0);',
@@ -315,11 +333,50 @@ const MUTATIONS = {
   // that named a box a subject stood in now name a different box at every output size,
   // so the `crop` row must say so while `noise` and the two region rows stay clean.
   'crop-in-pixels': { file: 'web/main.js', edits: [[
-    '  if (pos.x < cropL || pos.x > cropR || pos.y < cropB || pos.y > cropT) {',
+    '  if (cropOn == 1.0 && (pos.x < cropL || pos.x > cropR || pos.y < cropB || pos.y > cropT)) {',
     '  float cropScale = bufferHeight / 1080.0;\n'
-    + '  if (pos.x < cropL * cropScale || pos.x > cropR * cropScale\n'
-    + '   || pos.y < cropB * cropScale || pos.y > cropT * cropScale) {',
+    + '  if (cropOn == 1.0 && (pos.x < cropL * cropScale || pos.x > cropR * cropScale\n'
+    + '   || pos.y < cropB * cropScale || pos.y > cropT * cropScale)) {',
   ]] },
+  // The faint pass stops reading the chrome flag and answers to the button alone, so a
+  // box left on while somebody exports puts the cut points into the file. This is the
+  // whole reason the uniform is derived rather than assigned, and the edit is one term.
+  'cropoutside-reaches-the-export': { file: 'web/main.js', edits: [[
+    '  uniforms.cropOutside.value = chromeOn && showCropBox ? CROP_FAINT : 0;',
+    '  uniforms.cropOutside.value = showCropBox ? CROP_FAINT : 0;',
+  ]] },
+  // Both early returns go, so a point outside the box always survives to the fragment
+  // stage - invisible at `cropOutside` zero, because `vMask` multiplies its alpha to
+  // nothing, and still writing depth the whole time. Alpha does not stop a splat
+  // occluding: `depthWrite` is on, so the cut half of a room goes on hiding the half
+  // that was kept, and the picture with the box off quietly loses geometry that is not
+  // cropped at all.
+  'faint-survives-at-zero': { file: 'web/main.js', edits: [
+    [
+      '  if (outsideCrop && cropOutside <= 0.0) {\n'
+      + '    gl_Position = vec4(0.0, 0.0, 2.0, 1.0);\n'
+      + '    gl_PointSize = 0.0;\n'
+      + '    return;\n'
+      + '  }',
+      '  if (false) {\n'
+      + '    gl_Position = vec4(0.0, 0.0, 2.0, 1.0);\n'
+      + '    gl_PointSize = 0.0;\n'
+      + '    return;\n'
+      + '  }',
+    ],
+    [
+      '    if (cropOutside <= 0.0) {\n'
+      + '      gl_Position = vec4(0.0, 0.0, 2.0, 1.0);\n'
+      + '      gl_PointSize = 0.0;\n'
+      + '      return;\n'
+      + '    }',
+      '    if (false) {\n'
+      + '      gl_Position = vec4(0.0, 0.0, 2.0, 1.0);\n'
+      + '      gl_PointSize = 0.0;\n'
+      + '      return;\n'
+      + '    }',
+    ],
+  ] },
   'grain-continuous': { file: 'web/main.js', edits: [[
     'float n = hash(floor(vUv * ref) + fract(time) * 137.0);',
     'float n = hash(vUv * ref + fract(time) * 137.0);',
@@ -569,7 +626,10 @@ const INSTALL = `(() => {
           if (mm === 0) continue;
           const z = mm * 0.001;
           if (z < near || z > far) continue;
-          const X = ((px + 0.5 - cx) / fx) * z;
+          // x negated: the mirror correction unproject in web/main.js carries the
+          // reasoning for. It reaches viewZ through m[2], so it only vanishes from this
+          // row while the program camera happens to face straight down the axis.
+          const X = (-(px + 0.5 - cx) / fx) * z;
           const Y = -((py + 0.5 - cy) / fy) * z;
           const Z = -z;
           // Column-major, the same product the vertex shader takes: -mv.z.
@@ -1017,17 +1077,23 @@ async function onFreshPage(what, work, attempts = 3) {
  * whole point of them.
  */
 async function setStage(page, size) {
-  // The strip's real height, off the page. It is `--timeline-h` plus a row per lane
-  // and neither term depends on the viewport, so one measurement is normally exact -
-  // the second pass only earns its keep if a lane appeared between the read and the
-  // resize, which changes the strip and therefore the stage under it.
+  // The fixed furniture's real height, off the page. The strip is `--timeline-h` plus
+  // a row per lane, and the Pencil shell adds its application bar above the stage. One
+  // measurement is normally exact; the second pass earns its keep if a lane appeared
+  // between the read and the resize, which changes the strip and therefore the stage.
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const strip = await page.evaluate(`(() => {
-      const el = document.getElementById('timeline');
-      if (!el || el.hidden) return 0;
-      return Math.round(el.getBoundingClientRect().height);
+    const furniture = await page.evaluate(`(() => {
+      const strip = document.getElementById('timeline');
+      const appBar = document.getElementById('appBar');
+      return {
+        strip: strip && !strip.hidden ? Math.round(strip.getBoundingClientRect().height) : 0,
+        shell: appBar && !appBar.hidden ? Math.round(appBar.getBoundingClientRect().height) : 0,
+      };
     })()`);
-    await page.setViewportSize({ width: size.width, height: size.height + strip });
+    await page.setViewportSize({
+      width: size.width,
+      height: size.height + furniture.strip + furniture.shell,
+    });
     // Optional, because the cross-build arms load an older `main.js` on purpose and
     // that build has no letterbox - its buffer is the viewport, which is exactly what
     // the wait below already expects. Guarding here rather than branching at the call
@@ -1186,7 +1252,17 @@ const REGION_AT_SUBJECT = {
 const HD_LOOK = { ...OFF, additive: false, pointSize: HD_POINT_SIZE };
 const PIPELINES = [
   ['points', { look: OFF }],
-  ['splat', { look: { ...OFF, additive: true }, camera: NEAR_CAMERA }],
+  // **A smaller point than the default, and the clamp is the reason.** The shader
+  // draws `clamp(pointSize * bufferHeight / 1080 / max(0.15, -mv.z), 1.0, 64.0)`, and
+  // this arm stands the camera inside the cloud so the splats overlap - which puts its
+  // nearest points on the `0.15` floor, where the size is `pointSize * k / 0.15`. At
+  // the default that is 88.9px at 1200, over the ceiling, and the precondition below
+  // correctly refuses to compare two output sizes through a clamped tail. Seven keeps
+  // both arms inside the band by arithmetic rather than by luck: 51.9px at 1200 and
+  // 25.9px at 600 at the near end, and the far end stays over a pixel for anything
+  // inside the 6m clip. Additive blending is what this arm is about and a smaller
+  // point blends the same way.
+  ['splat', { look: { ...OFF, additive: true, pointSize: 7 }, camera: NEAR_CAMERA }],
   ['trails', { look: { ...OFF, trails: 0.5 } }],
   ['rgbsplit', { look: { ...OFF, rgbSplit: 1.6 } }],
   // Both at full rather than at the preset's 0.35 and 0.22. At preset strength the
@@ -1299,12 +1375,23 @@ const RES_TOLERANCE = {
   scanlines: { on: 'fine', mean: 4.0, ratio: 0.005, corr: 0.88 },
   grain: { on: 'fine', mean: 4.0, ratio: 0.005, corr: 0.70 },
   // The two rows the bloom residual lands in, and the only two whose ratio band is
-  // 0.01 rather than 0.005 - measured departures of 0.0035 and 0.0046 against
-  // mutant departures of 0.0648 and 0.0807, so the band sits between them with
-  // room on both sides instead of 8% of its range left.
-  bloom: { on: 'coarse', mean: 1.6, ratio: 0.01 },
+  // wider than 0.005. It was 0.01, set between measured departures of 0.0035 and
+  // 0.0046 and mutant departures of 0.0648 and 0.0807.
+  //
+  // **The clean end of that pair is a property of the room, not of the build, and on
+  // this tree it is three times what it was.** Bloom's chain is frozen at the 600-tall
+  // buffer the look was graded on while everything else is expressed against 1080p -
+  // CLAUDE.md's "both are correct and do not reconcile them" - so the halo really is
+  // tighter at 1200 than at 600, and how much luminance that costs depends on how much
+  // of the frame is bright enough to bloom. Measured here: 0.0108 and 0.0114 clean
+  // against 0.679 and 0.836 under `pointsize-absolute`, both arms, one run each at
+  // 960x600 against 1920x1200. So the band is 0.03, which the clean numbers sit at 38%
+  // of and the mutant numbers clear by twenty-three times. Widening it is not the same
+  // as admitting bloom: `nobloom` still carries the constancy claim at 0.005, which is
+  // why the two rows exist separately.
+  bloom: { on: 'coarse', mean: 1.6, ratio: 0.03 },
   nobloom: { on: 'coarse', mean: 2.4, ratio: 0.005 },
-  full: { on: 'coarse', mean: 2.6, ratio: 0.01 },
+  full: { on: 'coarse', mean: 2.6, ratio: 0.03 },
   // The three world-space rows. Every band here sits between a measured clean number
   // and a measured mutant one rather than being chosen to fit.
   //
@@ -1503,10 +1590,30 @@ let rebaseFullOld = null;
 let rebaseHdOld = null;
 let rebaseNon169Old = null;
 {
-  const src = execFileSync('git', ['-C', REPO, 'show', `${BEFORE}:web/main.js`], { encoding: 'utf8', maxBuffer: 1e9 });
+  let src = execFileSync('git', ['-C', REPO, 'show', `${BEFORE}:web/main.js`], { encoding: 'utf8', maxBuffer: 1e9 });
   if (src.includes('bufferHeight / 1080.0')) {
     throw new Error(`${BEFORE} already has the resolution work: the control would be the same build twice`);
   }
+  // The pinned build is the old *point size*, not the old geometry. The unprojection's x
+  // sign changed after this rev - the sensor's frames arrive horizontally mirrored and this
+  // build undoes them, `unproject` in `web/main.js` carries the reasoning - so left alone
+  // the old arm draws the room reflected and the cross-build rows below disagree for two
+  // reasons at once. They were already failing at this rev for the first reason, which is a
+  // separate finding recorded in `docs/instruments.md`; the point of normalising here is
+  // that whoever diagnoses them is not also chasing a mirror. Measured: with this in place
+  // the worst of forty tile means on the Blackwall arms returns to the 1.02/0.95 it reads
+  // at HEAD, from the 22.19/22.14 an un-normalised arm reports.
+  //
+  // Guarded exactly once, like `registry-check`'s copy of this and like the mutations: a rev
+  // where the text stopped matching would silently become a comparison against un-normalised
+  // geometry, reported as a finding about point size.
+  const OLD_UNPROJECT_X = '     (pixel.x + 0.5 - center.x) / focal.x * z,';
+  const xHits = src.split(OLD_UNPROJECT_X).length - 1;
+  if (xHits !== 1) {
+    throw new Error(`${BEFORE}:web/main.js states the unprojection's x ${xHits} times, expected exactly 1`
+      + ' - refusing to compare a mirrored build against an unmirrored one and report it as point size');
+  }
+  src = src.replace(OLD_UNPROJECT_X, '    -(pixel.x + 0.5 - center.x) / focal.x * z,');
   const beforeHtml = execFileSync('git', ['-C', REPO, 'show', `${BEFORE}:web/index.html`], { encoding: 'utf8', maxBuffer: 1e9 });
   const before = await openPage(SMALL, src, beforeHtml);
   const measured = await resolutionSweep(before.page, PIPELINES.filter(([n]) => n === 'points' || n === 'nobloom'));
@@ -1699,6 +1806,118 @@ for (const [label, arm] of [['1728x1080', rebaseFullRef], ['1920x1200', rebaseFu
     + `worst of 40 tile means ${fixed(worst)}/255`);
 }
 
+console.log('\n[3] the crop box is editing furniture and cannot reach an exported pixel');
+
+// The box itself is drawn on a canvas of its own and could not reach `readPixels` if it
+// tried. What *can* is the pass that comes with it: while the box is on screen, points
+// the crop cuts draw faintly instead of vanishing, and that is a uniform on the same
+// shader every exported frame goes through. A viewer setting one edit away from being in
+// somebody's deliverable is the `hd-reaches-recorder` class, so it is asserted here in
+// the tool that owns the exported bytes.
+//
+// **The mechanism under test is that the uniform is derived rather than assigned.** It
+// reads the chrome flag the export already clears around its render, so the export does
+// not have to know the faint pass exists. `cropoutside-reaches-the-export` cuts that
+// dependency and must redden the first row.
+{
+  const arm = async (label, { box, chrome, near = 0.05, crop = true, wide = false }) => main.page.evaluate(`(async () => {
+    const k = globalThis.__kinect;
+    const ex = globalThis.__ex;
+    k.keyframes.chrome.set(true);
+    if (k.cropBoxShown() !== ${box}) document.getElementById('cropBox').click();
+    // Straight to the flag rather than through a button, because this is the state an
+    // export puts the page into: \`exportClip\` sets it and calls \`placeChrome\`, which is
+    // where the faint pass is meant to be recomputed.
+    k.keyframes.chrome.set(${chrome});
+    const faces = ${wide} ? [['left', -7], ['right', 7], ['bottom', -7], ['top', 7], ['far', 9.5]]
+      : [['left', -0.8], ['right', 0.8], ['bottom', -0.8], ['top', 0.8], ['far', 3]];
+    for (const [n, v] of [...faces, ['near', ${near}], ['crop', ${crop}]]) {
+      k.params.set(n, v);
+    }
+    await k.timeline.settled();
+    await k.timeline.transport().seek(${AT_SEC});
+    ex.grab('${label}');
+    return { outside: k.cropOutside(), sha: await ex.sha(ex.shots.get('${label}').px) };
+  })()`);
+
+  const shown = await arm('cropShown', { box: true, chrome: true });
+  const exporting = await arm('cropExporting', { box: true, chrome: false });
+  const hidden = await arm('cropHidden', { box: false, chrome: true });
+
+  console.log(`  ....  faint pass   shown ${shown.outside}, mid-export ${exporting.outside}, `
+    + `box off ${hidden.outside}`);
+
+  // The control, and it comes first because the row below is an equality: two identical
+  // images prove nothing if the faint pass never reaches a pixel in the first place, and
+  // a build whose `cropOutside` was stuck at zero would pass the export row perfectly.
+  check(shown.sha !== hidden.sha,
+    'the faint pass reaches the rendered image while the editor is showing the box',
+    `${shown.sha.slice(0, 12)} shown against ${hidden.sha.slice(0, 12)} with the box off`);
+  check(exporting.sha === hidden.sha && exporting.outside === 0,
+    'and an exported frame is byte-identical with the box shown and with it hidden',
+    `${exporting.sha.slice(0, 12)} mid-export against ${hidden.sha.slice(0, 12)} with the box off`);
+
+  // **And with the box off the crop is a cull, not a fade to nothing.** A point kept
+  // alive at alpha zero is invisible and still writes depth, so the half of a room the
+  // crop removed goes on hiding the half it kept - which is a picture missing geometry
+  // that was never cropped, in the state every exported frame is rendered in.
+  //
+  // **Read as "cutting the front of the room shows you the back of it"**, which needs no
+  // brightness threshold tuned to a fixture and is exactly what an invisible occluder
+  // cannot do. A near plane at 1.5m removes the foreground; on a build that culls, the
+  // rays it was standing in front of come through and light pixels the uncropped picture
+  // has nothing on. On a build that keeps it at alpha zero, the foreground goes on
+  // occluding and those pixels stay dark - the picture is missing geometry the crop
+  // never touched, in the state every exported frame is rendered in.
+  //
+  // The two rows above cannot see this because both of their arms carry the same holes.
+  const cut = await arm('cropCut', { box: false, chrome: true, near: 2.5, wide: true });
+  const whole = await arm('cropWhole', { box: false, chrome: true, near: 2.5, crop: false, wide: true });
+  const revealed = await main.page.evaluate(`(() => {
+    const ex = globalThis.__ex;
+    const a = ex.shots.get('cropCut').px;
+    const b = ex.shots.get('cropWhole').px;
+    const lum = (px, i) => 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
+    let seen = 0;
+    let litCut = 0;
+    let litWhole = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      const la = lum(a, i);
+      const lb = lum(b, i);
+      if (la > lb + 8) seen++;
+      if (la > 8) litCut++;
+      if (lb > 8) litWhole++;
+    }
+    return { seen, litCut, litWhole };
+  })()`);
+  note('cutting the first 2.5m of the room',
+    `${revealed.seen} pixels the released picture has nothing on; `
+    + `${revealed.litCut} lit with the near plane biting against ${revealed.litWhole} released`);
+  // Two thousand, sitting between two measurements rather than just under one: this
+  // fixture reveals 3776 pixels through the gap the cull leaves, and 993 with
+  // `faint-survives-at-zero` keeping the foreground alive to occlude. It is a ratio and
+  // not a presence, because a cloud is sprites rather than a surface and rays get
+  // through a stack of invisible points anyway - which is also why the lit-pixel counts
+  // beside it separate the two builds by 3% and are printed rather than asserted on. A
+  // near plane at 2.5m with the lateral faces wide open is what makes the ratio big
+  // enough to divide: it puts the bulk of the room in front of what survives, where
+  // 1.5m left too little foreground and the two builds came out 225 against 154.
+  check(revealed.seen > 2000,
+    'and with the box off the crop is a cull, so what it removes stops occluding what it kept',
+    `${revealed.seen} revealed, ${revealed.litCut} lit against ${revealed.litWhole} released`);
+}
+
+// Left in the state the rows below expect, since this section moved six parameters.
+await main.page.evaluate(`(() => {
+  const k = globalThis.__kinect;
+  if (k.cropBoxShown()) document.getElementById('cropBox').click();
+  k.keyframes.chrome.set(true);
+  // The switch among them, because the last arm above ran with it off - without it
+  // this block leaves the state its own comment says it restores, and every row below
+  // would render with the box released.
+  k.params.reset(['left', 'right', 'bottom', 'top', 'near', 'far', 'crop']);
+})()`);
+
 // The main page has said everything it has to say, and it is closed here. Every
 // claim below runs on a page of its own, one browser at a time: two live WebGL
 // pages while an export is reading pixels back is a renderer process this machine
@@ -1708,7 +1927,7 @@ await main.close();
 
 // ------------------------------------------- 3. an exported frame is the editor's
 
-console.log('\n[3] an exported frame is the frame the editor showed at that program time');
+console.log('\n[4] an exported frame is the frame the editor showed at that program time');
 
 // Both arms in one page and at the editor's own stage, so no resize and no second
 // page load sits between the two things being compared. The export's output size
@@ -1772,7 +1991,7 @@ if (shown.ok) {
 
 // ---------------------------------------------------- 4. no wall clock anywhere
 
-console.log('\n[4] the same export twice is the same bytes');
+console.log('\n[5] the same export twice is the same bytes');
 
 const RERUN = {
   width: STAGE.width, height: STAGE.height, fps: EXPORT_FPS,
@@ -1836,7 +2055,7 @@ if (twice.every((r) => r.ok)) {
 
 // ------------------------------------------------------------- 5. the file
 
-console.log('\n[5] the file has the frames, the duration and the rate that were asked for');
+console.log('\n[6] the file has the frames, the duration and the rate that were asked for');
 
 const probe = (path) => {
   const raw = execFileSync(FFPROBE, [
@@ -1892,6 +2111,60 @@ if (lossless.ok && twice[0]?.ok) {
     'decoded back, the file is byte-for-byte the frames the browser sent, right way up and in order',
     `${matched}/${lossless.done.frameHashes.length} frames matched`);
 
+  // **The two deliverables the dialog offers that nothing here encoded.** The format
+  // segments were proved as far as the document they write and no further, so `prores`
+  // and `pngseq` were two buttons whose whole journey past `setExportCodec` was
+  // untested - and they are the two entries in `CODECS` that differ from `h264` in the
+  // things that break: one changes the container, the other stops the artifact being a
+  // file at all.
+  //
+  // They are asserted differently on purpose. A ProRes deliverable is a `.mov` and the
+  // question is what stream is inside it, so `probe` answers. A PNG sequence is a
+  // **directory** - `server/export.js` says so in as many words, and `frameExt` is the
+  // field that decides it - so probing it as a file is not a weaker version of the same
+  // row, it is a row that cannot run. Counting what landed in the directory is the only
+  // form the claim has here, and the per-frame size still has to come from ffprobe
+  // because a file that exists is not a picture of the right shape.
+  const movRun = await onFreshPage('the ProRes deliverable', async (page) =>
+    page.evaluate(`globalThis.__kinect.export.run(${JSON.stringify({ ...LOSSLESS, name: 'check-mov', codec: 'prores' })})`));
+  if (movRun.ok) {
+    const p = probe(movRun.value.output);
+    const wantFrames = EXPORT_FRAMES + 1;
+    // The codec name as well as the extension, because a `.mov` carrying h264 is exactly
+    // what a table that lost its `args` would write, and it is the shape a row asking
+    // only about the container passes.
+    check(movRun.value.output.endsWith('.mov') && p.codec === 'prores'
+      && p.frames === wantFrames && p.width === STAGE.width && p.height === STAGE.height,
+      'prores: the deliverable is a .mov holding a ProRes stream of the frames that were asked for',
+      `${movRun.value.output.split('/').pop()}: ${p.frames} frames of ${p.width}x${p.height} in ${p.codec}, `
+      + `wanted ${wantFrames} of ${STAGE.width}x${STAGE.height} in prores`);
+  } else {
+    check(false, 'prores: the deliverable is a .mov holding a ProRes stream of the frames that were asked for', movRun.error);
+  }
+
+  const seqRun = await onFreshPage('the PNG sequence deliverable', async (page) =>
+    page.evaluate(`globalThis.__kinect.export.run(${JSON.stringify({ ...LOSSLESS, name: 'check-pngseq', codec: 'pngseq' })})`));
+  if (seqRun.ok) {
+    const dir = seqRun.value.output;
+    // `readdirSync` on a path that is not a directory throws ENOTDIR, which is the
+    // failure this row wants to be loud about rather than to catch: an artifact that
+    // stopped being a directory is the defect, not a condition to handle.
+    const files = readdirSync(dir).filter((f) => f.endsWith('.png')).sort();
+    const wantFrames = EXPORT_FRAMES + 1;
+    check(files.length === wantFrames,
+      'pngseq: the artifact is a directory holding one numbered PNG per frame',
+      `${files.length} png files in ${dir.split('/').pop()}, wanted ${wantFrames}`
+      + (files.length ? ` - first ${files[0]}, last ${files[files.length - 1]}` : ''));
+    if (files.length) {
+      const p = probe(join(dir, files[0]));
+      check(p.codec === 'png' && p.width === STAGE.width && p.height === STAGE.height,
+        'and each of them is a PNG of the size that was asked for',
+        `${files[0]}: ${p.width}x${p.height} in ${p.codec}, wanted ${STAGE.width}x${STAGE.height} in png`);
+    }
+  } else {
+    check(false, 'pngseq: the artifact is a directory holding one numbered PNG per frame', seqRun.error);
+  }
+
   // Output resolution is an ordinary export setting, which is the property the
   // resolution work above exists to make true - so one export is asked for at a
   // size the editor is not, and the file is measured rather than the request
@@ -1929,7 +2202,7 @@ if (lossless.ok && twice[0]?.ok) {
 
 // ------------------------------------ 6. a failed export leaves the last one alone
 
-console.log('\n[6] a failed export leaves the previous file and its record exactly as they were');
+console.log('\n[7] a failed export leaves the previous file and its record exactly as they were');
 
 // The one claim here that does not go through the running server, because it cannot:
 // what it is about is a path inside `server/export.js`, and a page can be served a
@@ -2064,6 +2337,58 @@ console.log('\n[6] a failed export leaves the previous file and its record exact
         : `no done message: ${first.error ?? 'the socket just closed'}`);
     if (!first.done || !existsSync(OUT) || !existsSync(SIDECAR)) {
       throw new Error('the good export did not produce a file to protect');
+    }
+
+    // **The two formats the dialog gained, asked here rather than only in section 5, and
+    // the reason is delivery.** Section 5 exports through the server named by `--url`,
+    // which is a process this tool did not start and cannot stage - so a mutation of
+    // `server/export.js` reaches nothing there, and a control aimed at it runs the clean
+    // build and reports itself caught-by-nothing at exit 0. Measured exactly that way
+    // before this block existed: `prores-writes-h264` came back 45/45 passed, NOT CAUGHT,
+    // with the section 5 rows green because the build under them was never mutated. That
+    // is the silent-delivery failure this suite already carries two entries about.
+    //
+    // This section imports the module itself, `serverSource` carries the mutation, so the
+    // claim about what a codec writes is asked where an edit to the codec table can be
+    // seen. Section 5 keeps its rows: they are the end-to-end confirmation through the
+    // real server, and this is the half that can be falsified.
+    for (const [codec, wantExt] of [['prores', 'mov'], ['pngseq', 'pngseq']]) {
+      const sock = await socketTo(server.port);
+      sock.send({ begin: { ...SHAPE, name: `${NAME}-${codec}`, codec } });
+      const armReady = await untilReady(sock);
+      if (armReady.error) {
+        check(false, `${codec}: the module writes the artifact its codec table names`, armReady.error);
+        continue;
+      }
+      for (let n = 0; n < SHAPE.frames; n++) sock.send(frameOf(n));
+      sock.send({ end: true });
+      const out = await settle(sock);
+      const path = armReady.output;
+      if (!out.done) {
+        check(false, `${codec}: the module writes the artifact its codec table names`,
+          `no done message: ${out.error ?? 'the socket just closed'}`);
+        continue;
+      }
+      if (codec === 'pngseq') {
+        // A sequence is a directory, so `readdirSync` is the question and its ENOTDIR is
+        // the answer when the artifact has stopped being one. Counting the frames is the
+        // only form this claim has - probing the path as a file cannot run at all.
+        let files = null;
+        let why = '';
+        try {
+          files = readdirSync(path).filter((f) => f.endsWith('.png'));
+        } catch (err) { why = err.code ?? err.message; }
+        check(files !== null && files.length === SHAPE.frames,
+          `${codec}: the module writes the artifact its codec table names`,
+          files === null
+            ? `${path.split('/').pop()} is not a directory: ${why}`
+            : `${files.length} png frames in ${path.split('/').pop()}, wanted ${SHAPE.frames}`);
+      } else {
+        const p = probe(path);
+        check(path.endsWith(`.${wantExt}`) && p.codec === codec,
+          `${codec}: the module writes the artifact its codec table names`,
+          `${path.split('/').pop()} holds ${p.codec}, wanted a .${wantExt} holding ${codec}`);
+      }
     }
     const fileBefore = createHash('sha256').update(readFileSync(OUT)).digest('hex');
     const recordBefore = readFileSync(SIDECAR, 'utf8');

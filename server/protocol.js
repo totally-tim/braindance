@@ -56,19 +56,36 @@
 // 76.5% of the 512x424 grid carries a reading: mean 166,148 samples, range 146,129 to
 // 170,134.
 //
-// **Unprojection**, libfreenect2's pinhole model, the same one `Registration::getPointXYZ`
-// and the vertex shader in `web/main.js` use. For the sample at column `col` and row
-// `row` holding `mm` millimetres, in metres, in a right-handed frame with the camera
-// looking down -z:
+// **Unprojection**, libfreenect2's pinhole model, the same one the vertex shader in
+// `web/main.js` uses. For the sample at column `col` and row `row` holding `mm`
+// millimetres, in metres, in a right-handed frame with the camera looking down -z:
 //
 //     z = mm / 1000
-//     X =  (col + 0.5 - cx) / fx * z
+//     X = -(col + 0.5 - cx) / fx * z
 //     Y = -(row + 0.5 - cy) / fy * z
 //     Z = -z
 //
 // The half pixel is the sample's centre, and Y is negated because image space grows
 // downward. That is the whole of it: those four lines against the four intrinsics out of
 // the hello turn a take into geometry with none of this program running.
+//
+// **X is negated, and that is one sign away from `Registration::getPointXYZ`. Do not
+// "correct" it back.** The depth grid in this file is the sensor's frame verbatim, and
+// libfreenect2 delivers depth, IR and colour horizontally mirrored on purpose, to match
+// the Microsoft SDK's selfie-view convention. Microsoft pairs that mirrored image with a
+// camera space whose x grows to the sensor's *left*, which makes their 3D output chirally
+// correct; `getPointXYZ` pairs the same mirrored image with an x that grows right, so
+// copying it gives a cloud that is a mirror image of the room - a raised right hand on
+// the right of the picture. Every take in this format was written through that mirror, so
+// the negation belongs in the reader and every take old and new decodes upright with it.
+//
+// The half-pixel and the principal point are unaffected: for a mirrored pixel the true
+// column is `W - (col + 0.5)` and the true principal point is `W - cx`, the grid width
+// cancels out of the difference, and `-(col + 0.5 - cx)` is what remains. So `cx` is used
+// exactly as the hello reports it. **Mirroring the sample indices instead of negating X
+// is a different and wrong fix**, because the registered colour shares the depth grid
+// pixel for pixel and is mirrored the same way - move the sampling and the colour comes
+// off the geometry.
 //
 // **Nothing in the file says which generation of grabber wrote it.** That is issue #44's
 // to fix rather than this specification's, and it is recorded here because a reader that

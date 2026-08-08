@@ -36,32 +36,33 @@
 //     at any cant is the same picture it gives at none. That is what forces the free
 //     camera's up onto the sensor's, which is why navigation's controls are rebuilt
 //     rather than written to - see `setNavigationUp` in `web/main.js`.
-//  5. **Floor selection reads the chosen geometry.** Three planted surfaces with three
-//     different normals must produce three different and individually correct
-//     answers. One arm would not do: a button that wrote zeros is right about a
-//     level room, and a button that read the pair in the wrong order is right about
-//     every surface that leans only one way. `level-writes-zero` and
-//     `level-order-swapped` are the two controls, and the third arm leans both ways
-//     precisely so the order has a consequence. A split frame then makes the selected
-//     point consequential, and the reset control proves the neutral way back.
+//  5. **There is a neutral way back, and it goes through the control.** The pair is
+//     document state and easy to leave somewhere unusable, so `reset rotation` puts
+//     both axes and both sliders back in one press - and it has to be pressed rather
+//     than called, because the panel being a view on the registry is the thing that
+//     could silently stop being true. `reset-keeps-roll` is its control: a button that
+//     took `tilt` home and left `roll` behind passes any row that reads one axis.
 //
 // **The frames are planted, so this needs no sensor and no capture.** The depth
 // texture is written directly with an analytic plane - `z = c / (u . n)` along each
-// pixel's own ray - which is what lets section 5 know the answer it is grading. A
-// fixture take would have given a surface nobody knows the normal of, and the fit
-// would then only ever have been asserted against itself.
+// pixel's own ray - so the normal every section works from is one this file chose. That
+// is what lets `levelPair` below state the cant a planted surface should be level at
+// instead of asking the page for it, and a fixture take would have given a surface
+// nobody knows the normal of.
 //
 //   node tools/level-check.mjs
 //   node tools/level-check.mjs --mutate tilt-ignored             # must FAIL
 //   node tools/level-check.mjs --mutate crop-follows-tilt        # must FAIL
+//   node tools/level-check.mjs --mutate plan-box-ignores-tilt    # must FAIL
+//   node tools/level-check.mjs --mutate crop-switch-reaches-only-the-shader # must FAIL
 //   node tools/level-check.mjs --mutate plan-ignores-tilt        # must FAIL
 //   node tools/level-check.mjs --mutate plan-skips-vertical-crop # must FAIL
 //   node tools/level-check.mjs --mutate region-follows-tilt      # must FAIL
 //   node tools/level-check.mjs --mutate sensor-view-ignores-tilt # must FAIL
-//   node tools/level-check.mjs --mutate level-writes-zero        # must FAIL
 //   node tools/level-check.mjs --mutate level-order-swapped      # must FAIL
-//   node tools/level-check.mjs --mutate level-selection-ignores-point # must FAIL
-//   node tools/level-check.mjs --mutate reset-keeps-roll          # must FAIL
+//   node tools/level-check.mjs --mutate reset-keeps-roll         # must FAIL
+//   node tools/level-check.mjs --mutate x-not-mirrored           # must FAIL
+//   node tools/level-check.mjs --mutate plan-x-not-mirrored      # must FAIL
 //
 // It spawns its own server and needs none running. `--port` takes one nothing else
 // holds; the default is not in any other tool's range, but two worktrees running this
@@ -102,9 +103,26 @@ const MUTATIONS = {
   // Section 2's identity is what sees it - the surviving set changes, and no camera
   // move can put a discarded point back.
   'crop-follows-tilt': { file: 'web/main.js', edits: [[
-    '  if (pos.x < cropL || pos.x > cropR || pos.y < cropB || pos.y > cropT) {',
+    '  if (cropOn == 1.0 && (pos.x < cropL || pos.x > cropR || pos.y < cropB || pos.y > cropT)) {',
     '  vec3 cropAt = (modelMatrix * vec4(pos, 1.0)).xyz;\n'
-    + '  if (cropAt.x < cropL || cropAt.x > cropR || cropAt.y < cropB || cropAt.y > cropT) {',
+    + '  if (cropOn == 1.0 && (cropAt.x < cropL || cropAt.x > cropR || cropAt.y < cropB || cropAt.y > cropT)) {',
+  ]] },
+  // The crop box is drawn straight off the uniforms, in the sensor's axes, over a cloud
+  // in the room's. This is what the top-down's old rectangle did for as long as levelling
+  // existed, and it had no control at all - the rectangle was two of the six faces and
+  // nothing compared it to anything.
+  'plan-box-ignores-tilt': { file: 'web/main.js', edits: [[
+    '    ).applyQuaternion(worldTilt);',
+    '    );',
+  ]] },
+  // The switch reaches the shader and stops there. The picture releases and the top-down
+  // goes on culling the cloud it draws underneath the box - which is the "close the
+  // class" failure written as one line: two readers, one of them told. There were three
+  // readers while a floor could be selected in the picture, and that reader is gone, so
+  // the plan is now the only thing standing between this mutation and a green run.
+  'crop-switch-reaches-only-the-shader': { file: 'web/main.js', edits: [[
+    '  if (uniforms.cropOn.value !== 1) return false;\n',
+    '',
   ]] },
   // The picture levels and the box in the corner does not, which is exactly the state
   // this feature was built to end. Nothing outside section 3 can see it.
@@ -116,9 +134,18 @@ const MUTATIONS = {
   // care about. Levelling turns sensor y into the plan's own x and z, so points the
   // renderer discarded reappear inside the footprint - and only section 3's extent,
   // measured with a crop that bites vertically, can see it.
+  //
+  // Spelled out at the call site rather than by editing `croppedOut`, and the
+  // distinction is what keeps this mutation and the one above apart: reaching into the
+  // predicate is `crop-switch-reaches-only-the-shader`'s job and reddens the switch
+  // rows, where this one leaves the predicate alone and changes only what the plan
+  // thinks to ask it. Two mutations that edited the same function would redden the same
+  // rows and neither would say which property was load-bearing.
   'plan-skips-vertical-crop': { file: 'web/main.js', edits: [[
-    '      if (wy < uniforms.cropB.value || wy > uniforms.cropT.value) continue;\n',
-    '',
+    '      if (croppedOut(wx, wy, z)) continue;',
+    '      if (uniforms.cropOn.value === 1\n'
+    + '        && (z < uniforms.nearClip.value || z > uniforms.farClip.value\n'
+    + '          || wx < uniforms.cropL.value || wx > uniforms.cropR.value)) continue;',
   ]] },
   // The sensor view keeps navigation's own pole and its own axis, so on a levelled
   // take the one button that means "exactly what the sensor shot" shows a rolled
@@ -128,35 +155,6 @@ const MUTATIONS = {
     '  setNavigationUp(new THREE.Vector3(0, 1, 0).applyQuaternion(worldTilt));\n'
     + '  controls.target.set(0, 0, -SENSOR_VIEW_DISTANCE).applyQuaternion(worldTilt);',
     '  controls.target.set(0, 0, -SENSOR_VIEW_DISTANCE);',
-  ]] },
-  // The button reports success and writes a level room. Plausible on any take that
-  // was nearly level to start with, which is why section 5 plants surfaces that are
-  // not.
-  'level-writes-zero': { file: 'web/main.js', edits: [[
-    '  writeFromControl(\'roll\', roll);\n  writeFromControl(\'tilt\', tilt);',
-    '  writeFromControl(\'roll\', 0);\n  writeFromControl(\'tilt\', 0);',
-  ]] },
-  // The mode and cursor work, but the click coordinate is discarded and both sides
-  // of a frame containing different planes level on the same centre patch. The split
-  // plant in section 5 is what gives this a visible consequence.
-  'level-selection-ignores-point': { file: 'web/main.js', edits: [[
-    '      const d = Math.hypot(\n'
-    + '        (levelVec.x * 0.5 + 0.5) * size.w - stageX,\n'
-    + '        (0.5 - levelVec.y * 0.5) * size.h - stageY,\n'
-    + '      );',
-    '      const d = Math.hypot(levelVec.x * 0.5 * size.w, levelVec.y * 0.5 * size.h);',
-  ]] },
-  // The same discarded coordinate one link earlier, in the handler rather than in the
-  // function behind it. `levelAtStagePoint` still reads the point it is handed and
-  // still fits the plane under it correctly; what is lost is the press's own position
-  // on the way in. That distinction is the whole reason this mutation exists beside the
-  // one above: every arm that calls the hook directly passes its own coordinate and so
-  // cannot see the handler at all, and a single-plane frame answers the same whatever
-  // point reaches it. Only an off-centre press on the split plant, driven through
-  // `#camLevel` and `#stage`, has an answer that differs here.
-  'pointer-levels-the-centre': { file: 'web/main.js', edits: [[
-    '  const result = levelAtStagePoint(view.x, view.y);',
-    '  const result = levelAtStagePoint(stageSize().w / 2, stageSize().h / 2);',
   ]] },
   // The button takes tilt back to neutral and leaves roll behind. Reading both
   // parameters and both sliders through the real control catches the half-reset.
@@ -174,13 +172,49 @@ const MUTATIONS = {
     '  vec3 p0 = pos;',
     '  vec3 p0 = (modelMatrix * vec4(pos, 1.0)).xyz;',
   ]] },
-  // The pair is composed the other way round, `Rz(roll) * Rx(tilt)`. Every surface
-  // that leans along one axis alone is levelled correctly by both orders, so this is
-  // invisible to two of section 5's three arms by construction - and the third leans
-  // both ways for exactly that reason.
+  // The pair is composed the other way round, `Rz(roll) * Rx(tilt)`. Every surface that
+  // leans along one axis alone is carried onto the vertical by both orders, so a plant
+  // that only tipped away from the sensor could not see this at all - which is why
+  // section 3 plants surface B, whose roll is 27 degrees.
+  //
+  // **It is the two-sided reading that catches this, not the flat one.** Measured: under
+  // the swap the surface is left canted, and the flat row still passes, because a canted
+  // plane fills a box too and that row asks only for a fat one. What fires is the quarter
+  // turn - 118px across flat and 58px on edge where a levelled surface collapses to 28 -
+  // since a pose that was never level does not stand on its edge when it is turned as if
+  // it were. This is the same reason the section was built two-sided, arriving from a
+  // second direction.
+  //
+  // `registry-check` catches it independently, by writing `Rx * Rz` out longhand and
+  // comparing against the landing site. Two tools rather than one is deliberate: this
+  // one says the order has a visible consequence, and that one says which order.
+  //
+  // It shares that row with `plan-ignores-tilt`, which reddens it at 116px flat and 116px
+  // on edge. Distinguishable by value and not by name, so the row is load-bearing twice
+  // over: weaken it and two controls go quiet together.
   'level-order-swapped': { file: 'web/main.js', edits: [[
     "const tiltEuler = new THREE.Euler(0, 0, 0, 'XYZ');",
     "const tiltEuler = new THREE.Euler(0, 0, 0, 'ZYX');",
+  ]] },
+  // The shader goes back to being a faithful port of `Registration::getPointXYZ`, which
+  // is the state this program shipped in from its first commit: the frames arrive
+  // mirrored and nothing undoes it, so the cloud is a reflection of the room. This is the
+  // mutation that had no catcher for two years - section 8 is its only one, and only
+  // because that section plants something asymmetric. Every other fixture in this file,
+  // and the fov and intrinsics arms of `sensor-view-check`, draw the same picture either
+  // way round.
+  'x-not-mirrored': { file: 'web/main.js', edits: [[
+    '    -(pixel.x + 0.5 - center.x) / focal.x * z,',
+    '     (pixel.x + 0.5 - center.x) / focal.x * z,',
+  ]] },
+  // The sign is fixed in the shader and the top-down keeps the old one, so the picture
+  // shows the room the right way round and the plan beside it is a reflection. This is
+  // "close the class, not the instance" written as one line, and it is a separate control
+  // from `x-not-mirrored` for the reason `plan-ignores-tilt` is separate from
+  // `tilt-ignored`: one says the sign matters and the other says which readers were told.
+  'plan-x-not-mirrored': { file: 'web/main.js', edits: [[
+    '      const wx = (-(col + 0.5 - cx) / fx) * z;',
+    '      const wx = ((col + 0.5 - cx) / fx) * z;',
   ]] },
 };
 if (MUTATE && !MUTATIONS[MUTATE]) {
@@ -272,28 +306,44 @@ const stopAll = async () => {
   await wait(150);
 };
 
-// The three surfaces every section plants. Each is a unit normal in sensor metres and
-// the depth at which its centre ray crosses. **A is deliberately blind to the order
-// the pair composes in**: it leans along one axis only, so its roll comes out at zero
-// and `Rx * Rz` and `Rz * Rx` are the same rotation. B and C lean both ways and are
-// the two that can see `level-order-swapped`. The blind arm is kept rather than
-// replaced, because a set of arms that all see a mutation says nothing about which
-// property is load-bearing - and the file says which is which here rather than
-// leaving it to be rediscovered from a confusing sweep.
+// The three surfaces the sections plant. Each is a unit normal in sensor metres and the
+// depth at which its centre ray crosses. **A is deliberately blind to the order the pair
+// composes in**: it leans along one axis only, so its roll comes out at zero and
+// `Rx * Rz` and `Rz * Rx` are the same rotation. B and C lean both ways, which is why
+// section 3 - the section whose control is `level-order-swapped` - plants B rather than
+// the simplest of the three. The blind arm is kept rather than replaced, because a set
+// of arms that all see a mutation says nothing about which property is load-bearing, and
+// the file says which is which here rather than leaving it to a confusing sweep.
 const SURFACES = [
   { name: 'A, tipped away from the sensor and not rolled', n: [0, 0.3, -1], z: 2.0 },
   { name: 'B, rolled in its bracket as well', n: [0.45, 0.89, -0.35], z: 2.2 },
   { name: 'C, leaning hard along both axes at once', n: [0.6, 0.6, -0.53], z: 2.0 },
 ];
 
-// How far off the vertical a levelled normal is allowed to land, as the length of its
-// horizontal component. Snapping two angles to the sliders' half-degree step can leave
-// about 0.0062 radians behind in the worst case, so this is a shade over twice the
-// quantisation and is a bound rather than a number chosen to fit: the clean run's worst
-// arm sits at 0.0035 and the mutation it has to catch misses by 0.19. An earlier
-// version at 0.02 let surface C through `level-order-swapped` by 0.0005, which is a row
-// that would have gone green or red depending on the machine.
-const LEVEL_TOLERANCE = 0.012;
+/**
+ * The pair that carries a planted normal onto the room's vertical, under the
+ * `Rx(tilt) * Rz(roll)` order the cloud is turned by.
+ *
+ * **This is an oracle and not a convenience.** The sections below need a surface that is
+ * genuinely level to measure a top-down against, and the cant that makes it so is a fact
+ * about the normal this file planted - so it is computed here, from that normal, and
+ * never read back out of the page. A check that asked the build under test which angles
+ * level its own plant would agree with any build by construction, including one that
+ * composes the pair the other way round.
+ *
+ * `roll` is whatever takes the normal into the YZ plane, which leaves a non-negative
+ * horizontal component behind, and `tilt` is whatever then swings that onto the axis.
+ * Two angles for two degrees of freedom, with yaw left where it belongs.
+ */
+const levelPair = ([x, y, z]) => {
+  const len = Math.hypot(x, y, z);
+  const [nx, ny, nz] = [x / len, y / len, z / len];
+  const deg = (rad) => (rad * 180) / Math.PI;
+  return {
+    tilt: deg(Math.atan2(-nz, Math.hypot(nx, ny))),
+    roll: deg(Math.atan2(nx, ny)),
+  };
+};
 
 const hash = (buf) => createHash('sha256').update(buf).digest('hex').slice(0, 16);
 
@@ -323,14 +373,14 @@ try {
   await page.evaluate(() => { document.getElementById('panel').style.display = 'none'; });
 
   /**
-   * Plants one analytic plane over the depth image, or a different one on each half.
+   * Plants one analytic plane over the depth image.
    *
    * The look is flattened first and that is not tidiness. Fade, wake and noise are
    * temporal, so a picture compared against another picture would be comparing two
    * moments of an accumulator rather than two geometries, and the identity in section
    * 2 would be false for a reason that has nothing to do with levelling.
    */
-  const plant = (surface, rightSurface = null) => page.evaluate((surfaceSpecs) => {
+  const plant = (surface) => page.evaluate(({ n: n0, z: zc }) => {
     const k = globalThis.__kinect;
     for (const [name, value] of Object.entries({
       fade: 0, wake: 0, noise: 0, additive: false, spin: false, denoise: false,
@@ -341,19 +391,21 @@ try {
     const fy = k.uniforms.focal.value.y;
     const cx = k.uniforms.center.value.x;
     const cy = k.uniforms.center.value.y;
-    const planes = surfaceSpecs.filter(Boolean).map(({ n: n0, z: zc }) => {
-      const len = Math.hypot(n0[0], n0[1], n0[2]);
-      const n = n0.map((v) => v / len);
-      // `c` is fixed by where the centre ray is wanted, so every surface lands at a
-      // sane depth whatever way it leans.
-      return { n, c: zc * -n[2] };
-    });
+    const len = Math.hypot(n0[0], n0[1], n0[2]);
+    const n = n0.map((v) => v / len);
+    // `c` is fixed by where the centre ray is wanted, so every surface lands at a
+    // sane depth whatever way it leans.
+    const c = zc * -n[2];
     const data = k.uniforms.depthCurr.value.image.data;
     data.fill(0);
     for (let row = 0; row < DH; row++) {
       for (let col = 0; col < DW; col++) {
-        const { n, c } = planes.length > 1 && col >= DW / 2 ? planes[1] : planes[0];
-        const ux = (col + 0.5 - cx) / fx;
+        // The ray this sample lies on, and it is the *page's* unprojection inverted
+        // rather than upstream's - x carries the mirror correction `unproject` in
+        // `web/main.js` explains. Planting through an un-negated ray would put every
+        // surface in the texture at the mirror image of the normal asked for, and the
+        // plane fit would then be graded against a normal nobody planted.
+        const ux = -(col + 0.5 - cx) / fx;
         const uy = -(row + 0.5 - cy) / fy;
         const den = ux * n[0] + uy * n[1] - n[2];
         if (Math.abs(den) < 1e-6) continue;
@@ -366,8 +418,8 @@ try {
     }
     k.uniforms.depthCurr.value.needsUpdate = true;
     k.resetAccumulators();
-    return planes.map(({ n }) => n);
-  }, [surface, rightSurface]).then((normals) => (rightSurface ? normals : normals[0]));
+    return n;
+  }, surface);
 
   /**
    * Whether the planted frame is still the one the page is drawing.
@@ -406,19 +458,6 @@ try {
     k.params.set('roll', r);
     return { tilt: k.params.get('tilt'), roll: k.params.get('roll'), q: k.worldTilt() };
   }, [tilt, roll]);
-
-  const levelAt = (x, y = 0.5) => page.evaluate(([xFraction, yFraction]) => {
-    const k = globalThis.__kinect;
-    const stage = k.renderer.domElement.getBoundingClientRect();
-    return k.levelAtStagePoint(stage.width * xFraction, stage.height * yFraction);
-  }, [x, y]);
-
-  const landNormal = (normal) => page.evaluate((n) => {
-    const k = globalThis.__kinect;
-    const v = k.freeCamera.position.clone().fromArray(n);
-    const q = k.freeCamera.quaternion.clone().fromArray(k.worldTilt());
-    return v.applyQuaternion(q).toArray();
-  }, normal);
 
   /**
    * The rendered frame, and only the rendered frame.
@@ -577,6 +616,7 @@ try {
       const h = Math.round(r.h * scale);
       const px = canvas.getContext('2d').getImageData(x0, y0, w, h).data;
       let minX = Infinity; let maxX = -Infinity; let minY = Infinity; let maxY = -Infinity; let n = 0;
+      let sumX = 0;
       for (let y = 0; y < h; y++) {
         for (let x = 0; x < w; x++) {
           const i = (y * w + x) * 4;
@@ -587,27 +627,41 @@ try {
           // those would be measuring the furniture.
           if (red < 90 || Math.abs(red - green) > 26 || Math.abs(green - blue) > 26) continue;
           n++;
+          sumX += x;
           if (x < minX) minX = x;
           if (x > maxX) maxX = x;
           if (y < minY) minY = y;
           if (y > maxY) maxY = y;
         }
       }
-      return n === 0 ? { n: 0 } : { n, w: maxX - minX + 1, h: maxY - minY + 1, scale };
+      // `sumX` and `insetW` are raw on purpose, and section 8 is what needs them: an
+      // extent is invariant under a reflection and a position is not, so every row that
+      // measures `w` and `h` would pass a plan drawn mirrored. They come out unreduced
+      // because the filter above does not catch quite everything - see section 8 - and a
+      // centroid computed here would bake that in where a caller cannot subtract it.
+      return n === 0
+        ? { n: 0, sumX: 0, insetW: w }
+        : { n, w: maxX - minX + 1, h: maxY - minY + 1, scale, sumX, insetW: w };
     });
   };
 
-  // Back to no cant before planting, or the surface is levelled from wherever the
-  // previous section left the room and the crosshair is looking at nothing.
+  // Surface B, which leans along both axes: its roll is 27 degrees, so the pair that
+  // levels it is a different pair under each composition order and this whole section
+  // is `level-order-swapped`'s catcher. A surface that only tipped away from the sensor
+  // would be levelled correctly by either order and every row below would stay green.
+  //
+  // The cant comes from `levelPair` rather than from the page, and is written through
+  // `setTilt` so the angles the rest of the section reasons with are the ones the
+  // sliders actually hold after snapping to their half-degree step.
   await setTilt(0, 0);
   await plant(SURFACES[1]);
-  const level = await levelAt(0.5);
-  ok('the planted surface can be levelled on', level.ok === true, level.reason ?? '');
-  if (level.ok) {
+  const level = levelPair(SURFACES[1].n);
+  const flatPose = await setTilt(level.tilt, level.roll);
+  {
     const flatPlan = await planExtent();
     ok('a surface levelled flat covers the top-down in two directions',
       flatPlan.n > 200 && Math.min(flatPlan.w, flatPlan.h) > 8,
-      `${flatPlan.n} plan points, ${flatPlan.w}x${flatPlan.h}px`);
+      `${flatPlan.n} plan points, ${flatPlan.w}x${flatPlan.h}px at tilt ${flatPose.tilt} roll ${flatPose.roll}`);
     // **The vertical crop, which this plan ignored on purpose until levelling existed.**
     // While the top-down was drawn about the sensor's own axes, sensor y ran straight up
     // the axis a top-down projects away, so a point cropped by `bottom`/`top` could not
@@ -630,7 +684,7 @@ try {
     // carried onto +Y goes to -Z, which is horizontal, so its top-down collapses to a
     // line. Two-sided on purpose - the fat reading alone passes on a plan that ignores
     // the levelling entirely, because a canted plane fills a box too.
-    await setTilt(level.tilt - 90, level.roll);
+    await setTilt(flatPose.tilt - 90, flatPose.roll);
     const edgePlan = await planExtent();
     const flatMinor = Math.min(flatPlan.w, flatPlan.h);
     const edgeMinor = Math.min(edgePlan.w ?? 0, edgePlan.h ?? 0);
@@ -664,159 +718,43 @@ try {
     Math.abs(restored.afterLevelling[1] - 1) < 1e-9,
     restored.afterLevelling.map((v) => v.toFixed(3)).join(', '));
 
-  // --- 5. selecting a floor reads the chosen geometry ------------------------
-  console.log('\n5. floor selection derives the pair from the chosen surface');
-  const answers = [];
-  for (const surface of SURFACES) {
-    await setTilt(0, 0);
-    const planted = await plant(surface);
-    const result = await levelAt(0.5);
-    if (!result.ok) {
-      ok(`surface ${surface.name} could be levelled on`, false, result.reason);
-      continue;
-    }
-    // Where the planted normal ends up under the pair the button wrote, computed from
-    // the quaternion the page is carrying rather than recomposed here from the two
-    // angles - recomposing would agree with the implementation by construction and
-    // could never see the order being read backwards.
-    const landed = await landNormal(planted);
-    answers.push({ surface, result, landed });
-    ok(`surface ${surface.name}: the pair it wrote carries that surface's normal onto the vertical`,
-      Math.hypot(landed[0], landed[2]) < LEVEL_TOLERANCE,
-      `lands at ${landed.map((v) => v.toFixed(4)).join(', ')}, wrote tilt ${result.tilt} roll ${result.roll}`);
-  }
-  const pairs = answers.map((a) => `${a.result.tilt}/${a.result.roll}`);
-  // The rule this repo keeps relearning: a set of arms that agree about a quantity
-  // cannot measure it however many of them there are.
-  ok('and the three surfaces are three different answers rather than one constant',
-    new Set(pairs).size === answers.length, pairs.join(', '));
-  ok('the fit reports how flat the surface it read actually was',
-    answers.every((a) => Number.isFinite(a.result.rms) && a.result.samples >= 32),
-    answers.map((a) => `${a.result.samples} samples at ${(a.result.rms * 1000).toFixed(2)}mm`).join(', '));
-
-  // Two surfaces in one picture make the selected coordinate load-bearing. A full
-  // frame of one plane proves the normal fit but cannot distinguish a selected point
-  // from the old hard-coded centre, however many different full frames are tried.
-  const [leftNormal, rightNormal] = await plant(SURFACES[0], SURFACES[2]);
-  const selected = [];
-  for (const [side, x, normal] of [['left', 0.35, leftNormal], ['right', 0.65, rightNormal]]) {
-    await setTilt(0, 0);
-    await page.evaluate(() => globalThis.__kinect.sensorView());
-    const result = await levelAt(x);
-    const landed = result.ok ? await landNormal(normal) : [Infinity, Infinity, Infinity];
-    selected.push(result);
-    ok(`selecting the ${side} side reads the plane on that side`,
-      result.ok && Math.hypot(landed[0], landed[2]) < LEVEL_TOLERANCE,
-      result.ok
-        ? `lands at ${landed.map((v) => v.toFixed(4)).join(', ')}, wrote ${result.tilt}/${result.roll}`
-        : result.reason);
-  }
-  ok('and the two selected points produce different rotations',
-    selected.every((result) => result.ok)
-      && `${selected[0].tilt}/${selected[0].roll}` !== `${selected[1].tilt}/${selected[1].roll}`,
-    selected.map((result) => (result.ok ? `${result.tilt}/${result.roll}` : result.reason)).join(', '));
-
-  // **Through the two-step control and not through the hook**, and that is the whole
-  // reason these rows exist rather than being one more call like the arms above. `editor-check`
-  // names this tool as `camLevel`'s driver, and a driver that reached past the control
-  // into the function behind it would be the exact failure that file was written
-  // about: the suite testing the model while the control it is named after was never
-  // pressed, which is how the in and out markers spent their whole life detached from
-  // the document with every proof tool green.
-  // **And the press has to be off the centre, on the split plant.** A frame of one plane
-  // answers the same whatever point reaches the fit, so a gesture on one only ever proves
-  // that pressing did *something* - the handler could drop `view.x`/`view.y` on the floor
-  // and hand the middle of the frame to an otherwise correct hook, and a single-plane
-  // press could not tell. The arms above cannot see it either, because each one passes its
-  // own coordinate straight to `levelAtStagePoint` and so starts one link past the thing
-  // that would be broken. Two planes and a named side is what gives the coordinate a
-  // consequence: `pointer-levels-the-centre` is the control, and it presses the seam
-  // between the two planted planes, where the answer belongs to neither side.
-  await setTilt(0, 0);
-  const [pressLeftNormal, pressRightNormal] = await plant(SURFACES[0], SURFACES[2]);
-  await page.evaluate(() => globalThis.__kinect.sensorView());
+  // --- 5. the neutral way back ----------------------------------------------
+  console.log('\n5. reset rotation puts both axes and both sliders back');
+  // **Through the control and not through the hook**, and that is why these rows drive a
+  // button at all rather than calling `resetWorldRotation`. `editor-check` names this
+  // tool as `camLevelReset`'s driver, and a driver that reached past the control into the
+  // function behind it would be the exact failure that file was written about: the suite
+  // testing the model while the control it is named after was never pressed, which is how
+  // the in and out markers spent their whole life detached from the document with every
+  // proof tool green.
   await page.evaluate(() => { document.getElementById('panel').style.display = ''; });
-  await page.locator('#camLevel').click();
-  const armed = await page.evaluate(() => ({
-    active: globalThis.__kinect.levelSelection(),
-    pressed: document.getElementById('camLevel').getAttribute('aria-pressed'),
-    label: document.getElementById('camLevel').textContent,
-    note: document.getElementById('levelNote').textContent,
-    rotation: [globalThis.__kinect.params.get('tilt'), globalThis.__kinect.params.get('roll')],
-  }));
-  ok('pressing select floor visibly arms one selection without changing the room',
-    armed.active && armed.pressed === 'true' && /cancel/.test(armed.label)
-      && armed.rotation[0] === 0 && armed.rotation[1] === 0,
-    `${armed.label}, rotation ${armed.rotation.join('/')}; ${armed.note}`);
-  // Taken from the element rather than written down, because `#stage` is letterboxed to
-  // the export aspect and a hard-coded pixel would silently stop naming a side the day
-  // that aspect changes.
-  const stageBox = await page.locator('#stage').boundingBox();
-  const pressSide = async (xFraction) => {
-    await page.locator('#stage').click({
-      position: { x: stageBox.width * xFraction, y: stageBox.height * 0.5 },
-    });
-    return page.evaluate(() => {
-      const k = globalThis.__kinect;
-      return {
-        tilt: k.params.get('tilt'),
-        roll: k.params.get('roll'),
-        note: document.getElementById('levelNote').textContent,
-        slider: document.getElementById('tilt').value,
-        active: k.levelSelection(),
-        pressed: document.getElementById('camLevel').getAttribute('aria-pressed'),
-      };
-    });
-  };
-  const pressed = await pressSide(0.35);
-  ok('clicking the picture through the armed control levels the room and spends the mode',
-    (pressed.tilt !== 0 || pressed.roll !== 0) && !pressed.active && pressed.pressed === 'false',
-    `tilt ${pressed.tilt} roll ${pressed.roll}, armed ${pressed.active}`);
-  ok('and the slider beside it follows, because the panel is a view on the registry',
-    Number(pressed.slider) === pressed.tilt, `slider reads ${pressed.slider}`);
-  ok('and the selection says what it read rather than only that it worked',
-    /samples/.test(pressed.note), pressed.note);
-  // Graded against the plane that was actually under the press, and read before the next
-  // `setTilt` moves the rotation this is measured through.
-  const pressedLeftLanded = await landNormal(pressLeftNormal);
-  ok('and the press read the plane under the point pressed, not the middle of the frame',
-    Math.hypot(pressedLeftLanded[0], pressedLeftLanded[2]) < LEVEL_TOLERANCE,
-    `lands at ${pressedLeftLanded.map((v) => v.toFixed(4)).join(', ')}, wrote ${pressed.tilt}/${pressed.roll}`);
-
-  await setTilt(0, 0);
-  await page.locator('#camLevel').click();
-  const pressedRight = await pressSide(0.65);
-  const pressedRightLanded = await landNormal(pressRightNormal);
-  ok('and pressing the other side of the same frame reads the other plane',
-    !pressedRight.active && Math.hypot(pressedRightLanded[0], pressedRightLanded[2]) < LEVEL_TOLERANCE,
-    `lands at ${pressedRightLanded.map((v) => v.toFixed(4)).join(', ')}, wrote ${pressedRight.tilt}/${pressedRight.roll}`);
-  // The two rows above could both pass on a build that levelled correctly on whichever
-  // single plane it always picked, if the two planted normals happened to be close. This
-  // is the row that says the two presses were answered differently at all.
-  ok('so two presses through one control are two rotations, and the coordinate reached the fit',
-    `${pressed.tilt}/${pressed.roll}` !== `${pressedRight.tilt}/${pressedRight.roll}`,
-    `${pressed.tilt}/${pressed.roll} then ${pressedRight.tilt}/${pressedRight.roll}`);
-
-  await page.locator('#camLevel').click();
-  await page.keyboard.press('Escape');
-  const cancelled = await page.evaluate(() => ({
-    active: globalThis.__kinect.levelSelection(),
-    note: document.getElementById('levelNote').textContent,
-  }));
-  ok('Escape leaves a selection mode without spending it',
-    !cancelled.active && /cancelled/.test(cancelled.note), cancelled.note);
-
+  // **And the inspector holding it is selected, because the panel is four tabs now.**
+  // Showing `#panel` was enough while it was one column; with tabs, every group outside
+  // the selected one is `display: none`, so this click waited thirty seconds on a
+  // button plainly in the document and the run ended at "did not finish" with
+  // twenty-four rows passed and one failed. The tab is read off the group that contains
+  // the button rather than named, so the next reorganisation moves it without moving
+  // this.
+  await page.evaluate(() => {
+    const tab = document.getElementById('camLevelReset')?.closest('[data-panel-tab]')?.dataset.panelTab;
+    if (tab) document.querySelector(`.paneltab[data-panel-tab="${tab}"]`)?.click();
+  });
   await setTilt(12.5, -6);
   await page.locator('#camLevelReset').click();
   const reset = await page.evaluate(() => ({
     tilt: globalThis.__kinect.params.get('tilt'),
     roll: globalThis.__kinect.params.get('roll'),
     sliders: [document.getElementById('tilt').value, document.getElementById('roll').value],
-    note: document.getElementById('levelNote').textContent,
   }));
+  // Both axes and both sliders. A button that took `tilt` home and left `roll` behind
+  // satisfies any row reading one of them, which is `reset-keeps-roll`; and the sliders
+  // are read beside the parameters rather than instead of them, because the panel being
+  // a view on the registry is the thing that could quietly stop being true - a reset
+  // that moved the value and not the view looks like a reset that worked to anything
+  // asking only one of the two.
   ok('reset rotation takes both axes and both sliders back to neutral',
     reset.tilt === 0 && reset.roll === 0 && reset.sliders.every((value) => Number(value) === 0),
-    `rotation ${reset.tilt}/${reset.roll}, sliders ${reset.sliders.join('/')}; ${reset.note}`);
+    `rotation ${reset.tilt}/${reset.roll}, sliders ${reset.sliders.join('/')}`);
   await page.evaluate(() => { document.getElementById('panel').style.display = 'none'; });
 
   // --- 6. which side of the document boundary it falls on --------------------
@@ -837,13 +775,262 @@ try {
   });
   ok('both are document state, so a project carries the cant it was levelled at',
     boundary.inDocument && !boundary.leakedToView, `${boundary.values.join(', ')} tagged ${boundary.tags.join('/')}`);
-  // The plane fit's two `atan2`s cannot leave these, so the button can never write a
-  // value its own slider would clamp - which would be a silent disagreement between
-  // the two ways of saying the same thing.
-  ok('and the sliders reach everywhere the plane fit can land',
+  // Every orientation a mount can end up at has to be reachable on the sliders, and
+  // `levelPair`'s two `atan2`s say what that span is: `roll` over the full turn, `tilt`
+  // against a non-negative horizontal component and so inside the quarter turn either
+  // side. A range short of these would refuse a bracket somebody actually built, and
+  // would do it by clamping rather than by saying so.
+  ok('and the sliders reach every cant a surface can be levelled from',
     boundary.ranges[0][0] <= -90 && boundary.ranges[0][1] >= 90
     && boundary.ranges[1][0] <= -180 && boundary.ranges[1][1] >= 180,
     JSON.stringify(boundary.ranges));
+  console.log('\n7. the crop box is drawn in the room and its switch reaches every reader');
+
+  // Section 2 asserts the crop is *tested* in sensor metres, before the model matrix, so
+  // a box shrunk onto a subject stays on that subject when the room is levelled. This is
+  // the drawing's half of the same fact and it points the other way: the box is drawn in
+  // the room, so the picture of it has to carry the rotation the test deliberately does
+  // not. Both halves are needed - the shader ignoring the tilt and the chrome applying
+  // it are two statements about one box, and the old top-down rectangle got the second
+  // one wrong for as long as levelling existed.
+  await setTilt(14, -9);
+  const box = await page.evaluate(() => {
+    const k = globalThis.__kinect;
+    const q = k.worldTilt();
+    const u = k.uniforms;
+    const lo = [u.cropL.value, u.cropB.value, -u.farClip.value];
+    const hi = [u.cropR.value, u.cropT.value, -u.nearClip.value];
+    // Turned by the quaternion read off the cloud rather than by one composed from the
+    // two sliders. That is the difference between holding the drawing to what the
+    // renderer is actually doing and holding it to a second calculation that agrees with
+    // it by construction.
+    const v = new (k.freeCamera.position.constructor)();
+    const rot = k.freeCamera.quaternion.clone().fromArray(q);
+    const want = [];
+    for (let i = 0; i < 8; i++) {
+      want.push(v.set(
+        (i & 1) ? hi[0] : lo[0],
+        (i & 2) ? hi[1] : lo[1],
+        (i & 4) ? hi[2] : lo[2],
+      ).applyQuaternion(rot).toArray());
+    }
+    const got = k.cropBoxCorners();
+    const worst = Math.max(...got.map((c, i) => Math.max(...c.map((n, j) => Math.abs(n - want[i][j])))));
+    // The control for the row: a box already sitting in the room's frame would satisfy
+    // the comparison above without carrying anything, so the corners must also be
+    // somewhere the unrotated box is not.
+    const bare = Math.max(...got.map((c, i) => Math.max(...c.map((n, j) => Math.abs(n
+      - [(i & 1) ? hi[0] : lo[0], (i & 2) ? hi[1] : lo[1], (i & 4) ? hi[2] : lo[2]][j])))));
+    return { worst, bare };
+  });
+  ok('the box the chrome draws is the sensor box turned by the rotation the cloud carries',
+    box.worst < 1e-6, `worst corner off by ${box.worst.toExponential(2)} m`);
+  ok('and it is not simply the sensor box, which a levelled room would draw beside its cloud',
+    box.bare > 0.05, `${box.bare.toFixed(3)} m from the unrotated box`);
+
+  // The switch, asked of a reader that is not the shader. The top-down walks the depth
+  // texture through the same six faces, so a crop that bites takes points out of the
+  // plan - and has to hand them back the moment the switch says the box does not bite.
+  // A `crop` wired to the shader alone leaves the top-down culling a cloud the picture
+  // is showing in full, which is section 3's disagreement arriving from the other side.
+  //
+  // **This used to ask floor selection, which walked the same texture and applied the
+  // same faces.** That gesture is gone and the plan is the only non-shader reader left,
+  // so `crop-switch-reaches-only-the-shader` has exactly one catcher and it is here.
+  //
+  // Measured with the surface levelled flat, for section 3's reason: that is the pose
+  // where the whole plane is inside the box, so a strip taken out of it is a change this
+  // extent can actually see.
+  await plant(SURFACES[1]);
+  const switchFlat = levelPair(SURFACES[1].n);
+  await setTilt(switchFlat.tilt, switchFlat.roll);
+  const openPlan = await planExtent();
+  await page.evaluate(() => {
+    const k = globalThis.__kinect;
+    k.params.set('bottom', -0.25);
+    k.params.set('top', 0.25);
+  });
+  const bitingPlan = await planExtent();
+  await page.evaluate(() => globalThis.__kinect.params.set('crop', false));
+  const releasedPlan = await planExtent();
+  await page.evaluate(() => {
+    globalThis.__kinect.params.reset(['bottom', 'top', 'crop']);
+    globalThis.__kinect.keyframes.chrome.set(false);
+  });
+  ok('a crop that bites takes points out of the top-down',
+    bitingPlan.n > 0 && bitingPlan.n * 1.2 < openPlan.n,
+    `${openPlan.n} plan points with the box open, ${bitingPlan.n} with bottom/top closed`);
+  // Back to the open count exactly, rather than merely upward. The same plant drawn
+  // through the same camera is the same set of pixels twice, so anything short of the
+  // open count is a switch that released *something else* - and a row asking only for
+  // more points would pass a build that widened the faces instead of standing them down.
+  ok('and releasing the switch hands them back, so the switch reaches more than the shader',
+    releasedPlan.n === openPlan.n,
+    `${bitingPlan.n} biting, ${releasedPlan.n} released, ${openPlan.n} open`);
+
+  // --- 8. the cloud is not a reflection of the room -------------------------
+  console.log('\n8. the unprojection is mirrored, on both readers that state it');
+  /**
+   * A slab of constant depth in one column band, and nothing anywhere else.
+   *
+   * **Asymmetric on purpose, and that is the only reason this section can exist.** Every
+   * other fixture in this file is a plane, and a plane is symmetric about the optical
+   * axis - reflect it and it is the same plane. So no row that plants a `SURFACES` entry
+   * can see a sign on x, which is how a mirrored cloud sat in this program from its first
+   * commit through every proof tool in the suite: `level-check` plants symmetric planes,
+   * the intrinsics and fov arms of `sensor-view-check` measure half-angles, and
+   * `registration-check` grades `Registration::apply` rather than the unprojection. A
+   * mirror was invariant under the entire rig. The band is deliberately off-centre and
+   * deliberately not added to `SURFACES`, because a fixture list of planes is the thing
+   * that was missing an object rather than a list that wanted one more entry.
+   *
+   * **What this section can and cannot say.** It cannot see the room - no offline fixture
+   * can, and the flip was established by measurement on the rig instead: the colour
+   * camera's own 1920x1080 frame off `/camera.mjpg` carries branded text that reads only
+   * after one horizontal flip, on a JPEG with a JFIF APP0 marker and no EXIF segment for
+   * anything downstream to have been applying. What this section does is pin the sign that
+   * measurement settled, so the next edit through here cannot quietly undo it, and hold
+   * the shader and the top-down to the same one.
+   */
+  const plantBar = (offsetFrom, offsetTo, metres) => page.evaluate(({ a, b, z }) => {
+    const k = globalThis.__kinect;
+    for (const [name, value] of Object.entries({
+      fade: 0, wake: 0, noise: 0, additive: false, spin: false, denoise: false,
+    })) k.params.set(name, value);
+    const DW = 512;
+    const DH = 424;
+    const cx = k.uniforms.center.value.x;
+    const from = Math.max(0, Math.round(cx + a));
+    const to = Math.min(DW, Math.round(cx + b));
+    const data = k.uniforms.depthCurr.value.image.data;
+    data.fill(0);
+    let n = 0;
+    if (z > 0) {
+      const mm = Math.round(z * 1000);
+      for (let row = 0; row < DH; row++) {
+        for (let col = from; col < to; col++) { data[row * DW + col] = mm; n++; }
+      }
+    }
+    k.uniforms.depthCurr.value.needsUpdate = true;
+    k.resetAccumulators();
+    return { n, from, to, cx };
+  }, { a: offsetFrom, b: offsetTo, z: metres });
+
+  /**
+   * The crop, used as a fixed frame of reference rather than as the thing under test.
+   *
+   * The six faces are world-space constants and the cloud's x is not, so half-opening the
+   * box turns "which side of the axis did this band land on" into "is the stage empty" -
+   * a question `picture()` already answers, with no pixel read and no second render path
+   * to keep honest. It is also a genuinely different reader: `croppedOut` compares against
+   * the same `pos.x` the geometry is built from, so a sign that moves moves the cloud
+   * relative to a box that does not.
+   */
+  const keepSideOfAxis = (side) => page.evaluate((s) => {
+    const k = globalThis.__kinect;
+    k.params.set('crop', true);
+    k.params.set('left', s === 'negative' ? -7 : 0.05);
+    k.params.set('right', s === 'negative' ? -0.05 : 7);
+  }, side);
+
+  await setTilt(0, 0);
+  await page.evaluate(() => globalThis.__kinect.sensorView());
+  await wait(260);
+  // The reference, and it is an empty *grid* rather than an empty crop: every row below
+  // reads "equal to this" as "the band was entirely on the other side of the axis", so
+  // the reference has to be a stage with nothing in it for a reason the crop cannot also
+  // produce by accident.
+  await plantBar(0, 0, 0);
+  const emptyStage = await picture();
+  ok('an empty depth grid draws a stable empty stage to compare against', emptyStage.stable,
+    `hash ${emptyStage.hash}`);
+
+  const RIGHT_BAND = [80, 140];
+  const LEFT_BAND = [-140, -80];
+  // Five metres rather than two, and the depth is what buys the top-down its margin. The
+  // band's world x is `offset / fx * z`, so the column offset sets the angle and the
+  // distance sets how far across the inset that angle lands. Measured at five: the two
+  // bands come out at 0.358 and 0.646 of the inset's width, 0.288 apart and symmetric
+  // about its centre to within 0.004, against thresholds at 0.44 and 0.56. Still inside
+  // `farClip` and inside the plan's 7m span. The crop rows above are indifferent to the
+  // depth - culling on x is scale-free - so one fixture serves both readers.
+  const BAND_DEPTH = 5;
+  const bandRight = await plantBar(RIGHT_BAND[0], RIGHT_BAND[1], BAND_DEPTH);
+  await plantFingerprint();
+  ok('a band planted right of the principal point has samples in it',
+    bandRight.n > 20000, `${bandRight.n} samples in columns ${bandRight.from}..${bandRight.to}`);
+  await keepSideOfAxis('negative');
+  const rightOnNeg = await picture();
+  await keepSideOfAxis('positive');
+  const rightOnPos = await picture();
+  const heldRight = await plantHeld();
+  ok('and the band is still the planted one, not a frame off the wire',
+    heldRight.sameTexture && heldRight.sum === heldRight.expected,
+    heldRight.sameTexture ? `checksum ${heldRight.sum} vs ${heldRight.expected}` : 'the depth texture was swapped under it');
+  // The load-bearing pair. A band on the image's *right* is at negative world x once the
+  // mirror is undone, so it survives a box that keeps only the negative side and vanishes
+  // from one that keeps only the positive side. Un-negate the unprojection and both rows
+  // invert together.
+  ok('a band on the image right survives a crop keeping only negative x',
+    rightOnNeg.stable && rightOnNeg.hash !== emptyStage.hash,
+    `${rightOnNeg.hash} against an empty ${emptyStage.hash}`);
+  ok('and nothing of it survives a crop keeping only positive x',
+    rightOnPos.stable && rightOnPos.hash === emptyStage.hash,
+    `${rightOnPos.hash} against an empty ${emptyStage.hash}`);
+
+  // **Two-sided, because one side cannot tell a mirror from a build that culls.** A row
+  // asking only that the right-hand band lands on negative x is satisfied by a shader
+  // that put every point at negative x, or drew nothing at all, and either would read as
+  // a pass. The complement is what makes the pair a measurement of the sign.
+  await plantBar(LEFT_BAND[0], LEFT_BAND[1], BAND_DEPTH);
+  await plantFingerprint();
+  await keepSideOfAxis('positive');
+  const leftOnPos = await picture();
+  await keepSideOfAxis('negative');
+  const leftOnNeg = await picture();
+  ok('the mirrored band answers the other way round: it survives on positive x',
+    leftOnPos.stable && leftOnPos.hash !== emptyStage.hash,
+    `${leftOnPos.hash} against an empty ${emptyStage.hash}`);
+  ok('and vanishes on negative x, so the two bands are on opposite sides of the axis',
+    leftOnNeg.stable && leftOnNeg.hash === emptyStage.hash,
+    `${leftOnNeg.hash} against an empty ${emptyStage.hash}`);
+
+  // The top-down, asked the same question, because it states the unprojection for itself
+  // in another language's worth of code and a sign fixed in the shader alone leaves the
+  // plan drawing the room's left on the plan's right. Position rather than extent: an
+  // extent is invariant under a reflection, which is why every existing row in section 3
+  // would pass a mirrored plan.
+  //
+  // **The inset's own furniture is measured and subtracted rather than filtered around.**
+  // `planExtent`'s comment claims the cloud is the only near-neutral thing in the box, and
+  // that is not quite true: the TOP-DOWN caption is `#6d7683`, which clears the brightness
+  // floor and both neutrality bounds, and it sits in the bottom-left corner. Left in, it
+  // drags a centroid a fixed distance toward the left edge - measured at about 0.17 of the
+  // inset's width, which is larger than the displacement these two bands produce, so the
+  // uncorrected reading put both of them left of centre and 0.017 apart. An empty depth
+  // grid is what the box looks like with no cloud in it, so the difference between the two
+  // readings is the cloud on its own and the caption cancels exactly rather than
+  // approximately. Section 3's extents have the same passenger and are wide enough not to
+  // care; the claim in that comment is the thing that is wrong, and it is noted here
+  // rather than quietly patched there.
+  await page.evaluate(() => globalThis.__kinect.params.reset(['left', 'right', 'crop']));
+  await plantBar(0, 0, 0);
+  const planBare = await planExtent();
+  await plantBar(LEFT_BAND[0], LEFT_BAND[1], BAND_DEPTH);
+  const planLeftBand = await planExtent();
+  await plantBar(RIGHT_BAND[0], RIGHT_BAND[1], BAND_DEPTH);
+  const planRightBand = await planExtent();
+  await page.evaluate(() => globalThis.__kinect.keyframes.chrome.set(false));
+  const bandAcross = (shot) => (shot.sumX - planBare.sumX) / (shot.n - planBare.n) / shot.insetW;
+  const rightAcross = bandAcross(planRightBand);
+  const leftAcross = bandAcross(planLeftBand);
+  ok('the top-down puts the image-right band left of its own centre, as the picture does',
+    planRightBand.n > planBare.n && rightAcross < 0.44,
+    `${planRightBand.n - planBare.n} cloud pixels at ${rightAcross.toFixed(3)} across`);
+  ok('and the image-left band right of it, so the plan and the shader share one sign',
+    planLeftBand.n > planBare.n && leftAcross > 0.56,
+    `${planLeftBand.n - planBare.n} cloud pixels at ${leftAcross.toFixed(3)} across`);
+
   ok('the page reported no error through any of it', pageErrors.length === 0,
     pageErrors.slice(0, 2).join(' | '));
 

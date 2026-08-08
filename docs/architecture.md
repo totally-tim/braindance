@@ -171,3 +171,22 @@ The grabber writes frames to stdout and every log line to stderr, because one st
 on stdout would desync the stream permanently. The browser needs `fx/fy/cx/cy` from the hello
 to unproject, and hardcoded intrinsics skew the cloud in a way that is hard to spot and hard
 to attribute.
+
+**Every frame in this format is horizontally mirrored, and the readers undo it rather than the
+writer.** libfreenect2 delivers depth, IR and colour flipped left-for-right on purpose, to
+match the Microsoft SDK's selfie-view convention, and the grabber `memcpy`s the buffer through
+untouched, so the sensor's frame reaches the file exactly as the driver produced it. The
+correction is one sign in the unprojection — `X = -(col + 0.5 - cx) / fx * z`, with `cx` used
+exactly as the hello reports it, because the grid width cancels out of the algebra. That is one
+sign away from `Registration::getPointXYZ`, which pairs the same mirrored image with an x that
+grows right and therefore describes a reflection of the room; `server/protocol.js` carries the
+derivation and the warning not to copy upstream back in.
+
+**Undoing it in the readers rather than in the grabber is what keeps the archive
+single-valued.** Flipping columns before the wire would leave every take shot before the change
+mirrored and every take after it not, with nothing in the file to tell them apart — the split
+that `format` exists to prevent, arriving through a different door. Correcting on the way out
+means one geometry for the whole archive, old takes included. The cost is that the sign is
+stated by five readers (the vertex shader, the top-down, the gallery poster, and the oracles in
+`export-check` and `monitor-check`) plus this specification, and `level-check` section 8 is what
+holds them to one answer.

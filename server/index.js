@@ -122,6 +122,13 @@ const MIME = {
   '.json': 'application/json; charset=utf-8',
   '.mp4': 'video/mp4',
   '.mkv': 'video/x-matroska',
+  // The other two things an export can be. A `.mov` served as
+  // `application/octet-stream` is a file the `<video>` element declines to play, and
+  // a frame of a PNG sequence served the same way is a picture nothing will preview -
+  // which would make "watch it back where it was made" a property of the format that
+  // shipped first rather than of the exports directory.
+  '.mov': 'video/quicktime',
+  '.png': 'image/png',
 };
 
 const WEB_DIR = join(ROOT, 'web');

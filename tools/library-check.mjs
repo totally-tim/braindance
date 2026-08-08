@@ -1117,14 +1117,11 @@ const MUTATIONS = {
   // only exits were Open, which leaves for the editor, and a browser back button the
   // node's touch panel does not have.
   //
-  // **Re-anchored when this branch met `main`.** The way out was a `.back` anchor of
-  // this page's own until #2 landed `surfacenav` on every surface; merging them kept
-  // both, two elements carrying `id="toMenu"`, and the chips won. A mutation is a
-  // piece of source text, so the old anchor stopped matching the moment that markup
-  // went - and an anchor that matches nothing refuses, which reads as a caught
-  // mutation to anything checking only the exit code.
+  // The application bar carries the same real anchor now. Removing that one line
+  // leaves the status and filters working, so the mutation reddens the two navigation
+  // rows without stopping the gallery before the rest of the suite can run.
   'gallery-has-no-way-back': { file: 'web/library.html', edits: [[
-    '    <a id="toMenu" href="/">menu</a>',
+    '    <a class="appback" id="toMenu" href="/"><span class="arrow">&lt;</span><span aria-current="page">Gallery</span></a>',
     '    <!-- mutation: no way back -->',
   ]] },
   // **The falsification control for the enumeration**, and the only mutation here
@@ -1759,13 +1756,27 @@ function writeTake(dir, id, { frames = 8, withHello = true, truncate = false, st
     // takes both machines hold are compared by content hash, and a helper that
     // re-serialised unconditionally would leave that resting on `JSON.stringify` being
     // stable rather than on the two files being the same file.
+    //
+    // **`startedAt: false` strips the key, and that is not the same request as leaving
+    // it alone.** Carrying the sample's hello through was how this fixture asked for a
+    // take from before the field existed, which is only true while the sample on the
+    // machine is one of those. `captures/` is gitignored and every current build stamps
+    // a wall clock into the hello, so on a freshly shot sample the take meant to prove
+    // the gallery falls back to the file date arrived carrying a date - and the row
+    // reddened over a fixture that had quietly stopped being the shape it was named
+    // for. Asked for explicitly, it is the same take on any sample.
+    const stripped = startedAt === false;
     const stamped = {
-      ...(startedAt === null ? {} : { startedAt }),
+      ...(startedAt === null || stripped ? {} : { startedAt }),
       ...(format === null ? {} : { format }),
     };
-    const hello = Object.keys(stamped).length === 0
+    const hello = Object.keys(stamped).length === 0 && !stripped
       ? SRC.hello
-      : Buffer.from(JSON.stringify({ ...JSON.parse(SRC.hello.toString('utf8')), ...stamped }));
+      : (() => {
+        const parsed = { ...JSON.parse(SRC.hello.toString('utf8')), ...stamped };
+        if (stripped) delete parsed.startedAt;
+        return Buffer.from(JSON.stringify(parsed));
+      })();
     parts.push(encodeMessage(TYPE_HELLO, hello));
   }
   for (let i = 0; i < frames; i++) parts.push(SRC.frames[i % SRC.frames.length]);
@@ -1853,7 +1864,7 @@ function buildFixture() {
   writeTake(macCaps, 'local-clip', { frames: 60, startedAt: Date.UTC(2026, 6, 15, 18, 5) });
 
   // The shapes the gallery has to survive rather than the shapes it likes.
-  writeTake(macCaps, 'truncated-take', { frames: 6, truncate: true });
+  writeTake(macCaps, 'truncated-take', { frames: 6, truncate: true, startedAt: false });
   writeTake(macCaps, 'no-hello-take', { frames: 6, withHello: false });
   writeTake(macCaps, 'one-frame-take', { frames: 1 });
   // **A hello, and no whole frame - the one shape that could tell the gallery's two
@@ -3173,13 +3184,30 @@ async function runChecks() {
     check([1, 2, 4, 16].every((k) => sizes[k].colorBytes === sizes[1].colorBytes && sizes[k].colorBytes > 0),
       'the colour block is carried through untouched at every divisor',
       `${sizes[1].colorBytes} bytes each`);
-    // The spec's own arithmetic: divisor 4 is 27KB of depth plus 52KB of colour,
-    // which is the ~80KB that puts a scrub position at 21ms over a 3.8 MB/s link
-    // against the 128ms a full frame costs. Dropping colour would give ~7ms, which
-    // is a different mechanism wearing this one's measured number.
-    check(Math.abs(sizes[4].total - 79 * 1024) < 6 * 1024,
-      'divisor 4 lands at the ~80KB the 21ms-per-position figure is derived from',
-      `${(sizes[4].total / 1024).toFixed(1)}KB = ${(sizes[4].depthBytes / 1024).toFixed(0)}KB depth + ${(sizes[4].colorBytes / 1024).toFixed(0)}KB colour`);
+    // The spec's own arithmetic: divisor 4 is 27KB of depth plus the whole colour
+    // block, and on the capture that figure was taken from those are the ~80KB that
+    // put a scrub position at 21ms over a 3.8 MB/s link against the 128ms a full frame
+    // costs. Dropping colour would give ~7ms, which is a different mechanism wearing
+    // this one's measured number.
+    //
+    // **So what is asserted is the composition, not the eighty.** A JPEG's size is a
+    // property of what the camera was looking at, and `captures/` is gitignored - this
+    // fixture's colour block is half the size of the one the note was written against,
+    // and a literal total reddened over a room that photographs smaller. The property
+    // that keeps the 21ms honest is that the colour block is still there and is most of
+    // what a position costs, because that is exactly what a build dropping it at
+    // decimation would break - it would take the share to zero. A third is the floor
+    // rather than a half: this fixture's colour is 50% of the total against the 66% the
+    // note was written on, and both are a long way from nothing. The cost on this
+    // capture is printed rather than asserted.
+    const LINK_MB_S = 3.8;
+    const positionMs = (sizes[4].total / (LINK_MB_S * 1024 * 1024)) * 1000;
+    const wholeFrameMs = (sizes[1].total / (LINK_MB_S * 1024 * 1024)) * 1000;
+    check(sizes[4].colorBytes / sizes[4].total > 0.35 && sizes[4].depthBytes === grid(4),
+      'divisor 4 is decimated depth plus the whole colour block, which is what the per-position figure is made of',
+      `${(sizes[4].total / 1024).toFixed(1)}KB = ${(sizes[4].depthBytes / 1024).toFixed(0)}KB depth `
+      + `+ ${(sizes[4].colorBytes / 1024).toFixed(0)}KB colour, so ${positionMs.toFixed(0)}ms a position `
+      + `against ${wholeFrameMs.toFixed(0)}ms a whole frame at ${LINK_MB_S} MB/s`);
     check([1, 2, 4, 16].every((k) => sizes[k].stamp === sizes[1].stamp),
       'and the capture timestamp is the frame\'s own at every divisor');
     check(sizes[1].total === sizes[1].depthBytes + sizes[1].colorBytes + 16,
@@ -4077,36 +4105,36 @@ async function runChecks() {
     await page.goto(galleryPage(macUrl), { waitUntil: 'domcontentloaded' });
     await page.waitForFunction('globalThis.__library !== undefined', null, { timeout: 20000 });
 
-    // **The other chip says where you are, and the thing to assert about it is that
-    // it does not go anywhere.** `surfacenav` arrived on this page from `main`, which
-    // put the same two chips in the same corner of every surface, and the sweep below
-    // caught it immediately: a control the gallery renders that nothing in this file
-    // drove. The claim it carries is not navigation - it is that the current surface
-    // is marked as current and is inert, so a tap on it cannot reload the page the
-    // operator is already looking at. An `href` here would be exactly that reload,
-    // which is why its absence is the assertion rather than an oversight.
-    const hereChip = await page.evaluate(`(() => {
-      const a = document.getElementById('toLibrary');
-      return a ? { tag: a.tagName, href: a.getAttribute('href'), current: a.getAttribute('aria-current') } : null;
+    // The surface name moved into the real back control. Geometry is read off the
+    // rendered bar rather than inferred from its stylesheet, because a fixed rule
+    // that lost its top edge would still leave a valid anchor in the document.
+    const galleryShell = await page.evaluate(`(() => {
+      const bar = document.getElementById('appBar');
+      const back = document.getElementById('toMenu');
+      const active = document.querySelector('.tab[aria-pressed="true"]');
+      if (!bar || !back) return null;
+      const r = bar.getBoundingClientRect();
+      return {
+        top: Math.round(r.top), height: Math.round(r.height),
+        arrow: back.querySelector('.arrow')?.textContent.trim() ?? null,
+        label: back.querySelector('span:last-child')?.textContent.trim() ?? null,
+        active: active?.dataset.filter ?? null,
+      };
     })()`);
-    check(hereChip?.current === 'page' && hereChip.href === null,
-      'the gallery chip marks this surface as the current one and does not navigate',
-      JSON.stringify(hereChip));
-    if (hereChip) {
-      const wasAt = page.url();
-      await page.click('#toLibrary');
-      await new Promise((done) => { setTimeout(done, 300); });
-      check(page.url() === wasAt && await page.evaluate('globalThis.__library !== undefined'),
-        'and pressing it leaves the operator on the gallery rather than reloading it',
-        `${page.url()}`);
-    } else {
-      check(false, 'and pressing it leaves the operator on the gallery rather than reloading it', 'there is no chip');
-    }
+    // 38 and not 32, which is the number this row carried until the shared bar grew.
+    // `nav.css` owns the height - one `.appbar` rule for the editor, the recorder and
+    // this page - and `editor-check`'s own bar row already reads 38 off the editor. Two
+    // instruments naming one constant and disagreeing about it means one of them is
+    // asserting a page nobody ships, and the sheet that draws the bar is the tiebreak.
+    check(galleryShell?.top === 0 && galleryShell.height === 38
+      && galleryShell.arrow === '<' && galleryShell.label === 'Gallery',
+      'the gallery names itself in a fixed application bar at the top edge', JSON.stringify(galleryShell));
+    const wasAt = page.url();
+    await page.click('.tab[data-filter="all"]');
+    await new Promise((done) => { setTimeout(done, 300); });
+    check(page.url() === wasAt && await page.evaluate('document.querySelector(".tab[data-filter=all]").getAttribute("aria-pressed")') === 'true',
+      'and the active filter marks the current view without navigating or reloading it', page.url());
 
-    // Back to a known state again, for the same reason as above: the click above is
-    // one state rather than from whichever page the mutation happened to leave open.
-    await page.goto(galleryPage(macUrl), { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction('globalThis.__library !== undefined', null, { timeout: 20000 });
     await page.evaluate('globalThis.__library.drawn(document.querySelector(".tile").dataset.hash)');
 
     // ---- 6b. every tile is the same size
@@ -4117,12 +4145,12 @@ async function runChecks() {
     // draws after a window went from 1512 to 700. What a proof tool can read is the
     // box the browser produced.
     //
-    // Two widths and a resize between them, because the two ways a tile changed size
+    // Two widths and a resize between them, including the narrow one-column layout
+    // where the fixed desktop card becomes fluid. The two ways a tile changed size
     // showed up under different conditions: the warnings moved a tile's height
     // against its neighbours at every width, and the poster's box only drifted once
-    // something had resized. A single-width arm measured before any resize passes on
-    // a build carrying the second bug, which is the shape of hole step 6 recorded -
-    // arms that agree about a quantity cannot measure it.
+    // something changed the card's width. A single fixed-card arm passes on a build
+    // carrying the second bug because every desktop column is deliberately 252px.
     const geometryAt = async (width) => {
       await page.setViewportSize({ width, height: 900 });
       // Two frames, so the grid has reflowed its columns and the ResizeObserver has
@@ -4134,7 +4162,7 @@ async function runChecks() {
     const overlapsIn = (boxes) => boxes.filter((b) => boxes.some(
       (o) => o !== b && o.top < b.bottom - 0.5 && o.bottom > b.top + 0.5 && Math.abs(o.top - b.top) > 0.5,
     ));
-    for (const width of [1512, 900]) {
+    for (const width of [900, 520]) {
       const boxes = await geometryAt(width);
       const flagged = boxes.filter((b) => ['three-warning-take', 'truncated-take', 'no-hello-take'].includes(b.id));
       check(flagged.length === 3,
@@ -4158,14 +4186,19 @@ async function runChecks() {
         `and no two rows overlap at ${width}px, which is what an intrinsic height nobody could rely on produced`,
         overlapsIn(boxes).map((b) => b.id).join(' ') || `${new Set(boxes.map((b) => Math.round(b.top))).size} rows`);
     }
-    // The backing store followed the box rather than being assigned once. Read as
-    // pixels rather than as a ratio, because a canvas whose store never moved still
-    // reports the CSS box it is stretched over - the numbers that go stale are these.
-    const wide = await geometryAt(1512);
-    const narrow = await geometryAt(900);
-    check(wide[0].canvasPixels.w !== narrow[0].canvasPixels.w,
-      'a resize moves the canvas backing store, so the picture is drawn at the size it is shown at',
-      `${wide[0].canvasPixels.w}x${wide[0].canvasPixels.h} then ${narrow[0].canvasPixels.w}x${narrow[0].canvasPixels.h}`);
+    // The backing store follows the rendered box rather than being assigned once.
+    // Compare both dimensions with the box at both widths: checking only that the
+    // width changed would pass on a stale-height canvas stretched over the fluid
+    // card, which is the bug this probe exists to distinguish.
+    const wide = await geometryAt(900);
+    const narrow = await geometryAt(520);
+    const backingFits = (box) => box.canvasPixels.w === Math.round(box.width - 2)
+      && box.canvasPixels.h === Math.round(box.posterHeight);
+    check(backingFits(wide[0]) && backingFits(narrow[0])
+      && wide[0].canvasPixels.w !== narrow[0].canvasPixels.w,
+      'a resize moves both dimensions of the canvas backing store with the box it is shown in',
+      `${wide[0].canvasPixels.w}x${wide[0].canvasPixels.h} over ${wide[0].width.toFixed(1)}x${wide[0].posterHeight.toFixed(1)}, then `
+      + `${narrow[0].canvasPixels.w}x${narrow[0].canvasPixels.h} over ${narrow[0].width.toFixed(1)}x${narrow[0].posterHeight.toFixed(1)}`);
     await geometryAt(1100);
 
     // ---- 6c. the contextual menu
@@ -4506,7 +4539,7 @@ async function runChecks() {
     await page.evaluate(`globalThis.__library.viewer.open(${JSON.stringify(clipHash2)})`);
     await page.evaluate('globalThis.__library.viewer.drawn(1)');
     const DRIVERS = new Set([
-      'toMenu', 'toLibrary', 'all', 'local', 'remote', 'both',
+      'toMenu', 'all', 'local', 'remote', 'both',
       'open', 'download', 'delete', 'more',
       'rename', 'reveal', 'reclaim',
       'vMore', 'vClose', 'mark',

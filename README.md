@@ -47,8 +47,9 @@ npm start                 # menu on http://localhost:8080
 
 `npm start` lands on a menu: live viewer, take library, or editor.
 
-![The menu: three cards reading RECORD, GALLERY and EDITOR, the last one saying
-nothing has been opened on this machine yet.](media/menu.png)
+![The menu, under a bar reading Braindance · capture. replay. transcend.: three cards
+reading RECORD, GALLERY and EDITOR, the last one saying nothing has been opened on this
+machine yet and that it goes to the gallery instead.](media/menu.png)
 
 Two shortcuts past it:
 
@@ -66,27 +67,52 @@ shooting for five minutes.
 ### 1. Shoot a take
 
 Pick **Record**, then press **record** to arm. The recorder waits for the sensor's hello
-before opening a take, so the capture carries the intrinsics it was shot with; the bar
+before opening a take, so the capture carries the intrinsics it was shot with; the panel
 counts frames and shows the recording time the disk has left.
 
-![The live viewer in Blackwall: a room drawn as a crimson containment volume, a hot
-rim burning along the ceiling edge, with the record and shading controls down the left
-and "30 fps in" at the top.](media/viewer.png)
+![The record surface in Blackwall: a room drawn as a crimson point cloud filling the
+frame, with an application bar across the top reading Record, File, Output and View, and
+a panel down the left whose four tabs are Record, Framing, Look and Region. The Record
+tab is open, showing the record and mark buttons, "not recording", colour camera and low
+light toggles, monitor decimation and the OBS output settings. The bar's right-hand end
+reads the sensor serial, its firmware and "29 fps in".](media/viewer.png)
 
 **mark** drops a mark at the current frame, which shows up later on the gallery's scrub bar
 and the editor's ruler. **stop** closes the take: the `.knct` and its `.idx` index land in
-`captures/`, with a `.marks.jsonl` sidecar if you marked anything.
+`captures/`, with a `.marks.jsonl` sidecar if you marked anything. `R` and `M` do the same
+two things from the keyboard.
 
-**The shading controls change what you are looking at, never what is written.**
+**The panel is four tabs rather than one column.** *Record* arms the sensor and points the
+OBS output somewhere; *Framing* levels the room and sets the clip box; *Look* is everything
+about how the cloud is drawn; *Region* holds displacement and the region box. The
+application bar above them carries what is not about the picture — the project, the export,
+the OBS status — and is the same bar on every surface.
+
+**The shading controls change what you are looking at, never what is written.** They used
+to be five buttons; they are five documents now, and the *Look* tab's picker offers them
+beside anything you have saved yourself.
+
+![The same surface with the Look tab open. A Preset picker is expanded over the panel,
+listing none, blackwall, contour, depth, ghost and rgb with blackwall highlighted, and a
+plus button for saving a new one. Underneath it the Style parameters — ghost, contour,
+blackwall, ghost rim, ghost fill, bands, thickness, wall sweep, scan, rim, thermal and
+edges — each carry a slider and a value.](media/look.png)
+
+`blackwall`, `contour`, `depth`, `ghost` and `rgb` ship in `presets-builtin/` and cannot be
+overwritten; **save** writes yours to `presets/`, and **export** and **import** move them
+between machines as JSON. Every scalar underneath is still yours to move, and a row you have
+changed grows a **↺** that puts just that one back.
 
 ### 2. Find it in the gallery
 
 **Gallery** on the menu, or the link in any surface's header.
 
-![The gallery: three take cards of identical size with depth thumbnails, the first
-carrying three marks on its scrub bar, each showing its size, frame count and date
-above an Open, a Delete and a three-dot menu, with a way back to the menu in the
-header.](media/gallery.png)
+![The gallery: three take cards of identical size with depth thumbnails, two of them
+carrying a mark on the scrub bar under the poster, each showing its duration, LOCAL
+badge, size, frame count, mark count and date above an Open, a Delete and a three-dot
+menu. A filter row above them reads ALL 3, LOCAL 3, NODE ONLY 0 and BOTH 0, and the
+application bar says 3 takes, their total running time, and that no node is
+linked.](media/gallery.png)
 
 Every take is a same-size tile carrying its poster, duration, size, frame count, mark count
 and date. Skim a poster to scrub it; tap to open it large, with arrow keys stepping a frame
@@ -101,10 +127,12 @@ library into *local*, *node only* and *both*.
 **Open** lands on `/edit?take=<id>`. The cloud draws on the left, the keyed camera path with
 it and in the top-down inset, and the timeline underneath.
 
-![The editor. The recorded cloud sits on the left; on the right the keyed camera path
-draws as a line of nodes with the program camera's frustum on it. Below, three lanes
-(retime, camera, exposure) carry their keys, and the program clock reads 00:03.000
-against a source clock of 00:02.350.](media/editor.png)
+![The editor in depth shading, the room drawn cyan through orange by distance. A keyed
+camera path arcs above it as a line of five nodes with the program camera's frustum
+sitting on it, and the top-down inset repeats the same arc. The panel on the left is on
+its Camera tab, offering add key, delete key and set viewport to camera. Underneath, the
+transport reads a program clock of 00:10.967 against the same source time, and the
+timeline's camera lane says 5 keys with a diamond under each.](media/editor.png)
 
 Drag to orbit, scroll to zoom, right-drag to pan, `H` hides the panel;
 [the controls reference](docs/reference.md#viewer-and-timeline-controls) has the timeline's
@@ -113,9 +141,12 @@ navigation. On a canted mount,
 
 ### 4. Key a camera move
 
-Park the playhead, orbit to the pose you want, and press **key here** under
-*Camera · composition*. Move, orbit, press again: a key takes the pose you are orbiting
-from, and dragging a path node in either the view or the top-down moves it.
+Park the playhead, orbit to the pose you want, and press **add key** on the panel's
+*Camera* tab. Move, orbit, press again: a key takes the pose you are orbiting from, and
+dragging a path node in either the view or the top-down moves it. **delete key** removes
+the one under the playhead, and **set viewport to camera** puts your eye where the program
+camera is standing. The keyframe arrows beside the transport step between keys without
+hunting for the diamonds.
 
 Two clocks read under the transport. **program** is a position in the output, **source** a
 position in the capture; at 1.00× they agree, and pulling **speed** or keying the retime
@@ -129,12 +160,26 @@ saved with the clip nor exported.
 
 ### 5. Get a video out
 
-Set **in** and **out**, pick a size from the **export** list, name it, and press **render**.
+Set **in** and **out** on the timeline bar, then open **Output → Export** (`⌘E`), choose
+what you want out, and press **render**.
 
-![The right half of the editor's timeline bar after a render: out set to 00:01.967 over
-a 1.97s length, and below it the export row reading 2026-08-02-take2.mp4 · 60 frames ·
-0.6 MB in 1.5s, beside the name field, a 960x540 size, render and save a
-copy.](media/export.png)
+![The Export dialog. Aspect ratio runs across the top as 16:9, 1.90:1, 4:3, 1:1 and
+65:24 with 16:9 selected; below it a Resolution of 1920x1080 and a Frame rate of 30, then
+a Format row of MP4, MOV and PNG sequence with MP4 selected, an Output name whose
+placeholder is the take's id, and save a copy and render at the
+foot.](media/export.png)
+
+**Three things come out, and they are for different jobs.** **MP4** is h264 and the one to
+send someone. **MOV** is ProRes 422 HQ at 10-bit 4:2:2, which is what an editor that is
+going to grade the shot wants. **PNG sequence** writes the frames themselves into a
+directory, for a compositor or for anything that should not be told about codecs at all.
+Aspect ratio and resolution are two controls over one list: the resolutions are grouped by
+shape, and pressing a ratio moves you into that group rather than filtering the others
+away, so the ratio row is a way of getting about a long list and the select still shows
+everything. Frame rate sits beside them because it used to have only a default — an edit
+went out at 30 with nothing on screen saying that had been chosen. Only h264 insists on
+even dimensions, so odd sizes stay available on the other two rather than being refused at
+the end of a render.
 
 The render runs in the page, frame by frame through the program camera, pushing frames to
 ffmpeg over a socket. Each render gets its own directory under `exports/` with a `.job.json`
@@ -172,8 +217,11 @@ add the deliverable back yourself.
 
 ## Streaming to OBS
 
-Two outputs, and they are different pictures rather than two views of one. The panel's
-*Output to OBS* group prints both URLs.
+Two outputs, and they are different pictures rather than two views of one. Both URLs are
+printed twice over: in the record panel's *Output* group, where you are already standing
+when you point the thing at OBS, and in **Output → OBS**, which is the same two addresses
+with a **copy** button on each, the camera and resolution beside them, and a line saying
+how many sources are actually attached right now.
 
 | What | How | What it is |
 | --- | --- | --- |
