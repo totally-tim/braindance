@@ -25,6 +25,255 @@ large share of every frame is empty. Removing the fragment `discard` in favour o
 alpha falloff made no difference (0.71 vs 0.74 ms), so it is kept for the look. Bloom runs at
 half buffer resolution, being the most expensive pass in the chain.
 
+**Bloom being the most expensive pass is now measured rather than asserted, and the reason
+it is expensive is not the one that sentence implies** - it is the pass count and not the
+resolution, so the "runs at half resolution" half of it buys nothing. See
+[what each effect costs](#what-each-effect-costs) below.
+
+## What each effect costs
+
+Taken after testers reported the effects making performance "fluctuate wildly". The
+fluctuation turned out to be mostly a different question from the cost, and both answers
+are here: the cost table in this section, and [the compile
+stalls](#the-first-use-of-a-pass-costs-a-compile) further down.
+
+**Method, common to every number in this section.** Interleaved paired A/B with the arm
+order flipped every round, 21 rounds of 50 renders, first round discarded, and **the
+median of the within-round paired deltas** rather than a difference of medians. The
+quartiles of those same paired deltas are carried beside each figure, and an arm whose
+band straddles zero is recorded as under floor rather than as a value. Editor on
+`captures/sample.knct`, playhead parked at program 12.0 s with the seek verified against
+the position it asked for and the stand-downs counted (zero throughout), camera pinned,
+page cache warm after repeated reads of the same capture. The fixture covers 92.7% of the
+buffer, so this is a full room rather than an empty one. M2 Max, machine load 11-20 with
+other agent sessions live.
+
+**The pairing is not a refinement, it is the instrument.** The baseline drifts on this rig
+by more than most of these effects cost - across one block of arms it moved 0.283 to
+0.420 ms - and an unpaired design reported the *null* control at **+15.1%**. Differencing
+inside a round cancels anything slower than one round. Two controls hold the table up: a
+null arm writing the same value on both sides reads -0.009 ms with a band of
+[-0.036, 0.032], and `pointSize` 9 to 48 reads +0.230 ms, which is the arm an instrument
+blind to fill rate would fail.
+
+| effect | 0.851 Mpx | 1.915 Mpx | shape |
+| --- | --- | --- | --- |
+| `pointSize` 9 -> 48 | +0.230 | +0.583 | scales with pixels; the dominant fill term |
+| bloom | +0.269 | +0.281 | **flat** - the pass count, not the pixels |
+| trails (afterimage) | +0.051 | +0.214 | scales steeply, a full-screen read and write |
+| streak, 16 taps | +0.044 | +0.101 | about 0.05 ms/Mpx, which is the figure already on this page |
+| thermal | +0.076 | +0.044 | |
+| `fade` 120 ms, the ghost half | +0.057 | +0.039 | on by default |
+| the Blackwall reading against the RGB one | +0.056 | +0.068 | |
+| additive | +0.035 | under floor | |
+| grain | under floor | +0.010 | |
+| turbulence, lattice, region push / scramble / mask, ripple, glitch, duotone and its hue and motion, edges, rgbSplit, scanlines, raster hardness | under floor | under floor | |
+
+**The point shader is not where the money goes**, which is worth stating plainly because
+the shader's own comment calls `vnoise3` "the most expensive thing in this shader" and on
+this GPU it does not resolve above a 0.035 ms floor. Neither does the lattice, the glitch,
+the region or the ripple. The cost is the post chain and the fill.
+
+Two rows in that table are a weaker claim than the rest and are marked so rather than
+being quoted flat. The fragment terms above are measured against `readRgb`, the cheapest
+of the five readings, while every shipped graded look runs `readBlackwall` with `additive`
+on. Re-run pinned to that base at 1.915 Mpx, all nine of the terms re-tested stayed under
+floor - duotone +0.025, its hue -0.024, its motion -0.035, thermal +0.061, edges -0.010,
+turbulence +0.019, lattice +0.043, glitch +0.025, region scramble +0.007 - **but the floor
+on that base is about +/-0.15 ms rather than +/-0.035**, because overdraw varies per frame
+once additive blending stops points occluding each other. So those nine are established as
+under about 0.15 ms, not under 0.035, and thermal and lattice both trend positive without
+resolving.
+
+**`wake` is unmeasured rather than free.** The draw range is 434,176 - two slots per ray -
+in both arms, because the ghost half is drawn whenever `fade` is up and fade defaults to
+120 ms. Wake moves only the surviving fraction, 5.67% to 6.35% on this fixture, which is
+under the floor. A parked frame never sheds, so this harness cannot price it and does not
+claim to.
+
+**An arm inside the grade must pin the composer on in both of its states.** `postEnabled()`
+switches `composer.render` for `renderer.render`, so an arm that takes the last grade term
+to zero measures that switch rather than its own term. Left unpinned, `trails` and the
+grade pass both came back negative *and* resolved, which is not a thing a pass can be. The
+switch on its own reads -0.089 ms, and that figure is an artifact of reading the canvas
+back after two different render paths rather than a claim that post processing is free.
+
+### These are two clocks, and the paced one is four times the batch one
+
+Everything above submits renders back to back, where the driver pipelines one frame's work
+under the next one's submission. That is the right shape for the marginal GPU work of a
+term and the wrong shape for what a frame costs while somebody is watching. Re-measured on
+the GPU's own clock through `EXT_disjoint_timer_query_webgl2` - the instrument the stats
+overlay's `gpu` row reads - with one rAF between frames so each is its own submission,
+same paired design, 13 rounds of 45 frames:
+
+| effect | paired delta | ratio |
+| --- | --- | --- |
+| null control | +0.010 | 1.00x |
+| bloom | **+1.060** | 2.23x |
+| `pointSize` 9 -> 48 | +0.841 | 1.23x |
+| streak | +0.105 | 1.16x |
+| trails | unresolved, band [-0.679, 1.030] | |
+| Blackwall entire | **+1.106** | 2.29x |
+
+The ordering does not move and bloom is still first, but the magnitudes are four times the
+batch figures. Bloom costs about **1.06 ms of a 16.7 ms 60 Hz frame on an M2 Max**, and a
+whole graded look slightly more than doubles GPU frame time against a 0.99 ms baseline.
+Both sets are real measurements of different questions; the paced ones are the ones to
+quote at anybody asking whether a look is smooth.
+
+### The shipped looks are two populations, not a range
+
+Nobody drags `streak`; they pick a look. Whole documents against the parameter defaults,
+same paired design, 17 rounds of 50 renders:
+
+| look | 0.851 Mpx | 1.915 Mpx |
+| --- | --- | --- |
+| rgb | 1.02x | 1.29x |
+| ghost | 1.06x | 1.20x |
+| depth | 1.29x | 0.90x |
+| contour | 1.44x | 1.15x |
+| ember | 1.81x | **3.00x** |
+| voxel | 1.85x | **2.50x** |
+| grille | 1.91x | **2.82x** |
+| blackwall | 1.99x | **2.58x** |
+| tearline | 2.10x | **2.96x** |
+
+Four bare readings cost about nothing and five graded looks cost double, and **the gap
+widens with resolution** because the graded half's cost sits in the post chain. The five
+expensive ones are expensive for the same reason as each other: every one of them turns on
+`additive`, `wake`, `bloom`, `trails`, `rgbSplit`, `scanlines`, `grain` and a vignette
+together, and four of them add `streak` and a hard raster on top. So "what do the effects
+cost" has no single answer, and which of the two populations a tester happened to pick
+decides their number before any individual slider does.
+
+### Bloom is the pass count, not the pixels
+
+Shrinking the chain 60-fold changes nothing, which is what says the cost is fixed overhead
+per pass:
+
+| bloom chain | ms/frame | against off |
+| --- | --- | --- |
+| off | 0.308 | - |
+| shipped, `refWidth/2` x 300 | 0.586 | +0.278 |
+| quarter the texels, 266x150 | 0.560 | +0.252 |
+| 64x36 | 0.584 | +0.276 |
+
+`UnrealBloomPass` at five mips is a bright pass, five mips times two blur directions, a
+composite and an additive blend: **13 render-target passes**, each paying a bind and a
+full-screen draw. So the only lever is removing passes. Walking the mip count on Blackwall
+entire, GPU clock, rAF-paced, 11 rounds of 40 frames, two independent runs:
+
+| mips | passes | run 1 | run 2 |
+| --- | --- | --- | --- |
+| 5 (shipped) | 13 | 2.138 | 2.722 |
+| 4 | 11 | 2.010 | 2.685 |
+| 3 | 9 | 1.173 | 1.613 |
+| 2 | 7 | 1.070 | 1.484 |
+| 1 | 5 | 1.033 | 1.412 |
+| bloom off | 0 | 0.952 | 1.205 |
+
+**Dropping five mips to three recovers about 80% of what bloom costs**, and the shape
+reproduces across both runs even though the absolute level does not. What is *not*
+established is why the cliff sits between four and three rather than the cost falling
+smoothly with the pass count - the two mips being removed there are the smallest targets
+in the chain, so a per-pass constant does not explain it and neither does a texel count.
+That is recorded as an open question rather than given a mechanism.
+
+The picture pays for it. At three mips the broad low-frequency haze goes and the glow
+tightens onto the bright edges, which on a look built around red atmosphere is a visible
+regrade rather than a refinement. So the mip count was not the answer taken; the chain
+was replaced instead.
+
+### What replaced it, and what that cost the proofs
+
+`UnrealBloomPass` is gone and `BloomPass` in `web/main.js` is ours: a progressive
+down-and-up sample chain, five downsamples through a thirteen-tap bilinear filter, four
+upsamples through a nine-tap tent accumulating as they go, and one composite. **Ten draws
+against thirteen**, and the width comes from the resampling rather than from a Gaussian
+per mip, so no level is blurred twice. Measured on the GPU clock, rAF-paced, paired, 13
+rounds of 45 frames: **+0.260 ms against the old +1.060 ms, so 1.22x the frame where the
+old chain was 2.23x.** Those two figures are from separate runs on a drifting machine, so
+the ratios are the comparable half and the absolutes are not.
+
+**Two things it got wrong on the way, both worth keeping.** The first version blended the
+glow additively onto the buffer it had been handed, the way the pass it replaces does -
+which means reading that buffer as a texture at the top of the chain and binding it as
+the render target at the bottom. WebGL leaves that undefined and here it lost the picture
+outright: with `strength` at zero, where the blend provably adds nothing, the frame came
+back **0% lit against 100% with the pass off**. Reading both the picture and the glow and
+writing a third target cannot alias, so the pass composites and swaps instead. The second
+is that a probe doing five full-buffer `readPixels` calls inside one Playwright
+`evaluate` gets its promise collected out from under it, which reads exactly like a page
+crash and is not one.
+
+**On `export-check` it is a net two rows better, and the baseline was taken properly
+rather than assumed** - the working copies moved outside the repo, `git checkout --`, the
+measurement, and the files put back, because a `git stash` in a worktree of this repo
+pushes onto a ref every other worktree shares.
+
+| tree | clean | `bloom-buffer-sized` | `bloom-reference-1080` |
+| --- | --- | --- | --- |
+| before | 45/50, 5 red | 7 red - **caught** | 5 red - **not caught** |
+| with `BloomPass` | 47/50, 3 red | 4 red - **caught** | 3 red - **not caught** |
+
+The two rows that went green are *the whole look rebases, not just the points* at
+1728x1080 and at 1920x1200 - the resolution-independence pair, which were red on a clean
+tree before this and therefore, in the words of the commit that dated them, catching
+nothing. A progressive chain resamples rather than point-sampling a frozen chain, which
+is the likely reason, and the honest alternative is that a differently-shaped halo simply
+differs less between two sizes. Both readings are open.
+
+**`bloom-reference-1080` is now inert for a new reason, and that is a hole to close
+rather than a result to bank.** It was already uncaught before this change, blinded by
+those two rows being red anyway. It is still uncaught now that they are green, and the
+mechanism has moved: that mutation changes the chain's base height, and in a down/up
+chain the halo's width in frame-fractions is set by *how many times it halves* and the
+tent radius, not by the resolution it starts from. So the arm no longer moves the picture
+it is asking about. **The control that would bite this chain mutates `BLOOM_LEVELS`**, and
+until `export-check` carries one, the level count is a number nothing falsifies.
+
+**What still pins bloom's appearance is thin, and was thin before.** `registry-check`'s
+section 1b renders at parameter defaults, where bloom is 0 and the pass never runs, so it
+is blind to all of this. Both tools compute their earlier arm by serving
+`git show <rev>:web/main.js` into a second page load, so the reference is the old code and
+there is no baseline anybody can accept - which is why a look-affecting change here can
+only ever be argued from the rows it moves, never signed off by a re-baseline.
+
+### The first use of a pass costs a compile
+
+The largest single thing behind "the effects fluctuate" was not an effect's steady cost at
+all. Each post pass and each blending variant of the point material is compiled the first
+time it is actually reached, so the frame that engages one is long and every frame after
+it is normal. Single frames with a `readPixels` barrier, editor at 0.851 Mpx:
+
+| first frame after | before | after warming |
+| --- | --- | --- |
+| the grade pass engaging | **83.1 ms** | 1.6 ms |
+| bloom engaging | **48.1 ms** | 4.3 ms |
+| an `additive` toggle | **20.9 ms** | 2.5 ms |
+| the same toggle a second time | 0.7 - 2.1 ms | unchanged |
+
+A graded preset writes all three at once, so picking one used to cost about 150 ms of
+compilation and picking it a second time cost nothing. That asymmetry is why the same look
+gets reported as smooth by somebody who tried it twice and as a stall by somebody who
+tried it once, and it is why two testers disagreed with each other rather than with the
+build. `warmPrograms` in `web/main.js` now renders one composed frame with all three
+passes on and both blending states before either transport is installed, and puts every
+flag and accumulator back; the comment beside it has why it is one composed frame rather
+than a pass-by-pass warm.
+
+### `fps in` is the sensor's rate and has never been a rendering number
+
+Worth writing down because it cost a round of confused reports. The `fps` on the status
+line and in the stats overlay is counted in `handleFrame` off socket arrivals, so it
+measures USB and the grabber - this page already records it moving 12.82 to 30.00 on hub
+topology alone. Until the `gpu` row arrived beside it, it was the only performance number
+anywhere in the app, and people read it while dragging sliders. The two are labelled apart
+now, and the `gpu` row is a timer query rather than a wall clock around the draw call: the
+queue is 0.005 ms against 0.310 ms of GPU work, so a wall clock there would report a
+sixtieth of the cost and would not move when an effect was switched on.
+
 ### Showing the crop box
 
 The box's own drawing is chrome and costs a 2D canvas nothing measures. What costs is the

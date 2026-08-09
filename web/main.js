@@ -5,10 +5,9 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { AfterimagePass } from 'three/addons/postprocessing/AfterimagePass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
+import { Pass, FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 
 const POINTS = DEPTH_W * DEPTH_H;
 
@@ -1608,6 +1607,269 @@ function bindColor(bitmap) {
   uniforms.hasColor.value = 1;
 }
 
+// ---------------------------------------------------------------- bloom
+
+/**
+ * The glow, as a progressive down-and-up sample chain rather than a Gaussian per mip.
+ *
+ * **This replaces `UnrealBloomPass`, and the reason is a measurement rather than a
+ * preference.** That pass costs what it costs because of how many render targets it
+ * visits and not how big they are: measured on this build, shrinking its chain sixty-fold
+ * - 533x300 down to 64x36 - moved the frame by 0.026ms, from +0.278 to +0.252 against
+ * bloom off. Sixty times fewer texels for two percent of the cost is a pass count
+ * talking, so the only lever that does anything is visiting fewer targets. Its shape is
+ * a bright pass, five mips each blurred twice because a Gaussian separates, a composite
+ * and an additive blend: **thirteen full-screen draws**, each paying a bind.
+ *
+ * A down/up chain gets its width from the resampling instead. Each downsample halves the
+ * buffer through a thirteen-tap filter whose taps sit on texel corners, so the hardware's
+ * bilinear unit does half the averaging for free and one pass reaches as far as a much
+ * wider Gaussian would; the upsample walks back with a nine-tap tent, adding each finer
+ * level onto the coarser one it just expanded. So the octaves accumulate on the way up
+ * rather than being composited at the end, and no level is ever blurred twice. That is
+ * **five downsamples, four upsamples and one blend, so ten draws against thirteen** - and
+ * the last upsample is not folded into the blend even though it could be, because the
+ * blend is where `strength` is applied and fusing them would put a look control inside
+ * the resampling arithmetic.
+ *
+ * **The threshold rides in the first downsample**, which is the one place fusing costs
+ * nothing: the bright pass and the first halving both read the full-resolution frame, so
+ * doing them separately reads it twice to no end. Its soft knee is the one
+ * `LuminosityHighPassShader` applies, kept because the shipped looks are graded against
+ * where that knee puts the cut rather than against a hard step.
+ *
+ * **Sized off the 600-tall reference and not the drawing buffer**, exactly as before -
+ * `resize` still calls `setSize(refWidth / 2, 300)` and the note there has the full
+ * argument. A chain sized off the buffer makes the halo's width a fraction of the frame
+ * that halves every time the buffer doubles, which `export-check` is what holds.
+ *
+ * `needsSwap` is false because this blends additively onto the buffer it was handed, the
+ * way the pass it replaces did: bloom is light added to a picture, not a picture built
+ * from one.
+ */
+const BLOOM_LEVELS = 5;
+
+// Thirteen taps in the pattern Jimenez's filter uses - a centre, four at half a texel and
+// eight on the diagonals a texel out - weighted so the result is a smooth partition of
+// unity. Written as one pass because every tap is bilinear: the four corner groups each
+// average four source texels in hardware, so this reads thirty-six texels' worth of
+// neighbourhood for thirteen fetches, which is what lets a single pass replace a
+// separable pair.
+const bloomDownShader = /* glsl */ `
+  precision highp float;
+  uniform sampler2D tSource;
+  uniform vec2 texel;
+  uniform float threshold, knee, firstLevel;
+  varying vec2 vUv;
+
+  void main() {
+    vec2 t = texel;
+    vec3 a = texture2D(tSource, vUv + vec2(-2.0 * t.x,  2.0 * t.y)).rgb;
+    vec3 b = texture2D(tSource, vUv + vec2( 0.0,        2.0 * t.y)).rgb;
+    vec3 c = texture2D(tSource, vUv + vec2( 2.0 * t.x,  2.0 * t.y)).rgb;
+    vec3 d = texture2D(tSource, vUv + vec2(-2.0 * t.x,  0.0)).rgb;
+    vec3 e = texture2D(tSource, vUv).rgb;
+    vec3 f = texture2D(tSource, vUv + vec2( 2.0 * t.x,  0.0)).rgb;
+    vec3 g = texture2D(tSource, vUv + vec2(-2.0 * t.x, -2.0 * t.y)).rgb;
+    vec3 h = texture2D(tSource, vUv + vec2( 0.0,       -2.0 * t.y)).rgb;
+    vec3 i = texture2D(tSource, vUv + vec2( 2.0 * t.x, -2.0 * t.y)).rgb;
+    vec3 j = texture2D(tSource, vUv + vec2(-t.x,  t.y)).rgb;
+    vec3 k = texture2D(tSource, vUv + vec2( t.x,  t.y)).rgb;
+    vec3 l = texture2D(tSource, vUv + vec2(-t.x, -t.y)).rgb;
+    vec3 m = texture2D(tSource, vUv + vec2( t.x, -t.y)).rgb;
+
+    vec3 sum = e * 0.125;
+    sum += (a + c + g + i) * 0.03125;
+    sum += (b + d + f + h) * 0.0625;
+    sum += (j + k + l + m) * 0.125;
+
+    // Only the level that reads the frame itself cuts the darks out. Applying it again
+    // further down the chain would eat the glow it had already spread, because a halo is
+    // dimmer than the highlight that threw it and would fall back under the knee.
+    if (firstLevel > 0.5) {
+      float lum = dot(sum, vec3(0.299, 0.587, 0.114));
+      sum *= smoothstep(threshold, threshold + knee, lum);
+    }
+    gl_FragColor = vec4(sum, 1.0);
+  }
+`;
+
+// The nine-tap tent that walks back up. Additive onto the level below, so each octave is
+// laid over the wider one under it and the falloff is the sum of the chain rather than a
+// set of weights chosen at the end.
+const bloomUpShader = /* glsl */ `
+  precision highp float;
+  uniform sampler2D tSource;
+  uniform vec2 texel;
+  uniform float radius;
+  varying vec2 vUv;
+
+  void main() {
+    // The sample radius is what the bloom radius moves, and it moves it here rather than
+    // in a composite weight: widening the tent widens every octave together, which is
+    // the same knob the pass this replaces spelled as a lerp between two weight sets.
+    vec2 t = texel * radius;
+    vec3 sum = texture2D(tSource, vUv + vec2(-t.x,  t.y)).rgb * 0.0625;
+    sum += texture2D(tSource, vUv + vec2( 0.0,   t.y)).rgb * 0.125;
+    sum += texture2D(tSource, vUv + vec2( t.x,   t.y)).rgb * 0.0625;
+    sum += texture2D(tSource, vUv + vec2(-t.x,   0.0)).rgb * 0.125;
+    sum += texture2D(tSource, vUv).rgb * 0.25;
+    sum += texture2D(tSource, vUv + vec2( t.x,   0.0)).rgb * 0.125;
+    sum += texture2D(tSource, vUv + vec2(-t.x,  -t.y)).rgb * 0.0625;
+    sum += texture2D(tSource, vUv + vec2( 0.0,  -t.y)).rgb * 0.125;
+    sum += texture2D(tSource, vUv + vec2( t.x,  -t.y)).rgb * 0.0625;
+    gl_FragColor = vec4(sum, 1.0);
+  }
+`;
+
+const bloomVertexShader = /* glsl */ `
+  varying vec2 vUv;
+  void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+`;
+
+class BloomPass extends Pass {
+  constructor(strength = 1, radius = 1, threshold = 0) {
+    super();
+    this.strength = strength;
+    this.radius = radius;
+    this.threshold = threshold;
+    // The last step writes the picture and the glow summed into the other buffer, so the
+    // composer swaps onto it. The pass this replaces blended onto the buffer it was
+    // handed and set this false; doing that here aliased the texture the chain reads
+    // with the target it writes, and the note on `blendMaterial` has what that cost.
+    this.needsSwap = true;
+
+    this.targets = [];
+    for (let i = 0; i < BLOOM_LEVELS; i++) {
+      const target = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType });
+      target.texture.name = `bloom.${i}`;
+      target.texture.generateMipmaps = false;
+      this.targets.push(target);
+    }
+
+    this.downMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tSource: { value: null },
+        texel: { value: new THREE.Vector2() },
+        threshold: { value: threshold },
+        knee: { value: 0.01 },
+        firstLevel: { value: 0 },
+      },
+      vertexShader: bloomVertexShader,
+      fragmentShader: bloomDownShader,
+    });
+
+    this.upMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tSource: { value: null },
+        texel: { value: new THREE.Vector2() },
+        radius: { value: radius },
+      },
+      vertexShader: bloomVertexShader,
+      fragmentShader: bloomUpShader,
+      // Additive, because an upsample lays its octave over the wider one already in the
+      // target rather than replacing it.
+      blending: THREE.AdditiveBlending,
+      depthTest: false,
+      depthWrite: false,
+      transparent: true,
+    });
+
+    // **The picture and the glow are added in one shader rather than by blending the
+    // glow onto the picture**, and that is a correctness fix rather than a tidy-up. The
+    // additive version reads the frame as a texture at the top of the chain and then
+    // binds that same buffer as the render target at the bottom, which is a feedback
+    // loop: WebGL leaves the result undefined, and here it lost the picture entirely -
+    // with `strength` at zero, where the blend provably adds nothing, the frame came back
+    // 0% lit against 100% with the pass off. Reading both and writing a third target
+    // cannot alias, so the composer swaps to the result instead.
+    this.blendMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tPicture: { value: null },
+        tBloom: { value: null },
+        strength: { value: strength },
+      },
+      vertexShader: bloomVertexShader,
+      fragmentShader: /* glsl */ `
+        precision highp float;
+        uniform sampler2D tPicture, tBloom;
+        uniform float strength;
+        varying vec2 vUv;
+        void main() {
+          vec4 base = texture2D(tPicture, vUv);
+          gl_FragColor = vec4(base.rgb + texture2D(tBloom, vUv).rgb * strength, base.a);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+    });
+
+    this.quad = new FullScreenQuad(null);
+  }
+
+  setSize(width, height) {
+    let w = Math.max(1, Math.round(width));
+    let h = Math.max(1, Math.round(height));
+    for (const target of this.targets) {
+      // Halved per level and floored at one, so a chain asked for on a very small preview
+      // stops shrinking instead of asking for a zero-sized target.
+      w = Math.max(1, Math.round(w / 2));
+      h = Math.max(1, Math.round(h / 2));
+      target.setSize(w, h);
+    }
+  }
+
+  render(renderer, writeBuffer, readBuffer) {
+    const previousTarget = renderer.getRenderTarget();
+
+    // Down. The first level reads the frame and cuts the darks; the rest read the level
+    // above them, which is what makes this a chain rather than five blurs of one image.
+    this.quad.material = this.downMaterial;
+    for (let i = 0; i < this.targets.length; i++) {
+      const source = i === 0 ? readBuffer : this.targets[i - 1];
+      this.downMaterial.uniforms.tSource.value = source.texture;
+      this.downMaterial.uniforms.threshold.value = this.threshold;
+      this.downMaterial.uniforms.firstLevel.value = i === 0 ? 1 : 0;
+      this.downMaterial.uniforms.texel.value.set(1 / source.width, 1 / source.height);
+      renderer.setRenderTarget(this.targets[i]);
+      renderer.clear();
+      this.quad.render(renderer);
+    }
+
+    // Up, accumulating. Nothing is cleared on the way back: each pass adds its octave to
+    // the level below, which already holds that level's own downsample.
+    this.quad.material = this.upMaterial;
+    for (let i = this.targets.length - 1; i > 0; i--) {
+      const source = this.targets[i];
+      this.upMaterial.uniforms.tSource.value = source.texture;
+      this.upMaterial.uniforms.radius.value = this.radius;
+      this.upMaterial.uniforms.texel.value.set(1 / source.width, 1 / source.height);
+      renderer.setRenderTarget(this.targets[i - 1]);
+      this.quad.render(renderer);
+    }
+
+    // And the two are summed into the buffer the composer will swap to. `strength` is
+    // applied here and only here, so the look control stays outside the resampling.
+    this.quad.material = this.blendMaterial;
+    this.blendMaterial.uniforms.tPicture.value = readBuffer.texture;
+    this.blendMaterial.uniforms.tBloom.value = this.targets[0].texture;
+    this.blendMaterial.uniforms.strength.value = this.strength;
+    renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
+    renderer.clear();
+    this.quad.render(renderer);
+
+    renderer.setRenderTarget(previousTarget);
+  }
+
+  dispose() {
+    for (const target of this.targets) target.dispose();
+    this.downMaterial.dispose();
+    this.upMaterial.dispose();
+    this.blendMaterial.dispose();
+    this.quad.dispose();
+  }
+}
+
 // ---------------------------------------------------------------- post chain
 
 // Deliberately ordered: trails accumulate the raw cloud, bloom blows out the hot
@@ -1620,7 +1882,7 @@ const afterimage = new AfterimagePass(0.0);
 afterimage.enabled = false;
 composer.addPass(afterimage);
 
-const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.0, 0.7, 0.2);
+const bloom = new BloomPass(0.0, 0.7, 0.2);
 bloom.enabled = false;
 composer.addPass(bloom);
 
@@ -6470,8 +6732,18 @@ function renderProgramFrame(t) {
     // The delta goes in explicitly because the composer falls back to a clock of
     // its own when render() is called bare, which would put a wall clock back
     // inside the seam even though no pass in this chain reads the delta today.
+    //
+    // The timer brackets the draw and only while somebody has the stats overlay open,
+    // so every path that is not being watched - every proof tool, every export, every
+    // pre-roll frame - issues exactly the calls it issued before this existed. A query
+    // writes no pixels either way; the gate is about not adding GL calls to the seam
+    // that `determinism-check` compares.
+    const timing = statsVisible;
+    const timerGl = timing ? renderer.getContext() : null;
+    if (timing) gpuTimer.begin(timerGl);
     if (postEnabled()) composer.render(dt);
     else renderer.render(scene, viewCamera);
+    if (timing) gpuTimer.end(timerGl);
 
     if (frameSink !== null && t === frameSink.t) {
       const gl = renderer.getContext();
@@ -11809,6 +12081,111 @@ const planVec = new THREE.Vector3();
 let chromeOn = false;
 let topViewVisible = true;
 let statsVisible = false;
+/**
+ * How long the GPU actually spent on the last frames, in milliseconds.
+ *
+ * **The stats overlay's `fps` is the sensor's delivery rate and has never been a
+ * rendering number.** It is counted in `handleFrame` off arrivals from the socket, so
+ * it measures USB and the grabber - `docs/performance.md` records it moving 12.82 to
+ * 30.00 on hub topology alone, with nothing about the look changing. Anybody reading it
+ * while dragging a slider is watching their USB tree, and people have: the reports that
+ * the effects make performance "fluctuate wildly" are in large part this number being
+ * read as though it said something about the render path. It stays, because a lagging
+ * colour rate is still the one thing that explains a stale-looking image, and it is now
+ * labelled `in` against this one's `gpu`.
+ *
+ * **A GPU timer query and not a wall clock around the draw call**, which is the whole
+ * reason this is worth having rather than being a second wrong instrument. WebGL
+ * submits asynchronously, so `performance.now()` either side of `composer.render`
+ * measures the time spent *queueing* the frame and nothing else - measured on this
+ * build, that queue is 0.005ms against 0.310ms of GPU work, so a wall clock here would
+ * report a sixtieth of the cost and would not move when an effect was switched on. The
+ * only other honest option is a `readPixels` barrier, and that is a full pipeline stall
+ * that would make the readout change what it measures.
+ *
+ * **Only while the overlay is open**, which keeps it out of every path that is not
+ * being watched. A proof tool never opens the stats panel, so the render seam those
+ * tools compare is byte for byte the one they compare today, and an export pays
+ * nothing. `EXT_disjoint_timer_query_webgl2` is absent on some drivers and the readout
+ * says so rather than showing a zero that reads as "free".
+ *
+ * Results arrive some frames after the frame they describe, so a query is polled until
+ * it is ready rather than waited on. Disjoint results are thrown away whole: the
+ * extension raises that flag when the GPU was descheduled mid-query, which is the same
+ * "read a health number and discard the run" rule `docs/measurement.md` states, in the
+ * one place the hardware reports it directly.
+ */
+const gpuTimer = {
+  ext: null,
+  probed: false,
+  inFlight: [],
+  samples: [],
+  active: false,
+
+  supported(gl) {
+    if (!this.probed) {
+      this.probed = true;
+      this.ext = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+    }
+    return this.ext !== null;
+  },
+
+  begin(gl) {
+    if (this.active || !this.supported(gl)) return;
+    // Drained here rather than only from the chrome paint, which is where this used to
+    // sit and was wrong: the two are not on the same clock. `drawChrome` runs when the
+    // furniture is repainted and the render seam runs when a frame is drawn, so a
+    // surface drawing frames without repainting its overlay filled the two slots below
+    // and then stopped issuing queries entirely - measured at 4 samples over a hundred
+    // frames, with the readout frozen on the median of the first two. Polling on the
+    // path that creates the queries means the reader cannot fall behind the writer.
+    this.poll(gl);
+    // Two queries in flight is plenty to cover the latency without letting a stalled
+    // reader grow an unbounded pool, and only one TIME_ELAPSED query may be open at a
+    // time - so a second begin before its end is a bug rather than a queue.
+    if (this.inFlight.length >= 2) return;
+    const query = gl.createQuery();
+    gl.beginQuery(this.ext.TIME_ELAPSED_EXT, query);
+    this.inFlight.push(query);
+    this.active = true;
+  },
+
+  end(gl) {
+    if (!this.active) return;
+    gl.endQuery(this.ext.TIME_ELAPSED_EXT);
+    this.active = false;
+  },
+
+  /** Drains whatever has become available. Called from the chrome paint, not the seam. */
+  poll(gl) {
+    if (!this.ext || this.active) return;
+    const disjoint = gl.getParameter(this.ext.GPU_DISJOINT_EXT);
+    for (let i = this.inFlight.length - 1; i >= 0; i--) {
+      const query = this.inFlight[i];
+      if (!gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE)) continue;
+      if (!disjoint) {
+        this.samples.push(gl.getQueryParameter(query, gl.QUERY_RESULT) / 1e6);
+        // A short window, because the number is here to answer "is what I just
+        // switched on expensive" while somebody is still holding the slider.
+        if (this.samples.length > 30) this.samples.shift();
+      }
+      gl.deleteQuery(query);
+      this.inFlight.splice(i, 1);
+    }
+  },
+
+  /**
+   * The median rather than the mean, for the reason every other number in this repo is
+   * a median: one descheduled frame is worth more than the other twenty-nine put
+   * together to a mean, and this is read while the machine is doing something else.
+   */
+  median() {
+    if (this.samples.length === 0) return null;
+    const sorted = [...this.samples].sort((a, b) => a - b);
+    return sorted[sorted.length >> 1];
+  },
+};
+
 // The crop box and its handles, and with them the faint pass that shows what the box
 // is cutting.
 //
@@ -12501,7 +12878,10 @@ function drawChrome() {
   // ── stats overlay, below the top-down view or in its place when hidden.
   if (statsVisible) {
     const statsY = topViewVisible ? rect.y + rect.h + INSET.margin : rect.y;
-    const statsH = 156;
+    // Eleven rows at `lineH` plus the top inset. Grown by one line when the gpu row
+    // arrived beside `fps in`, because a box sized for ten rows draws the eleventh
+    // over its own bottom edge.
+    const statsH = 167;
     const statsRect = { x: rect.x, y: statsY, w: rect.w, h: statsH };
 
     chromeCtx.fillStyle = 'rgba(13, 16, 20, 0.92)';
@@ -12516,11 +12896,28 @@ function drawChrome() {
     const col2 = statsRect.x + 90;
     let y = statsRect.y + 12;
 
-    // Performance
+    // Performance. The two rates are labelled apart on purpose: `fps in` is the
+    // sensor's delivery rate off the socket and says nothing about the look, and
+    // `gpu` is what a frame costs the GPU. Reading the first as the second is the
+    // misreading this row exists to end - see the note on `gpuTimer`.
     chromeCtx.fillStyle = '#6d7683';
     chromeCtx.fillText('PERF', col1, y);
     chromeCtx.fillStyle = '#e8ecf1';
-    chromeCtx.fillText(`${fps.toFixed(1)} fps`, col2, y); y += lineH;
+    chromeCtx.fillText(`${fps.toFixed(1)} fps in`, col2, y); y += lineH;
+    gpuTimer.poll(renderer.getContext());
+    const gpuMs = gpuTimer.median();
+    chromeCtx.fillStyle = '#6d7683';
+    chromeCtx.fillText('gpu', col1, y);
+    chromeCtx.fillStyle = '#e8ecf1';
+    // Three states rather than two, because a zero here would read as "free" in both
+    // of the cases that are not a measurement: a driver with no timer extension, and
+    // a panel that has been open for less time than the queries take to come back.
+    chromeCtx.fillText(
+      gpuTimer.supported(renderer.getContext())
+        ? (gpuMs === null ? 'sampling' : `${gpuMs.toFixed(2)} ms`)
+        : 'unavailable',
+      col2, y,
+    ); y += lineH;
     chromeCtx.fillStyle = '#6d7683';
     chromeCtx.fillText('renders', col1, y);
     chromeCtx.fillStyle = '#e8ecf1';
@@ -14347,6 +14744,73 @@ let pinnedPairs = null;
 
 // ------------------------------------------------------------------------- boot
 
+/**
+ * Compile every program the look can reach, before the first frame anybody sees.
+ *
+ * **A pass costs nothing until it is first switched on, and then it costs 83ms.** The
+ * three post passes and the point material's additive variant are each compiled the
+ * first time they are actually reached, which is whenever somebody drags a slider off
+ * zero or picks a preset - so the frame that engages them is one long frame and every
+ * frame after it is normal. Measured on this build, editor at 0.851 Mpx, single frames
+ * with a readPixels barrier, against a 0.7ms steady state:
+ *
+ *     first frame after the grade pass engages    83.1 ms
+ *     first frame after bloom engages             48.1 ms
+ *     first frame after an `additive` toggle      20.9 ms
+ *     the same toggles a second time               0.7 - 2.1 ms
+ *
+ * A graded preset writes all three at once, so picking one costs about 150ms of
+ * compilation and picking it again costs nothing. That asymmetry is why the same look
+ * gets reported as smooth by somebody who tried it twice and as a stall by somebody who
+ * tried it once, and it is the largest single thing behind "the effects fluctuate".
+ *
+ * **It is one composed frame and not a pass-by-pass warm**, because reaching into
+ * `UnrealBloomPass` for its internal materials is the coupling `resetAccumulators`
+ * already carries a guard against - the internals move between three versions and a
+ * warm that silently stopped warming would be invisible. Rendering the chain the way
+ * the chain is rendered cannot go stale that way.
+ *
+ * The cost is charged where nobody is waiting on a picture. This runs before either
+ * transport is installed, so the depth textures are still the empty initial ones and
+ * the cloud draws nothing: it compiles programs rather than shading a scene.
+ *
+ * **Nothing may survive it.** The enabled flags go back to what they were, and
+ * `resetAccumulators` clears the surface-memory pair and the afterimage's two buffers
+ * and puts `lastProgramTime` back to zero - so a warmed page and an unwarmed one are
+ * the same state by every reading, which is what `determinism-check` compares. It
+ * deliberately does not go through `renderProgramFrame`: that would advance the
+ * surface state, move `counters.renders` off zero and evaluate tracks that do not
+ * exist yet.
+ */
+function warmPrograms() {
+  const was = { after: afterimage.enabled, bloom: bloom.enabled, grade: grade.enabled };
+  const wasAdditive = uniforms.softEdge.value === 1;
+  try {
+    afterimage.enabled = true;
+    bloom.enabled = true;
+    grade.enabled = true;
+    // Both blending states, because `setAdditive` flips `material.needsUpdate` and the
+    // blend is its own pipeline object on a Metal driver - the 20.9ms above is that
+    // object being built, not GLSL being parsed, so compiling one variant leaves the
+    // other still owed.
+    setAdditive(!wasAdditive);
+    composer.render(0);
+    setAdditive(wasAdditive);
+    composer.render(0);
+  } catch (err) {
+    // A page that cannot warm is a page that still works, one hitch at a time. It is
+    // reported rather than swallowed because a warm that silently stopped happening
+    // would read exactly like the stalls coming back for some other reason.
+    console.warn('could not warm the shader programs:', err.message);
+  } finally {
+    afterimage.enabled = was.after;
+    bloom.enabled = was.bloom;
+    grade.enabled = was.grade;
+    resetAccumulators();
+  }
+}
+warmPrograms();
+
 // Which transport owns the loop is decided once, here, and the two are exclusive:
 // a page editing a take must not have a socket writing depth into the textures
 // underneath it, and a live viewer has no timeline to drive. Which of the two this
@@ -14483,6 +14947,25 @@ globalThis.__kinect = {
   // measuring something the shipped build does not run.
   get cloudDrawHz() { return cloudDrawHz; },
   set cloudDrawHz(hz) { cloudDrawHz = Number(hz); },
+
+  /**
+   * What the GPU spent on recent frames, as the overlay reads it, plus how the reading
+   * came about. Published because a check has three separate things to establish here
+   * and only one of them is a number: that the extension is present at all, that the
+   * timer is gated on the panel rather than always running, and that what it reports
+   * moves when the frame genuinely gets more expensive.
+   *
+   * `sampling` is the honest answer for a panel that has just opened, and it is
+   * distinguished from `unavailable` rather than folded into it, because a driver
+   * without the extension and a query that has not come back yet are different facts
+   * and a check that could not tell them apart would pass on the wrong one.
+   */
+  gpu: () => ({
+    supported: gpuTimer.supported(renderer.getContext()),
+    timing: statsVisible,
+    samples: gpuTimer.samples.length,
+    ms: gpuTimer.median(),
+  }),
 
   // The sensor's own view, and the numbers it derived. Returned rather than left to
   // be read off the camera because the containment rule is the claim worth checking
