@@ -2597,6 +2597,26 @@ async function openPage(browser, url, viewport = { width: 1100, height: 760 }) {
   return { page, errors };
 }
 
+/**
+ * The first thing the page said matching `re`, waited for.
+ *
+ * The editor's refusals were read off a chip in its application bar until that chip was
+ * removed; `showTimelineError` is a console line now, so the two rows here that assert an
+ * editor refusal by its wording read the array `openPage` above already fills. A Node-side
+ * poll, because the array is in this process rather than in the page, and it resolves to
+ * an empty string on a timeout rather than throwing - a build that refuses silently has to
+ * redden the row that asked, not end the run.
+ */
+async function saidOnConsole(errors, re, ms = 30000) {
+  const until = Date.now() + ms;
+  for (;;) {
+    const hit = errors.find((e) => re.test(e));
+    if (hit) return hit;
+    if (Date.now() >= until) return '';
+    await new Promise((done) => { setTimeout(done, 50); });
+  }
+}
+
 // ============================================================================ run
 
 console.log(`[library] ${MUTATE ? `MUTATED: ${MUTATE} (${mutation.file})` : 'unmutated tree'}`);
@@ -4868,18 +4888,14 @@ async function runChecks() {
   {
     const refusedAt = editorPage(macUrl, 'future-format-take');
     const { page: refused, errors: refusedErrors } = await openPage(browser, refusedAt, { width: 640, height: 400 });
-    // Taken at the moment it matches rather than read again afterwards, for the reason
-    // the preset rows below give: the note is one line and every later message
-    // overwrites it.
-    const held = await refused.waitForFunction(
-      '(() => { const t = document.getElementById("tNote")?.textContent ?? ""; return t.includes("capture format") ? t : null; })()',
-      null, { timeout: 30000 },
-    ).catch(() => null);
-    const note = held ? String(await held.jsonValue())
-      : await refused.evaluate('document.getElementById("tNote")?.textContent ?? ""');
+    // Read off the console, which is where an editor refusal lands now that the message
+    // chip has been taken out of the application bar. The sentence itself has not changed
+    // - `openTake` still throws it and `showTimelineError` still writes it - so this is
+    // the same claim at the surface that still carries it.
+    const note = await saidOnConsole(refusedErrors, /capture format/);
     check(new RegExp(`capture format ${CAPTURE_FORMAT + 1}\\b`).test(note),
       'an editor handed a take from a format this build does not read says which generation it found',
-      note.slice(0, 140) || 'the note is empty');
+      note.slice(0, 140) || 'nothing on the console matched');
     check(await refused.evaluate("document.body.classList.contains('editing')") === false,
       'and it does not open the take - the refusal is a door rather than a message beside an opened clip');
     // The throw is what this page is about, so counting it as a finding would be
@@ -4896,7 +4912,7 @@ async function runChecks() {
       .then(() => true, () => false);
     check(editing === true,
       'while a take whose hello declares no format at all opens in the same editor, which is every take shot before the field existed',
-      editing ? 'editing' : await opened.evaluate('document.getElementById("tNote")?.textContent ?? "(no note)"'));
+      editing ? 'editing' : (openedErrors[0] ?? '(the page said nothing)').slice(0, 140));
     check(openedErrors.filter((e) => !/Failed to load resource/.test(e)).length === 0,
       'and it opens without a page error', openedErrors.slice(0, 2).join(' | ') || 'none');
     await opened.close();
@@ -5713,33 +5729,36 @@ async function runChecks() {
     // is the one the store wrote.
     {
       const { page: hurt, errors: hurtErrors } = await openPage(browser, editorPage(brokenUrl, 'local-clip'));
-      // **`#tNote`, which is what `ui.note` is.** Written against `#note` first, and
-      // that row read an element that does not exist: `?? ''` made every arm answer
-      // "the note is empty", so it was red against a build that was reporting perfectly
-      // and would have been red against one that reported nothing at all.
+      // **Read off the console, which is where this report lands now.** It was a chip in
+      // the editor's application bar and the chip has been removed, so `openTake` writes
+      // the collected failures with `console.error` and nothing else. The claim these two
+      // rows make has not moved with it: what matters is that the refusal is *reported*
+      // with the store's own reason in it, rather than thrown away into an empty `catch`
+      // the way it was when a `--builtin-presets` one directory too high drew a picker
+      // holding the placeholder and said nothing.
       //
-      // The text is taken *at the moment it matches* rather than read again afterwards,
-      // because the note is one line that every later message overwrites - a read taken
-      // a beat too late measures whichever gesture came next.
-      const held = await hurt.waitForFunction(
-        '(() => { const t = document.getElementById("tNote")?.textContent ?? ""; return t.includes("library unavailable") ? t : null; })()',
-        null, { timeout: 30000 },
-      ).catch(() => null);
-      const note = held ? String(await held.jsonValue())
-        : await hurt.evaluate('document.getElementById("tNote")?.textContent ?? ""');
-      check(/library unavailable/.test(note) && /presets/.test(note),
-        'an editor whose preset library will not load says so instead of drawing an empty picker',
-        note.slice(0, 120) || 'the note is empty');
+      // Written against `#note` originally, which is an element the editor does not have -
+      // `?? ''` made every arm answer "the note is empty", so the row was red against a
+      // build reporting perfectly and would have been red against one reporting nothing.
+      // That is the reason the evidence string below distinguishes "nothing matched" from
+      // an empty read.
+      const note = await saidOnConsole(hurtErrors, /unavailable/);
+      check(/unavailable/.test(note) && /presets/.test(note),
+        'an editor whose preset library will not load says so instead of drawing an empty picker in silence',
+        note.slice(0, 120) || 'nothing on the console matched');
       // The store's own sentence, not a paraphrase and not `list is not iterable`: the
-      // path from `listJsonNames` to the note is what makes the failure actionable.
+      // path from `listJsonNames` to the report is what makes the failure actionable.
       check(/cannot be read/.test(note),
-        'and the note carries the server\'s reason rather than the shape of the crash',
-        note.slice(0, 120) || 'the note is empty');
+        'and it carries the server\'s reason rather than the shape of the crash',
+        note.slice(0, 120) || 'nothing on the console matched');
       // The 500 itself is the subject of this page, so the console line the browser
       // writes for it is not a finding - asserting its absence would be asserting that
-      // the scenario did not happen. An uncaught exception still is one: reporting a
-      // failed library must not be a second way to break the editor.
-      const thrown = hurtErrors.filter((e) => !/Failed to load resource/.test(e));
+      // the scenario did not happen. **And the editor's own report is not one either**,
+      // which is new: it used to go on a chip and now goes here, so a row counting
+      // everything on this console would report the thing the two rows above just
+      // demanded as a fault. An uncaught exception still is one: reporting a failed
+      // library must not be a second way to break the editor.
+      const thrown = hurtErrors.filter((e) => !/Failed to load resource/.test(e) && !/unavailable/.test(e));
       check(thrown.length === 0, 'and reporting it raises no uncaught page errors',
         thrown.slice(0, 2).join(' | ') || 'none beyond the 500 this page is about');
       await hurt.close();

@@ -529,6 +529,13 @@
   .dialog-copy { display: flex; gap: 6px; margin-bottom: 7px; }
   .dialog-copy button { flex: 0 0 52px; }
   .dialog-actions { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
+  /* It keeps its box when empty, deliberately, and the measurement is why. This note has
+     no border to draw - it is the `flex: 1` that pushes the export dialog's actions to the
+     right edge - so collapsing it bought nothing and cost the alignment: with no render yet
+     the note is empty, the spacer vanishes and `save a copy` and `Export` sat hard left,
+     278px from the right edge the other two dialogs' actions sit on. Measured at 1512px
+     wide. Written down because the app bar's chip once had the opposite rule for the
+     opposite reason, and the pair read as an inconsistency to somebody tidying up. */
   .dialog-actions .note { flex: 1; min-width: 0; color: var(--dim); font-size: 9px; }
   /* What a dialog with nothing to say puts in the note's place, so its actions sit at the
      right edge like the other two rather than drifting left on their own. */
@@ -753,15 +760,7 @@
     color: var(--ink); font: inherit; font-size: 11px; padding: 1px 7px; cursor: pointer;
   }
   .tchip button[disabled] { color: var(--dim); cursor: default; }
-  .tchip.warn, #tNote { border-color: var(--warn); color: var(--warn); }
-  /* `#tNote` only, and `#tExportNote` deliberately not. The app bar's chip is a bordered
-     box, so an empty one draws a stray outline and collapsing it is the whole point. The
-     export dialog's note has no box at all - it is the `flex: 1` that pushes that dialog's
-     actions to the right edge - so collapsing it bought nothing and cost the alignment:
-     with no render yet the note is empty, the spacer vanishes and `save a copy` and
-     `Export` sat hard left, 278px from the right edge the other two dialogs' actions sit
-     on. Measured at 1512px wide. */
-  #tNote:empty { display: none; }
+  .tchip.warn { border-color: var(--warn); color: var(--warn); }
   #tResume { border: none; background: none; padding: 0; }
   #tResumeOpen { padding: 5px 10px; }
   /* `hidden` on a chip, which needs saying because `.tchip` already sets a display and
@@ -773,30 +772,13 @@
   .tchip[hidden] { display: none; }
   /* The app bar's right-hand slot. `nav.css` gives it the `margin-left: auto` and the
      ellipsis that every surface shares; the row inside it is this page's, because the
-     gallery fills the same slot with two spans and the editor fills it with two chips
-     and a readout. `min-width: 0` on the note is what makes the ellipsis land on the
-     message rather than pushing the sensor readout off the end of the bar - a flex item
-     will not shrink below its content without it, so a long refusal would win the row
-     from everything to its right. */
+     gallery fills the same slot with two spans and the editor fills it with a chip and a
+     readout. Nothing in here shrinks now: the two items are the resume offer, which is
+     hidden until there is one to make, and the sensor readout, which is a short fixed
+     phrase. The slot held a third that did - a message chip long enough to win the row
+     from everything to its right - and the `min-width: 0` and the ellipsis machinery it
+     needed came out with it. */
   #appStatusSlot { display: flex; align-items: center; gap: 10px; }
-  /* **`block` and not the `inline-flex` every other chip is, and the difference is the
-     ellipsis.** `text-overflow` cuts the text of a *block* box; inside a flex container
-     the text becomes an anonymous flex item and the property has nothing to apply to, so
-     the chip simply grew to its content and reported `scrollWidth === clientWidth` - no
-     overflow, no ellipsis, and a refusal running the width of the bar. This chip holds
-     one string and no children, so it has nothing the flex layout was doing for it.
-     `:not(:empty)` keeps the `#tNote:empty` rule above winning when there is no message,
-     since two ids beat one id and a pseudo-class and a bare `display: block` here would
-     paint an empty bordered box on a quiet bar.
-
-     And `flex: 0 1 auto`, because `.tchip` sets `flex: none` - which is `flex-shrink: 0`,
-     so the note claimed its full content width and pushed straight through the slot no
-     matter what `min-width` said. A box that never shrinks never overflows itself, which
-     is why the ellipsis had nothing to do even once it was a block: the clipping was the
-     slot's `overflow: hidden` cutting the sentence off mid-word with no mark to say so. */
-  #appStatusSlot #tNote:not(:empty) {
-    display: block; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
-  }
   #appStatusSlot #appStatus { flex: 0 0 auto; }
   /* Speed control and mark button next to clocks. */
   .tspeed { display: flex; align-items: center; gap: 8px; flex: none; }
@@ -1117,18 +1099,23 @@
     </nav>
     <!-- The right-hand slot the shared bar already reserves - `nav.css` gives it the
          `margin-left: auto` that puts it at the far end, and the gallery fills the same
-         one with its count and its path. Three things live in the editor's copy of it,
-         and all three are statements about the session rather than about where the
-         playhead is, which is all the strip below says now.
+         one with its count and its path. Two things live in the editor's copy of it, and
+         both are statements about the session rather than about where the playhead is,
+         which is all the strip below says now.
 
-         `#tNote` is what the program says back. Every refusal in the editor arrives here
-         and nowhere else - `say` is the one writer and `showTimelineError` is `say` plus
-         a console line - so the rework losing this element did not make the messages
-         quieter, it made them stop: `say` returned at `if (!ui.note)`, and a bad export
-         name, a project whose take hash does not match, a preset the server answers 404
-         for and a failed auto-save all reached nobody. Empty it hides itself, so the bar
-         is bare in the ordinary case, and `title` carries the whole sentence because the
-         slot ellipsises and a refusal is exactly the text worth reading to the end.
+         **A third used to, and its removal is a decision rather than a tidy-up.** `#tNote`
+         was a bordered chip carrying whatever the program had last said, and every refusal
+         in the editor arrived there and nowhere else: a bad export name, a project whose
+         take hash does not match, a preset the server answers 404 for, a failed auto-save.
+         It was asked for gone because the ordinary case is not a refusal - it is a
+         confirmation of something the operator just did and can already see, and a chip
+         that lights amber on both reads as an alarm on neither. What went with it is real
+         and is written here rather than left to be discovered: those four refusals now
+         happen silently as far as the page is concerned, `showTimelineError` is a console
+         line and nothing else, and the `?` key no longer prints the shortcut list because
+         the chip was the only surface it had. The proof tools that used to read this
+         element for evidence went in the same change rather than being re-pointed at a
+         second channel, because a second channel is the thing this design keeps refusing.
 
          `#tResume` is the auto-save offer, and an offer nobody sees is the same as no
          offer - which is what it became when the chip's row went away and left
@@ -1140,7 +1127,6 @@
          `#appStatus` is the sensor and the rate coming in. `paintStatus` has been writing
          it since the bar arrived and there was nothing here to write to. -->
     <div class="appstatus" id="appStatusSlot">
-      <span class="tchip" id="tNote"></span>
       <span class="tchip" id="tResume" hidden><b id="tResumeWhen"></b><button id="tResumeOpen" type="button">restore autosave</button></span>
       <span id="appStatus"></span>
     </div>

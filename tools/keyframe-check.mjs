@@ -2286,7 +2286,6 @@ console.log('\n== 4f. a retime curve that runs downhill ==');
     for (let i = 0; i < 90 && t.playing; i++) await frames();
     const afterCrash = {
       playing: t.playing,
-      note: document.getElementById('tNote').textContent,
       rendered: k.timeline.counters.renders - before,
     };
     // Put a sane curve back and ask the loop to work. If the callback stopped being
@@ -2301,8 +2300,8 @@ console.log('\n== 4f. a retime curve that runs downhill ==');
     return { startedPlaying, afterCrash, alive: k.timeline.counters.renders - settledRenders };
   })()`);
   console.log(`  a curve written straight onto the object, then play: transport `
-    + `${survived.afterCrash.playing ? 'still playing' : 'paused'}, note `
-    + `"${survived.afterCrash.note.slice(0, 60)}"`);
+    + `${survived.afterCrash.playing ? 'still playing' : 'paused'} after `
+    + `${survived.afterCrash.rendered} renders`);
   console.log(`  with a sane curve back, the animation loop rendered ${survived.alive} frames`);
   // The control on the control: the transport really was playing when it met the
   // curve, so "it paused" is a thing that happened rather than a thing that never
@@ -2313,8 +2312,13 @@ console.log('\n== 4f. a retime curve that runs downhill ==');
     `rendered ${survived.afterCrash.rendered} frames before refusing`);
   check(survived.afterCrash.playing === false,
     'a curve that cannot be walked pauses the transport rather than running into it');
-  check(survived.afterCrash.note.length > 0, 'and says why on the strip rather than only in the console',
-    survived.afterCrash.note);
+  // There was a row here reading the refusal off the timeline strip - "and says why on the
+  // strip rather than only in the console". The editor's message chip was removed, so the
+  // console is the only place it lands and that sentence has no second half left to make.
+  // What still holds the reporting to account is `expectError` below: it requires the
+  // refusal to arrive, so a build that paused the transport and explained nothing anywhere
+  // reddens the run-wide sweep rather than passing quietly.
+  //
   // This section provokes exactly one error and it is the one under test, so the
   // run-wide no-errors assertion is told to expect it - and told to fail if it
   // does not arrive.

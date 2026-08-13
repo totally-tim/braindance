@@ -280,12 +280,11 @@ const MUTATIONS = {
   },
 
   // The control for the row that asks the *store* rather than the page. It keeps the
-  // refusal and only moves it: the file is PUT first and validated afterwards, so the
-  // note still names the wrong key and the look still does not move - both of the
-  // observations that row used to be surrounded by - while the malformed preset is now
-  // a document in the library. That is what makes it the right control rather than a
-  // second copy of `import-skips-normalise`, which removes validation altogether and
-  // therefore reddens the note rows instead.
+  // refusal and only moves it: the console still names the wrong key and the look still
+  // does not move - both of the observations that row used to be surrounded by - while
+  // the malformed preset is now a document in the library. That is what makes it the
+  // right control rather than a second copy of `import-skips-normalise`, which removes
+  // validation altogether and therefore reddens the rows that read the refusal instead.
   //
   // Must redden: the two rows that ask the store after a refusal - "a refused file never
   // reaches the library" for the malformed one, and the same question asked of the file
@@ -313,27 +312,6 @@ const MUTATIONS = {
     ],
   },
 
-  // The editor's note goes back to being written into an element that truncates, with
-  // nothing carrying the whole sentence. `#tNote` sits in `.tchips`, which scrolls
-  // horizontally with its scrollbar hidden, so a message wider than the strip has no
-  // scrollbar to drag and no `title` to hover - it is off the right edge and there is
-  // no gesture that reaches it. Every note in the editor went through that element and
-  // only that element, and the messages that overflow are the refusals.
-  //
-  // Only the `title` goes. The text still lands and the strip still scrolls, which is
-  // what makes this the control for one row rather than a blanket switch: a mutation
-  // that also stopped the note being written would redden every row that reads it and
-  // say nothing about whether the sentence was reachable.
-  //
-  // Must redden: section 13's "the whole of a long refusal is reachable off the note's
-  // title", and that row alone. The export note's own rows stay green - `sayExport`
-  // writes its own title and a mutation reaching it would be saying something wider
-  // than this fix is.
-  'note-skips-title': {
-    file: 'web/main.js',
-    edits: [['  ui.note.title = text;\n', '']],
-  },
-
   // A mark tick seeks to the mark's own source second instead of the program second
   // the drawing code clamped it to, which undoes the retime the tick was positioned
   // through. The two coincide exactly at rate 1 with no keys, so the row that drives
@@ -349,27 +327,6 @@ const MUTATIONS = {
     edits: [[
       '      goTo(at);',
       '      goTo(mark.sourceMs / 1000);',
-    ]],
-  },
-
-  // Applying a look from the picker goes back to saying nothing at all, which is how it
-  // shipped for the whole life of the picker: the note lived on the apply button the
-  // picker replaced, and it went with the button rather than moving onto the control that
-  // inherited the gesture. The one action on this surface that rewrites every look value
-  // on screen was also the only one that happened in silence, and no row here had looked,
-  // because the row that would have was written against the button.
-  //
-  // Must redden: **one row** - section 17's "and the note for it says what was applied
-  // rather than naming a revision this gesture did not apply". Nothing else, and that is
-  // the shape worth having: the values still land, so every row about what a partial
-  // apply *writes* stays green and this one is about the sentence alone.
-  'apply-says-nothing': {
-    file: 'web/main.js',
-    edits: [[
-      '          say(stamped\n'
-      + '            ? `applied ${doc.name} · ${doc.rev.slice(7, 15)}`\n'
-      + '            : `applied ${written} values from ${doc.name}, which names part of a look rather than the whole of one`);',
-      '          void stamped; void written;',
     ]],
   },
 
@@ -392,9 +349,9 @@ const MUTATIONS = {
   },
 
   // The autosave offer goes back to being withheld whenever any part of the library
-  // failed to list. That gate was right while the offer was a sentence written through
-  // `say`, which would have painted over the note naming what broke - and wrong the
-  // moment it became a button, since a button overwrites nothing and what the gate now
+  // failed to list. That gate was right while the offer was a sentence on the application
+  // bar's message chip, which would have painted over the sentence naming what broke - and
+  // wrong the moment it became a button, since a button overwrites nothing and what the gate now
   // does is throw away the only control that reaches `__working__`, a document the
   // project picker deliberately does not show, because an unrelated presets directory
   // was pointed one level too high.
@@ -496,12 +453,7 @@ const MUTATIONS = {
   // surface was broken. Must redden only the click rows.
   'tick-seeks-outside-the-trim': {
     file: 'web/main.js',
-    edits: [[
-      "        if (!reachableInClip(at)) {\n"
-      + "          say('that mark is outside the clip range, so the edit cannot reach it');\n"
-      + '          return;\n        }\n',
-      '',
-    ]],
+    edits: [['        if (!reachableInClip(at)) return;\n', '']],
   },
 
   // `.tmk.beyond` goes back under the two interaction states. Same specificity, so the
@@ -545,12 +497,18 @@ const MUTATIONS = {
   // they are separate writers over one picker. The three that follow are provenance rows,
   // and they go red for a reason about the fixture rather than about themselves - a
   // picker ignoring the boxes writes the *whole* look, so the sparse document those rows
-  // exist to reason about no longer exists, the import stamps the clip, the apply note
-  // names a revision, and the save moves the stamp it should have left alone. None is a
-  // second defect. This said "the two rows that read the exported document's keys" and
-  // undercounted, which under this suite's rule that the next agent re-derives the fired
-  // set from scratch reads as a bug to chase. Measured, settled machine, 278 assertions:
-  // `caught, as required (5 assertions fired)`.
+  // exist to reason about no longer exists, the import stamps the clip, the apply leaves a
+  // stamp naming the document it just applied, and the save moves the stamp it should have
+  // left alone. None is a second defect. This said "the two rows that read the exported
+  // document's keys" and undercounted, which under this suite's rule that the next agent
+  // re-derives the fired set from scratch reads as a bug to chase. Measured, settled
+  // machine, 278 assertions: `caught, as required (5 assertions fired)`.
+  //
+  // **Re-measured at 508 assertions after the application bar's message chip was removed**,
+  // because one of the three provenance rows read that chip and two replaced it: what was a
+  // row about the apply's note is now a row about the stamp the apply leaves. The count is
+  // unchanged at five and the fired set is the same five claims, which is the answer that
+  // had to be checked rather than assumed.
   //
   // The rows about what the dialog offers and how it ticks stay green, deliberately -
   // they are about the control and this mutation does not touch it.
@@ -574,11 +532,12 @@ const MUTATIONS = {
   // The second is the format's opinion of the document that came out, which is a claim of
   // its own rather than a cascade and is why that row exists at all - a file naming four
   // of the five weights is exactly what `refusePresetBody` refuses, so the import is
-  // refused and the row reading the note says so. The third follows from the second
-  // mechanically: with the import refused the sparse document was never written, so the
-  // apply pointed at it comes back "could not apply" and the row asking what the note
-  // says goes red about a preset that does not exist. That one is the fixture, not a
-  // finding. Measured on an idle machine: `caught, as required (3 assertions fired)`,
+  // refused and the row reading the picker's name back says so. The third follows from the
+  // second mechanically: with the import refused the sparse document was never written, so
+  // it is not an entry in the picker and the row that applies it goes red about a preset
+  // that does not exist. That one is the fixture, not a finding - and it is a *row* rather
+  // than a crash only because `applyByChoosing` answers whether the entry was there, which
+  // it did not until this mutation killed the run at a click waiting for one. Measured on an idle machine: `caught, as required (3 assertions fired)`,
   // against a docstring that had promised one.
   'readings-tick-alone': {
     file: 'web/main.js',
@@ -833,8 +792,7 @@ const MUTATIONS = {
     file: 'web/main.js',
     edits: [
       // Lifted out of its place above the marks...
-      ['  await fitCropToTake(id, params.get(\'near\'), params.get(\'far\'))\n'
-        + '    .catch((err) => { say(`the crop box could not be fitted to this take: ${err.message}`); });\n'
+      ['  await fitCropToTake(id, params.get(\'near\'), params.get(\'far\')).catch(showTimelineError);\n'
         + '  // Awaited, so the first paint of the ruler already has the ticks on it. A take',
       '  // Awaited, so the first paint of the ruler already has the ticks on it. A take'],
       // ...and put back on the far side of the baseline, committing like any other edit,
@@ -846,8 +804,7 @@ const MUTATIONS = {
       '  // The stack starts from whatever the clip already is, so the first undo has\n'
         + '  // somewhere honest to land rather than an empty document.\n'
         + '  history.begin();\n'
-        + '  await fitCropToTake(id, params.get(\'near\'), params.get(\'far\'))\n'
-        + '    .catch((err) => { say(`the crop box could not be fitted to this take: ${err.message}`); });\n'
+        + '  await fitCropToTake(id, params.get(\'near\'), params.get(\'far\')).catch(showTimelineError);\n'
         + '  history.commit();'],
     ],
   },
@@ -898,11 +855,21 @@ const MUTATIONS = {
     ]],
   },
 
+  // The button is planted in the application bar's status slot, which is deliberate and is
+  // the whole history of this control: the slot is inside `.appbar` and outside `#navRow`,
+  // and for as long as the rule keyed on the bar rather than on the nav row a control
+  // planted here was adopted by a coverage rule written about the menus - 420 assertions,
+  // 0 failed, NOT CAUGHT. `docs/instruments.md` carries that case.
+  //
+  // It anchored on `#tNote`, the message chip that used to open this slot, and moved onto
+  // the slot's opening tag when the chip was removed. The anchor being the container rather
+  // than a sibling is the better of the two anyway: the position it has to occupy is "in
+  // this slot", and a sibling anchor is a second thing that has to still be there.
   'plant-unswept-control': {
     file: 'web/index.html',
     edits: [[
-      '      <span class="tchip" id="tNote"></span>',
-      '      <span class="tchip" id="tNote"></span>\n'
+      '    <div class="appstatus" id="appStatusSlot">',
+      '    <div class="appstatus" id="appStatusSlot">\n'
       + '      <button id="tPlantedControl" type="button">planted</button>',
     ]],
   },
@@ -2426,7 +2393,7 @@ const DRIVER_RULES = [
     // `#navRow` and not `#appBar`, and the narrowing is the whole point of the entry.
     // Written as the container, this rule covered anything anywhere in the application
     // bar - and the bar stopped being only menus when the status slot moved into it, so
-    // `plant-unswept-control` planted its button beside `#tNote`, matched here on the
+    // `plant-unswept-control` planted its button in that slot, matched here on the
     // strength of sharing an ancestor with the File menu, and the mutation went NOT
     // CAUGHT while reporting 420 assertions and 0 failures. A falsification control that
     // passes is worse than none, because the row it guards goes on reading green.
@@ -2439,7 +2406,7 @@ const DRIVER_RULES = [
     // was supposed to be giving all along.
     //
     // **Narrowed a second time, by the same failure arriving through a different door.**
-    // The row above was already the repair for a button planted beside `#tNote`; written
+    // The row above was already the repair for a button planted in the status slot; written
     // as "a `BUTTON` in `#navRow`" it went on covering every button the *row* grew, and
     // the row stopped being only menus the moment the panel's collapse toggle was put in
     // it. `panelToggle` matched here on nothing but sharing an ancestor with the File
@@ -2527,8 +2494,8 @@ const DRIVER_IDS = {
   // The project picker and its two buttons used to be named here, credited to
   // `library-check`. Both halves of that stopped being true at once: the rework routes
   // opening through the gallery and Save as through the application bar, so none of the
-  // three elements exists - and `library-check` never pressed them anyway, it reads
-  // `#tNote` and drives the take. An id crediting a driver that does not drive it is the
+  // three elements exists - and `library-check` never pressed them anyway, it reads the
+  // page's refusals and drives the take. An id crediting a driver that does not drive it is the
   // shape this table exists to refuse, so they are gone rather than left as three lines
   // that would silently cover a control if one came back under the same name.
   tResumeOpen: 'section 13 - plants an autosave, presses it, and reads the restored document back',
@@ -2538,7 +2505,7 @@ const DRIVER_IDS = {
   // control whose whole behaviour is where it points.
   toMenu: 'section 1 - reads the href it navigates to, beside the library link',
   // **Both of these were credited to `library-check`, and it presses neither.** It writes
-  // deliverable *directories* on the server and reads `#tNote`; it has never referenced
+  // deliverable *directories* on the server and reads the page's refusals; it has never referenced
   // either control. The picker's other half was true - section 6 does plant a name in it
   // and read the refusal back - so that half is what is left. The `new` button had nothing
   // true said about it at all, which is the shape the two project entries above record,
@@ -2705,6 +2672,71 @@ const PICKER_STUB = `(() => {
     };
   };
 })()`;
+
+/**
+ * The console settled, so a mark taken after this cannot be overtaken by what came before.
+ *
+ * Playwright delivers console events over CDP asynchronously, so a line written just before
+ * a mark is sampled can land in the array just after it. Section 12 provokes five refusals
+ * in a row and reads each one back, which is exactly the shape that race spoils: the fifth
+ * read returns the fourth sentence, the row about three documents getting three distinct
+ * sentences goes red, and it does so intermittently. Waiting for a quiet stretch before
+ * marking is what makes "past this index" mean "caused by what I do next".
+ *
+ * Bounded, because a page that never goes quiet must not hang the run - it returns the
+ * index it has and the row downstream reddens on the content instead.
+ */
+async function consoleSettled(errors, quietMs = 250, ms = 5000) {
+  const until = Date.now() + ms;
+  let seen = -1;
+  let since = Date.now();
+  for (;;) {
+    if (errors.length !== seen) { seen = errors.length; since = Date.now(); }
+    if (Date.now() - since >= quietMs || Date.now() >= until) return errors.length;
+    await new Promise((done) => { setTimeout(done, 50); });
+  }
+}
+
+/**
+ * The first thing the page said past `at` matching `re`, waited for rather than sampled.
+ *
+ * The editor's refusals were read off a chip in its application bar until that chip was
+ * removed; `showTimelineError` is a console line now, so the refusals that are still worth
+ * asserting - the four sentences a hand-edited preset file gets back, the take-hash refusal,
+ * the library that would not list - are read out of the array `openEditor` fills from
+ * `pageerror` and `console` for the end-of-run sweep.
+ *
+ * **It matches rather than waiting for the array to grow, and the difference is a defect
+ * this shipped with.** Written as "wait until `errors.length !== at`" it returned whatever
+ * arrived first, which on this page is as likely to be a `Failed to load resource` 404 as
+ * the refusal - so a content row read a string about something else and went red about a
+ * build with nothing wrong with it. `library-check`'s copy of this helper was written the
+ * matching way from the start and the two spellings should not have been allowed to differ.
+ *
+ * The pattern callers pass names the *channel* rather than the sentence - `[timeline]` is
+ * what `showTimelineError` prefixes, `[library]` is the listing report - so this waits for
+ * the right kind of line without presupposing which sentence is in it, which is the whole
+ * question the rows downstream are asking.
+ *
+ * A Node-side poll and not `waitForFunction`, because the array being waited on is in this
+ * process rather than in the page. **It resolves to the empty string on a timeout rather
+ * than throwing**, for the reason every wait in this file has a `.catch`: a build where the
+ * refusal never happens has to redden the row that asked for it, where a throw here arrives
+ * as `DID NOT RUN` and reports nothing about the mutation that caused it.
+ *
+ * Module scope rather than a closure inside `openEditor`, because that is where it started
+ * and the whole run died at `saidOnConsole is not defined` 364 assertions in - the sections
+ * that read refusals are outside that function, and only `page` and `errors` come out of it.
+ */
+async function saidOnConsole(errors, at, re, ms = 15000) {
+  const until = Date.now() + ms;
+  for (;;) {
+    const hit = errors.slice(at).find((e) => re.test(e));
+    if (hit !== undefined) return hit;
+    if (Date.now() >= until) return '';
+    await new Promise((done) => { setTimeout(done, 50); });
+  }
+}
 
 async function openEditor() {
   // Local Network Access is off, and it is an artifact of how a markup mutation has
@@ -4813,8 +4845,13 @@ try {
   await settle();
   const retimeKeys = () => page.evaluate('__kinect.timeline.retime.keys.length');
   check(await retimeKeys() === 3, 'the retime origin will not delete while keys follow it',
-    `${await retimeKeys()} keys, note "${(await text('#tNote')).trim().slice(0, 60)}"`);
-  check((await text('#tNote')).trim().length > 10, 'and it says why rather than doing nothing quietly');
+    `${await retimeKeys()} keys`);
+  // There was a row here reading the refusal off the message chip - "and it says why
+  // rather than doing nothing quietly". The chip is gone and `removeRetimeKey` returns
+  // `false` and says nothing, so the row went with it rather than being re-pointed at the
+  // console: what is left to assert is that the key survives, which the row above does,
+  // and the two rows below saying the same delete works once the followers have gone are
+  // what keep this from passing on a build where the gesture is broken outright.
   await page.evaluate(`__kinect.editor.select('retime', 2)`);
   await page.keyboard.press('Delete');
   await settle();
@@ -5776,7 +5813,6 @@ try {
       out: t.clipOutSec,
       early: t.frameAt(t.duration * 0.25),
       late: t.frameAt(t.duration * 0.75),
-      note: document.getElementById('tNote').textContent.trim(),
     };
   })()`);
   check(Number.isFinite(bad.in) && Number.isFinite(bad.out),
@@ -5791,12 +5827,14 @@ try {
   check(Number.isFinite(bad.early) && Number.isFinite(bad.late) && bad.early !== bad.late,
     '  and frameAt still resolves two positions half a program apart to two different frames',
     `frameAt(0.25) ${bad.early}, frameAt(0.75) ${bad.late}`);
-  // The operator's half. A document that is refused and says nothing is a menu selection
-  // that appears to have worked, which is the same silence the clamp itself was fixing.
-  check(/not a program time/.test(bad.note),
-    '  and the refusal is said out loud rather than leaving the menu looking like it took',
-    `#tNote reads ${JSON.stringify(bad.note)}`);
-  // `showTimelineError` also writes the refusal to `console.error`, and the sweep at the end
+  // The operator's half used to be a row here reading the sentence off the application
+  // bar's message chip, on the argument that a document refused in silence is a menu
+  // selection that appears to have worked. The chip is gone, and the two things left
+  // saying a refusal happened are the picker snapping back - below - and the console line
+  // this block already drains. So the drain stopped being bookkeeping and became the
+  // assertion: it is now the only place the *reason* is stated at all.
+  //
+  // `showTimelineError` writes the refusal to `console.error`, and the sweep at the end
   // of this file asserts the page said nothing at all - so this block has to take its own
   // noise back out or it reddens a row fifteen sections away that is about something else.
   //
@@ -5832,7 +5870,7 @@ try {
   const drained = errors.filter((e) => /not a program time/.test(e));
   for (const e of drained) errors.splice(errors.indexOf(e), 1);
   check(drained.length === 1,
-    '  and it reaches the console exactly once, which is what this block takes back out of the page-error sweep',
+    '  and the reason reaches the console exactly once, which is the only surface left saying why the menu did not take',
     `${drained.length} drained: ${drained.map((e) => e.slice(0, 60)).join(' | ') || 'nothing'}`);
 
   await focusStage();
@@ -7143,9 +7181,13 @@ try {
     '  and eight wheel notches take the cheap path every time, never the one that resizes the buffer',
     `${zoomCounters.laneRepositions} repositions, ${zoomCounters.laneRebuilds} rebuilds`);
 
-  // The keys. `SHORTCUTS` is what `?` prints and it now names four of them, so each is
-  // pressed rather than trusted - a string telling the user about a feature is the
-  // cheap version of the bug this whole file exists for.
+  // The keys, pressed rather than trusted. Three rows in this section used to read a
+  // `SHORTCUTS` string back through `__probe` and assert the legend named the key just
+  // pressed - the legend was what `?` printed onto the application bar's message chip.
+  // The chip went, so `?` prints nothing, so the string had no reader but those rows and
+  // came out; a constant kept alive by checks about a display that does not exist is the
+  // shape `exemption-outlives-its-export` is named for. The presses below are the half
+  // that was always the point.
   // **The playhead is put inside the window rather than at a second written down here.**
   // This was `seek(15)` against a window set at 0.2..0.8 of the clip, and the two numbers
   // are only compatible for a take between about 19s and 75s long: on the 9.4s sample the
@@ -7179,9 +7221,6 @@ try {
   check(afterIn.startSec < held && afterIn.endSec > held,
     '  and the playhead is still inside the window after zooming in, which is what "about" means',
     `playhead ${held.toFixed(2)}s in ${afterIn.startSec.toFixed(2)}s..${afterIn.endSec.toFixed(2)}s`);
-  check((await page.evaluate('__kinect.editor.shortcuts()')).includes('f fits the clip'),
-    '  and the shortcut list says so, which is where anybody would look for it',
-    await page.evaluate('__kinect.editor.shortcuts()'));
 
   // Panning a window of the width you already have, which is the one thing the keyboard
   // could not do. Zoom, fit and frame all *resize*; moving a narrow window along a long
@@ -7211,8 +7250,6 @@ try {
     `${beforePan.spanSec.toFixed(4)}s -> ${keyPanned.spanSec.toFixed(4)}s`);
   check(near(panBack.startSec, beforePan.startSec, 1e-3) && near(panBack.spanSec, beforePan.spanSec, 1e-6),
     '  and , brings it back', `${keyPanned.startSec.toFixed(3)}s -> ${panBack.startSec.toFixed(3)}s`);
-  check((await page.evaluate('__kinect.editor.shortcuts()')).includes(',/. pan it'),
-    '  and the shortcut list says so too', await page.evaluate('__kinect.editor.shortcuts()'));
 
   // **A round trip has to come back.** The window is stored as fractions and its minimum
   // is in seconds, so the two disagree the moment the duration moves - and a clamp applied
@@ -7759,12 +7796,27 @@ try {
     // `docs/instruments.md` records as a check testing its own helper. `#tPresetList` is
     // the listbox and `.pickeroption[data-name]` is how every reader of it finds an entry,
     // including `main.js`.
+    //
+    // **It answers whether the entry was there rather than waiting thirty seconds for one
+    // that will not arrive.** Every name this helper is asked for got into the library by
+    // being imported earlier in the section, so a mutation that makes an import refuse
+    // takes the entry with it - and `page.click` on a selector matching nothing waits out
+    // its whole default timeout and then throws, which arrives as `DID NOT RUN` with the
+    // rows that had already reddened thrown away. Measured on exactly that:
+    // `readings-tick-alone` reddened its two rows and then killed the run at the click.
+    // A tool that crashes where it should redden reports nothing about the build.
     const applyByChoosing = async (name) => {
       await presetIdle();
       await page.click('#tPreset');
       await page.waitForFunction("document.getElementById('tPresetList').hidden === false",
         null, { timeout: 10000 });
-      await page.click(`#tPresetList .pickeroption[data-name=${JSON.stringify(name)}]`);
+      const entry = page.locator(`#tPresetList .pickeroption[data-name=${JSON.stringify(name)}]`);
+      const there = await entry.count() > 0;
+      // Shut again through the trigger, which is the toggle `definePicker` binds - a list
+      // left open would take the pointer for every row after this one.
+      if (there) await entry.click();
+      else await page.click('#tPreset');
+      return there;
     };
     // Every import in this section goes through here for the same reason.
     const importFile = async (path) => {
@@ -7822,7 +7874,15 @@ try {
     await page.evaluate("globalThis.__kinect.params.reset(globalThis.__kinect.params.names('look'))");
     await settle();
     await importFile(edited);
-    await page.waitForFunction("document.getElementById('tNote').textContent.startsWith('imported')", null, { timeout: 15000 });
+    // Waited on the picker's rendered name rather than on a message, because the message
+    // is gone and a wait is not decoration - the three rows below read values the import
+    // writes, and without something to wait on they would race the fetch and pass on a
+    // build that imported nothing. `showPickerChoice` runs on the far side of the apply
+    // and paints the trigger, so this is the last thing the gesture does and none of the
+    // rows below assert it.
+    await page.waitForFunction(
+      `document.querySelector('#tPreset .pickervalue')?.textContent === ${JSON.stringify(NAME_EDITED)}`,
+      null, { timeout: 15000 });
     await settle();
     const back = await page.evaluate("(() => { const k = globalThis.__kinect; return JSON.stringify({ bloom: k.params.get('bloom'), grain: k.params.get('grain'), readBlackwall: k.params.get('readBlackwall'), stamp: k.library.appliedPreset() }); })()");
     const landed = JSON.parse(back);
@@ -7901,22 +7961,28 @@ try {
     // row is the format's own opinion of what came out, taken without this file needing
     // to know which parameters are readings.
     //
-    // **Waited for as a change rather than for the word `imported`, and the wait cannot
-    // end the run.** A build whose reading boxes move one at a time writes a file this
-    // program refuses, so waiting for the success message is waiting for something that
-    // is never going to arrive - fifteen seconds and a throw, which arrives as `DID NOT
-    // RUN` and reports nothing about a mutation that had already reddened the row above
-    // it. Measured on exactly that: `readings-tick-alone` crashed the run at 231 of 241
-    // assertions before this was a catch and a row.
-    const noteBeforeImport = (await text('#tNote')) ?? '';
+    // **Read off the picker's rendered name, and the wait cannot end the run.** A build
+    // whose reading boxes move one at a time writes a file this program refuses, so
+    // waiting for a sign of success is waiting for something that is never going to
+    // arrive - fifteen seconds and a throw, which arrives as `DID NOT RUN` and reports
+    // nothing about a mutation that had already reddened the row above it. Measured on
+    // exactly that: `readings-tick-alone` crashed the run at 231 of 241 assertions before
+    // this was a catch and a row.
+    //
+    // The sign used to be the word `imported` on the application bar's message chip. With
+    // the chip gone the discriminator is the trigger's own text: `showPickerChoice` runs
+    // only on the far side of a successful `importPresetFile`, so a refused document
+    // leaves the picker still naming the previous one. That is the exact difference this
+    // row is about, and no row below reads it.
     await importFile(partFile);
-    await page.waitForFunction(`document.getElementById('tNote').textContent !== ${JSON.stringify(noteBeforeImport)}`,
+    await page.waitForFunction(
+      `document.querySelector('#tPreset .pickervalue')?.textContent === ${JSON.stringify(NAME_PART)}`,
       null, { timeout: 15000 }).catch(() => {});
     await settle();
-    const importNote = (await text('#tNote')) ?? '';
-    check(importNote.startsWith('imported'),
+    const importedName = await text('#tPreset .pickervalue');
+    check(importedName === NAME_PART,
       'and the format accepts the document this dialog authored, which is the file rule reading back what the control wrote',
-      `"${importNote}"`);
+      `the picker names ${JSON.stringify(importedName)}, where a refused import would leave ${JSON.stringify(NAME_EDITED)}`);
     const afterPart = await page.evaluate("(() => { const k = globalThis.__kinect; return JSON.stringify({ stamp: k.library.appliedPreset(), grain: k.params.get('grain') }); })()");
     const part = JSON.parse(afterPart);
     check(part.stamp?.name === NAME_EDITED,
@@ -7926,11 +7992,12 @@ try {
       'while the values it does name are applied like any other look',
       `grain ${part.grain}`);
 
-    // The same document through the apply button, because that is the surface the stamp
-    // is reported on and it used to report it by reading `appliedPreset.rev` whatever
-    // had happened. On a partial apply that names a revision this gesture did not apply,
-    // and on a clip with no stamp at all it throws inside the handler - which the
-    // surrounding catch turns into "could not apply" over an apply that worked.
+    // The same document through the apply button, which is the second door onto
+    // `applyStoredPreset` and the one a person uses. It used to be checked by its note -
+    // a partial apply reported the count of values it wrote, where naming the stamp's
+    // revision would have named a document this gesture did not apply. The note is gone
+    // and the rule it was reporting is not, so what is asserted here now is the rule
+    // itself at this door: the values land and the provenance does not move.
     // **The name that went in, checked against the name that came out.** The picker stopped
     // being a `<select>`, and `value` on the button that replaced it is a real IDL
     // attribute - so this assignment still means what it always meant. That is exactly the
@@ -7945,14 +8012,24 @@ try {
     })()`);
     check(wroteName === NAME_PART, 'the picker holds the preset name that was written to it',
       `wrote ${JSON.stringify(NAME_PART)}, the control reads ${JSON.stringify(wroteName)}`);
-    await applyByChoosing(NAME_PART);
-    await page.waitForFunction("document.getElementById('tNote').textContent.startsWith('applied')", null, { timeout: 15000 })
+    // Moved off a default first, so "the value landed" is a claim about this apply rather
+    // than about what the clip happened to be wearing already - `grain` is 0.13 from the
+    // import above and the document about to be applied names it, so without this the row
+    // below passes on a build that applies nothing at all.
+    await page.evaluate("globalThis.__kinect.params.set('grain', 0.02)");
+    await settle();
+    const chosePart = await applyByChoosing(NAME_PART);
+    await page.waitForFunction("globalThis.__kinect.params.get('grain') === 0.13", null, { timeout: 15000 })
       .catch(() => {});
     await settle();
-    const partNote = await text('#tNote');
-    check(partNote.startsWith('applied') && !/·\s*[0-9a-f]{8}\s*$/.test(partNote) && partNote.includes(NAME_PART),
-      'and the note for it says what was applied rather than naming a revision this gesture did not apply',
-      `"${partNote}"`);
+    const applied = JSON.parse(await page.evaluate(
+      "(() => { const k = globalThis.__kinect; return JSON.stringify({ grain: k.params.get('grain'), stamp: k.library.appliedPreset() }); })()"));
+    check(chosePart && applied.grain === 0.13,
+      'applying a document that names part of a look writes the values it does name',
+      chosePart ? `grain ${applied.grain}` : `${NAME_PART} is not in the library to be chosen`);
+    check(applied.stamp?.name === NAME_EDITED,
+      'and leaves the provenance on the last document that said what the whole look is, rather than claiming this one',
+      `stamp ${JSON.stringify(applied.stamp?.name)}, where the document just applied was ${NAME_PART}`);
 
     // ---- the same subset through the *save*, read back out of the library
     //
@@ -7966,12 +8043,12 @@ try {
     // that mutation changes the shared answer, so both doors move together and neither is
     // proved against the other.
     //
-    // Read back out of the store rather than off the note, for the reason the cancel row
-    // below gives about the same store: a build that said "saved" and wrote something
-    // else satisfies every row that reads the strip. And graded against the boxes as they
-    // stood rather than a list kept here, which is the rule the export rows already
-    // follow - a tool holding its own copy of which parameter sits under which heading is
-    // a copy that goes stale and fails looking like the feature breaking.
+    // Read back out of the store, which was already the rule here for the reason the
+    // cancel row below gives about the same store: a build that reported a save and wrote
+    // something else satisfies every row that reads a message. And graded against the
+    // boxes as they stood rather than a list kept here, which is the rule the export rows
+    // already follow - a tool holding its own copy of which parameter sits under which
+    // heading is a copy that goes stale and fails looking like the feature breaking.
     const stampBeforeSave = await page.evaluate('globalThis.__kinect.library.appliedPreset()');
     await openPicker('tPresetSave');
     await page.fill('#ppName', NAME_SAVED_PART);
@@ -7979,8 +8056,13 @@ try {
     await page.click('#pp-readDepth');
     const savedTicks = await page.evaluate(ticksNow);
     await page.evaluate("document.getElementById('ppGo').click()");
+    // The entry appearing in the picker's own list, which is what `refreshPresets` does on
+    // the far side of the PUT - so it is the page saying the write came back, in place of
+    // the message the bar used to carry. Read from the list rather than from the server,
+    // because the fetch below is the assertion and a wait that fetched the same route
+    // would be the row waiting for itself.
     await page.waitForFunction(
-      `document.getElementById('tNote').textContent.startsWith('saved ${NAME_SAVED_PART}')`,
+      `Boolean(document.querySelector('#tPresetList .pickeroption[data-name="${NAME_SAVED_PART}"]'))`,
       null, { timeout: 15000 }).catch(() => {});
     await settle();
     const savedDoc = await (await fetch(`${URL_BASE}/presets/${encodeURIComponent(NAME_SAVED_PART)}`)).json();
@@ -8096,7 +8178,7 @@ try {
         const button = document.getElementById('tPresetSave');
         button.disabled = false;
         button.click();
-        return { dialog: document.getElementById('presetPick').open, note: document.getElementById('tNote').textContent };
+        return { dialog: document.getElementById('presetPick').open };
       })()`);
       check(!second.dialog && putsSeen === 1,
         'and a second save pressed with the disable removed opens no dialog and puts no second write on the wire',
@@ -8147,15 +8229,18 @@ try {
       await settle();
       check(putsSeen === 1,
         'and a file chosen with a write in flight starts no second one either, which is the third door onto the same stamp',
-        `${putsSeen} PUT reached the network, note "${await text('#tNote')}"`);
+        `${putsSeen} PUT reached the network`);
 
       releasePut();
-      await page.waitForFunction(
-        `document.getElementById('tNote').textContent.startsWith('saved ${NAME_RACE}')`,
+      // The gesture flag falling, which is `withPresetGesture`'s `finally` and so the last
+      // thing the whole gesture does - and the only observable left for "the write came
+      // back", now that nothing writes a sentence anywhere when it does. `.catch` for the
+      // reason every wait in this file has one: a build where the guard never releases has
+      // to redden a row rather than end the run fifteen seconds later with DID NOT RUN.
+      await page.waitForFunction('globalThis.__kinect.library.presetGestureRunning() === false',
         null, { timeout: 15000 }).catch(() => {});
       await settle();
       const done = await page.evaluate(`(() => ({
-        note: document.getElementById('tNote').textContent,
         save: document.getElementById('tPresetSave').disabled,
         exported: document.getElementById('tPresetExport').disabled,
         imported: document.getElementById('tPresetImport').disabled,
@@ -8163,9 +8248,9 @@ try {
         focus: document.activeElement ? document.activeElement.id || document.activeElement.tagName : null,
         stamp: globalThis.__kinect.library.appliedPreset(),
       }))()`);
-      check(done.note.startsWith(`saved ${NAME_RACE}`) && done.stamp?.name === NAME_RACE,
+      check(done.stamp?.name === NAME_RACE,
         'the write the guard let through finishes and stamps the clip, so the guard refuses a second gesture rather than the first',
-        `"${done.note}" with the stamp naming ${JSON.stringify(done.stamp?.name)}`);
+        `the stamp names ${JSON.stringify(done.stamp?.name)}`);
       // The flag as well as the three disables, because the picker is the door that has
       // no disable to come back: a build that re-enabled the buttons and left the gesture
       // flag set would satisfy a row reading only attributes, and every later choice in
@@ -8197,13 +8282,19 @@ try {
     // - and the image must not have moved on the way to finding out.
     const bad = join(TMP, `${NAME_BAD}.braindance-preset.json`);
     writeFileSync(bad, `${JSON.stringify({ version: PROJECT_VERSION, values: { bloom: 'loud' } }, null, 2)}\n`);
+    // **The sentence is read off the console, which is where a refusal lands now.** It was
+    // read off the application bar's message chip until that chip was removed, and the
+    // sentence itself did not go with it: `refusePresetBody` still throws it and
+    // `showTimelineError` still writes it. `page.on('console')` already feeds `errors` for
+    // the end-of-run sweep, so the wait is a Node-side poll on that array - there is
+    // nothing in the DOM to wait on, which is exactly what changed.
+    const badAt = await consoleSettled(errors);
     await importFile(bad);
-    await page.waitForFunction("document.getElementById('tNote').textContent.includes('bloom')", null, { timeout: 15000 })
-      .catch(() => {});
-    const afterBad = await page.evaluate("(() => ({ note: document.getElementById('tNote').textContent, bloom: globalThis.__kinect.params.get('bloom') }))()");
-    check(/bloom/.test(afterBad.note) && afterBad.bloom === 4.4,
+    const badSaid = await saidOnConsole(errors, badAt, /\[timeline\]/);
+    const afterBad = await page.evaluate("globalThis.__kinect.params.get('bloom')");
+    check(/bloom/.test(badSaid) && afterBad === 4.4,
       'a malformed file is refused at the key that is wrong, and leaves the look alone',
-      `"${afterBad.note}" with bloom still ${afterBad.bloom}`);
+      `"${badSaid}" with bloom still ${afterBad}`);
 
     // **And it never became a document**, which the two observations above cannot see.
     // They read the error text and the live look, and a build that PUT the file first
@@ -8216,7 +8307,7 @@ try {
     const storeAfterBad = await (await fetch(`${URL_BASE}/presets`)).json();
     const landedBad = storeAfterBad.presets.find((d) => d.name === NAME_BAD && !d.builtin);
     check(!landedBad,
-      'and a refused file never reaches the library, which the note and the look cannot tell you',
+      'and a refused file never reaches the library, which neither the sentence nor the look can tell you',
       landedBad ? `${NAME_BAD} is in /presets` : `${NAME_BAD} is absent from /presets`);
 
     // And the prototype question, which a file can ask and an assignment cannot.
@@ -8228,23 +8319,30 @@ try {
     writeFileSync(proto, `{ "version": ${PROJECT_VERSION}, "values": { "__proto__": { "polluted": true }, "bloom": 1 } }\n`);
     const parsedHasOwn = Object.keys(JSON.parse(readFileSync(proto, 'utf8')).values).includes('__proto__');
     check(parsedHasOwn, 'the probe really contains __proto__ as an own key, or the row below tests nothing');
+    const protoAt = await consoleSettled(errors);
     await importFile(proto);
-    await page.waitForFunction("document.getElementById('tNote').textContent.includes('__proto__')", null, { timeout: 15000 })
-      .catch(() => {});
-    const afterProto = await page.evaluate("(() => ({ note: document.getElementById('tNote').textContent, polluted: ({}).polluted ?? null, bloom: globalThis.__kinect.params.get('bloom') }))()");
-    check(/__proto__/.test(afterProto.note) && afterProto.polluted === null && afterProto.bloom === 4.4,
+    const protoSaid = await saidOnConsole(errors, protoAt, /\[timeline\]/);
+    const afterProto = await page.evaluate("(() => ({ polluted: ({}).polluted ?? null, bloom: globalThis.__kinect.params.get('bloom') }))()");
+    check(/__proto__/.test(protoSaid) && afterProto.polluted === null && afterProto.bloom === 4.4,
       'and a file carrying __proto__ is refused as an unknown parameter, polluting nothing',
-      `"${afterProto.note}" polluted=${afterProto.polluted}`);
+      `"${protoSaid}" polluted=${afterProto.polluted}`);
 
     // ---- the refusals whose *words* are the feature, driven at last
     //
-    // Every row above about a refusal reads that a refusal happened - the note names
-    // `bloom`, the note names `__proto__` - and three of this program's refusals were
+    // Every row above about a refusal reads that a refusal happened - the sentence names
+    // `bloom`, the sentence names `__proto__` - and three of this program's refusals were
     // rewritten on the strength of an argument about what they say, with no fixture
     // anywhere driving the shapes they were rewritten for. A message is the whole of what
     // a hand-edited file gets back, so a sentence that fits one document and is read by
     // three is a defect this suite could not see. These rows send the documents and read
     // the sentences.
+    //
+    // **What "gets back" means has narrowed and the rows have not.** The sentences reached
+    // a chip in the application bar and now reach the developer console alone, which is a
+    // real loss for the person hand-editing the file - but the words are still written and
+    // are still the only account of what was wrong with the document, so they are still
+    // worth holding to. Deleting these rows because the display went would leave three
+    // refusals free to collapse back into one sentence unnoticed.
     //
     // Sent as files rather than as objects handed to a page function, for the reason the
     // `__proto__` row states one direction and this states the other: the import path is
@@ -8253,12 +8351,13 @@ try {
     const refuse = async (label, body) => {
       const path = join(TMP, `${label}.braindance-preset.json`);
       writeFileSync(path, `${body}\n`);
-      const was = (await text('#tNote')) ?? '';
+      // Settled *before* the mark, so the sentence this read returns is the one this
+      // import caused rather than the one the import above it caused arriving late.
+      const at = await consoleSettled(errors);
       await importFile(path);
-      await page.waitForFunction(`document.getElementById('tNote').textContent !== ${JSON.stringify(was)}`,
-        null, { timeout: 15000 }).catch(() => {});
+      const said = await saidOnConsole(errors, at, /\[timeline\]/);
       await settle();
-      return (await text('#tNote')) ?? '';
+      return said;
     };
 
     // Three documents with no look in them, and they are three different mistakes. One
@@ -8326,22 +8425,28 @@ try {
     await cleanupPresets();
   }
 
-  // ============== 13. the note can be read, the ticks seek, and the auto-save comes back
+  // ============== 13. a refusal is made, the ticks seek, and the auto-save comes back
 
-  console.log('\n[13] the note carries its whole sentence, a ruler tick seeks, and the auto-save is offered back');
+  console.log('\n[13] a refusal is made with its reason, a ruler tick seeks, and the auto-save is offered back');
   //
   // Three claims that share a shape rather than a subsystem: in each of them the
-  // editor already knew the right answer and had no way to say it. The note knew the
-  // whole refusal and showed the part that fitted; the tick knew the program second to
-  // seek to and was a `span`; the auto-save was on disk under a name the picker
-  // deliberately hides, with nothing offering it back.
+  // editor already knew the right answer and had no way to say it. The tick knew the
+  // program second to seek to and was a `span`; the auto-save was on disk under a name
+  // the picker deliberately hides, with nothing offering it back; and the refusal knew
+  // the whole reason and had a chip too narrow to show it.
+  //
+  // **That third one has changed shape rather than been fixed.** The chip was removed
+  // from the application bar, so the refusals in this section reach the console and
+  // nothing else. Three rows about how the sentence was *drawn* went with it; the rows
+  // that remain assert the sentence is produced with its reason in it, which is the half
+  // still worth holding a build to.
   //
   // **Before section 13's pin**, because every row here needs the animation loop and
   // the transport, and pinning the drive takes both away for good.
   {
     // A project built on footage this take is not, so pressing Open produces the
-    // longest refusal this program writes - which is the message the note's failure
-    // was about. A real document through the real store, driven by the real button:
+    // longest refusal this program writes - which is the one the chip could not fit.
+    // A real document through the real store, driven by the real button:
     // a `showTimelineError` called from `page.evaluate` would test the helper and
     // leave the path an operator actually takes unmeasured.
     const OTHER = 'editor-check-other-footage';
@@ -8367,10 +8472,11 @@ try {
     // **Waits for the open to have finished, not for the transport to exist.** The two
     // are two fetches apart: `timeline` is assigned less than halfway through
     // `openTake`, before the library is listed and before the resume offer is decided,
-    // so a wait on the transport reads the note before anything has written it - and
-    // `settled()` does not close the gap, because a transport with nothing queued is
-    // idle in exactly that window. Measured: the note came back empty here while the
-    // identical sequence on a fresh page reported the offer every time.
+    // so a wait on the transport reads the page before anything has finished writing it -
+    // and `settled()` does not close the gap, because a transport with nothing queued is
+    // idle in exactly that window. Measured back when this read a message chip: it came
+    // back empty here while the identical sequence on a fresh page reported the offer
+    // every time.
     const reopen = async () => {
       await page.reload({ waitUntil: 'load' });
       await page.waitForFunction('globalThis.__kinect?.library?.opened() === true', null, { timeout: 30000 });
@@ -8435,7 +8541,7 @@ try {
     // Long enough that it cannot be read off a chip, and different footage besides.
     const foreignHash = `sha256:${'0'.repeat(64)}`;
 
-    // ---- reload one: the offer is made, and then the note has to carry a refusal
+    // ---- reload one: the offer is made, and then a refusal has to be made with it
     const differing = workingBody({ id: openId, hash: openHash });
     check(shapeOf(differing) !== shapeOf(fresh),
       'the document about to be planted differs from what a fresh open puts on screen, or there is nothing for the offer to be about',
@@ -8600,9 +8706,9 @@ try {
     // **A neighbour that will not list must not take the recovery with it.** Opening a
     // take refreshes three libraries and lets all three fail softly, and the offer used
     // to be withheld unless every one of them came back. That was right while the offer
-    // was a sentence written through `say`, which would have painted over the note
-    // naming what broke - and it stopped being right the moment the offer became a
-    // button, because a button overwrites nothing. What the gate did instead was strand
+    // was a sentence on the application bar's message chip, which would have painted over
+    // the sentence naming what broke - and it stopped being right the moment the offer
+    // became a button, because a button overwrites nothing. What the gate did instead was strand
     // the only control that reaches `__working__`, which the project picker deliberately
     // does not list, on a station whose `--builtin-presets` pointed one directory too
     // high. The autosave was there, intact, stamped with this take, and unreachable.
@@ -8613,60 +8719,45 @@ try {
     await page.route('**/presets', (route) => route.fulfill({
       status: 500, contentType: 'application/json', body: '{"error":"the presets directory is not there"}',
     }));
+    const brokenAt = await consoleSettled(errors);
     await reopen();
-    const brokenNote = await page.evaluate("document.getElementById('tNote').textContent");
+    const brokenSaid = await saidOnConsole(errors, brokenAt, /\[library\]/);
     const offeredAnyway = await offerState();
     await page.unroute('**/presets');
-    check(/library unavailable/.test(brokenNote) && /presets/.test(brokenNote),
+    check(/unavailable/.test(brokenSaid) && /presets/.test(brokenSaid),
       'a presets list that refuses is reported by name, which is what makes the row below about the gate rather than about a request that quietly worked',
-      `note "${brokenNote.slice(0, 100)}"`);
+      `console said "${brokenSaid.slice(0, 100)}"`);
+    errorsBefore = errors.length;
     check(offeredAnyway.shown && offeredAnyway.button,
       'and the autosave is offered anyway, because the projects list is the only one the offer is made of and a broken neighbour is not a reason to hide the work',
       `chip ${offeredAnyway.shown ? 'shown' : 'hidden'}, "${offeredAnyway.when}"`);
     await reopen();
 
+    // **Three rows here were about the box the sentence was drawn in and are gone.** They
+    // measured `scrollWidth` against `clientWidth` on the message chip, asserted its
+    // `title` carried the whole refusal, and asserted the cut was an ellipsis rather than
+    // the sentence pushing the sensor readout off the end of the bar. Every one of them
+    // was a claim about a surface that has been removed, and there is no second surface to
+    // re-point them at - so the claim they shared, that a long refusal stays readable, is
+    // simply not true of this build any more and is recorded as lost rather than restated
+    // somewhere it would be trivially satisfied.
+    //
+    // What is asserted instead is the half that survives: the refusal is *made*, with the
+    // reason in it. A project built on other footage must not open, and the console is the
+    // only account of why.
+    const footageAt = await consoleSettled(errors);
     await page.selectOption('#tProject', OTHER);
     await page.click('#tProjectOpen');
-    await page.waitForFunction("document.getElementById('tNote').textContent.includes('different footage')",
-      null, { timeout: 15000 }).catch(() => {});
-    // **Measured on the note's own box, because the note moved out of the strip.** It
-    // was a chip in `.tchips` when these rows were written - a scroller, which is why
-    // one of them asked whether the strip had scrolled to the arriving message. It is
-    // in the application bar's status slot now, which holds one message and ellipsises,
-    // so the question "did the strip scroll" has no answer on this build rather than a
-    // false one, and the row that asked it is gone with the surface it was about.
-    //
-    // What survives is the claim that actually mattered: a refusal runs longer than the
-    // space it is given, and the whole of it has to stay reachable. `scrollWidth` on the
-    // element against its own `clientWidth` is that measurement wherever the element
-    // lives, and it is the ellipsis rather than a hidden scrollbar doing the cutting now.
-    const noteBox = await page.evaluate(`(() => {
-      const note = document.getElementById('tNote');
-      return {
-        text: note.textContent,
-        title: note.title,
-        overflows: note.scrollWidth > note.clientWidth + 1,
-        scrollWidth: note.scrollWidth,
-        clientWidth: note.clientWidth,
-        clipped: getComputedStyle(note).textOverflow,
-      };
-    })()`);
-    // The row that makes the next one mean something: a message that fitted would be
-    // readable whatever the title said.
-    check(noteBox.overflows && noteBox.text.length > 120,
-      'the refusal is genuinely wider than the space it is written into, which is what the title is for',
-      `${noteBox.text.length} characters, ${noteBox.scrollWidth}px of content in ${noteBox.clientWidth}px`);
-    check(noteBox.title === noteBox.text && /different footage/.test(noteBox.title),
-      'and the whole of it is reachable off the note\'s title, which is the only surface it fits on',
-      `title "${noteBox.title.slice(0, 60)}..." against text "${noteBox.text.slice(0, 60)}..."`);
-    // And that the cutting is the ellipsis rather than the sentence simply running off
-    // the end of the bar, which would take the sensor readout beside it with it.
-    check(noteBox.clipped === 'ellipsis',
-      'and it is cut with an ellipsis rather than allowed to push the rest of the bar off the edge',
-      `text-overflow ${noteBox.clipped}`);
-    // The refusal above is this section's own doing and `showTimelineError` logs every
-    // note it writes, so the mark moves past it. Left where it was, the page-error row
-    // at the foot of the section would be reporting the fixture it was handed.
+    const footageSaid = await saidOnConsole(errors, footageAt, /\[timeline\]/);
+    check(/different footage/.test(footageSaid) && footageSaid.length > 120,
+      'a project built on other footage is refused with the whole reason in it rather than a bare failure',
+      `${footageSaid.length} characters: "${footageSaid.slice(0, 90)}..."`);
+    check(await page.evaluate('globalThis.__kinect.library.opened() === true'),
+      'and the editor stays up with the take it already had, because footage that will not open is exactly when somebody needs to see the page',
+      `opened ${await page.evaluate('globalThis.__kinect.library.opened()')}`);
+    // The refusal above is this section's own doing and `showTimelineError` logs it, so the
+    // mark moves past it. Left where it was, the page-error row at the foot of the section
+    // would be reporting the fixture it was handed.
     errorsBefore = errors.length;
 
     // ---- reload two: different footage under the same name
@@ -8945,13 +9036,15 @@ try {
     await page.locator('#tMarks .tmk').nth(outsideTickIndex).click();
     await settle();
     const afterClickingOutside = (await read()).programSec;
-    const noteAfter = await page.evaluate("document.getElementById('tNote').textContent");
     check(near(afterClickingOutside, trim.park, TOL),
       'pressing a tick the trim excludes moves the playhead nowhere, rather than seeking to a boundary the diamond is not drawn at',
       `${afterClickingOutside.toFixed(3)}s, parked at ${trim.park.toFixed(3)}s with the in point at ${trimmed.in?.toFixed(2)}s`);
-    check(/outside the clip range/.test(noteAfter),
-      'and it says so, because a key stepping past nothing has nothing to report while a diamond somebody aimed at does',
-      `note "${noteAfter.slice(0, 80)}"`);
+    // There was a row here reading "outside the clip range" off the application bar, on
+    // the argument that a key stepping past nothing has nothing to report while a diamond
+    // somebody aimed at does. That argument still holds and the surface it needed is gone,
+    // so the press is now silent and the row went with the sentence. The tick stays
+    // focusable and the one below still seeks, which is what keeps this from reading as a
+    // control that was removed.
     // The liveness half again, on the click path this time: the tick the trim keeps has
     // to still seek, or the row above passes against a ruler whose ticks are all dead.
     const insideTickIndex = await page.evaluate(`(() => {
@@ -9021,10 +9114,6 @@ try {
       'and a focused beyond mark looks different from a resting one - the outline is off on the grounds that the colour says it instead, so the colour has to say it',
       `resting ${beforeFocus.rest}, focused ${focused.colour}, outline ${focused.outline}`);
 
-    const legend = await page.evaluate('__kinect.editor.shortcuts()');
-    check(/\[\/\]/.test(legend),
-      'and the ? legend describes the whole keyboard, including the two keys this section added',
-      legend.slice(-90));
 
     check(errors.length === errorsBefore, 'none of it raises a page error',
       errors.slice(errorsBefore, errorsBefore + 2).join(' | '));

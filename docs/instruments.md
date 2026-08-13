@@ -257,7 +257,7 @@ bar they happen to sit in, and for as long as the bar held only menus the two we
 
 Then the status slot moved into the application bar, and the bar stopped being only menus without
 the rule noticing that its sentence had narrowed under it. `--mutate plant-unswept-control` plants
-a bare button beside `#tNote`, which is in that slot: the sweep found it through `.appbar button`,
+a bare button in that slot: the sweep found it through `.appbar button`,
 `DRIVER_IDS` did not name it, and then the container rule matched it on the strength of sharing an
 ancestor with the File menu. **The run reported 420 assertions, 0 failed, and NOT CAUGHT** — the
 falsification control for the whole "enumerate rather than list" claim, passing. Nothing else was
@@ -2952,8 +2952,8 @@ Three more were found at once, and finding them was an accident of the shape and
 moving surfaces. `tFps` was credited to "timeline-check and export-check change the output
 rate and count frames": both of those write `transport().outputFps` directly and neither has
 ever referenced the element. `tDeliverable` and `tDeliverableNew` were credited to
-`library-check`, which writes deliverable directories on the server, reads `#tNote`, and
-touches neither control. So of five entries read closely, three were false and two of those
+`library-check`, which writes deliverable directories on the server, reads the editor's
+refusals, and touches neither control. So of five entries read closely, three were false and two of those
 were false in both halves.
 
 **The mechanism is that a credit is a string.** Nothing joins `DRIVER_IDS['tFps']` to a
@@ -3091,3 +3091,58 @@ keeping because everything else about that mutation stays green: the ordinates a
 1, so the camera's *rate* still reaches zero at the key and every velocity assertion in the
 suite passes. What goes is only the degree, and with it the acceleration claim that was the
 whole reason for the second point.
+
+## A surface removed on purpose divides its assertions into evidence and synchronisation
+
+`#tNote` was the editor's one status chip: `say` was the only writer, and every refusal in the
+program arrived there — a bad export name, a project whose take hash does not match, a preset
+the server answers 404 for, a failed auto-save. It was removed because the ordinary message on
+it was a confirmation of something the operator had just done and could already see, and a chip
+that lights amber for both reads as an alarm for neither. About thirty references to it lived
+across `editor-check`, `library-check` and `keyframe-check`.
+
+**They were not one kind of reference, and treating them as one is where a removal goes wrong.**
+Roughly half were rows asserting the note *as evidence* — "and it says why rather than doing
+nothing quietly", "and the whole of it is reachable off the note's title". Those die with the
+channel and deleting them is honest. The other half were `page.waitForFunction` calls on the
+note's text, standing in front of an assertion about something else entirely: the import rows
+waited for the word `imported` before reading back what the file wrote, and the save race waited
+for `saved <name>` before fetching the document out of the store. Deleting a wait leaves the
+assertion after it racing the fetch it was waiting on, and a row that resolves before the work
+lands passes on a build that did nothing. **A deleted wait manufactures green in a way a deleted
+assertion does not**, which is why every one of them had to be re-pointed rather than dropped:
+at the picker's rendered name, at the gesture flag falling, at the entry appearing in the
+picker's list.
+
+The third kind is the one worth arguing about. Four refusals in the preset import path — a file
+with no `values`, one whose `values` is empty, one carrying a list, one naming two of the five
+reading weights — have rows asserting that each gets a *different* sentence, because one
+sentence had served all four and told somebody who had just emptied `values` to go looking for
+a key in front of them. Those sentences are still thrown by `refusePresetBody` and still written
+by `showTimelineError`; only the display went. So they moved onto the console, read out of the
+array the `page.on('console')` listener already fills for the page-error sweep, waited for by a
+Node-side poll because there is nothing left in the DOM to wait on. That is not a second channel
+grown to keep a check alive — it is the surface the message actually reaches now. The test for
+which of the three kinds you have: *would this row still be making a claim about the build if the
+display had never existed?* Evidence rows answer no. Waits and message-content rows answer yes.
+
+**The re-pointed wait has a failure mode of its own, and it shipped here first.** Written as
+"poll until the error array grows", the console helper returned whatever arrived first — and on
+this page that is as likely to be a `Failed to load resource` 404 as the refusal, so a row
+comparing sentences read a string about something else and went red about a healthy build. It
+has to match a pattern, and the pattern names the *channel* (`[timeline]`, `[library]`) rather
+than the sentence, or the wait presupposes the answer the row is asking for. There is a second
+half: Playwright delivers console events over CDP asynchronously, so a line written just before
+the mark is sampled can land just after it. Section 12 provokes five refusals in a row, which is
+exactly the shape that spoils — the fifth read returns the fourth sentence. The mark is taken
+after the console goes quiet for a beat, which is what makes "past this index" mean "caused by
+what I do next". `library-check`'s copy of the same helper was written the matching way from the
+start, and two spellings of one thing diverging is how one of them comes to be wrong.
+
+**What must not happen is the fourth thing**, and it is the tempting one: keeping a constant
+alive for a check about a display that is gone. `SHORTCUTS` was the keyboard legend `?` printed
+onto the chip, and with the chip gone its only reader was a `__probe` accessor feeding three
+rows that asserted the legend named the key each had just pressed. Kept, those rows would have
+gone on printing green about a string nothing renders. The legend, the accessor, the `?` case
+and the three rows went together — the same shape `module-check --mutate exemption-outlives-its-export`
+exists to catch one layer down.

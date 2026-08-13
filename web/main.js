@@ -3777,16 +3777,20 @@ const history = {
     this.stack.push(this.baseline);
     if (this.stack.length > UNDO_LIMIT) this.stack.shift();
     this.baseline = now;
-    // Auto-save the project after every change. Fire-and-forget: a failed save is
-    // logged in the UI but it must not block the interaction that caused it.
+    // Auto-save the project after every change. Fire-and-forget: a failed save is logged
+    // and must not block the interaction that caused it. It used to be logged *in the UI*,
+    // on the application bar's message chip, and that is why the report is here at all -
+    // the chip is gone and the console is where this lands now, which means a save that
+    // has been failing all session says so nowhere the operator will look. The offer to
+    // restore is still the thing that recovers from it, and that one is on the bar.
     const workingBody = { ...serialiseProject(), take: { id: openTakeId, hash: openTakeHash } };
     writeWorking(workingBody).then(async (res) => {
       if (!res.ok) {
         const text = await res.text().catch(() => '');
-        say(`auto-save failed: ${text.slice(0, 80)}`);
+        console.error('[autosave]', res.status, text.slice(0, 200));
       }
     }).catch((err) => {
-      say(`auto-save failed: ${err.message}`);
+      console.error('[autosave]', err);
     });
     return true;
   },
@@ -6397,7 +6401,6 @@ const ui = {
   out: document.getElementById('tOut'),
   shadeIn: document.getElementById('tShadeIn'),
   shadeOut: document.getElementById('tShadeOut'),
-  note: document.getElementById('tNote'),
   camKey: document.getElementById('camKey'),
   camClear: document.getElementById('camClear'),
   camView: document.getElementById('camView'),
@@ -6545,43 +6548,30 @@ const sayExport = (text) => {
   ui.exportNote.title = text;
 };
 
-/**
- * The editor's one line of prose, and the only way anything writes it.
- *
- * `#tNote` is a chip in the application bar's status slot, which ellipsises - so a
- * sentence wider than the slot is cut off with nothing to drag and no way to ask for
- * the rest. The whole of the editor's error channel writes into that element and
- * nothing else, which left a long refusal unreadable by any means available to the
- * person it was written for, and a refusal is exactly the message that runs long.
- * `title` is the same sentence somewhere it cannot be cut off, which is the repair
- * `sayExport` above already made for the export note beside it.
- *
- * **There is no scroll to do any more, and that is why one came out of here.** The note
- * was a chip in `.tchips` when this was written, a strip that scrolls with its scrollbar
- * hidden, so a message that had just arrived had to be scrolled to or it stayed off the
- * right edge behind a fade. In the bar the slot holds one message at a time and the
- * ellipsis is where it ends, so the scroll had nothing left to move and `closest`
- * answered null on every call - a line that reads as behaviour and performs none.
- *
- * A declaration rather than a `const` arrow like its neighbour, and that is about the
- * auto-save fifteen hundred lines above this line: it reports a failed save through
- * here, and a binding still in its temporal dead zone would turn that report into a
- * throw out of the fetch handler - a save failure eating its own message.
- */
-function say(text) {
-  if (!ui.note) return;
-  ui.note.textContent = text;
-  ui.note.title = text;
-}
-
 const timecode = (sec) => {
   const s = Math.max(0, sec);
   const m = Math.floor(s / 60);
   return `${String(m).padStart(2, '0')}:${(s - m * 60).toFixed(3).padStart(6, '0')}`;
 };
 
+/**
+ * Where a rejected promise from the timeline goes, and now the whole of it.
+ *
+ * This used to be two lines: the console, and `say` putting the same sentence on a chip
+ * in the application bar. The chip was asked for gone - see `index.html`'s comment on
+ * `#appStatusSlot` for the argument and for what went with it - and the console line is
+ * what is left, so an export refused for its filename, a project whose take hash does not
+ * match, a preset the server answers 404 for and a failed auto-save are all reported to
+ * the developer tools and to nobody on the page.
+ *
+ * Written down rather than left to be noticed, because the shape is a real one: several
+ * callers below sit in a `catch` whose entire body is this call, and a reader who does not
+ * know the display went on purpose will read those as handlers somebody forgot to finish.
+ * The one thing that must not happen is a *second* channel growing back here - a toast, a
+ * banner, a second chip somewhere quieter - because the removal was the decision and two
+ * paths that drift is what this design keeps refusing.
+ */
 function showTimelineError(err) {
-  say(String(err?.message ?? err));
   console.error('[timeline]', err);
 }
 
@@ -7367,11 +7357,13 @@ ui.clearRange?.addEventListener('click', () => {
 const TYPING_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
 const isTyping = (el) => el instanceof HTMLElement && (TYPING_TAGS.has(el.tagName) || el.isContentEditable);
 
-const SHORTCUTS = 'space play/pause · arrows step a frame, with shift a second · '
-  + 'home/end · i/o set in/out, with shift jump to them · del removes the selected key · '
-  + 'm marks, [/] jump to the previous and next mark · '
-  + '+/- zoom the ruler, ,/. pan it, f fits the clip, z frames in..out · '
-  + 'cmd-z undoes · h hides the panel';
+// **There is no `?` key any more, and no legend for it to print.** The list of shortcuts
+// was one string written out onto the application bar's message chip, and when the chip
+// went the string had exactly one reader left - a `__probe` accessor keeping it alive for
+// three proof-tool rows that asserted the legend named the keys they had just added. A
+// constant nothing displays, checked by rows about a display that does not exist, is the
+// shape this repo already has a mutation for, so the legend went with the surface rather
+// than being given a second one. The keys themselves are all still bound below.
 
 /**
  * The editor's keyboard, and the guard that has to come with it.
@@ -7551,7 +7543,6 @@ addEventListener('keydown', (e) => {
       e.preventDefault();
       if (view.frame(clipIn, clipOut ?? view.duration)) viewChanged();
       return;
-    case '?': e.preventDefault(); say(SHORTCUTS); return;
     default:
   }
 });
@@ -8843,11 +8834,13 @@ function paintMarks() {
         const newSourceMs = Math.round(sourceSec * 1000);
         moveMark(mark, newSourceMs).catch(showTimelineError);
       } else {
-        // Just a click - seek to the mark position
-        if (!reachableInClip(at)) {
-          say('that mark is outside the clip range, so the edit cannot reach it');
-          return;
-        }
+        // Just a click - seek to the mark position. A mark outside the trim is drawn but
+        // not seekable, and the refusal is now the tick simply not moving the playhead:
+        // there used to be a sentence on the application bar saying which of the two it
+        // was, and it went with the chip. The tick is still focusable and still keyboard
+        // reachable, so this is a press that does nothing rather than a control that has
+        // gone away - which is the honest shape given there is nowhere left to say why.
+        if (!reachableInClip(at)) return;
         goTo(at);
       }
     });
@@ -9372,22 +9365,26 @@ function refusePresetBody(name, body) {
  *
  * So a partial apply leaves the stamp exactly where it was, which is the same thing
  * moving a slider does, and is the honest answer for the same reason - the clip's
- * provenance is the last document that described the whole of it. The two surfaces
- * that report an apply read the result rather than the stamp, because a note that
- * printed `appliedPreset.rev` after a partial apply would either name a revision the
- * user did not just apply or, once the clip has no stamp at all, throw inside the
- * handler and report a successful apply as a failure.
+ * provenance is the last document that described the whole of it.
+ *
+ * **This returned which of the two had happened and now returns nothing**, because the two
+ * surfaces that read it were both notes on the application bar's message chip and both went
+ * with it. The distinction has not stopped mattering - it is the whole reason the stamp is
+ * conditional - it has stopped being reported, and the caller that wants it back should read
+ * `wholeLookTag` here rather than have this hand out a shape nothing consumes.
  */
 function applyStoredPreset(doc) {
   refuseDuringEvaluation('a stored preset applied');
   refusePresetBody(doc.name, doc.body);
   const values = doc.body.values ?? {};
   const stamped = wholeLookTag(values);
+  // The write first and the stamp after, which is an ordering rather than a style: an
+  // `apply` that throws mid-document must not leave the clip claiming a provenance it
+  // does not have.
   params.apply(values);
   if (stamped) appliedPreset = { name: doc.name, rev: doc.rev };
   requestRepaint();
   history.commit();
-  return { stamped, written: Object.keys(values).length, look: completeLookNames().length };
 }
 
 /**
@@ -9460,8 +9457,14 @@ function trashGlyph() {
 const TYPE_AHEAD_MS = 700;
 const pickers = [];
 
-function definePicker(trigger, list, { adds = null, note = null, autoApply = false } = {}) {
-  const picker = { trigger, list, adds, note, autoApply, docs: [], typed: '', typedAt: 0 };
+// There was a `note` option here, a per-picker element a refusal could be written into,
+// falling back to the application bar's chip when a picker had none. One picker is defined
+// in this program and it never passed one, so the fallback was the only path any of it ever
+// took - and with the chip gone the option is a parameter whose every value is null. It
+// came out rather than being kept for a second picker somebody might add, because a
+// facility with no user is a facility nothing keeps honest.
+function definePicker(trigger, list, { adds = null, autoApply = false } = {}) {
+  const picker = { trigger, list, adds, autoApply, docs: [], typed: '', typedAt: 0 };
   pickers.push(picker);
 
   trigger.addEventListener('click', () => (list.hidden ? openPicker(picker) : closePicker(picker)));
@@ -9568,32 +9571,17 @@ function choosePicker(picker, name, { close = false } = {}) {
   if (close) closePicker(picker, { restoreFocus: true });
   if (picker.autoApply) {
     if (name) {
-      withPresetGesture(picker.note ?? ui.note, () => whileWriting(async () => {
+      withPresetGesture(() => whileWriting(async () => {
         try {
           const doc = await (await fetch(`/presets/${encodeURIComponent(name)}`)).json();
-          const { stamped, written } = applyStoredPreset(doc);
-          // **Applying a look says so, and this is the surface `applyStoredPreset`'s
-          // comment means when it says two of them report an apply.** The other is the
-          // import. This one had a note until the picker replaced the apply button, and
-          // the note went with the button rather than moving onto the control that took
-          // over the gesture - so the one action on this surface that rewrites every look
-          // value on screen was also the only one that happened in silence.
-          //
-          // Read off what the apply returned rather than off `appliedPreset`, for the
-          // reason that function's comment gives: a partial document leaves the stamp
-          // where it was, so a note printing the stamp's revision would name a document
-          // this press did not apply - and on a clip that never had a stamp it would
-          // throw inside the handler, which the catch below would report as an apply
-          // that failed over one that worked.
-          //
-          // The partial sentence carries a count and no denominator on purpose. It read
-          // "70 of 69 look values" the first time it shipped: the count of what the
-          // document names and the size of a *complete* look are two different questions,
-          // and the second one is not the one a partial apply raises. What is true and
-          // useful is how many values landed and that the stamp was left alone.
-          say(stamped
-            ? `applied ${doc.name} · ${doc.rev.slice(7, 15)}`
-            : `applied ${written} values from ${doc.name}, which names part of a look rather than the whole of one`);
+          // **Applying a look said so, and the sentence went with the chip it was written
+          // on.** It named the revision on a complete document and the count of values
+          // landed on a partial one, which is the distinction `applyStoredPreset`'s comment
+          // is still about: a partial apply leaves the stamp where it was, so `appliedPreset`
+          // afterwards names a document this press did not apply. Nothing on this surface
+          // reports the difference any more - the values land either way, and which kind of
+          // document did it is now only visible in what the panel shows.
+          applyStoredPreset(doc);
         } catch (err) {
           showTimelineError(err);
         }
@@ -9605,7 +9593,6 @@ function choosePicker(picker, name, { close = false } = {}) {
       appliedPreset = null;
       params.reset(params.names('look'));
       history.commit();
-      say('reset to defaults');
     }
   }
 }
@@ -9688,7 +9675,7 @@ async function deletePreset(picker, name) {
   const options = pickerOptions(picker);
   const at = options.findIndex((option) => option.dataset.name === name);
   const successor = options[at + 1]?.dataset.name ?? options[at - 1]?.dataset.name ?? null;
-  await withPresetGesture(picker.note ?? ui.note, () => whileWriting(async () => {
+  await withPresetGesture(() => whileWriting(async () => {
     // The content type is declared even though a delete carries no body, because every
     // route in the table that changes something requires it - the rule is about the
     // request being a deliberate one from a page that meant it, not about there being
@@ -9703,11 +9690,7 @@ async function deletePreset(picker, name) {
     // leave `apply` pointed at a preset the server would answer 404 for.
     if (picker.trigger.value === name) picker.trigger.value = '';
     await refreshPresets();
-  })).catch((err) => {
-    if (picker.note) picker.note.textContent = `could not delete ${name}: ${err.message}`;
-    else showTimelineError(err);
-    console.error(err);
-  });
+  })).catch(showTimelineError);
   if (picker.list.hidden) return;
   const back = successor
     ? picker.list.querySelector(`.pickeroption[data-name="${CSS.escape(successor)}"]`)
@@ -10113,11 +10096,12 @@ for (const type of ['pointerup', 'pointercancel']) {
 function removeRetimeKey(key) {
   const i = retime.keys.indexOf(key);
   if (i < 0) return false;
-  if (i === 0 && retime.keys.length > 1) {
-    say('the first retime key anchors the start of the clip - '
-      + 'remove the ones after it first');
-    return false;
-  }
+  // The refusal is the `false` and nothing else now. It carried a sentence saying the
+  // origin anchors the start of the clip and to remove the ones after it first, on the
+  // application bar's message chip, and that chip is gone - so a delete of the first key
+  // reads to the operator as a key that will not delete, with the rule above as the only
+  // record of why. The return is what every caller already branches on.
+  if (i === 0 && retime.keys.length > 1) return false;
   retime.keys.splice(i, 1);
   // An origin key on its own says nothing a plain rate does not.
   if (retime.keys.length === 1 && retime.keys[0].t === 0) retime.keys.length = 0;
@@ -10266,11 +10250,12 @@ function applyEasePreset(name) {
   return true;
 }
 
+// The press and nothing else. It used to announce which preset had gone on which lane,
+// and that announcement is what got the whole message chip removed: shaping a curve is a
+// dozen presses of these buttons in a row, each one drawing an amber-bordered box at the
+// top of the window to report a change already visible in the lane underneath the pointer.
 for (const btn of ui.ease.querySelectorAll('button[data-ease]')) {
-  btn.addEventListener('click', () => {
-    const owner = selection?.owner ?? '';
-    if (applyEasePreset(btn.dataset.ease)) say(`${btn.dataset.ease} ease on ${owner}`);
-  });
+  btn.addEventListener('click', () => { applyEasePreset(btn.dataset.ease); });
 }
 
 /**
@@ -10348,16 +10333,11 @@ function changePointCount(delta) {
   return true;
 }
 
+// The count these used to report is drawn: one handle per control point appears in or
+// leaves the lane on the press, and `paintEase` disables whichever button has hit the
+// ceiling or the floor, so the sentence was saying what two visible controls already said.
 for (const [button, delta] of [[ui.addPoint, 1], [ui.dropPoint, -1]]) {
-  button.addEventListener('click', () => {
-    const owner = selection?.owner ?? '';
-    if (!changePointCount(delta)) return;
-    // Re-read after the edit rather than before it, because the counts in the readout
-    // are the ones the press produced.
-    const { keys, i } = selectionEaseState();
-    say(`${delta > 0 ? 'added' : 'removed'} an ease control point on ${owner}: `
-      + `${keys[i].easeOut.length} out, ${keys[i].easeIn.length} in`);
-  });
+  button.addEventListener('click', () => { changePointCount(delta); });
 }
 
 // Only meaningful while a key is selected, so the row goes quiet rather than staying
@@ -11928,17 +11908,15 @@ if (ui.cropFit) {
     ui.cropFit.disabled = true;
     try {
       const fitted = await fitCropToTake(openTakeId, params.get('near'), params.get('far'));
-      if (!fitted) {
-        say('nothing inside the near/far range to fit the box to');
-        return;
-      }
+      // Nothing inside the near/far range to measure, so nothing moves. This said so on
+      // the message chip, and with that gone the press is indistinguishable from a fit
+      // that landed exactly where the box already was - which it is, in the sense that
+      // matters: the four faces are untouched either way.
+      if (!fitted) return;
       requestRepaint();
       history.commit();
-      say(`box fitted to ${fitted.frames} frames: `
-        + `${fitted.left.toFixed(2)} to ${fitted.right.toFixed(2)} across, `
-        + `${fitted.bottom.toFixed(2)} to ${fitted.top.toFixed(2)} up`);
     } catch (err) {
-      say(`the crop box could not be fitted to this take: ${err.message}`);
+      showTimelineError(err);
     } finally {
       ui.cropFit.disabled = false;
     }
@@ -12222,12 +12200,15 @@ let presetGesture = false;
  * last, and `appliedPreset` ends up naming the older revision - which corrupts the one
  * thing the stamp is for, quietly, in the direction that looks like it worked.
  *
- * **A refused gesture is answered rather than dropped**, and the surface is the caller's
- * because the recorder has no timeline strip to write into. A second press of save is a
- * repeat of the gesture already running and silence there reads as the press not having
- * registered; an apply or an import is a *different* gesture, chosen from a picker or an
- * operating system file dialog, and swallowing one without a word is a document answered
- * with silence.
+ * **A refused gesture used to be answered rather than dropped, and now it is dropped.**
+ * This took an element to write into and said "a preset gesture is still running, so this
+ * one did not start" on it, on the argument that a second press of save reads as the first
+ * press not having registered, and that an apply or an import chosen from a picker or an
+ * operating system file dialog is a document answered with silence. That argument was
+ * right and the element it depended on is gone, so the honest description of this guard
+ * now is that the second gesture does not start and nothing says so. The boolean return is
+ * still here and still means what it meant, which is what a caller would need if a surface
+ * for it ever comes back.
  *
  * The export half of this closes no race of its own: `exportPresetFile` builds a blob
  * and clicks a link, with no request whose answer could arrive late. It is here because
@@ -12235,11 +12216,8 @@ let presetGesture = false;
  * flight underneath a fresh export sheet is a name field over a document that is still
  * being written.
  */
-async function withPresetGesture(note, run) {
-  if (presetGesture) {
-    note.textContent = 'a preset gesture is still running, so this one did not start';
-    return false;
-  }
+async function withPresetGesture(run) {
+  if (presetGesture) return false;
   presetGesture = true;
   try {
     await run();
@@ -12283,7 +12261,7 @@ async function whileWriting(run) {
 
 /** Pick a subset, then do one thing with it, inside the one gesture the program allows. */
 async function withPresetSubset(ask, run) {
-  await withPresetGesture(ui.note, async () => {
+  await withPresetGesture(async () => {
     try {
       const picked = await pickPresetSubset(ask);
       if (!picked) return;
@@ -12317,8 +12295,10 @@ ui.presetSave.addEventListener('click', () => withPresetSubset(
     // say what this clip is wearing, so the clip's origin is still whatever last did.
     if (wholeLookTag(body.values)) appliedPreset = { name: saved.name, rev: saved.rev };
     await refreshPresets();
-    say(`saved ${saved.name} · ${saved.rev.slice(7, 15)}`
-      + (wholeLookTag(body.values) ? '' : ` · ${picked.names.length} of ${params.names('look').length} values`));
+    // The saved name, its revision and - on a subset - how many of the look's values went
+    // into it were reported on the message chip. The name is on the picker afterwards and
+    // the revision was never anywhere else, so a save is now confirmed by the entry
+    // appearing in the list and by nothing more precise than that.
     history.commit();
   },
 ));
@@ -12339,8 +12319,8 @@ ui.presetExport.addEventListener('click', () => withPresetSubset(
     name: ui.preset.value || appliedPreset?.name || 'look',
   },
   async (picked) => {
+    // The browser's own download indicator is what says this happened now.
     exportPresetFile(picked.name, presetFromCurrentLook(picked.names));
-    say(`exported ${picked.name}.braindance-preset.json`);
   },
 ));
 
@@ -12357,7 +12337,7 @@ ui.presetFile.addEventListener('change', () => {
   // The input itself is never disabled and does not need to be: the button in front of
   // it is, and this is the only thing that opens it. The gesture is what the guard is
   // about anyway, so a file arriving here by any other route is still refused.
-  return withPresetGesture(ui.note, () => whileWriting(async () => {
+  return withPresetGesture(() => whileWriting(async () => {
     try {
       const saved = await importPresetFile(file);
       await refreshPresets();
@@ -12368,7 +12348,6 @@ ui.presetFile.addEventListener('change', () => {
       // applied what it read - going through the choosing path would fetch the document
       // back off the server and apply it a second time.
       showPickerChoice(pickers.find((p) => p.trigger === ui.preset), saved.name);
-      say(`imported ${saved.name} · ${saved.rev.slice(7, 15)}`);
     } catch (err) {
       showTimelineError(err);
     }
@@ -12405,7 +12384,8 @@ async function saveProjectAs() {
     if (saved.error) throw new Error(saved.error);
     await refreshProjects();
     if (ui.project) ui.project.value = saved.name;
-    say(`saved ${saved.name} · ${saved.bytes} bytes`);
+    // The name lands on the project control, which is where a save was confirmed after
+    // the size in bytes stopped being reported anywhere.
     rememberOpened();
   } catch (err) {
     showTimelineError(err);
@@ -12437,8 +12417,9 @@ ui.resumeOpen?.addEventListener('click', async () => {
     // it did not make the restore survive anything. `__working__` still held the edit
     // that overwrote the offer, this was the only remaining copy, and nothing writes the
     // slot again until the next `history.commit()` - so closing the page after being
-    // told "restored the autosaved edit" loaded the overwriting edit back and lost the
-    // work a second time, having just reported it recovered.
+    // told the edit was restored loaded the overwriting edit back and lost the work a
+    // second time, having just reported it recovered. That report is gone with the message
+    // chip; the withdrawal of the offer below is what says the press worked now.
     //
     // Awaited and reported rather than fired and forgotten, unlike the auto-save on
     // every edit: that one is one of thousands and must not block a drag, while this is
@@ -12454,7 +12435,6 @@ ui.resumeOpen?.addEventListener('click', async () => {
     if (!kept.ok) throw new Error(`restored on screen, but the auto-save could not be rewritten: ${(await kept.text().catch(() => '')).slice(0, 80)}`);
     if (ui.resume) ui.resume.hidden = true;
     offeredWorkingBody = null;
-    say('restored the autosaved edit');
   } catch (err) {
     showTimelineError(err);
   }
@@ -12476,7 +12456,6 @@ ui.deliverable?.addEventListener('change', async () => {
     // the opposite of what the design decided. Choosing a deliverable is not an edit to the
     // clip; it is choosing which file to make from it.
     showAdoptedDeliverable(name);
-    say(`deliverable ${name}`);
   } catch (err) {
     // **Put the picker back on what the clip is actually on.** `applyDeliverable` refuses a
     // document whose cuts are not program times, and it refuses it before it has replaced
@@ -12486,8 +12465,11 @@ ui.deliverable?.addEventListener('change', async () => {
     // one thing, the control says another, and the file that comes out of a render afterwards
     // matches the readout while carrying the name the operator can see in the menu.
     //
-    // The message stays on `#tNote` either way, so this is not a refusal being swallowed - it
-    // is the refusal being told in one place instead of contradicted in a second.
+    // This used to say the message stays on the application bar either way, so the picker
+    // going back was the refusal being told in one place instead of contradicted in a
+    // second. There is no second place now and no first one either: the control returning
+    // to the adopted name is the whole of what a refused deliverable looks like, which
+    // makes putting it back the only thing distinguishing a refusal from a silent success.
     ui.deliverable.value = ui.deliverable.dataset.adopted ?? '';
     showTimelineError(err);
   }
@@ -12503,7 +12485,6 @@ ui.deliverableNew?.addEventListener('click', async () => {
     // Through the same door as the menu's own adoption: what was just saved *is* what the
     // clip is on, so this is the selection a later refusal has to be able to come back to.
     showAdoptedDeliverable(name);
-    say(`saved deliverable ${name}`);
   } catch (err) {
     showTimelineError(err);
   }
@@ -13071,7 +13052,6 @@ async function loadProjectNamed(name, offered = null) {
   await timeline.seek(timeline.programSec);
   if (resume && gen === transportGen) timeline.play();
   if (ui.project) ui.project.value = name;
-  say(`opened ${name}`);
   rememberOpened();
   return doc;
 }
@@ -13329,8 +13309,8 @@ async function openTake(id) {
   //
   // Softly, like those listings and for their reason: a node whose extent route is
   // unreachable is still a node you can cut footage on, and what you get is the wide box
-  // it always was. Silent is the other failure, so the refusal is said rather than
-  // swallowed.
+  // it always was. It used to say so on the message chip; with that gone the console is
+  // where it lands, which is the same trade the three listings below now make.
   //
   // **Unconditional, and it was written with a gate that turned out to be unreachable.**
   // The gate asked whether the document had authored its four faces, on the reasoning
@@ -13343,8 +13323,7 @@ async function openTake(id) {
   // silently stops being tested. The rule it was protecting still holds and is enforced
   // where it is actually decided: a restored document names all six faces and lands on
   // top of this, so a document's own box outranks a measurement by arriving later.
-  await fitCropToTake(id, params.get('near'), params.get('far'))
-    .catch((err) => { say(`the crop box could not be fitted to this take: ${err.message}`); });
+  await fitCropToTake(id, params.get('near'), params.get('far')).catch(showTimelineError);
   // Awaited, so the first paint of the ruler already has the ticks on it. A take
   // whose marks arrived a frame later would show them appearing, which reads as
   // the page finding them rather than the take having them.
@@ -13356,16 +13335,19 @@ async function openTake(id) {
   // but the placeholder and said not one word about why. The server's refusal exists
   // and reaches here; only the editor was throwing it away.
   //
-  // Collected rather than reported one at a time, because three notes written in
-  // sequence leave only the last one on screen - and the recorder's own note, which
-  // already reported this, is on a surface the editor does not show.
+  // Still collected rather than reported one at a time, though the reason has changed
+  // under it: it was that three notes written in sequence leave only the last one on the
+  // message chip, and with the chip gone it is that one console line naming all three
+  // failures is a better record than three lines a reader has to notice are related.
+  // The pickers themselves are the visible half - one holding nothing but its placeholder
+  // is what an unavailable library looks like on screen now.
   const unavailable = [];
   const listed = {};
   for (const [what, refresh] of [['presets', refreshPresets], ['projects', refreshProjects],
     ['deliverables', refreshDeliverables]]) {
     listed[what] = await refresh().catch((err) => { unavailable.push(`${what} (${err.message})`); return null; });
   }
-  if (unavailable.length) say(`library unavailable: ${unavailable.join('; ')}`);
+  if (unavailable.length) console.error('[library] unavailable:', unavailable.join('; '));
   ensureActiveDeliverable();
   applyDeliverable(activeDeliverable);
   timingChanged();
@@ -13936,7 +13918,6 @@ globalThis.__kinect = {
     // The beads the path overlay draws, in world space. A canvas cannot be asked what
     // it drew, so the check reads the function the drawing reads - see `beadPoints`.
     pathBeads: () => beadPoints(pathPoints()),
-    shortcuts: () => SHORTCUTS,
     exportName: () => ({ base: exportBaseName(), valid: EXPORT_NAME_OK.source, canSaveAs: CAN_SAVE_AS }),
     lastExport: () => (lastExport ? { ...lastExport } : null),
   },

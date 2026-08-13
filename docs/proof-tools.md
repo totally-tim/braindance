@@ -539,7 +539,8 @@ would still pass every row here and drift the first time the band gains a member
 
 So the assertion the mutation really carries is the *count*: it reddens **8 of 392** — the
 listing's `openable`, the refusal the take carries, the two-table containment row, the gallery's
-badge and its Open button, the menu's sentence, and the editor's note and its refusal to open.
+badge and its Open button, the menu's sentence, and the editor's console line and its refusal
+to open.
 The count grew when the surfaces stopped deriving, which is the right direction: quoting one
 sentence in five places means a band that stops refusing is visible in five places rather than in
 one. The takes that must stay green stay green — both `no-hello-take` rows, `local-clip`'s
