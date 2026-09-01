@@ -9,6 +9,7 @@
 //   TYPE_HELLO         1            the sensor record, once, before any frame
 //   TYPE_FRAME         2            one depth grid and at most one JPEG
 //   TYPE_COLOR         3            live only - the recorder never writes one
+//   TYPE_KEY           4            live only - the colour picture's depth, for keying
 //   MAX_PAYLOAD_BYTES  8388608      a longer declared payload is a desync, not a frame
 //
 // Message: `[u32 magic][u32 type][u32 payloadLen][payload]`, little-endian, one after
@@ -18,6 +19,11 @@
 // constant. Type 2 is `[u32 depthBytes][u32 colorBytes][u64 stampMs][depth][jpeg]`, the
 // depth `width * height` u16 millimetres row-major with 0 meaning no reading; `colorBytes`
 // may be zero, and the JPEG is the registered colour, sharing the grid pixel for pixel.
+//
+// Type 4 is `[u64 stampMs][f32 fx][f32 fy][f32 cx][f32 cy][f32 rangeM][jpeg]`, the colour camera's
+// own depth at 1920x1080 as a greyscale JPEG, so the four intrinsics are the colour camera's and
+// not the depth camera's. A pixel of 0 is no reading; anything else is `v / 255 * rangeM` metres,
+// which `web/key-stream.js` is the one implementation of at both ends.
 //
 // Unprojection, libfreenect2's pinhole model, metres, right-handed, camera down -z:
 //
@@ -39,6 +45,10 @@ export const TYPE_FRAME = 2;
 // colour. Live only: a type 3 in a capture would move every take's content hash, which is
 // the key the library joins two machines on.
 export const TYPE_COLOR = 3;
+// The same picture's depth, quantised to one byte a pixel and JPEG-compressed, so a browser can key
+// the colour against it. Live only for the same reason type 3 is, and it arrives only while a key
+// client is attached - `key on` implies the colour encode, so a type 4 never travels without one.
+export const TYPE_KEY = 4;
 export const HEADER_BYTES = 12;
 
 // `payloadLen` is a u32 off the wire, so a desynced stream can declare four gigabytes and
