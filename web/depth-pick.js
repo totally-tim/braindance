@@ -2,6 +2,7 @@
 
 import * as THREE from 'three';
 import { DEPTH_H, DEPTH_W } from './format.js';
+import { unprojectPixel } from './crop-box.js';
 
 // Keep mutable scratch private so no writable state crosses a module boundary.
 const scratch = new THREE.Vector3();
@@ -9,11 +10,15 @@ const scratchWorld = new THREE.Vector3();
 const viewProjection = new THREE.Matrix4();
 const tiltMatrix = new THREE.Matrix4();
 
-/** Writes one libfreenect2 depth sample into `out`, or returns 0 for no return. */
+/**
+ * Writes one libfreenect2 depth sample into `out`, or returns 0 for no return. The unprojection
+ * itself is `web/crop-box.js`'s, so the plan, the pick and the webcam page share one spelling of
+ * it; `out` is written in place because a sweep calls this once per texel.
+ */
 export function sensorPoint(out, mm, col, row, fx, fy, cx, cy) {
   if (mm === 0) return 0;
   const z = mm * 0.001;
-  out.set((-(col + 0.5 - cx) / fx) * z, -((row + 0.5 - cy) / fy) * z, -z);
+  unprojectPixel(col, row, z, { fx, fy, cx, cy }, out);
   return z;
 }
 

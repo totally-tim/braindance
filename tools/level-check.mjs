@@ -42,9 +42,8 @@ const MUTATIONS = {
   // room. Section 2's identity sees it: the surviving set changes, and no camera move can put a
   // discarded point back.
   'crop-follows-tilt': { file: 'web/cloud-shader.js', edits: [[
-    '  if (cropOn == 1.0 && (pos.x < cropL || pos.x > cropR || pos.y < cropB || pos.y > cropT)) {',
-    '  vec3 cropAt = (modelMatrix * vec4(pos, 1.0)).xyz;\n'
-    + '  if (cropOn == 1.0 && (cropAt.x < cropL || cropAt.x > cropR || cropAt.y < cropB || cropAt.y > cropT)) {',
+    '  if (outsideLateral(pos.xy)) {',
+    '  if (outsideLateral((modelMatrix * vec4(pos, 1.0)).xy)) {',
   ]] },
   // The crop box is drawn straight off the uniforms, in the sensor's axes, over a cloud in the
   // room's - what the top-down's old rectangle did for as long as levelling existed, with
@@ -57,8 +56,8 @@ const MUTATIONS = {
   // picture is showing in full. Two readers, one of them told; the plan is now the only one left
   // that can catch it.
   'crop-switch-reaches-only-the-shader': { file: 'web/point-cloud.js', edits: [[
-    '  if (uniforms.cropOn.value !== 1) return false;\n',
-    '',
+    '    crop: uniforms.cropOn.value === 1,',
+    '    crop: true,',
   ]] },
   // The picture levels and the box in the corner does not, which is the state this feature was
   // built to end. Nothing outside section 3 can see it.
@@ -117,13 +116,15 @@ const MUTATIONS = {
   // The sign is fixed in the shader and the top-down keeps the old one, so the picture shows the
   // room the right way round and the plan beside it is a reflection. One says the sign matters, the
   // other says which readers were told.
-  // Aimed at `web/depth-pick.js` and not at the plan's own loop, because the unprojection moved
-  // there when the pivot's pick came to need it and the plan now calls it. That widens the
-  // mutation - it turns the pivot's sweep over too - which is the point: one spelling means one
-  // control, rather than a second copy in `main.js` this file would have gone on testing alone.
-  'plan-x-not-mirrored': { file: 'web/depth-pick.js', edits: [[
-    '  out.set((-(col + 0.5 - cx) / fx) * z, -((row + 0.5 - cy) / fy) * z, -z);',
-    '  out.set(((col + 0.5 - cx) / fx) * z, -((row + 0.5 - cy) / fy) * z, -z);',
+  // Aimed at `web/crop-box.js`, where the JavaScript unprojection now lives: it was in the plan's
+  // own loop, moved to `web/depth-pick.js` when the pivot's pick came to need it, and moved again
+  // when the webcam page came to need it under bare node. Each move widened the mutation and that
+  // is the point - one spelling means one control, so this now turns over the pick, the plan and
+  // the page together rather than leaving a copy this file would have gone on testing alone. The
+  // shader keeps its own spelling in GLSL, which is what `x-not-mirrored` above is for.
+  'plan-x-not-mirrored': { file: 'web/crop-box.js', edits: [[
+    '  point.x = (-(col + 0.5 - cx) / fx) * zMetres;',
+    '  point.x = ((col + 0.5 - cx) / fx) * zMetres;',
   ]] },
 };
 if (MUTATE && !MUTATIONS[MUTATE]) {

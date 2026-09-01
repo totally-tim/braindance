@@ -48,8 +48,11 @@ import {
 } from './post-chain.js';
 import {
   geometry, uniforms, material, cloud, level, levelAngles, transform, setAdditive,
-  setCloudProgram, CLIP_NEAR_DEFAULT, CLIP_FAR_DEFAULT, CROP_LIMIT, cropReach, croppedOut,
+  setCloudProgram, cropReach, croppedOut,
 } from './point-cloud.js';
+import {
+  CLIP_FAR_DEFAULT, CLIP_NEAR_DEFAULT, CROP_FACE_NAMES, CROP_LIMIT, FRAMING_DEFAULTS, FRAMING_NAMES,
+} from './crop-box.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { createCloudInstance, disposeCloudInstance, selectCloud } from './cloud-instance.js';
 import { cloudSpine } from './cloud-shader.js';
@@ -978,6 +981,30 @@ function refuseRegistryDisagreement() {
         `the composition parameter ${name} is scoped ${JSON.stringify(scope)}: a composition `
         + `value is stored under ${BLOCK_SCOPES.join(' or ')} or in a field of its own, and one `
         + 'under neither would be written nowhere and come back as its default',
+      );
+    }
+  }
+
+  // The framing group against `web/crop-box.js`, which is what the webcam page reads instead of
+  // this table. A name or a default that moved on one side only would come back as a key that
+  // keys the wrong thing, with nothing on the page saying so - so it refuses to boot here.
+  const framing = Object.keys(PARAMS).filter((name) => PARAMS[name].group === 'framing');
+  const extra = framing.filter((name) => !FRAMING_NAMES.includes(name));
+  const missing = FRAMING_NAMES.filter((name) => !framing.includes(name));
+  if (extra.length > 0 || missing.length > 0) {
+    throw new Error(
+      'the framing group and FRAMING_NAMES in web/crop-box.js disagree: '
+      + `${extra.length > 0 ? `the registry has ${extra.join(', ')} as well; ` : ''}`
+      + `${missing.length > 0 ? `crop-box names ${missing.join(', ')} and the registry does not; ` : ''}`
+      + 'the webcam page frames its picture off that list',
+    );
+  }
+  for (const name of FRAMING_NAMES) {
+    if (PARAMS[name].def !== FRAMING_DEFAULTS[name]) {
+      throw new Error(
+        `the framing parameter ${name} defaults to ${JSON.stringify(PARAMS[name].def)} here and `
+        + `${JSON.stringify(FRAMING_DEFAULTS[name])} in web/crop-box.js: a document that names `
+        + 'no value for it would be framed one way in the editor and another in the webcam page',
       );
     }
   }
@@ -9883,7 +9910,10 @@ function resetWorldRotation() {
 ui.camLevelReset.addEventListener('click', () => { resetWorldRotation(); });
 
 ui.cropReset.addEventListener('click', () => {
-  params.reset(['left', 'right', 'bottom', 'top', 'crop']);
+  // The lateral four and the switch. The depth pair is deliberately left alone: near and far are
+  // also the range every reading is graded against, so reverting them would move the colour.
+  const lateral = CROP_FACE_NAMES.filter((name) => name !== 'near' && name !== 'far');
+  params.reset([...lateral, 'crop']);
   requestRepaint();
   history.commit();
 });
