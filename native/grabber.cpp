@@ -226,9 +226,14 @@ public:
 
 private:
   void run() {
-    tjhandle jpeg = tjInitCompress();
-    if (!jpeg) {
+    // TurboJPEG keeps one reusable destination allocation per compressor; alternating two
+    // buffers through one handle frees the first while its pointer is still live.
+    tjhandle colourJpeg = tjInitCompress();
+    tjhandle keyJpeg = tjInitCompress();
+    if (!colourJpeg || !keyJpeg) {
       std::fprintf(stderr, "[grabber] cannot start the hd encoder: %s\n", tjGetErrorStr());
+      if (colourJpeg) tjDestroy(colourJpeg);
+      if (keyJpeg) tjDestroy(keyJpeg);
       return;
     }
     std::vector<uint8_t> colourWork, grey, payload;
@@ -262,14 +267,15 @@ private:
       }
 
       const bool alive = isColour
-        ? encodeColour(jpeg, colourWork, ts, payload, &colourBuf, &colourSize)
-        : encodeKey(jpeg, depthWork, ts, grey, payload, &keyBuf, &keySize);
+        ? encodeColour(colourJpeg, colourWork, ts, payload, &colourBuf, &colourSize)
+        : encodeKey(keyJpeg, depthWork, ts, grey, payload, &keyBuf, &keySize);
       if (!alive) break;
     }
 
     if (colourBuf) tjFree(colourBuf);
     if (keyBuf) tjFree(keyBuf);
-    tjDestroy(jpeg);
+    tjDestroy(colourJpeg);
+    tjDestroy(keyJpeg);
   }
 
   /** Encodes and writes one type 3 message. False means stdout is gone. */
