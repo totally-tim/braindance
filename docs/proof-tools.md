@@ -72,7 +72,7 @@ node tools/effect-conformance-check.mjs --mutate leaks-at-zero # ... a floor und
 node tools/monitor-check.mjs                              # step 9: the monitor's decimation, the take it must not touch, and the picture it shows
 node tools/sensor-view-check.mjs                          # the intrinsics a take was shot with, against a build that assumes them
 node tools/level-check.mjs                                # levelling: the room turns, and the crop, the top-down and the sensor view keep their meaning
-node tools/vcam-check.mjs                                 # the output to OBS: the colour camera, the take it must not touch, and the source's picture
+node tools/vcam-check.mjs                                 # the output to OBS: the colour camera, the keyed webcam, the take neither may touch, and both pages' pictures
 node tools/guard-check.mjs                                # the socket's origin rule, the bind, and the rebinding rule
 node tools/jobs-check.mjs                                 # step 8: the queue, the pin, a real render, and a job
                                                           #   whose deliverable this build cannot read, which has to

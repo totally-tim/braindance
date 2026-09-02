@@ -172,7 +172,7 @@ exit code (rule 3).
 | `monitor-check.mjs` | the monitor's decimation, the take it must not touch, the picture | port 8341 free |
 | `sensor-view-check.mjs` | the intrinsics a take was shot with, against a build assuming them | `--url`, plus port 8131 |
 | `level-check.mjs` | levelling: the room turns and every surface keeps its meaning | port 8377 free |
-| `vcam-check.mjs` | the output to OBS, and the take it must not touch | port 8361 free |
+| `vcam-check.mjs` | the output to OBS: the colour camera, the keyed webcam and its page, and the take neither may touch | port 8361 free |
 | `guard-check.mjs` | the socket's origin rule, the bind, the rebinding rule | port 8321 free |
 | `jobs-check.mjs` | the queue, the pin, a real render, a job this build cannot read | ports 8231 and 8232, a GPU browser, ffprobe |
 | `effect-check.mjs` | installing an effect: revisions, the door, the hotload, park and restore | port 8281 free, a GPU browser |

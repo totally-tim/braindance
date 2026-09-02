@@ -3825,8 +3825,9 @@ Nothing was wrong until the browser bundle split. Then `web/main.js` went from 1
 code that had been carried out of it. Eight of them are one sentence copied around the suite —
 the unprojection's mirror correction, which is in `web/cloud-shader.js` and which
 `web/library.js`, `export-check` twice, `registry-check`, `monitor-check` twice, `level-check`
-and `server/protocol.js` all sent a reader to the bundle for. The rest are `CROP_LIMIT`, which is
-declared in `web/point-cloud.js` while the prose told a reader to raise it in the bundle,
+and `server/protocol.js` all sent a reader to the bundle for. The rest are `CROP_LIMIT`, which was
+declared in `web/point-cloud.js` then (it is in `web/crop-box.js` now) while the prose told a
+reader to raise it in the bundle,
 `setNavigationUp` in `web/scene.js`, the boot uniform block in `web/point-cloud.js` with two
 tools still naming the bundle for it, the GLSL one lexer's ambiguity is argued from, and the
 `readGhost` comment this suite quotes. Every one of those paths still resolves, which is the
