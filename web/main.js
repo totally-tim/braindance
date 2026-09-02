@@ -3660,7 +3660,8 @@ if (!PROGRAM_OUT && progModeEl) {
     sendProgramOut({ size: programOutSize });
   });
   progNoteEl.textContent = `browser source: ${location.origin}/program  ·  `
-    + `webcam: ${location.origin}/camera.mjpg`;
+    + `webcam: ${location.origin}/camera.mjpg  ·  `
+    + `keyed webcam: ${location.origin}/key`;
 }
 
 function connect() {
@@ -10389,8 +10390,10 @@ const shell = shellElements({
   obsCustomSize: 'obsCustomSize',
   obsBrowserUrl: 'obsBrowserUrl',
   obsWebcamUrl: 'obsWebcamUrl',
+  obsKeyUrl: 'obsKeyUrl',
   obsCopyBrowser: 'obsCopyBrowser',
   obsCopyWebcam: 'obsCopyWebcam',
+  obsCopyKey: 'obsCopyKey',
   obsOpen: 'obsOpen',
   obsStatus: 'obsStatus',
   obsStatusText: 'obsStatusText',
@@ -10598,11 +10601,16 @@ async function refreshObsStatus() {
   try {
     const state = await (await fetch('/record/state')).json();
     const webcam = state?.webcam ?? {};
-    const n = (webcam.subscribers ?? []).length;
+    const key = state?.key ?? {};
+    // Both doors counted, because the dot is about whether anything is reading this machine and
+    // an OBS pulling only the keyed source is reading it.
+    const n = (webcam.subscribers ?? []).length + (key.subscribers ?? []).length;
     shell.obsStatus.classList.toggle('live', n > 0);
-    // A server with no colour camera is a third state and not a quiet kind of idle.
-    shell.obsStatusText.textContent = webcam.unavailable
-      ? webcam.unavailable
+    // A server with no colour camera is a third state and not a quiet kind of idle. Both doors
+    // fail on the same fact, so whichever of them says so is the reason.
+    const unavailable = webcam.unavailable ?? key.unavailable;
+    shell.obsStatusText.textContent = unavailable
+      ? unavailable
       : (n === 0
         ? 'idle - nothing is reading'
         : `streaming to ${n} ${n === 1 ? 'source' : 'sources'}`);
@@ -10632,6 +10640,7 @@ shell.obsDialog.addEventListener('close', stopObsStatusPoll);
 function paintObsDialog() {
   shell.obsBrowserUrl.value = new URL('/program', location.href).href;
   shell.obsWebcamUrl.value = new URL('/camera.mjpg', location.href).href;
+  shell.obsKeyUrl.value = new URL('/key', location.href).href;
   for (const option of shell.obsResolution.querySelectorAll('option[data-current]')) option.remove();
   if (![...shell.obsResolution.options].some((option) => option.value === progSizeEl.value)) {
     const option = document.createElement('option');
@@ -10690,6 +10699,7 @@ async function copyObsValue(input) {
 
 shell.obsCopyBrowser.addEventListener('click', () => copyObsValue(shell.obsBrowserUrl));
 shell.obsCopyWebcam.addEventListener('click', () => copyObsValue(shell.obsWebcamUrl));
+shell.obsCopyKey.addEventListener('click', () => copyObsValue(shell.obsKeyUrl));
 shell.obsOpen.addEventListener('click', () => {
   globalThis.open(shell.obsBrowserUrl.value, '_blank', 'noopener');
   sayObs('source opened');
