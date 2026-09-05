@@ -193,10 +193,6 @@ await page.evaluate(`(() => {
     async load(arm, offsets, windowSec, look, warmStart) {
       const base = k.library.serialiseProjectBody();
       const one = base.clips[0];
-      const retimeAt = (inSec, span) => {
-        k.keyframes.setRetime({ rate: 1, keys: [{ t: 0, value: inSec }, { t: span, value: inSec + span }] });
-        return JSON.parse(JSON.stringify(k.library.serialiseProjectBody().clips[0].retime));
-      };
       // Written into each clip's own block rather than applied afterwards: a look applied through
       // the registry lands on the selected clip alone now, so an arm that did that would time one
       // clip at this look and the rest at the registry's defaults - which is half the draw.
@@ -206,7 +202,7 @@ await page.evaluate(`(() => {
       const mine = scoped(look, 'clip');
       const clips = [];
       for (let i = 0; i < arm.live; i++) {
-        clips.push({ ...one, id: 'v' + i, start: 0, length: 12, retime: retimeAt(offsets[i], 12),
+        clips.push({ ...one, id: 'v' + i, start: 0, length: 12, speed: 1, sourceStart: offsets[i],
           params: { ...one.params, ...mine } });
       }
       for (let i = 0; i < arm.warming; i++) {
@@ -218,7 +214,8 @@ await page.evaluate(`(() => {
           id: 'w' + i,
           start: warmStart,
           length: 6,
-          retime: retimeAt(offsets[offsets.length - 1] + 1, 6),
+          speed: 1,
+          sourceStart: offsets[offsets.length - 1] + 1,
           params: { ...one.params, ...mine },
         });
       }

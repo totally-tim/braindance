@@ -124,9 +124,7 @@ const MUTATIONS = {
       + 'wiring. Reddens three rows of section 7: the control pressed and the node the status '
       + 'was written into carry the claim, and the precondition above them goes red because '
       + 'the status write it builds the fixture out of is the very thing the mutation stops '
-      + 'landing. Measured, 2026-08-24 - this line said "two rows and nothing else" for as '
-      + 'long as nobody had counted, which is the undercount docs/instruments.md warns a '
-      + 'Must-redden line produces when it names the claim rows alone',
+      + 'landing',
   },
 
   'rebuild-forgets-the-tab': {
@@ -405,8 +403,7 @@ const MUTATIONS = {
       + 'so the term runs on with no control anywhere that can move it. Reddens three rows of '
       + 'section 8, and the third is the one worth reading: with every control back at its '
       + 'default the picture is the one the raised term drew, hash for hash. The first is the '
-      + 'grade gate\'s uninstall row, which asserted this defect approvingly until this round '
-      + '- see docs/instruments.md',
+      + 'grade gate\'s uninstall row',
   },
 
   'poll-retries-a-refused-set': {

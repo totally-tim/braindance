@@ -431,7 +431,8 @@ const PROJECT = {
     take: { id: 'a-take', hash: HASH_A },
     start: 0,
     length: null,
-    retime: { rate: 1, keys: [] },
+    speed: 1,
+    sourceStart: 0,
     appliedPreset: null,
     params: {
       readRgb: 1,

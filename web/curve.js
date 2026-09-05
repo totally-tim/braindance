@@ -81,18 +81,6 @@ function elevate(a, b, side) {
   return { easeOut: raised.slice(0, cut), easeIn: raised.slice(cut) };
 }
 
-/** d(value fraction)/d(time fraction), which is what a retime slope is built from. */
-function easeSlopeAt(a, b, x) {
-  const u = easeParam(a, b, x);
-  const dx = bezSlopeAxis(a, b, 0, u);
-  if (dx > 1e-6) return bezSlopeAxis(a, b, 1, u) / dx;
-  // Vertical tangent: measure over a small window.
-  const h = 1e-4;
-  const lo = Math.max(0, x - h);
-  const hi = Math.min(1, x + h);
-  return (easeAt(a, b, hi) - easeAt(a, b, lo)) / Math.max(1e-9, hi - lo);
-}
-
 /** The last key at or before `t`, or -1 when `t` sits before every key. */
 function keyBefore(keys, t) {
   let lo = 0;
@@ -107,46 +95,19 @@ function keyBefore(keys, t) {
 }
 
 const HOLD_ENDS = 'hold';
-const EXTEND_ENDS = 'extend';
 
 function scalarAt(keys, t, ends) {
   const n = keys.length;
   if (n === 0) return 0;
   if (n === 1) return keys[0].value;
   const i = keyBefore(keys, t);
-  if (i < 0) {
-    if (ends === HOLD_ENDS) return keys[0].value;
-    return keys[0].value + (t - keys[0].t) * segmentSlope(keys, 0, 0);
-  }
-  if (i >= n - 1) {
-    if (ends === HOLD_ENDS) return keys[n - 1].value;
-    return keys[n - 1].value + (t - keys[n - 1].t) * segmentSlope(keys, n - 2, 1);
-  }
+  if (i < 0) return keys[0].value;
+  if (i >= n - 1) return keys[n - 1].value;
   const a = keys[i];
   const b = keys[i + 1];
   const span = b.t - a.t;
   if (span <= 0) return b.value;
   return a.value + (b.value - a.value) * easeAt(a.easeOut, b.easeIn, (t - a.t) / span);
-}
-
-/** The slope of segment `i` at one of its ends, in value per program second. */
-function segmentSlope(keys, i, x) {
-  const a = keys[i];
-  const b = keys[i + 1];
-  const span = b.t - a.t;
-  if (span <= 0) return 0;
-  return ((b.value - a.value) / span) * easeSlopeAt(a.easeOut, b.easeIn, x);
-}
-
-function scalarSlopeAt(keys, t) {
-  const n = keys.length;
-  if (n < 2) return 0;
-  const i = keyBefore(keys, t);
-  if (i < 0) return segmentSlope(keys, 0, 0);
-  if (i >= n - 1) return segmentSlope(keys, n - 2, 1);
-  const span = keys[i + 1].t - keys[i].t;
-  if (span <= 0) return 0;
-  return segmentSlope(keys, i, (t - keys[i].t) / span);
 }
 
 function stepAt(keys, t) {
@@ -242,38 +203,6 @@ function foldFreeX(a, b, side, index, from, to) {
   return good;
 }
 
-/** The source second a clip's own program second maps to. */
-function retimeSourceSecAt({ rate, keys }, programSec) {
-  if (keys.length === 0) return programSec * rate;
-  if (keys.length === 1) return keys[0].value + (programSec - keys[0].t) * rate;
-  return scalarAt(keys, programSec, EXTEND_ENDS);
-}
-
-/** The program position a source position sits at, which is `retimeSourceSecAt` run backwards. */
-function retimeProgramSecAt(curve, sourceSec) {
-  const { rate, keys } = curve;
-  if (keys.length === 0) return sourceSec / rate;
-  if (keys.length === 1) return keys[0].t + (sourceSec - keys[0].value) / rate;
-  if (sourceSec <= keys[0].value) {
-    const slope = segmentSlope(keys, 0, 0);
-    return slope > 0 ? keys[0].t - (keys[0].value - sourceSec) / slope : keys[0].t;
-  }
-  for (let i = 0; i < keys.length - 1; i++) {
-    if (keys[i + 1].value < sourceSec) continue;
-    let lo = keys[i].t;
-    let hi = keys[i + 1].t;
-    for (let k = 0; k < 50; k++) {
-      const mid = (lo + hi) / 2;
-      if (retimeSourceSecAt(curve, mid) < sourceSec) lo = mid;
-      else hi = mid;
-    }
-    return hi;
-  }
-  const last = keys[keys.length - 1];
-  const slope = segmentSlope(keys, keys.length - 2, 1);
-  return slope > 0 ? last.t + (sourceSec - last.value) / slope : last.t;
-}
-
 export {
   handleRefusal,
   foldRefusal,
@@ -287,11 +216,7 @@ export {
   elevate,
   keyBefore,
   HOLD_ENDS,
-  EXTEND_ENDS,
   scalarAt,
-  retimeSourceSecAt,
-  retimeProgramSecAt,
-  scalarSlopeAt,
   stepAt,
   hermite,
   tangentAt,

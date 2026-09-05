@@ -1,49 +1,37 @@
 # Performance
 
-What this costs and what it does not, measured rather than reasoned about. Results only;
-`docs/measurement.md` is the method, and it says which runs get thrown away.
+The numbers this build has been measured at, each with the method that produced it.
+`docs/measurement.md` is how to take one and which runs get thrown away. The rig is an Apple
+M2 Max, and the browser is Playwright's bundled Chromium through ANGLE's Metal backend.
 
 ## Rendering cost
 
-Measured on an M2 Max by rendering N times per frame so fixed overhead amortises out, since
-a plain rAF counter only measures the 120Hz vsync ceiling. The point pass does not scale
-with resolution; the post chain does:
+Method: render N times per frame so fixed overhead amortises out, because a plain rAF counter
+reads only the 120 Hz vsync ceiling. 217,088 points. Sample count and warmup not recorded.
 
-| Drawing buffer | Points only | With full Blackwall chain |
+| drawing buffer | points only | with the full Blackwall chain |
 | --- | --- | --- |
 | 0.92 Mpx | 0.83 ms | 0.87 ms |
 | 2.07 Mpx | 0.83 ms | 1.17 ms |
 | 3.69 Mpx | 0.83 ms | 1.57 ms |
 
-So the 217k points are bound by vertex work and texture fetches, not fill rate. The post
-chain costs roughly 0.2 ms per megapixel, which is what `render %` controls, against an
-8.33 ms budget at 120Hz.
+The point pass is bound by vertex work and texture fetches, so it does not move with resolution. The post chain costs about 0.2 ms per megapixel against an 8.33 ms budget
+at 120 Hz, and `render %` sets the buffer it pays that on.
 
-The one optimisation that mattered was returning early on `mm <= 0.0` before the four
-neighbour `texelFetch` calls, cutting the point pass from 1.44 ms to 0.71 ms at 2.28 Mpx: a
-large share of every frame is empty. Removing the fragment `discard` in favour of additive
-alpha falloff made no difference (0.71 vs 0.74 ms), so it is kept for the look. Bloom runs at
-half buffer resolution, being the most expensive pass in the chain.
-
-**Bloom being the most expensive pass is now measured rather than asserted, and the reason
-it is expensive is not the one that sentence implies** - it is the pass count and not the
-resolution, so the "runs at half resolution" half of it buys nothing. See
-[what each effect costs](#what-each-effect-costs) below.
+| what | value | moves when |
+| --- | --- | --- |
+| returning early on `mm <= 0.0`, before the four neighbour `texelFetch` calls | point pass 1.44 to 0.71 ms at 2.28 Mpx | the empty share of the frame changes |
+| the fragment `discard` against additive alpha falloff | 0.71 against 0.74 ms | nothing measurable, so `discard` stays for the look |
 
 ## What a second, third and fourth overlapping clip cost
 
-`node tools/layering-ab.mjs --url … --take fixture-1g` is the harness, and it interleaves the
-arms round-robin rather than running them in sequence. Method: 16 rounds after 4 discarded, one
-15-output-frame block per arm per round, `fixture-1g` at a 1280x720 drawing buffer on an M2 Max
-through ANGLE's Metal backend, a look of fade 300ms plus wake 300ms with no trails and depth
-writing on, so the geometry draws two vertices per point - 434,176 - which is the shedding draw
-and not the cheap one. Every block's bytes are resident before the clock starts.
-
-**Three readings decide whether a block is believable**, and a block failing any of them is
-discarded rather than timed: it rendered every frame it was asked for and fetched nothing inside
-the block, it drew and warmed the clips its arm declares on every one of those frames, and the
-page reported no error. The health number is the one-clip arm's median over the first half of the
-rounds against the second, held against that arm's own interquartile spread.
+Harness: `node tools/layering-ab.mjs --url … --take fixture-1g`, arms interleaved round-robin.
+Method: 16 rounds after 4 discarded, one 15-output-frame block per arm per round, `fixture-1g` at
+1280x720, a look of fade 300 ms plus wake 300 ms with no trails and depth writing on, so the
+geometry draws two vertices per point — 434,176 slots, the shedding draw. Every block's bytes are
+resident before the clock starts. A block is timed only when it rendered every frame it was asked
+for, fetched nothing, drew and warmed the clips its arm declares on every one of those frames, and
+left the page reporting no error; every other block is discarded.
 
 | arm | run 1 | run 2 | run 3 | against one clip |
 | --- | --- | --- | --- | --- |
@@ -52,151 +40,80 @@ rounds against the second, held against that arm's own interquartile spread.
 | 4 clips | 10.167 | 9.977 | 9.720 | +4.667, 1.85x |
 | 4 live + 1 warming | 9.977 | 10.037 | 9.840 | +4.503, 1.84x |
 
-Health on the three runs in order: 0.053 ms of movement against a 0.367 ms spread, 0.430 against
-0.680, and 0.433 against 0.620. Each arm's last column is its delta taken inside its own run and
-then the median of the three, because the 1-clip arm itself moves 0.3 ms between runs and a delta
-taken across runs would carry that. The three agree arm by arm to within 6%, which is what this
-rig reproduces to on a working machine.
+Health: the one-clip arm's median over the first half of the rounds against the second, against
+that arm's interquartile spread — 0.053 ms of movement against 0.367 ms, 0.430 against 0.680,
+0.433 against 0.620. Each arm's delta is taken inside its own run and medianed across the three,
+because the one-clip arm moves 0.3 ms between runs. The three agree arm by arm to within 6%.
 
-**The third and fourth clips cost about 1.93 ms each and the second costs 0.75, so there is no one
-number for "a clip".** Per run the second clip adds 0.723, 0.707 and 0.816, while the third and
-fourth add 1.972, 2.035 and 1.784 each. Three extra clouds add 4.667 ms between them, which
-averages 1.54, and that average is the trap: it is dragged down by a cheap second clip, so it
-describes neither the second nor the fourth and understates the fourth by a fifth. Four clips is
-1.85x one, and against a 33.3 ms budget at 30fps four overlapping clips is 30%.
+There is no one number for "a clip". The second costs 0.723, 0.707 and 0.816 ms; the third and
+fourth cost 1.972, 2.035 and 1.784 each, so the 1.54 ms average of the three understates the
+fourth by a fifth. Four clips is 1.85x one, and 30% of a 33.3 ms frame at 30 fps. A warming clip
+sits under the floor: -0.190, +0.060 and +0.120 ms against the four-clip arm, a
+mean of -0.003 over a 0.310 ms span, each inside its arm's own spread of 0.367 to 0.680 ms, so the
+bound is about ±0.2 ms.
 
-**The warming clip's cost is under this rig's floor rather than measured at some small number, and
-the floor is the caveat.** Its difference from the 4-clip arm is -0.190, +0.060 and +0.120 ms
-across the three runs, a mean of -0.003 over a 0.310 ms span: the sign flips, and every one of
-those sits inside the arm's own interquartile spread. But those spreads are 0.367, 0.680 and 0.620
-ms, four to seven times the 0.093 ms of the run this page once called healthy, so all three pass
-the drift gate on a machine that was carrying other work. The bound is about +/-0.2 ms and a quiet
-rig might yet resolve a warming clip below it. What holds without the hedge is the shape: the
-layering bound is the draw, 1.93 ms and 1.85x are large against these spreads, and warming a clip
-through a cut is not what to look at first.
+The harness reads each arm's blend back before timing it. A look lands on the selected clip alone,
+so an arm applying one after adding its clips would time one clip at the look asked for and the
+rest at the registry's defaults — one vertex per point instead of two.
 
-**The earlier run of this table is withdrawn rather than corrected, because the harness that took
-it could not tell whether its arms had happened.** It read 5.330 / 6.807 / 10.393 / 10.317, and
-the -0.076 ms between its last two rows is what this page published as a warming clip costing
-0.02. The block's counters for clips drawn and clips warmed were being differenced per block and
-read by nothing, so a block whose fifth clip idled all the way through would have been averaged in
-as though it had warmed. The counters were collected and discarded rather than missing, so what
-closed this was reading them rather than adding them. A look whose warm window cannot cover the
-block is caught, but upstream by the render gate, which is not the reading the warming arm needs.
-The three runs above are the first ones taken with the new gate armed. None of them tripped it,
-and each reports the warming clip warming 15 of its block's 15 frames - which is the number the
-old page required and never read. `docs/instruments.md` carries why a guard on the configuration
-is not a check on the run.
+## The frame cache
 
-**Sizing the cache by demand did not move the draw in any direction this rig can resolve.** Two
-runs taken either side of that change read 5.330 / 6.807 / 10.393 / 10.317 before and 5.597 /
-6.573 / 10.050 / 9.950 after, which is +5.0%, -3.4%, -3.3% and -3.6%: straddling zero rather than
-pointing one way, and inside the 6% the gated runs above reproduce to. It was measured on a
-machine carrying other agent sessions at a load average of 7 to 9, and both sides of it were
-ungated in the sense above, so the null result is what survives and a signed figure was never
-available.
+| what | value | method |
+| --- | --- | --- |
+| fetch and JPEG decode | 2.34 ms per source frame | the pass that makes a block resident, cold, over two range requests for 61 frames. Repeats and warmup not recorded |
+| one resident decoded frame | 1,263 KiB measured, 1,302,528 bytes by construction | resident-set size of every bundled-Chromium process before and after filling one take's cache, a fresh browser per point, a full GC through CDP's `HeapProfiler.collectGarbage` on both sides |
 
-**The harness reads its arms' blend back before it times them, and that guard was earned.** A look
-applied through the registry lands on the selected clip alone once a clip's look is its own, so an
-arm that applied one afterwards would time one clip at the look asked for and the rest at the
-registry's defaults - which puts the geometry on one vertex per point instead of two for most of
-the clips in the frame. The look goes into each clip's own block in the document now, and a run
-whose clips do not agree about their blend refuses rather than averaging two draws.
+Fetch is per source frame, not per clip: two clips wanting one frame pay once, two at different
+offsets pay twice, and the prefetch runs ahead of the playhead, outside a rendered frame.
+The frame cost is `POINTS * 2 + POINTS * 4`, a depth block at two bytes a cell plus the same grid
+as an RGBA bitmap. Baselines across five fresh browsers agree to 0.6%: 88 frames cost 157,296 and
+154,416 KiB, 176 frames cost 263,248, 273,376 and 267,008 KiB, and a browser that fetches nothing
+moves 560 and 640 KiB. The slope is 0.7% under the arithmetic and the ~46 MB intercept is the
+fetch machinery's high-water. Take each point in a fresh browser, because freed pages are not
+returned to the OS and an arm that cleared the cache reads the previous arm's peak.
 
-Fetch and JPEG decode are measured on the pass that makes a block resident, cold, and come to
-**2.34 ms per source frame** over two range requests for 61 frames. That is a cost per source
-frame rather than per clip: two clips wanting one frame pay it once, two at different offsets pay
-it twice, and the prefetch runs it ahead of the playhead rather than inside a rendered frame.
+A take's cache is sized by what the clips cut on it ask for: `IndexedTake.capacity` is
+`demand + 16`, floored at 192 and bounded by `CACHE_CEILING_FRAMES`, which a 768 MiB budget puts at
+618 frames, of which one plan may ask for 602. At fade 500 ms plus wake 1500 ms a seek renders 60
+of its 60 pre-roll frames at four clips of one take and again at eight, the `CLIP_CEILING`, which
+asks that take for 496. What still caps is eight clips of one take each pre-rolling more than
+about 2.5 seconds, or a speed slow enough that one clip's window runs past 602 source frames.
 
-**The budget held on the draw and did not hold on the cache, and the cache is now sized by
-demand.** `CACHE_FRAMES` was 192 decoded frames per take while the plan a seek makes is per clip,
-so four clips of one take asked that one cache for four windows. At fade 500ms plus wake 1500ms -
-two seconds of persistence, an ordinary look - a seek at four clips rendered 42 of the 60 pre-roll
-frames it computed and reported itself capped 18 short; at four plus a warming clip it rendered 33
-of 60. One and two clips were unaffected, and so were four clips on four *different* takes,
-because each take gets its own cache. The failure was reported rather than silent, but a capped
-pre-roll is an image that has not converged.
+## What a gizmo drag costs
 
-A take's cache now holds what the clips cut on it are asking for between them. The transport
-publishes that demand when it plans - `askFor`, from both the seek path and the prefetch - and
-`IndexedTake.capacity` is `demand + 16` frames, floored at the 192 a single clip always had and
-bounded by a ceiling derived from a memory budget. **A one-clip project caches exactly what it
-did.** At the same look the four-clip seek now renders 60 of 60, and so does one at eight clips,
-the `CLIP_CEILING`, which asks one take for 496 frames.
+A pointer move through the clip handles arms a redraw and never starts one. `renderProgramFrame`
+runs `advanceNavigation`, so a handler that renders on an input event has asked for the next one.
 
-**A resident frame costs 1.29 MB, not the 1.7 MB this page carried as an estimate.** By
-construction it is a 512x424 depth block at two bytes a cell - 434,176 bytes exactly - plus the
-same grid as an RGBA bitmap at 868,352, which is 1,302,528 bytes or 1,272 KiB. Measured: the
-resident-set size of every process of the bundled Chromium, before and after filling one take's
-cache from a fresh browser per point, with a full GC forced through CDP's
-`HeapProfiler.collectGarbage` on both sides. Fresh browser per point is the instrument rather
-than a precaution - freed pages are not returned to the OS, so an arm that cleared the cache read
-the high-water mark of the arm before it and the interleaved design measured nothing. Baselines
-across five fresh browsers agreed to 0.6%: 88 frames cost 157,296 and 154,416 KiB, 176 frames cost
-263,248, 273,376 and 267,008, and the null arm - a fresh browser that fetched nothing - moved 560
-and 640 KiB. The slope through the two loaded points is **1,263 KiB per frame**, 0.7% under the
-1,272 the arithmetic gives; the ~46 MB intercept is the fetch machinery's own high-water.
-
-The ceiling is that figure turned into a frame count: a budget of **768 MB buys 618 frames**, and a
-plan may ask one take for 602 of them. It is generous by the measure it was chosen against - eight
-clips at two and a half seconds of persistence each - and **what still caps is eight clips of one
-take each pre-rolling more than about 2.5 seconds**, or a retime curve slow enough that one clip's
-window alone runs past 602 source frames. A cap reports the arithmetic that produced it:
-`lastSeek.bound` names the take, how many clips are on it, what they asked for and what the
-ceiling is, and the strip says it once per distinct cap.
-
-The ceiling and the span a fetch may request cannot be moved apart. A cache smaller than the span
-a plan is allowed to ask for evicts the frames that fetch has just put in it, `resident()` never
-comes true, and the seek stands down for ever rather than reporting anything - which is why
-`timeline-check` has one control over both numbers and not one each.
-
-## What a gizmo drag costs, and what it used to
-
-A pointer move through the clip handles arms a redraw and never starts one, which is the rule
-`renderProgramFrame` is under: it runs `advanceNavigation`, so a handler that renders on an input
-event has asked for the next one. Measured with `editor-check`'s section 22b, which delivers 30
-pointer moves' worth of `objectChange` and counts `laneRebuilds` and `renders` across them:
-**0 lane rebuilds while the pointer is down, and 1 over the whole gesture** - the one the release
-does. The historical failure this is measured against is the pointer-move-renders shape that
-shipped once and cost 34 rebuilds for a single move.
-
-`--mutate gizmo-renders-from-the-pointer` puts that shape back in one edit, and it reads
-30 rebuilds for 30 moves. The number to watch is the rebuild count rather than the render count:
-a look write asks for its repaint through a microtask that coalesces, so a build writing from the
-event still renders about as often and only the lane stack gives it away.
+Measured by `editor-check` section 22b, which delivers 30 pointer moves' worth of `objectChange`
+and counts `laneRebuilds` and `renders` across them: **0 lane rebuilds while the pointer is down
+and 1 over the whole gesture**, the one the release does. Rendering from the pointer event instead
+reads 30 rebuilds for 30 moves. Watch the rebuild count and not the render count, because a look
+write asks for its repaint through a microtask that coalesces.
 
 ## What each effect costs
 
-Taken after testers reported the effects making performance "fluctuate wildly". The
-fluctuation turned out to be mostly a different question from the cost, and both answers
-are here: the cost table in this section, and [the compile
-stalls](#the-first-use-of-a-pass-costs-a-compile) further down.
+Method for this whole section: interleaved paired A/B, arm order flipped every round, 21 rounds of
+50 renders, and the median of the within-round paired deltas: take each round's A-minus-B and
+median those. A quartile band straddling zero is recorded as under floor.
+Editor on `captures/sample.knct`, playhead parked at program 12.0 s with every seek verified
+against the position it asked for and stand-downs — seeks that resolve without moving the
+playhead — counted at zero throughout, camera pinned, page
+cache warm, 92.7% buffer coverage, machine load 11-20. Every figure carrying bloom is an upper
+bound: these were taken over three's `UnrealBloomPass` and the shipped `BloomPass` costs about a
+quarter of it.
 
-**Method, common to every number in this section.** Interleaved paired A/B with the arm
-order flipped every round, 21 rounds of 50 renders, first round discarded, and **the
-median of the within-round paired deltas** rather than a difference of medians. The
-quartiles of those same paired deltas are carried beside each figure, and an arm whose
-band straddles zero is recorded as under floor rather than as a value. Editor on
-`captures/sample.knct`, playhead parked at program 12.0 s with the seek verified against
-the position it asked for and the stand-downs counted (zero throughout), camera pinned,
-page cache warm after repeated reads of the same capture. The fixture covers 92.7% of the
-buffer, so this is a full room rather than an empty one. M2 Max, machine load 11-20 with
-other agent sessions live.
-
-**The pairing is not a refinement, it is the instrument.** The baseline drifts on this rig
-by more than most of these effects cost - across one block of arms it moved 0.283 to
-0.420 ms - and an unpaired design reported the *null* control at **+15.1%**. Differencing
-inside a round cancels anything slower than one round. Two controls hold the table up: a
-null arm writing the same value on both sides reads -0.009 ms with a band of
-[-0.036, 0.032], and `pointSize` 9 to 48 reads +0.230 ms, which is the arm an instrument
+The pairing is the instrument. The baseline drifts by more than most of these effects cost, 0.283
+to 0.420 ms across one block of arms, and an unpaired design reports the null control at +15.1%.
+Two controls hold the table up: a null arm writing the same value on both sides reads -0.009 ms
+with a band of [-0.036, 0.032], and `pointSize` 9 to 48 reads +0.230 ms, the arm an instrument
 blind to fill rate would fail.
 
 | effect | 0.851 Mpx | 1.915 Mpx | shape |
 | --- | --- | --- | --- |
-| `pointSize` 9 -> 48 | +0.230 | +0.583 | scales with pixels; the dominant fill term |
-| bloom | +0.269 | +0.281 | **flat** - the pass count, not the pixels |
+| `pointSize` 9 to 48 | +0.230 | +0.583 | scales with pixels; the dominant fill term |
+| bloom | +0.269 | +0.281 | flat: the pass count, not the pixels |
 | trails (afterimage) | +0.051 | +0.214 | scales steeply, a full-screen read and write |
-| streak, 16 taps | +0.044 | +0.101 | about 0.05 ms/Mpx, which is the figure already on this page |
+| streak, 16 taps | +0.044 | +0.101 | about 0.05 ms/Mpx |
 | thermal | +0.076 | +0.044 | |
 | `fade` 120 ms, the ghost half | +0.057 | +0.039 | on by default |
 | the Blackwall reading against the RGB one | +0.056 | +0.068 | |
@@ -204,63 +121,48 @@ blind to fill rate would fail.
 | grain | under floor | +0.010 | |
 | turbulence, lattice, region push / scramble / mask, ripple, glitch, duotone and its hue and motion, edges, rgbSplit, scanlines, raster hardness | under floor | under floor | |
 
-**The point shader is not where the money goes**, which is worth stating plainly because
-the shader's own comment calls `vnoise3` "the most expensive thing in this shader" and on
-this GPU it does not resolve above a 0.035 ms floor. Neither does the lattice, the glitch,
-the region or the ripple. The cost is the post chain and the fill.
+The point shader is not where the money goes: `vnoise3`, the lattice, the glitch, the region and
+the ripple do not resolve above a 0.035 ms floor. The cost is the post chain and the fill.
 
-Two rows in that table are a weaker claim than the rest and are marked so rather than
-being quoted flat. The fragment terms above are measured against `readRgb`, the cheapest
-of the five readings, while every shipped graded look runs `readBlackwall` with `additive`
-on. Re-run pinned to that base at 1.915 Mpx, all nine of the terms re-tested stayed under
-floor - duotone +0.025, its hue -0.024, its motion -0.035, thermal +0.061, edges -0.010,
-turbulence +0.019, lattice +0.043, glitch +0.025, region scramble +0.007 - **but the floor
-on that base is about +/-0.15 ms rather than +/-0.035**, because overdraw varies per frame
-once additive blending stops points occluding each other. So those nine are established as
-under about 0.15 ms, not under 0.035, and thermal and lattice both trend positive without
-resolving.
+Those fragment terms are measured against `readRgb`, the cheapest of the five readings, while
+every graded look runs `blackwall.amount` with `additive` on. Re-run pinned to that base at 1.915 Mpx
+nine terms stay under floor — duotone +0.025, its hue -0.024, its motion -0.035, thermal +0.061,
+edges -0.010, turbulence +0.019, lattice +0.043, glitch +0.025, region scramble +0.007 — but the
+floor there is about ±0.15 ms, four times the ±0.035 above, because overdraw varies once additive
+blending stops points occluding each other. Thermal and lattice trend positive without resolving.
 
-**`wake` is unmeasured rather than free.** The draw range is 434,176 - two slots per ray -
-in both arms, because the ghost half is drawn whenever `fade` is up and fade defaults to
-120 ms. Wake moves only the surviving fraction, 5.67% to 6.35% on this fixture, which is
-under the floor. A parked frame never sheds, so this harness cannot price it and does not
-claim to.
-
-**An arm inside the grade must pin the composer on in both of its states.** `postEnabled()`
-switches `composer.render` for `renderer.render`, so an arm that takes the last grade term
-to zero measures that switch rather than its own term. Left unpinned, `trails` and the
-grade pass both came back negative *and* resolved, which is not a thing a pass can be. The
-switch on its own reads -0.089 ms, and that figure is an artifact of reading the canvas
-back after two different render paths rather than a claim that post processing is free.
+An arm inside the grade pins the composer on in both states. `postEnabled()` switches
+`composer.render` for `renderer.render`, so an arm taking the last grade term to zero measures
+that switch: alone it reads -0.089 ms.
 
 ### These are two clocks, and the paced one is four times the batch one
 
-Everything above submits renders back to back, where the driver pipelines one frame's work
-under the next one's submission. That is the right shape for the marginal GPU work of a
-term and the wrong shape for what a frame costs while somebody is watching. Re-measured on
-the GPU's own clock through `EXT_disjoint_timer_query_webgl2` - the instrument the stats
-overlay's `gpu` row reads - with one rAF between frames so each is its own submission,
-same paired design, 13 rounds of 45 frames:
+Back-to-back renders let the driver pipeline one frame's work under the next one's submission,
+which is right for a term's marginal GPU cost and wrong for what a frame costs while somebody is
+watching. Method: the GPU's own clock through `EXT_disjoint_timer_query_webgl2`, which is what the
+stats overlay's `gpu` row reads, one rAF between frames so each is its own submission, the same
+paired design, 13 rounds of 45 frames.
 
 | effect | paired delta | ratio |
 | --- | --- | --- |
 | null control | +0.010 | 1.00x |
-| bloom | **+1.060** | 2.23x |
-| `pointSize` 9 -> 48 | +0.841 | 1.23x |
+| bloom, `BloomPass` | +0.260 | 1.22x |
+| bloom, `UnrealBloomPass` | +1.060 | 2.23x |
+| `pointSize` 9 to 48 | +0.841 | 1.23x |
 | streak | +0.105 | 1.16x |
 | trails | unresolved, band [-0.679, 1.030] | |
-| Blackwall entire | **+1.106** | 2.29x |
+| Blackwall entire, over `UnrealBloomPass` | +1.106 | 2.29x |
 
-The ordering does not move and bloom is still first, but the magnitudes are four times the
-batch figures. Bloom costs about **1.06 ms of a 16.7 ms 60 Hz frame on an M2 Max**, and a
-whole graded look slightly more than doubles GPU frame time against a 0.99 ms baseline.
-Both sets are real measurements of different questions; the paced ones are the ones to
-quote at anybody asking whether a look is smooth.
+The ordering does not move and the magnitudes are four times the batch figures. Blackwall entire
+over `UnrealBloomPass` slightly more than doubles GPU frame time against a 0.99 ms baseline; the
+same look over the shipped chain is not measured. Quote the paced figures to anybody asking
+whether a look is smooth. The two bloom rows are separate runs on a drifting machine, so their
+ratios compare and their absolutes do not.
 
 ### The shipped looks are two populations, not a range
 
-Nobody drags `streak.amount`; they pick a look. Whole documents against the parameter defaults,
-same paired design, 17 rounds of 50 renders:
+Nobody drags `streak.amount`; they pick a look. Method: whole documents at the parameter defaults,
+the same paired design, 17 rounds of 50 renders.
 
 | look | 0.851 Mpx | 1.915 Mpx |
 | --- | --- | --- |
@@ -268,541 +170,318 @@ same paired design, 17 rounds of 50 renders:
 | ghost | 1.06x | 1.20x |
 | depth | 1.29x | 0.90x |
 | contour | 1.44x | 1.15x |
-| ember | 1.81x | **3.00x** |
-| voxel | 1.85x | **2.50x** |
-| grille | 1.91x | **2.82x** |
-| blackwall | 1.99x | **2.58x** |
-| tearline | 2.10x | **2.96x** |
+| ember | 1.81x | 3.00x |
+| voxel | 1.85x | 2.50x |
+| grille | 1.91x | 2.82x |
+| blackwall | 1.99x | 2.58x |
+| tearline | 2.10x | 2.96x |
 
-Four bare readings cost about nothing and five graded looks cost double, and **the gap
-widens with resolution** because the graded half's cost sits in the post chain. The five
-expensive ones are expensive for the same reason as each other: every one of them turns on
-`additive`, `wake`, `bloom`, `trails`, `rgbsplit.amount`, `raster.amount`, `grain.amount` and a vignette
-together, and four of them add `streak.amount` and a hard raster on top. So "what do the effects
-cost" has no single answer, and which of the two populations a tester happened to pick
-decides their number before any individual slider does.
+Four bare readings cost about nothing and five graded looks cost double, and the gap widens with
+resolution because the graded half's cost sits in the post chain. All five turn on `additive`,
+`wake`, `bloom`, `trails`, `rgbsplit.amount`, `raster.amount`, `grain.amount` and a vignette
+together, and four add `streak.amount` and a hard raster. Which population somebody picks decides
+their number before any individual slider does.
 
 ### Bloom is the pass count, not the pixels
 
-Shrinking the chain 60-fold changes nothing, which is what says the cost is fixed overhead
-per pass:
+Shrinking `UnrealBloomPass`'s chain 60-fold changes nothing, which says the cost is fixed overhead
+per pass. The second table walks its mip count on Blackwall entire: GPU clock, rAF-paced, 11
+rounds of 40 frames, two independent runs.
 
 | bloom chain | ms/frame | against off |
 | --- | --- | --- |
-| off | 0.308 | - |
-| shipped, `refWidth/2` x 300 | 0.586 | +0.278 |
+| off | 0.308 | — |
+| `refWidth/2` x 300 | 0.586 | +0.278 |
 | quarter the texels, 266x150 | 0.560 | +0.252 |
 | 64x36 | 0.584 | +0.276 |
 
-`UnrealBloomPass` at five mips is a bright pass, five mips times two blur directions, a
-composite and an additive blend: **13 render-target passes**, each paying a bind and a
-full-screen draw. So the only lever is removing passes. Walking the mip count on Blackwall
-entire, GPU clock, rAF-paced, 11 rounds of 40 frames, two independent runs:
-
 | mips | passes | run 1 | run 2 |
 | --- | --- | --- | --- |
-| 5 (shipped) | 13 | 2.138 | 2.722 |
+| 5 | 13 | 2.138 | 2.722 |
 | 4 | 11 | 2.010 | 2.685 |
 | 3 | 9 | 1.173 | 1.613 |
 | 2 | 7 | 1.070 | 1.484 |
 | 1 | 5 | 1.033 | 1.412 |
-| bloom off | 0 | 0.952 | 1.205 |
+| off | 0 | 0.952 | 1.205 |
 
-**Dropping five mips to three recovers about 80% of what bloom costs**, and the shape
-reproduces across both runs even though the absolute level does not. What is *not*
-established is why the cliff sits between four and three rather than the cost falling
-smoothly with the pass count - the two mips being removed there are the smallest targets
-in the chain, so a per-pass constant does not explain it and neither does a texel count.
-That is recorded as an open question rather than given a mechanism.
+That pass at five mips is a bright pass, five mips times two blur directions, a composite and an
+additive blend — 13 render-target passes, each paying a bind and a full-screen draw — so the only
+lever is removing passes. Five mips to three recovers about 80% of what bloom costs and the shape
+reproduces across both runs, though the level does not. Three mips also regrades the picture: the
+broad haze goes and the glow tightens onto bright edges. The shipped chain reaches a lower cost
+and keeps the halo, at ten draws through resampling.
 
-The picture pays for it. At three mips the broad low-frequency haze goes and the glow
-tightens onto the bright edges, which on a look built around red atmosphere is a visible
-regrade rather than a refinement. So the mip count was not the answer taken; the chain
-was replaced instead.
+### The shipped bloom chain
 
-### What replaced it, and what that cost the proofs
+`BloomPass` in `web/bloom-pass.js` is ten draws against `UnrealBloomPass`'s thirteen. The up
+chain accumulates five octaves, whose target means in half float are 9.68e-3, 1.94e-2,
+2.90e-2, 3.87e-2 and 4.84e-2; with `renderer.autoClear` left on they all read 9.67e-3, four fifths
+of the halo wiped between draws. The composite carries `BLOOM_COMPAT_GAIN` of 3.0 and
+`bloomWeights` mirrors the per-mip factors against `radius`, which is a tent tap spacing in texels
+here and a weight mirror in [0, 1] in `UnrealBloomPass`; `web/post-chain.js` constructs it at 0.7.
 
-`UnrealBloomPass` is gone and `BloomPass` in `web/bloom-pass.js` is ours: a progressive
-down-and-up sample chain, five downsamples through a thirteen-tap bilinear filter, four
-upsamples through a nine-tap tent accumulating as they go, and one composite. **Ten draws
-against thirteen**, and the width comes from the resampling rather than from a Gaussian
-per mip, so no level is blurred twice. Measured on the GPU clock, rAF-paced, paired, 13
-rounds of 45 frames: **+0.260 ms against the old +1.060 ms, so 1.22x the frame where the
-old chain was 2.23x.** Those two figures are from separate runs on a drifting machine, so
-the ratios are the comparable half and the absolutes are not.
+Against `UnrealBloomPass`. Method: Blackwall at one 960x600 buffer, both chains driven to the same
+five sizes, every arm repeated across two browser launches with zero spread, and the first
+bloom-bearing arm of each page discarded, because the frame that engages the pass pays its compile
+and reads 1.5114 where every repeat reads 7.1614.
 
-**Two things it got wrong on the way, both worth keeping.** The first version blended the
-glow additively onto the buffer it had been handed, the way the pass it replaces does -
-which means reading that buffer as a texture at the top of the chain and binding it as
-the render target at the bottom. WebGL leaves that undefined and here it lost the picture
-outright: with `strength` at zero, where the blend provably adds nothing, the frame came
-back **0% lit against 100% with the pass off**. Reading both the picture and the glow and
-writing a third target cannot alias, so the pass composites and swaps instead. The second
-is that a probe doing five full-buffer `readPixels` calls inside one Playwright
-`evaluate` gets its promise collected out from under it, which reads exactly like a page
-crash and is not one.
+| what | value | moves when |
+| --- | --- | --- |
+| cost, paced | +0.260 ms and 1.22x the frame, against +1.060 and 2.23x | separate runs, so ratios compare and absolutes do not |
+| picture at `bloom` 0.5 | mean luminance 14.4805 against 17.4846, ratio 0.82818, worst of 40 tile means 21.360/255 | it grows with the glow: 0.85627 at `bloom` 0.45, 0.70718 at 0.8 |
+| picture at `bloom` 0 | identical to four decimals, 0.000/255 worst tile | nothing; this says the rest of the difference is the pass |
 
-**On `export-check` it is a net two rows better, and the baseline was taken properly
-rather than assumed** - the working copies moved outside the repo, `git checkout --`, the
-measurement, and the files put back, because a `git stash` in a worktree of this repo
-pushes onto a ref every other worktree shares.
+The residual is the halo's width and not a droppable term. `UnrealBloomPass` blurs each mip with a
+baked Gaussian spanning 22 taps across a 15x10 mip, where a down/up chain gets its width from one
+tent per octave. Widening that tent with the energy held at about 4.3e-2 gives ratios of 0.828 at
+the shipped 0.7, 0.870 at 1.0, 0.945 at 1.5, 1.012 at 2.0 and 1.093 at 3.0, with the worst tile
+still improving at 3.0 and coverage still 35% against the old halo's 78%. Mean and tile disagree
+about the optimum, so there is no measured value to take and the tent holds at 0.7.
 
-| tree | clean | `bloom-buffer-sized` | `bloom-reference-1080` |
-| --- | --- | --- | --- |
-| before | 45/50, 5 red | 7 red - **caught** | 5 red - **not caught** |
-| with `BloomPass` | 47/50, 3 red | 4 red - **caught** | 3 red - **not caught** |
+Only Blackwall is comparable across the two chains. Every other bloom-bearing look carries a
+duotone whose ramp width is in metres, so `ember` and `tearline` differ by 5.17% and 5.16% with
+the glow off, and `voxel` carries the glyph field's exposure regrade on top.
 
-The two rows that went green are *the whole look rebases, not just the points* at
-1728x1080 and at 1920x1200 - the resolution-independence pair, which were red on a clean
-tree before this and therefore, in the words of the commit that dated them, catching
-nothing. A progressive chain resamples rather than point-sampling a frozen chain, which
-is the likely reason, and the honest alternative is that a differently-shaped halo simply
-differs less between two sizes. Both readings are open.
+`export-check` judges its two resolution-independence rows with bloom taken out, because the build
+they are pinned against imports `UnrealBloomPass` and always will. Isolated at 960x600, Blackwall
+at `bloom` 0.5 reads 7.1614 here against 17.3797 there — a ratio of 0.41205 and a worst tile of
+45.649 — where `bloom` 0 reads 5.0925 against 5.0581, 1.00679 and 0.337. The tool prints the
+bloom-up ratio beside the judged one on every run, and `docs/instruments.md` has the case file.
 
-**Those two paragraphs are the wrong way round, and the correction is left beside them
-rather than replacing them.** Re-measured on 2026-08-24 by running this file's own
-`export-check` at the two commits, one machine, one capture (`sample`), consecutive
-revisions and minutes apart: at `124a90b^` the pair reads luminance ratios of **0.99312
-and 0.99403** with worst tiles of 1.545 and 1.433 of 255, and passes; at `124a90b` it
-reads **0.40978 and 0.40931** with worst tiles of 45.923 and 45.962, and fails. So the
-replacement is what turned those two rows red, not what turned them green. The same
-numbers come back unchanged to five figures at `ad7c806`, `6ad2433` and at the tip, which
-is what says the flip is that one commit and not the fifteen days after it.
+No shipped row moves with `BLOOM_LEVELS`, so the level count has no picture control, and both
+tools build their earlier arm by serving `git show <rev>:web/main.js` into a second page load, so
+a look-affecting change here is argued from the rows it moves and never from a re-baseline.
 
-The reason is that those rows are cross-build and the build they are pinned against is a
-revision, `f14b4be^`, which imports three's `UnrealBloomPass` and always will. From
-`124a90b` they compare our chain against three's and report the distance between two
-implementations as a rebase failure. Isolated at one 960x600 buffer, so that resolution is
-out of it entirely: at Blackwall's `bloom` of 0.5 the mean luminance is **7.1614 here
-against 17.3797 there**, a ratio of 0.41205 and a worst tile of 45.649; at `bloom` 0 it is
-5.0925 against 5.0581, a ratio of 1.00679 and a worst tile of 0.337. The whole 2.4x is that
-one term and none of it is the rebase. `export-check` now takes bloom out of those two rows
-and prints the bloom-up ratio beside the judged one on every run; `docs/instruments.md` has
-the case file.
+### Lens scaling and brightness
 
-**What that leaves open is a picture question rather than an instrument one, and it is not
-settled here.** The same reading says the shipped graded looks got about 2.4x dimmer at
-`124a90b` - the same build, the same look, one commit apart - and this page prices the
-replacement's cost without pricing its picture. Whether that is a regrade somebody accepted
-or a gain this chain is missing wants a decision rather than another measurement, and until
-one is taken the section above should be read as a cost result only.
+`export-check` compares a cropped 50-degree frame with a 26.25-degree frame reduced by two at
+1728x1080 and program time 4s. Each arm reads one image per lens after an accurate seek on warm
+pages, with no additional warmup discarded; bloom, trails and vignette are off. The recorded
+luminance ratios are:
 
-### The decision, and the three terms it turned out to be
+| fixture and arm | lens scaling | comparison |
+| --- | --- | --- |
+| synthetic `sample`, `lens-points` | 1.0049 | 0.6270 on `194ae972` |
+| synthetic `sample`, `lens-splat` | 1.0017 | 0.4019 on `194ae972`; 0.4883 with `vsize-lensed` |
+| synthetic `sample`, `lens-glyph` | 1.0022 | 0.9758 with `glyph-base-lens-absolute` |
+| recorded `2026-08-12-take1`, `lens-points` | 1.0037 | 0.9149 on `194ae972` |
+| recorded `2026-08-12-take1`, `lens-splat` | 1.0004 | 0.5459 on `194ae972` |
 
-**Taken on 2026-08-24: the graded brightness is restored.** Nine of the ten shipped looks
-were graded on 08-02 and 08-08, before the swap, so the brighter output is what their
-authors intended; `cascade` is the one authored inside the dim regime and its `bloom` moves
-in the same change to hold it. The paragraph above stands as the state before the decision
-rather than being replaced by it.
+The synthetic runs retain ten fixture failures and the recorded runs retain the crop-culling
+failure. `lens-absolute` fails the two ordinary-point rows; `vsize-lensed` fails only the additive
+row; `glyph-base-lens-absolute` fails only the glyph row. `splat-large`, with one accurate frame
+at 960x600 and 1920x1200 on warm synthetic pages, reads a coarse difference of 0.287/255 and a
+brightness ratio of 1.0001, against 17.567 and 0.6267 with `vsize-framebuffer`.
 
-**It was three dropped terms and not a gain, which is worth more than the decision.** The
-comparison this time is against `124a90b^` itself - a worktree at `fb03887`, its own server,
-the same `sample` capture by hash, both stages driven to 960x600 where the two builds' chains
-come out the same five sizes, every arm repeated across two browser launches with zero spread
-and the first bloom-bearing arm of each page discarded, because a frame that engages the pass
-pays its compile and reads 1.5114 where every repeat reads 7.1614. On that rig `fb03887` reads
-17.4846 to `f14b4be^`'s 17.3797, and Blackwall with `bloom` 0 comes back **identical to four
-decimals and 0.000/255 on the worst of forty tiles**, which is what says the rest of the
-difference is the pass.
+The wider recorded-take sweep uses six looks, lenses 8/16/22.7446/50/90/300mm and exact
+1920x1080 and 3840x2160 buffers at 4s. Three interleaved `194ae972`/fix repeats after one discarded
+warmup per build and lens, with warm page caches, retain 432 reads of a center square scaled
+with magnification.
+All 36 boot-lens frame pairs are byte-identical. At 1080p, additive points at `pointSize` 40 read
+32.837/255 at the boot lens and 32.625 at 50mm, against 12.081 on `194ae972` at 50mm. At 4K,
+90mm reads 23.857 against 32.826 at the boot lens as point-size clamping enters. Blackwall also
+retains a large brightness change: particle coverage with bloom, trails and vignette off is the
+claim. These measurements use recorded footage, with no live sensor.
 
-1. **`renderer.autoClear` was never dropped, so the accumulating chain did not accumulate.**
-   Read off the pass's own targets in half float: as it shipped all five levels carry a mean
-   of 9.67e-3, and with the flag held down they carry 9.68e-3, 1.94e-2, 2.90e-2, 3.87e-2 and
-   4.84e-2 - one, two, three, four and five octaves, which is what the pass's comment always
-   claimed. Four fifths of the halo was being wiped by the renderer between draws.
-2. **The composite's `3.0`**, which `UnrealBloomPass` carries as "backwards compatibility
-   with previous alpha-based intensity" and which had no counterpart here.
-3. **The per-mip `bloomFactors` and the radius that mirrors them**, which is one term and
-   the reason `radius` meant two different things across the swap - a weight mirror in
-   `[0, 1]` there, a tent tap spacing in texels here, and `0.7` carried over verbatim. The
-   old composite's arithmetic checks out to four figures against its own targets:
-   `3.0 * 0.5 * sum(w * mip)` predicts 3.2913e-2 where the target reads **3.2902e-2**.
+### `cascade` cannot hold its brightness, and the parameter is why
 
-**What the restoration lands on, and what it does not.** Blackwall at one 960x600 buffer,
-`bloom` 0.5, against `fb03887`: **14.4805 against 17.4846, a ratio of 0.82818**, with the
-worst of forty tile means down from 45.828/255 to 21.360. At 0.45 it reads 0.85627 and at 0.8
-it reads 0.70718, so the residual is not a constant - it grows with the glow. **The residual
-is the halo's width and it is not a droppable term.** `UnrealBloomPass` blurs each mip with a
-baked Gaussian, and at the coarse end those kernels span the frame - 22 taps across a
-15x10 mip - where a down/up chain gets its width from one tent per octave. Measured by
-widening that tent while the energy stays put at ~4.3e-2: 0.828 at the shipped 0.7, 0.870 at
-1.0, 0.945 at 1.5, 1.012 at 2.0 and 1.093 at 3.0, with the worst tile still improving at 3.0
-and coverage still 35% against the old halo's 78%. Mean and tile disagree about where the
-optimum is, so there is no measured value to take and the tent is held at 0.7 - **picking 2.0
-because the mean lands on 1.0 would be the fudge factor this whole exercise is about.**
-
-**Only Blackwall is comparable across the swap, which is a result about the other four.**
-Every other look carrying bloom also carries a duotone, and `bcfdb98` gave the duotone a ramp
-width in metres after `fb03887` - so `ember` and `tearline` already differ by 5.17% and 5.16%
-with the glow *off*, and their glow-up ratios of 1.25236 and 1.35194 are two changes read as
-one. `voxel` carries the glyph field's exposure regrade on top of that. A cross-build reading
-of any of them is not a reading of this pass.
-
-**`cascade` cannot be held, and the reason is the parameter rather than the pass.** Fifteen
-pinned program positions of `captures/sample.knct` over 0 to 0.9933s at a 640x360 buffer,
-device scale 1, minimising mean absolute deviation per RGB channel against frames captured on
-the pre-fix tree - the shape `docs/instruments.md` records for `voxel`. The search wants
-**0.015 to 0.0167 at a MAD of 2.19**, which is the 0.15/9 the restored gain predicts. It
-cannot have it: `bloom` is declared with a `step` of 0.05 and `normalise` snaps every write to
-that grid, so the reachable values are 0 and 0.05. Against a reference of mean channel 35.171
-and 32.22% lit, they read:
+Method: fifteen pinned program positions of `captures/sample.knct` over 0 to 0.9933 s at 640x360,
+device scale 1, minimising mean absolute deviation per RGB channel against frames captured on the
+dimmer chain. The reference is a mean channel of 35.171 at 32.22% lit.
 
 | `bloom` | MAD | worst channel | mean channel | lit |
 | --- | --- | --- | --- | --- |
-| 0.15, unchanged | 24.9910 | 210/255 | 60.163 | 48.28% |
-| 0.05, **shipped** | 7.3004 | 161/255 | 42.441 | 35.88% |
+| 0.15 | 24.9910 | 210/255 | 60.163 | 48.28% |
+| 0.05, shipped | 7.3004 | 161/255 | 42.441 | 35.88% |
 | 0 | 4.7586 | 138/255 | 30.413 | 21.63% |
-| 0.0167, unreachable | 2.1926 | 96/255 | - | - |
+| 0.0167, unreachable | 2.1926 | 96/255 | — | — |
 
-**0 wins the MAD and was not taken.** At 0 the pass does not run, so the criterion is reached
-by deleting the thing it measures, and the frame loses a third of its lit coverage - 21.63%
-against the reference's 32.22%, where 0.05 sits at 35.88%. That is CLAUDE.md's rule about an
-object every observation skips, arriving as a number. The same table at 960x600, a size the
-search did not tune at, keeps the same ordering: 27.8610, 8.5002, 4.8568. **A `step` of 0.01
-on `bloom` would let 0.015 hold `cascade` at a MAD of 2.19**, and that is a registry change
-somebody should decide on rather than one this change made.
-
-**`bloom-reference-1080` is now inert for a new reason, and that is a hole to close
-rather than a result to bank.** It was already uncaught before this change, blinded by
-those two rows being red anyway. It is still uncaught now that they are green, and the
-mechanism has moved: that mutation changes the chain's base height, and in a down/up
-chain the halo's width in frame-fractions is set by *how many times it halves* and the
-tent radius, not by the resolution it starts from. So the arm no longer moves the picture
-it is asking about. **The control that would bite this chain mutates `BLOOM_LEVELS`**, and
-until `export-check` carries one, the level count is a number nothing falsifies.
-
-**What still pins bloom's appearance is thin, and was thin before.** `registry-check`'s
-section 1b renders at parameter defaults, where bloom is 0 and the pass never runs, so it
-is blind to all of this. Both tools compute their earlier arm by serving
-`git show <rev>:web/main.js` into a second page load, so the reference is the old code and
-there is no baseline anybody can accept - which is why a look-affecting change here can
-only ever be argued from the rows it moves, never signed off by a re-baseline.
+The search wants 0.015 to 0.0167 at a MAD of 2.19 and cannot have it: `bloom` is declared with a
+`step` of 0.05 and `normalise` snaps every write to that grid, so the reachable values are 0 and
+0.05. 0 wins the MAD and is not taken, because at 0 the pass does not run and the criterion is met
+by deleting the thing it measures — the frame loses a third of its lit coverage. The same table at
+960x600, a size the search did not tune at, keeps the ordering: 27.8610, 8.5002, 4.8568.
+`snapScalar` rounds `(value - min) / step`, so 0.01 snaps 0.015 up to 0.02. **0.005 is the
+coarsest step that keeps the existing 0.05 grid and puts 0.015 on it**, holding `cascade` at a
+MAD of 2.19. That is a registry change somebody has to decide on.
 
 ### The first use of a pass costs a compile
 
-The largest single thing behind "the effects fluctuate" was not an effect's steady cost at
-all. Each post pass and each blending variant of the point material is compiled the first
-time it is actually reached, so the frame that engages one is long and every frame after
-it is normal. Single frames with a `readPixels` barrier, editor at 0.851 Mpx:
+Each post pass and each blending variant of the point material compiles the first time it is
+reached, so the frame that engages one is long and every frame after it is normal. Method: single
+frames with a `readPixels` barrier, editor at 0.851 Mpx.
 
 | first frame after | before | after warming |
 | --- | --- | --- |
-| the grade pass engaging | **83.1 ms** | 1.6 ms |
-| bloom engaging | **48.1 ms** | 4.3 ms |
-| an `additive` toggle | **20.9 ms** | 2.5 ms |
-| the same toggle a second time | 0.7 - 2.1 ms | unchanged |
+| the grade pass engaging | 83.1 ms | 1.6 ms |
+| bloom engaging | 48.1 ms | 4.3 ms |
+| an `additive` toggle | 20.9 ms | 2.5 ms |
+| the same toggle a second time | 0.7 to 2.1 ms | unchanged |
 
-A graded preset writes all three at once, so picking one used to cost about 150 ms of
-compilation and picking it a second time cost nothing. That asymmetry is why the same look
-gets reported as smooth by somebody who tried it twice and as a stall by somebody who
-tried it once, and it is why two testers disagreed with each other rather than with the
-build. `warmPrograms` in `web/main.js` now renders one composed frame with all three
-passes on and both blending states before either transport is installed, and puts every
-flag and accumulator back; the comment beside it has why it is one composed frame rather
-than a pass-by-pass warm.
+A graded preset engages the grade pass, bloom and an `additive` toggle at once, so an unwarmed
+build spends about 150 ms of compilation on the first pick and nothing on the second, which is why
+one tester reports a stall and another reports the same look as smooth. `warmPrograms` in
+`web/main.js` enables all four passes — afterimage, mosh, bloom and grade — and renders one
+composed frame in each blending state, at module level before either transport is installed, then
+restores every flag and accumulator.
 
-### `fps in` is the sensor's rate and has never been a rendering number
+### `fps in` is the sensor's rate and not a rendering number
 
-Worth writing down because it cost a round of confused reports. The `fps` on the status
-line and in the stats overlay is counted in `handleFrame` off socket arrivals, so it
-measures USB and the grabber - this page already records it moving 12.82 to 30.00 on hub
-topology alone. Until the `gpu` row arrived beside it, it was the only performance number
-anywhere in the app, and people read it while dragging sliders. The two are labelled apart
-now, and the `gpu` row is a timer query rather than a wall clock around the draw call: the
-queue is 0.005 ms against 0.310 ms of GPU work, so a wall clock there would report a
-sixtieth of the cost and would not move when an effect was switched on.
+The `fps` on the status line and in the stats overlay is counted in `handleFrame` off socket
+arrivals, so it measures USB and the grabber, and hub topology alone moves it 12.82 to 30.00. The
+`gpu` row beside it is a timer query and not a wall clock around the draw call: the queue is
+0.005 ms against 0.310 ms of GPU work, so a wall clock reports a sixtieth of the cost and does not
+move when an effect is switched on.
 
 ### Showing the crop box
 
-The box's own drawing is chrome and costs a 2D canvas nothing measures. What costs is the
-pass that comes with it: while the box is on screen the points the crop cuts are kept alive
-and dimmed instead of returning at the depth test, so they run the whole vertex stage
-including the region weight.
+While the box is on screen the points the crop cuts are kept alive and dimmed instead of returning
+at the depth test, so they run the whole vertex stage including the region weight.
 
-**0.285 ms per draft with the box hidden, 0.518 ms with it shown — up 82%.** Interleaved,
-17 rounds of 60 drafts each alternating shown and hidden, first round discarded, medians
-reported because one hidden round ran 0.45 ms wide. Editor on the `sample` take at a
-512-tall buffer, 434,176 points, playhead parked at 12.0 s, box at ±0.6 m over 0.05–2.0 m,
-which is deliberately tight enough to cut most of the room and so is the worst case rather
-than a typical one.
-
-The proportion is large because the thing it replaces is the cheapest exit in the shader —
-almost every point was leaving at the depth test and now runs to the end — and 0.23 ms is
-still under a hundredth of a 30 fps frame. Nothing pays it unless somebody is looking at the
-box: `cropOutside` is zero everywhere else, and `export-check` holds an exported frame
-byte-identical with the box shown and hidden.
-
-**Measured on the editor, because the same run on the recorder destroys its own health
-number.** A burst of renders starves the main thread, which starves the socket the sensor
-delivers on: `fps in` fell to 2–7 against ~30 and, per `docs/measurement.md`, that run is
-noise whatever its per-segment timings say. The editor's take is a file, so there is no
-delivered-fps to break, and interleaving is what controls for the machine.
+**0.518 ms per draft — one render of the program at a parked position — with the box shown
+against 0.285 ms hidden, up 82%.** Interleaved, 17 rounds
+of 60 drafts alternating shown and hidden, first round discarded, medians because one hidden round
+ran 0.45 ms wide. Editor on the `sample` take at a 512-tall buffer, 434,176 points, playhead parked
+at 12.0 s, box at ±0.6 m over 0.05–2.0 m, which cuts most of the room and so is the worst case. The
+proportion is large because the exit it replaces is the cheapest in the shader, and 0.23 ms is
+under a hundredth of a 30 fps frame. Nothing pays it unless somebody is looking at the box:
+`cropOutside` is zero everywhere else, and `export-check` holds an exported frame byte-identical
+with the box shown and hidden. Measure it on the editor and not the recorder, because a burst of
+renders starves the socket the sensor delivers on and `fps in` falls to 2–7.
 
 ### The streak
 
-Sixteen taps per pixel in the grade pass, and it needed **two numbers rather than one**,
-because what a guarded block costs the looks that enable it and what it costs the looks that
-do not are different questions and only one of them answers to a parameter toggle.
+Sixteen taps per pixel in the grade pass, and it takes two numbers, because what a guarded block
+costs the looks that enable it and what it costs the looks that do not are different questions.
 
-**Both numbers below predate `streak.angle` and neither has been re-taken.** The tap offset
-was a scalar step down the column when they were measured and is a vec2 multiply against the
-streak's axis now, so each tap gained arithmetic the figures do not include. It is left
-stated rather than guessed at: the gather is sixteen texture fetches and two more multiplies
-is unlikely to move a number whose slope is 0.05 ms per megapixel, but "unlikely to" is the
-reasoning this page exists to replace. Re-taking it wants a quiet machine, and the run that
-would have taken it was on one at load 13.0.
+**With the term on: 1.403 ms per frame against 1.353 off, so +0.050 ms, up 3.7%.** Interleaved, 17
+rounds of 60 renders alternating the uniform inside one page session and one compiled program,
+first round discarded, medians. Editor on the `2026-08-07-take2` take at 1320 frames, playhead
+parked at 22.000 s, camera pinned, 1230x692 (0.851 Mpx) at 100% render scale, page cache warm
+after repeated reads of the same 630 MB capture, machine load 6.0 to 8.7.
 
-**With the term on: 1.403 ms per frame against 1.353 off, so 0.050 ms, up 3.7%.** Interleaved,
-17 rounds of 60 renders each alternating the uniform inside one page session and one compiled
-program, first round discarded, medians reported. Editor on the `2026-08-07-take2` take at
-1320 frames, playhead parked at 22.000 s, camera pinned, drawing buffer 1230x692 (0.851 Mpx)
-at 100% render scale, page cache warm after repeated reads of the same 630 MB capture. Machine
-load 6.0 to 8.7 across the run, with three other agent sessions live on the box.
+It scales with the buffer, which says the number is the taps: 0.015 ms at 0.136 Mpx, 0.028 at
+0.417 and 0.050 at 0.851, so about 0.05 ms per megapixel, a quarter of the rest of the post chain.
+Each buffer size is interleaved within itself and the three blocks ran in sequence, so the slope
+is sound and the absolutes are not comparable between them.
 
-It scales with the buffer, which is what says the number is the taps rather than an artifact:
-0.015 ms at 0.136 Mpx, 0.028 at 0.417 and 0.050 at 0.851, so **about 0.05 ms per megapixel**,
-a quarter of what the rest of the post chain costs. Each of those three is interleaved within
-its own buffer size; the three blocks ran in sequence, so the slope is sound and the absolute
-figures are not comparable between them - the off-arm reads *slower* at the smallest buffer,
-which is the point pass being vertex-bound plus warmup, not a resolution effect.
+**With the term off: nothing measurable, -0.003 ms.** A parameter toggle reports that by
+construction, so it is measured between builds: HEAD against the commit before the streak, both
+held at streak 0, interleaved round by round across two pages, 17 rounds of 60, each arm checked
+to be its own build by whether the uniform is there.
 
-**With the term off: nothing measurable, -0.003 ms.** This is the number a parameter toggle
-reports as zero by construction, so it is measured between builds instead: HEAD against
-`7c6d0fb`, the commit immediately before the streak, both held at streak 0 and interleaved
-round by round across two pages, 17 rounds of 60. The two arms are checked to be the two
-builds rather than assumed - one has the uniform and the other does not - because two pages
-that had silently loaded the same bundle would have produced this same answer.
+Both figures cover a scalar tap offset stepping down the column. The shipped tap offset is a vec2
+multiply against `streak.angle`, so each tap carries arithmetic these numbers leave out.
 
-**The harness verifies its own seek, and had to.** A seek on this rig can resolve without
-moving: the first version of this measurement placed the playhead with one seek, got back a
-transport still sitting at 0 with only the opening frames resident, and would have timed
-whatever frame it happened to be on. Every seek here is checked against the position it asked
-for and retried, and the count of stand-downs comes back with the numbers - one per run at
-these loads.
+## The mosh pass
 
-### The glyph field is unmeasured, and this is what that means
+Per rendered frame it is enabled for, `web/mosh-pass.js` costs **two full-screen draws** — the
+mosh program into one target and a copy out of it — against the grade's one and bloom's ten. Its
+memory is two `HalfFloatType` RGBA targets at the drawing buffer's size, eight bytes a pixel each:
+**33.2 MB at 1920x1080 and 132.7 MB at 3840x2160**. Both are allocated whenever the chain exists
+whether the pass is switched on or off, so a build nobody has raised the smear on still holds
+them. Its time is not measured; see [Not measured](#not-measured).
 
-**There is no frame rate for the glyph field anywhere, and nothing on this page prices it.**
-It is written down as a hole rather than left to be inferred from the silence, because a term
-absent from the cost table above reads as a term that came in under the floor, and this one is
-absent for the opposite reason. `wake` is the page's other unmeasured term and says so in its
-own paragraph; this is the second.
+## The grabber, the wire and the library
 
-The arithmetic that says it will not be cheap is arithmetic and not a measurement. At full
-`glyph.amount` the sprite grows from `pointSize` to the size of a lattice cell on screen, which is
-`latticeCell * projectionMatrix[1][1] * 540.0 / dist` reference pixels — for `cascade`'s 5.5cm
-cell under the default 50-degree camera, **63.7 pixels at one metre against the 8.1 that same
-document names for `pointSize`**, so about 62 times the fill per point at that distance. That is
-over 217,088 rays, and over 434,176 drawn slots whenever `fade` is up, per the draw-range figure
-above. On
-top of the fill each fragment inside a grown sprite computes a wrapped index out of three keys
-and looks a bit out of a 64-entry table of `uvec2`. The field of view keyframes, so 63.7 is the
-default camera's number rather than a constant.
+| what | value | method |
+| --- | --- | --- |
+| `Registration::apply` | 6.3 ms per frame p50 | `grabber --profile` on the sensor, three runs over a fixed 40-45 s window with a 6 s warmup discarded: 6.05 / 6.33 / 6.53. Estimate was 4.5 ms. It runs serially in the frame loop and lands on capture-to-wire latency; its occlusion filter's share is not re-measured here |
+| the whole serial half | 7.1 ms against a 33 ms budget | the same runs |
+| hoisting `Registration::apply`'s 9.2 MB of per-call allocation | 0.30 ms of 5.71 ms | the offline A/B harness on the real loop, where 33 ms and a JPEG encode sit between calls. Its p50 baseline is that harness's and not `--profile`'s |
+| the HD colour encoder | 5.50 ms mean | 90 native 1920x1080 frames over a six-second subscription at q80, TJSAMP_420 and FASTDCT, no encoder warmup discarded, the grabber delivering 180 depth frames at 30.0 fps with zero encoder-busy drops. It runs on its own thread |
+| the `/key` encode, quantise plus greyscale JPEG of the 1920x1080 depth | 6.5 ms mean, about 12 ms a frame with the colour encode on the same thread against a 33 ms budget | 60 keys on an M2 Max at -O2, on the thread the colour encode already runs; the loop's own share is the copy, p50 0.16 ms over 360 calls with 40 warmup discarded. The capture node has not been measured and is the number that decides. Level 1, the smallest reading, survives an accurate inverse DCT and reads back as 0 through a fast one on a flat field at quality 90, so the lowest step of the range can decode as no reading |
+| compressing the wire | zstd 1.75x on depth per frame; a u16 temporal delta plus zstd 2.75x on depth and 2.30x overall, 117 Mbit/s down to 51 | a fixed 40-45 s window with a 6 s warmup discarded; sample count not recorded. 434 KB of the 486 KB frame is uncompressed depth, and colour compresses at 1.00x, being already JPEG. Estimate was 35-45 Mbit/s |
+| `/record/state` against `/library/all` | 1.2 ms against 145 ms | interleaved A/B, 20 pairs against a 200-take library, indexes warm and sidecars written, first eight pairs discarded as page cache settling and the steady-state figures taken from the last twelve, the linked pair on one machine so the listing includes its node round trip. `describeTake` reads a marks sidecar per take, so the listing's cost is per take |
+| the first listing over 200 unindexed takes | 7m30s cold, 2.4s warm | `cachedIndex` scans each file once and writes a `.idx` beside it; a second server over the same directory warms off those sidecars |
 
-**The deleted design document said twenty-two times, and there are two errors under that
-number**, which is worth recording because the figure was quoted onward. It stated the cell as
-`63.7 / z` reference pixels in two places and "about 42 pixels" in a third, and the cost
-paragraph was built on the third: `(42 / 9)²` is 21.8 where `(63.7 / 9)²` is 50.1. The second
-error is the 9, which is the registry's default `pointSize` and not the one this look ships —
-`cascade` names 8.1, and `(63.7 / 8.1)²` is the 61.8 the paragraph above rounds to 62. Neither
-of the document's numbers is `cascade`'s, and a ratio quoted for a shipped look has to be taken
-at the value that look names. The shipped shader's comment beside the clamp carries 64, and the
-projection expression above is what the code actually evaluates.
+## The orbit pivot's press
 
-**The nearest measured thing on this page is a neighbour rather than a bound.** The
-`pointSize` 9 to 48 arm is 28x the fill where a cell-sized sprite at a metre is about 62x —
-each against its own point size, the arm's 9 and `cascade`'s 8.1 — and
-it costs +0.230 ms batch at 0.851 Mpx, +0.583 at 1.915, and +0.841 on the paced clock. It is a
-neighbour in one term only: the glyph branch adds per-fragment index arithmetic and a table
-lookup the point-size arm has none of, and it changes what fraction of the sprite survives the
-discard, so the two are not the same experiment at two sizes.
+A press clears the afterimage, because `OrbitControls.update()` rebuilds `position` out of
+`target` every frame, so any write to the pivot re-rounds the position by about an ulp and
+`renderedCameraChanged` compares exactly. That clear is what one move of a right-drag pan costs,
+and the drag a press precedes clears every frame anyway. The mosh's two targets are not involved:
+they are cleared only by `resetAccumulators`.
 
-**What is measured is that it draws, and that is a correctness result rather than a cost one.**
-Driven in a real browser on `/edit` and `/record` with zero console errors, over `fixture-1g` on
-a 1280x800 page with a planted look — `lattice.amount` 1 on the 5.5cm cell, `glyph.amount` 1, a depth reading
-clipped to 0.4 and 4.5 metres — characters render at cell size in the near room and crossfade
-back to round splats at range, and the rain's pattern moves between program times 12.000 and
-13.000. None of those runs counted a frame. Those observations predate the crossfade reading
-the drawn buffer, and every buffer in them was shorter than 1080 — so their far fields sit on
-the fallback, not the look. A character-coverage figure for the shipped look has to come from a
-buffer at least 1080 tall; the 1920x1080 render taken after the change is the first one that
-qualifies.
+Method: interleaved in one loop, 80 trials with the first 20 discarded, headless Chromium at
+1512x900, `performance.now` quantised to 0.1 ms. Capture not recorded.
 
-**One thing that run looked like it proved, it does not, and the correction belongs here rather
-than in a commit message.** Taking the hash key to zero collapses every cell to the same mark,
-and this paragraph read that as saying the character is chosen per cell rather than per point.
-It says nothing of the kind. A zero coefficient deletes its own seed whichever thing the seed
-was keyed on, so a build hashing the *point* collapses to one mark under it just as tidily —
-the observation is satisfied by both implementations, which makes it no discriminator at all.
-What separates them is `registry-check`'s `one cell, one character` section: thinning a planted
-wall to a quarter of its points leaves the two frames bit-identical, hash for hash, because a
-mark that belongs to the cell cannot depend on how many points landed in that cell, where a
-build reading the point's own texel draws whichever of its four hundred occupants arrived first
-and thinning changes which one that is. Its control is the same thinning at `glyph.amount` 0, where the
-splat's falloff is a gradient rather than a bit, so the point count reaches the pixels and the
-two frames have to differ — which is what says the equality above it is not a fixture nothing
-can reach. The digests themselves stay in the run rather than on this page: they are identifiers
-for one build's output, they move on any shader edit, and what the row claims is that two of
-them match rather than which two. **A screenshot that agrees with the intended implementation is
-not evidence against the other one**, and that is the whole of the error being corrected.
+| press | value |
+| --- | --- |
+| one that hits | 0.600 ms p50, 0.700 p95 |
+| one that enters the handler and leaves at the button test | 0.100 ms, the floor |
+| one that finds nothing over a full grid | 2.8 ms |
 
-**Closing this is two measurements rather than one, and the design document collapsed them
-into one.** It said the cost could not be answered offline and wanted `grabber --profile` on
-the sensor, which is right about half of it. The render cost is answerable here and by the
-instrument this section already runs: `cascade` against the same document at `glyph.amount` 0, paced,
-paired, on the GPU's own timer query, with the arm order flipped every round. Nothing stops
-that but nobody having run it. What the editor genuinely cannot answer is whether a grown
-sprite costs the *recorder* anything, because the recorder's number is delivered fps and a
-burst of renders on that surface starves the socket the sensor delivers on — the shape the
-crop-box measurement above had to move to the editor to escape. That half is
-`grabber --profile` on the sensor with `prof-summary` reading the contention, and it is
-deferred. Until both are run the honest statement is the one at the top of this subsection.
+The full-grid sweep goes over every second texel and then every texel. That is a one-off on a
+pointer event against a 33 ms frame, and it buys presses on surfaces far enough away that stride-2
+samples land more than twelve stage pixels apart.
 
-## The mosh pass: what it allocates, and the number that is not here
+## The effect extraction cost nothing in pixels
 
-The feedback pass in `web/mosh-pass.js` costs, per rendered frame it is enabled for, **two
-full-screen draws** — the mosh program into one target and a copy out of it — against the grade's
-one and the bloom's thirteen. That is its shape rather than its price, and the price is not in
-this file: the paired A/B that every number in [What each effect costs](#what-each-effect-costs)
-comes from was attempted and thrown away, because the harness written for it read a wall clock
-around a render loop and `gl.finish()` does not fence on this machine. `docs/measurement.md`
-carries what that measured instead. The number wants the animation-loop pacing the older table
-used, and nobody has re-run it that way.
+Ten shipped looks — `blackwall`, `cascade`, `contour`, `depth`, `ember`, `ghost`, `grille`, `rgb`,
+`tearline`, `voxel` — each rendered at 15 pinned program positions and hashed with SHA-256 over
+`readPixels`: **150 of 150 equal** to the recorded baseline, re-asked at every landing point of the
+work. Every precondition is asserted: `captures/sample.knct` rebuilt to
+2,605,152 bytes and hashed before any look renders, a 572x322 buffer inside a 640x360 viewport at
+`deviceScaleFactor` 1, the unmasked renderer string matching the baseline's, and `focal.x !== 366`
+refusing a run where real intrinsics arrived. The baseline moves only for an approved picture
+change and records what moved; the most recent move carried 138 of 150 hashes with it. This says
+the shaders did not change, not that they are correct; `registry-check` says each term reaches
+pixels, in 145 rows on the same tree.
 
-**What is measured is the memory, because it is arithmetic rather than a timing.** Two
-`HalfFloatType` RGBA targets at the drawing buffer's size, so eight bytes a pixel each: **33.2 MB
-at 1920x1080 and 132.7 MB at 3840x2160**. Both are allocated whenever the chain exists rather
-than when the pass is switched on — three's own `AfterimagePass` behaves the same way and this
-pass follows it rather than inventing a second policy — so a build nobody has raised the smear on
-still holds them.
+## Not measured
 
-## The effect extraction cost nothing in pixels, and that is a measurement
+An absent term reads as one that came in under the floor. These did not.
 
-Moving every effect's GLSL out of two shader files and into sixteen packages is a refactor
-exactly as long as the text reaching the driver does not change, and the ways it can change
-quietly are not exotic — a chunk boundary off by one line, a blank line kept on both sides of a
-joint, an indent normalised on the way through. None of those breaks a compile and none shows in
-a picture anybody would look twice at. So the claim is held in pixels, against one recorded
-baseline, and it was re-asked at every landing point of the work rather than once at the end.
+| term | why there is no number | what would produce one |
+| --- | --- | --- |
+| `wake` | the draw range is 434,176 in both arms whenever `fade` is up, and it defaults to 120 ms, so wake moves only the surviving fraction — 5.67% to 6.35% on this fixture, under the floor. A parked frame never sheds | a harness that plays |
+| the glyph field | nothing prices it | `cascade` against the same document at `glyph.amount` 0, paced, paired, on the GPU's timer query, for the render cost; `grabber --profile` on the sensor with `prof-summary` reading the contention, for what a grown sprite costs the recorder |
+| the mosh pass's time | the harness written for it read a wall clock around a render loop, and `gl.finish()` does not fence on this machine | the animation-loop pacing the other tables use |
+| Blackwall entire on the paced clock over the shipped bloom chain | the paced table's whole-look row was taken over `UnrealBloomPass` | the same paired design, 13 rounds of 45 frames |
+| the streak's cost with `streak.angle` | its two figures cover a scalar tap offset, not the shipped vec2 multiply | the same design on a quiet machine |
+| why bloom's cliff sits between four mips and three | the two mips removed there are the smallest targets, so neither a per-pass constant nor a texel count explains it | — |
 
-**The rail: 150 framebuffer hashes, equal at every step.** Ten shipped looks — `blackwall`,
-`cascade`, `contour`, `depth`, `ember`, `ghost`, `grille`, `rgb`, `tearline`, `voxel` — each
-rendered at 15 pinned program positions and hashed with SHA-256 over `readPixels`. The final
-run, on the tree that retired the migration gates, came back **150 of 150 equal** to the
-baseline recorded at `0da90174`.
+The glyph field's arithmetic says it will not be cheap. At full `glyph.amount` the sprite grows
+from `pointSize` to a lattice cell on screen, `latticeCell * projectionMatrix[1][1] * 540.0 / dist`
+reference pixels, which for `cascade`'s 5.5 cm cell under the default 50-degree camera is **63.7
+pixels at one metre against the 8.1 that look names for `pointSize`** — about 62 times the fill
+per point at that distance, over 217,088 rays and 434,176 drawn slots. Each fragment inside a
+grown sprite also computes a wrapped index out of three keys and looks a bit out of a 64-entry
+table of `uvec2`. The field of view keyframes, so 63.7 is the default camera's number, and a
+character-coverage figure needs a buffer at least 1080 tall.
 
-The method, because a hash comparison is only worth what its preconditions are:
+## What did not work
 
-- **Fixture.** `captures/sample.knct`, frames 0, 4, 8, 12, 16 and 20 at stride 4, replayed with
-  3 substeps and the colour dropped. The rebuilt fixture is 2,605,152 bytes and its SHA-256 is
-  checked against the one the baseline recorded **before any look is rendered** — a comparison
-  against a different take would agree with itself perfectly and mean nothing.
-- **Buffer.** A 572x322 drawing buffer inside a 640x360 viewport at `deviceScaleFactor` 1, with
-  the output size set to `640x360`. Asserted rather than assumed, for the same reason.
-- **Rasteriser.** ANGLE's Metal renderer on an Apple M2 Max, through Playwright's bundled
-  Chromium. The unmasked renderer string is compared against the baseline's and the run refuses
-  to continue if it differs, because two GPUs round a fragment differently and their hashes are
-  not comparable.
-- **Intrinsics.** The WebSocket is intercepted and answered with nothing, so the page falls back
-  to the pinned focal length; a run where real intrinsics arrived is refused on reading
-  `focal.x !== 366`. The camera is pinned at `(0, 0.1, 1.6)` looking at `(0, 0, -2.2)`.
-- **The baseline's own shape.** It was recorded over three passes — two in one page, which is
-  what catches a look leaking into the next, and a third in a fresh browser context, which is the
-  shape a comparison run has. All three were identical.
+A negative result nobody wrote down is one somebody re-derives. The grabber rows are a fixed
+40-45 s window with a 6 s warmup discarded.
 
-**Two re-pins are recorded rather than hidden.** The baseline moved twice, both times for an
-approved picture change rather than for a refactor: the zero-alpha discard that keeps a
-transparent fragment out of the depth buffer, and the three restored bloom terms. The second
-re-pin was measured at the time — the four core looks differed at 12 of 15 positions and the six
-bloom-bearing looks at 15 of 15, 138 of 150 hashes in all — and everything since has been equal
-at 150. A baseline re-pinned to whatever the tree does today would prove nothing, so each re-pin
-carries what moved and why.
-
-**What this does not say** is that the shaders are correct; it says they did not change.
-`registry-check` is what says each term reaches pixels, and it runs 145 rows on the same tree.
-
-## What did not work, measured rather than assumed
-
-A negative result nobody wrote down is one somebody re-derives. All on a fixed 40-45s window
-with a 6s warmup discarded.
-
-**Transfer-pool tuning does nothing.** libfreenect2 uses a different isochronous pool on
-macOS (`ir_pkts_per_xfer=128, ir_num_xfers=4`) than elsewhere (`8`/`60`), and all four knobs
-take env overrides. Across 13 runs delivered fps spans 1.03fps against 0.60fps for four runs
-of the identical baseline, so every knob is barely above noise, and the Linux default was the
-worst of the set.
-
-**`--no-color` does not halve the drop rate.** An older revision of this repo's docs said it
-did; controlled, drops went slightly *up* (1046/min with colour, 1089 without). SuperSpeed
-isochronous bandwidth is reserved, so bulk colour transfers cannot preempt the depth
-endpoint's allocation.
-
-**The depth solve is not the bottleneck, and a Metal port would not help.** The OpenCL
-kernels benchmark at 0.75-0.85 ms against an 80-90 ms frame interval, on their own
-`AsyncPacketProcessor` thread, so making them faster cannot raise USB intake by one frame.
-Metal is a contingency against Apple dropping OpenCL.
-
-**What *is* worth watching** is `Registration::apply` at 6.3 ms/frame, because it runs
-serially in the grabber's frame loop and lands on capture-to-wire latency; the whole serial
-half measures 7.1 ms against a 33 ms budget. That figure is a correction: it was carried as
-4.5 ms for a long time, and `grabber --profile` over three runs gives 6.05 / 6.33 / 6.53 at
-p50. Its occlusion filter's share has *not* been re-measured here and should not be quoted as
-if it had.
-
-**The keyed webcam's encode rides the colour encoder's thread.** Quantise plus greyscale JPEG
-of the 1920x1080 depth measures 6.5 ms mean over 60 keys on an M2 Max at -O2, beside the
-5.50 ms colour encode, so one thread carries about 12 ms a frame against a 33 ms budget there;
-the loop's own share is the copy, p50 0.16 ms over 360 calls with 40 warmup discarded. The
-capture node has not been measured and is the number that decides. One JPEG fact worth
-keeping: level 1, the smallest reading, survives an accurate inverse DCT and reads back as 0
-through a fast one, measured on a flat field at quality 90, so the lowest step of the range
-can decode as no reading.
-
-**The orbit pivot's press cannot be made free, and a target write has never been free.** The
-pick that moves the pivot was designed to leave the camera bit-identical, so that
-`renderedCameraChanged` would stay false and no screen-space history would be cleared. It cannot:
-`OrbitControls.update()` rebuilds `position` out of `target` every frame, so any write to the
-pivot re-rounds the position by about an ulp, and the comparison is exact. Nudging the target by
-the residual and retrying does not converge - measured, 8 attempts still moving at 7 of 9
-camera poses. What it costs is one afterimage clear per press, which is exactly what one move of
-a right-drag pan has always cost, and the drag a press precedes clears on every frame anyway. The
-mosh history is not involved: `renderedCameraChanged` drives `clearAfterimage()` alone, and the
-mosh's two targets are cleared only by `resetAccumulators`.
-
-**The pick itself is cheap; its retry is not.** Interleaved in one loop, 80 trials with the first
-20 discarded, headless Chromium at 1512x900 on the M2 Max, `performance.now` quantised to 0.1 ms:
-a press that hits costs 0.600 ms at p50 (0.700 at p95), against a 0.100 ms floor for a press that
-enters the handler and leaves at the button test. A press that finds nothing over a full grid
-costs 2.8 ms, because it sweeps every second texel and then every texel. That is a one-off on a
-pointer event against a 33 ms frame, and it buys presses on surfaces far enough away that
-stride-2 samples land more than twelve stage pixels apart.
-
-**Compressing the wire is bounded by colour.** 434 KB of the 486 KB frame is uncompressed
-depth, and an early estimate put zstd-over-temporal-deltas at 35-45 Mbit/s. Measured,
-per-frame zstd manages 1.75x on depth, and a u16 temporal delta plus zstd reaches 2.75x on
-depth and 2.30x overall (117 Mbit/s down to 51). Colour compresses at 1.00x, being already
-JPEG.
+| what was tried | expected | measured | verdict |
+| --- | --- | --- | --- |
+| the four libfreenect2 isochronous transfer-pool knobs, all of which take env overrides; macOS uses `ir_pkts_per_xfer=128, ir_num_xfers=4` where elsewhere uses `8`/`60` | raise delivered fps | across 13 runs delivered fps spans 1.03 fps, against 0.60 fps across four runs of the identical baseline | every knob is barely above noise, and the Linux default is the worst of the set |
+| `--no-color` | halve the drop rate | drops went slightly up: 1046/min with colour, 1089 without | SuperSpeed isochronous bandwidth is reserved, so bulk colour transfers cannot preempt the depth endpoint's allocation |
+| porting the depth solve off OpenCL to Metal | raise USB intake | the OpenCL kernels benchmark at 0.75-0.85 ms against an 80-90 ms frame interval, on their own `AsyncPacketProcessor` thread | making the solve faster cannot raise intake by one frame. Metal is a contingency against Apple dropping OpenCL |
+| sizing a take's frame cache by demand | change the draw | two runs either side read 5.330 / 6.807 / 10.393 / 10.317 before and 5.597 / 6.573 / 10.050 / 9.950 after: +5.0%, -3.4%, -3.3%, -3.6% | straddles zero and sits inside the 6% the gated runs reproduce to. Both sides were ungated at a load average of 7 to 9, so a signed figure was never available |
+| nudging the pivot target by its rounding residual so the camera stays bit-identical | keep the afterimage across a pivot press | 8 attempts still move the camera at 7 of 9 poses | the position is rebuilt from the target every frame; a target write has never been free |
+| blending `BloomPass`'s glow additively onto the buffer it reads, the way `UnrealBloomPass` does | one draw fewer | 0% lit against 100% with the pass off, at a `strength` of zero where the blend provably adds nothing | reading a buffer as a texture at the top of a chain and binding it as the render target at the bottom is undefined in WebGL, so the pass composites into a third target |
 
 ## Resolved: USB topology was the whole bottleneck
 
-The sensor ran at 12-15fps with ~1000 discarded depth frames a minute, and it was the hub
-chain and nothing else. Moving it from three hubs deep on a Thunderbolt dock to a single hub
-on its own controller took it to a flat 30.00fps with zero drops, 1200 frames in 40 seconds,
-three runs identical:
+Method: 1200 frames in 40 seconds, three runs identical. Warmup not recorded.
 
 | topology | fps | drops/min |
 | --- | --- | --- |
-| 3 hubs deep on the dock | 12.82 | ~1000 |
-| ditto, with the sub-9 patch | 14.48 | ~950 |
-| 1 hub, own controller | 30.00 | 0 |
+| 3 hubs deep on a Thunderbolt dock | 12.82 | ~1000 |
+| the same, with the 9-of-10 sub-image edit | 14.48 | ~950 |
+| 1 hub on its own controller | 30.00 | 0 |
 
-The depth endpoint declares a 33,792-byte isochronous packet per 125µs microframe, reserving
-2.16Gbit/s of the link whether it is used or not, against 90MB/s actually sent at 30fps
-before colour. Anything sharing that controller competes for what is left, and in the old
-topology the sensor was a *sibling* of the last hub, sharing its parent with the network
-interface: libfreenect2 reports continuous `not all subsequences received` there, so most
-depth frames arrive incomplete and get discarded. Replay from a file held 29fps throughout,
-which ruled out the browser and the GPU path.
+The depth endpoint declares a 33,792-byte isochronous packet per 125 µs microframe, reserving
+2.16 Gbit/s of the link whether it is used or not, against 90 MB/s actually sent at 30 fps before
+colour, so anything sharing that controller competes for what is left. Three hubs deep the sensor
+is a sibling of the last hub, sharing its parent with the network interface, and libfreenect2
+reports continuous `not all subsequences received` there, so most depth frames arrive incomplete
+and are discarded. Replay from a file holds 29 fps throughout, which rules out the browser and the
+GPU path.
 
 Check the link is SuperSpeed first, because a USB 2.0 cable enumerates fine and then fails to
 stream:
@@ -811,36 +490,31 @@ stream:
 ioreg -p IOUSB -w0 -l | grep -A 40 "Xbox NUI Sensor@" | grep "Device Speed"
 ```
 
-`= 3` is SuperSpeed and works. `= 2` is High Speed, and libfreenect2 fails at `failed to
-claim interface with IrInterfaceId(=1)`, which reads like a permissions problem and is not
-one.
+`= 3` is SuperSpeed and works. `= 2` is High Speed, and libfreenect2 fails at `failed to claim
+interface with IrInterfaceId(=1)`, which reads like a permissions problem and is not one.
 
 ## The depth solve: OpenCL against CPU
 
-`--pipeline cpu` exists for comparison rather than for use:
+`--pipeline cpu` exists for comparison. Both runs saw the same two USB subsequence failures, so
+delivery was identical and the solve is the only variable. Window, sample count and warmup not
+recorded.
 
 | pipeline | fps | depth packets skipped |
 | --- | --- | --- |
 | OpenCL | 30.0 | 0 |
 | CPU | 14.4 | 638 |
 
-Both runs saw the same two USB subsequence failures, so delivery was identical and the solve
-is the only variable. The CPU path is scalar C++ on a single `AsyncPacketProcessor` thread
-(libfreenect2 ships no hand-written SIMD for depth on any architecture), roughly 70ms per
-frame against a 33ms budget, against 0.75-0.85ms for the OpenCL kernels.
+The CPU path is scalar C++ on a single `AsyncPacketProcessor` thread, since libfreenect2 ships no
+hand-written SIMD for depth on any architecture. It runs roughly 70 ms per frame against a 33 ms
+budget, against 0.75-0.85 ms for the OpenCL kernels.
 
-## The edits we carry in libfreenect2
+## The edits carried in libfreenect2
 
-Two, both in the vendored source rather than in a patch file, and both pinned by
-`tools/vendor-check.mjs`.
+Three, all carried in the vendored source and all pinned by `tools/vendor-check.mjs`. `third_party/UPSTREAM.md` carries each in full with the interleaved A/B
+behind its number.
 
-**Accepting depth frames missing only the unused 10th sub-image.** libfreenect2 discards a
-frame unless all ten arrive, but the depth solve reads only 0-8, so frames were thrown away
-over ~300KB that nothing reads. Worth +12.9% on the degraded topology (12.82 to 14.48fps)
-and inert on a healthy one.
-
-**Threading registration's occlusion filter.** Four threads is worth 2.07ms of registration's
-5.76ms p50 on an M2 Max, but the shipped default is two, because the capture node measures
-four as the worst threaded setting there is. The constrained machine decides.
-
-`third_party/UPSTREAM.md` carries both in full, with the interleaved A/B behind each number.
+| edit | what it is worth | method |
+| --- | --- | --- |
+| accept a depth frame missing only sub-image 9, which the depth solve never reads | +12.9% on the degraded topology, 12.82 to 14.48 fps, and inert on a healthy one | 6.8% of discarded frames were missing nothing else. Interleaved with both paths in one binary behind a switch, every new-path run beating every old-path run |
+| thread registration's occlusion filter | 2.07 ms of registration's 5.76 ms p50 at four threads on an M2 Max, and p90 from 6.69 to 4.59 ms | the offline A/B harness, interleaved A/B/A/B/A/B against upstream's scatter, three rounds, about 1000 frames per arm after 60 of warmup, all six arms at 30.03 to 30.04 fps. The default is two threads, because a Pi 5 measures four as the worst threaded setting there is: two holds 29.56–29.75 fps at 11.87 ms, three registers fastest at 10.03 ms and drops frames in 3 of 3 rounds, four is slower at 13.10 ms. The constrained machine decides |
+| ignore two USB link setup calls on Apple Silicon that `Freenect2DeviceImpl::open` otherwise treats as must-succeed | no throughput number: without it the sensor never opens, because the controller does not implement U1/U2 link power states and `enablePowerStates()` answers `LIBUSB_ERROR_PIPE` | both calls are still made and still log through `CHECK_LIBUSB_RESULT`. `failed to enable power states U1!` is harmless and the U2 form is not, so grep the startup log before reading packet loss on a Mac as a topology problem |

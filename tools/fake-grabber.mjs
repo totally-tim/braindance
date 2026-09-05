@@ -251,7 +251,7 @@ const hello = Buffer.from(JSON.stringify({
 // A real grabber sees EPIPE when the reader goes away first and it is not an error; unhandled it
 // exits with a stack trace that reads as the grabber having failed.
 process.stdout.on('error', (err) => { if (err.code === 'EPIPE') process.exit(0); });
-// Monotonic and strictly ascending - the index, the retime curve and `mixT` rest on it. Started
+// Monotonic and strictly ascending - the index, clip source-time mapping and `mixT` rest on it. Started
 // from the process clock so two takes in one session do not begin at the same stamp.
 const origin = Math.round(performance.now());
 let n = 0;

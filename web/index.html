@@ -59,6 +59,7 @@
        takes whatever the fixed ones leave. */
     --timeline-h: 112px;
     --tlanes-h: 0px;
+    --ruler-h: 32px;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; background: #05070a; color: var(--ink);
@@ -792,8 +793,8 @@
   .tclock small { display: block; font-size: 11px; letter-spacing: 0.14em;
     text-transform: uppercase; color: var(--faint); white-space: nowrap; }
   .tclock output { font-size: 22px; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
-  /* Source time is derived from program time through the retime, never edited,
-     so it reads as a secondary value rather than as a second control. */
+  /* Source time is derived from program time through the clip's speed and in-point,
+     never edited, so it reads as a secondary value rather than as a second control. */
   .tclock.derived output { color: var(--dim); font-size: 14px; }
 
   .tchips { flex: 1; display: flex; gap: 8px; flex-wrap: nowrap; align-items: center;
@@ -999,7 +1000,7 @@
      is exactly the surface step 4 left behind. Every other row is fixed and adds
      to it — only parameters that actually carry keys get one. */
   .trow { position: relative; flex: none; border-top: 1px solid var(--line); }
-  .trow.ruler { flex: none; height: 32px; border-top: 0; }
+  .trow.ruler { flex: none; height: var(--ruler-h); border-top: 0; }
   .tcol.rail .trow { display: flex; align-items: center; justify-content: space-between;
     gap: 6px; padding: 0 8px; overflow: hidden; }
   .tcol.rail .trow span { color: var(--dim); font-size: 11px; overflow: hidden;
@@ -1071,8 +1072,8 @@
   /* The take's marks, on the ruler the playhead runs along. They live on the take
      rather than in any project, so every edit of that take shows the same ticks -
      which is the payoff for putting them in a sidecar. Drawn in program time
-     through the retime curve, because the ruler is program time and a mark is
-     source time, and the two only coincide at rate 1 with no keys. */
+     through the clip's speed and in-point, because the ruler is program time and a
+     mark is source time, and the two only coincide on an untrimmed clip at 1.00x. */
   /* The strip stays transparent to the pointer so a scrub that crosses a mark is
      still a scrub, and each tick takes its own events back - the ticks are buttons
      that seek to the mark, and a layer that swallowed nothing would have swallowed
@@ -1084,7 +1085,7 @@
   .tmk svg { display: block; }
   /* A mark the edit never reaches stacks at the right edge rather than being
      dropped: the moment is still in the footage, and a tick nobody can explain is
-     better than a tick that silently vanished when the curve was retimed.
+     better than a tick that silently vanished when the clip's speed changed.
 
      **Above the two interaction states rather than below them, and the order is the
      whole of it.** `.tmk.beyond` and `.tmk:hover` have the same specificity, so
@@ -1100,11 +1101,8 @@
   .tmk:focus-visible { outline: 0; color: var(--ink); }
   .tmk.sel { color: var(--ink); }
 
-  /* Above the keys, which is why this is 6 and not the 3 it was. The diamonds had to
-     rise over the cut markers' grab zone - see `.tkey` for the press that zone was
-     eating - and a playhead left underneath them would be broken by every key it swept
-     past, on the one line you follow while the take is rolling. It is
-     `pointer-events: none`, so lifting it takes no gesture off anything. */
+  /* Above the keys, so a diamond does not break the one line you follow while the take
+     is rolling. `pointer-events: none`, so sitting this high takes no gesture off anything. */
   .tplayhead { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--ink);
     pointer-events: none; z-index: 6; }
   .tplayhead::before { content: ""; position: absolute; top: 0; left: -5px;
@@ -1122,31 +1120,19 @@
      dragged to set the clip range. A triangle points inward so the two do not
      collide when they are close. */
   .tcut { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--accent);
-    cursor: ew-resize; z-index: 4; }
-  /* The grab zone, which is not the line. A 1px target plus a 10px triangle at one
-     end is a control you have to aim at, and these two are how a clip gets trimmed -
-     measured at 1.0px wide before this. The line stays 1px because a thick one would
-     be a poor ruler; only the hit area grows.
-
-     Each one reaches *inward*, and that is not symmetry for its own sake. `out` sits
-     at `left: 100%` while nothing is trimmed, which puts it exactly on the right edge
-     of the strip - so a zone centred on it hangs half outside the window, and
-     `elementFromPoint` found 5 grabbable pixels there rather than 11. Reaching into
-     the kept range instead keeps the whole zone on screen at either extreme, and it
-     is where the pointer wants to be anyway: you drag the edge of the block you are
-     keeping. Where the two nearly coincide `out` wins, being later in the markup.
-
-     It still reaches down over the lanes, and it is `.tkey`/`.thandle` standing above
-     it that keeps that from mattering: the zone owns the lane whitespace, a key owns
-     itself. Lowering the zone here instead would have handed the ruler's marks the
-     same win over it, on the one surface where trimming is the whole point. */
-  .tcut::after { content: ""; position: absolute; top: 0; bottom: 0; }
+    pointer-events: none; z-index: 4; }
+  /* The grab zone, which is not the line: a 1px target is a control you have to aim at. The
+     ruler row only, so the lanes below keep their own presses. Each side reaches *inward*
+     rather than centring, because `out` sits at `left: 100%` untrimmed and a centred zone
+     would hang half off the strip. */
+  .tcut::after { content: ""; position: absolute; top: 0; height: var(--ruler-h);
+    pointer-events: auto; cursor: ew-resize; }
   .tcut-in::after { left: -4px; width: 16px; }
   .tcut-out::after { left: -12px; width: 16px; }
   .tcut::before { content: ""; position: absolute; top: 0; left: -5px;
     border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 7px solid var(--accent); }
-  .tcut.tcut-out::before { left: -4px; border-left: 4px solid var(--accent); border-right: 4px solid transparent; border-top: 0; border-bottom: 7px solid var(--accent); top: auto; bottom: 0; }
-  .tcut.tcut-in::before { left: -4px; border-left: 4px solid transparent; border-right: 4px solid var(--accent); border-top: 0; border-bottom: 7px solid var(--accent); top: auto; bottom: 0; }
+  .tcut.tcut-out::before { left: -4px; border-left: 4px solid var(--accent); border-right: 4px solid transparent; border-top: 0; border-bottom: 7px solid var(--accent); top: calc(var(--ruler-h) - 7px); }
+  .tcut.tcut-in::before { left: -4px; border-left: 4px solid transparent; border-right: 4px solid var(--accent); border-top: 0; border-bottom: 7px solid var(--accent); top: calc(var(--ruler-h) - 7px); }
 
   /* ── keyframe lanes ────────────────────────────────────────────────────────
      A lane draws the curve it is a lane for, because ease handles need something
@@ -1167,22 +1153,9 @@
      box are dead, so the target is smaller than it measures. The diamonds were 9px and
      the handles 7px, which is an aim rather than a click, and these two are the whole
      of keyframe editing. The drawn shapes stay small; only the reach grows. */
-  /* **Above the cut markers rather than under them, which is what stops a press meant
-     for a key from trimming the clip instead.** `#tIn` and `#tOut` are 1px lines whose
-     grab zone reaches 16px inward at `z-index: 4`, and they run the whole column from
-     the ruler down past the last lane - so that zone lies over the lanes as well as
-     over the ruler, where trimming is the only gesture there is. Nothing between a
-     diamond and those markers opens a stacking context - `.tlane`, `.trow` and
-     `#tLanes` are all `z-index: auto` - so the two numbers were compared directly and
-     4 beat 2. Measured at a 640-wide viewport on the 243s `fixture-1g`: the bed runs
-     525px from x 115, the bloom key at 4s draws centred on x 123.6, `#tIn`'s zone owns
-     x 114.5 to 126.5, and clicking that key's own centre selected nothing, drew no
-     handle, and moved the clip-in to 00:03.986 - a silent retrim from a press aimed at
-     a keyframe. Raising these two leaves the zone everything it still needs, the ruler
-     and the lane whitespace between keys, and gives a key the pixels it is drawn on.
-     The one cost is that a diamond now paints over a marker's line where they cross,
-     which is the right way round: the line has the shading either side of it to say
-     where the range ends, and a key has only itself. */
+  /* Above the cut markers, so a diamond paints over a marker's line where the two cross:
+     the line has the shading either side of it to say where the range ends, and a key has
+     only itself. */
   /* A clip, drawn as the thing that is there. The trim chrome on the ruler is the negative of
      this - two shades of the excluded region - and `.tminirange` is the precedent this follows:
      a positive box for a positive fact. */
@@ -1542,16 +1515,9 @@
                at the bottom of the old range changed the clip's length by a third and the
                same step at the top changed it by one percent. The bounds live in `main.js`
                beside the mapping that reads this, so there is one copy of them. `value` is
-               written from `retime.rate` at boot for the same reason - a position spelled
+               written from the clip's speed at boot for the same reason - a position spelled
                out here would be a second statement of where 1.00x sits. -->
-          <!-- The diamond belongs beside the slider it keys, which is the same shape the
-               camera chip to the right uses for the same job. Without it the slider sets
-               one rate for the whole clip and nothing can author a speed change over time:
-               `paintRateKey` and the add/delete behind it were still here after the rework
-               took the button away, so the retime curve remained a thing the document could
-               hold and the surface could not make. -->
-          <label class="tspeed">speed<input id="tRate" type="range" min="0" max="1" step="any"><b id="tRateOut">1.00&times;</b>
-            <button class="kf" id="tRateKey" type="button" aria-label="Retime keyframe"><i></i></button></label></span>
+          <label class="tspeed">speed<input id="tRate" type="range" min="0" max="1" step="any"><b id="tRateOut">1.00&times;</b></label></span>
         <!-- Applies to whichever key is selected in a lane, except `ends`, which is
              about the track's two outer keys however you got here - see EASE_PRESETS.
              They cover what a handle drag is usually reaching for, and a drag is still
@@ -1674,7 +1640,7 @@
       <div class="dialog-segments" id="projectAspects"></div>
     </div>
     <!-- A `<select>` and not a segmented row because the four rates are a list that could
-         grow, and because everything that reads this - the `change` handler that retimes
+         grow, and because everything that reads this - the `change` handler that sets the speed
          the open clip, `timingChanged`, and the restore from a saved project - already
          speaks `.value` and `change`. The id is unchanged from when this sat in the export
          dialog: the element moved surfaces, and nothing about what it drives did.

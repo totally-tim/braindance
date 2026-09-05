@@ -29,6 +29,8 @@ uniform float bufferHeight;
 // value, so it is not a registry parameter. Written once at boot out of
 // ALIASED_POINT_SIZE_RANGE, since the range is a property of the context and not of the window.
 uniform float pointCeiling;
+// projectionMatrix[1][1] of the 50-degree lens every look is graded through.
+uniform float lensReference;
 uniform float pointSize, nearClip, farClip, time, edgeTol;
 uniform float cropL, cropR, cropB, cropT, cropOn, cropOutside;
 uniform float noise, noiseScale, noiseSpeed;
@@ -323,26 +325,25 @@ void main() {
   // with the drawing buffer, and this is the dominant one. The clamp stays in framebuffer
   // pixels deliberately: it is a bound on what the hardware can draw, not a look value.
   float k = bufferHeight / 1080.0;
-  // How big one lattice cell is on screen at this distance, in the reference pixels vSize is
-  // carried in, derived from the projection because the fov is part of the camera pose and
-  // keyframes. max(0.15, -mv.z) is written out again below rather than hoisted into the clamp:
-  // that clamp's exact text is what export-check's pointsize-absolute anchors on.
+  // Magnify points with the scene; their reference size stays fixed for energy normalisation.
+  float zoom = projectionMatrix[1][1] / lensReference;
+  // Keep cellPx in the same reference as vSize, so lattice compensation does not undo the zoom.
   float dist = max(0.15, -mv.z);
-  float cellPx = latticeCell * projectionMatrix[1][1] * 540.0 / dist;
+  float cellPx = latticeCell * lensReference * 540.0 / dist;
 ` },
     // How big the sprite is drawn - a replacement, since an effect growing the sprite has to
     // stand where the clamp stood. The fallback is that clamp exactly as it was written.
     {
       slot: 'v.pointSize',
       fallback: /* glsl */ `\
-  gl_PointSize = clamp(pointSize * k / max(0.15, -mv.z), 1.0, 64.0);
+  gl_PointSize = clamp(pointSize * zoom * k / max(0.15, -mv.z), 1.0, 64.0);
 `,
     },
     { text: /* glsl */ `\
   // Carried in reference pixels rather than framebuffer ones, because the fragment shader
   // normalises additive energy against area and the same look must not sum brighter at twice
-  // the resolution.
-  vSize = gl_PointSize / k;
+  // the resolution or dimmer through a longer lens.
+  vSize = gl_PointSize / (k * zoom);
 
 ` },
     // What a displacement does to a splat's additive energy, cancelled where the view distance

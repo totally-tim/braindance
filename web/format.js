@@ -4,11 +4,12 @@
  *
  * A document from any other version is refused, naming the version it found, rather than
  * opened on a best guess: this build ships no conversion and no reader of a second shape.
- * Version 7 carries a `clips` array - each clip its own take, placement, retime curve and the
- * look values that write the cloud - beside the `look` block holding the ones that write the
- * post chain. Version 6 carried one take at the top and one undivided look under it.
+ * Version 8 carries a `clips` array - each clip its own take, placement, speed, in-point and
+ * the look values that write the cloud - beside the `look` block holding the ones that write
+ * the post chain. Version 7 placed its footage with a keyframed retime curve instead of the
+ * `speed` and `sourceStart` pair.
  */
-export const PROJECT_VERSION = 7;
+export const PROJECT_VERSION = 8;
 
 /**
  * How many clips this build composites.

@@ -13,10 +13,13 @@ import {
 } from './scene.js';
 import {
   EASE_OUT_LINEAR, EASE_IN_LINEAR, SEGMENT_POINT_CEILING, copyHandle, easeAt, elevate, keyBefore,
-  HOLD_ENDS, scalarAt, scalarSlopeAt, stepAt, hermite, tangentAt,
-  handleRefusal, foldRefusal, foldFreeX, retimeSourceSecAt, retimeProgramSecAt,
+  HOLD_ENDS, scalarAt, stepAt, hermite, tangentAt,
+  handleRefusal, foldRefusal, foldFreeX,
 } from './curve.js';
 import { tiltQuaternion } from './world-tilt.js';
+import {
+  isFlyKey, flyDirection, flyStep, lookOffset,
+} from './fly.js';
 import { verticalFovForFocalLength, focalLengthForVerticalFov } from './lens.js';
 import {
   EXPORT_SIZES, DEFAULT_EXPORT_SIZE, reduceAspect, exportAspects, sizesForAspect,
@@ -28,7 +31,8 @@ import { pickDepth, sensorPoint } from './depth-pick.js';
 import { ZOOM_PER_NOTCH, rulerTickSeconds, tickLabel, makeViewWindow } from './view-window.js';
 import { clipIn, clipOut, clipBoundOrThrow, writeClipRange } from './clip-range.js';
 import {
-  RATE_MIN, RATE_MAX, frameLoadByTake, integerMidpoint, rescaleClipKeys, snapshotClipKeys,
+  RATE_MIN, RATE_MAX, clipAffordedSec, clipProgramSecAt, clipSourceSecAt, frameLoadByTake,
+  framesBackFor, headFramesFor, headTrim, integerMidpoint, rescaleClipKeys, snapshotClipKeys,
   usableClipRate,
 } from './clip-plan.js';
 import {
@@ -230,8 +234,8 @@ let evaluatingClip = null;
  * Whose look a write or a read is about: the clip under evaluation, else the selected clip.
  *
  * An explicit indirection rather than a binding repointed for the walk. The selection is the
- * user's - the panel, the lanes and the retime curve are all views of it - so a walk that moved
- * it would be mutating what the operator is looking at in order to render a frame.
+ * user's - the panel and the lanes are both views of it - so a walk that moved it would be
+ * mutating what the operator is looking at in order to render a frame.
  */
 const clipOfLook = () => evaluatingClip ?? selectedClip;
 const lookOf = () => clipOfLook()?.look ?? bootLook;
@@ -411,6 +415,7 @@ function setDeliverableSize(text) {
 
 // Which camera the viewport draws. Navigation is off under the program camera.
 function setViewCamera(cam) {
+  stopLookDrag();
   useViewCamera(cam);
   if (gizmo) gizmo.camera = cam;
   renderPass.camera = cam;
@@ -2629,10 +2634,11 @@ function serialiseProjectBody({ suppressed = null } = {}) {
       id: clip.id,
       take: clip.take ? { ...clip.take } : null,
       start: clip.start,
-      // The trim, and null where this clip runs for everything its curve affords. Written and
+      // The trim, and null where this clip runs for everything its footage affords. Written and
       // read back as the same fact, which is where the edit stops using the take.
       length: clip.trim,
-      retime: clip.retime.serialise(),
+      speed: clip.speed,
+      sourceStart: clip.sourceStart,
       appliedPreset: clip.appliedPreset,
       // This clip's own look, read off its own tables. Two clips of one project hold two of
       // these and they are allowed to disagree, which is what makes a clip's look its own.
@@ -2651,7 +2657,7 @@ function restoreKey(owner, k, kind) {
   if (!Number.isFinite(k?.t)) {
     throw new Error(`${owner} has a key at t=${JSON.stringify(k?.t)}: a key time has to be a finite number`);
   }
-  const [loY, hiY] = kind === 'retime' || !KINDS[kind].overshoots ? [0, 1] : [-1, 2];
+  const [loY, hiY] = KINDS[kind].overshoots ? [-1, 2] : [0, 1];
   const handle = (side, points, fallback) => {
     if (points === undefined) return copyHandle(fallback);
     const ok = Array.isArray(points)
@@ -2898,12 +2904,17 @@ function checkProject(project) {
     }
     // A trim, and read back as the answer. It is where the edit stops using the take, which is
     // a different fact from how much take there is rather than a second spelling of it; null is
-    // a clip that runs for everything its curve affords.
+    // a clip that runs for everything its footage affords.
     if (clip.length !== null && (!Number.isFinite(clip.length) || clip.length < 0)) {
       throw new Error(`${what} is ${JSON.stringify(clip.length)} long: a length is a number of project seconds at or above zero, or null where the document states none`);
     }
-    if (!clip.retime || !Array.isArray(clip.retime.keys) || !usableClipRate(clip.retime.rate)) {
-      throw new Error(`${what} carries a retime with an array of keys and a rate from ${RATE_MIN} to ${RATE_MAX}`);
+    if (!usableClipRate(clip.speed)) {
+      throw new Error(`${what} runs at ${JSON.stringify(clip.speed)}: a clip's speed is a number from ${RATE_MIN} to ${RATE_MAX}`);
+    }
+    // The in-point: where in the take this clip starts. Zero is an untrimmed head, and a
+    // negative one would ask for footage from before the take began.
+    if (!Number.isFinite(clip.sourceStart) || clip.sourceStart < 0) {
+      throw new Error(`${what} starts at source ${JSON.stringify(clip.sourceStart)}: a clip's in-point is a finite number of source seconds, at or after zero`);
     }
     const stampWhy = stampRefusal(what, clip.appliedPreset ?? null);
     if (stampWhy) throw new Error(stampWhy);
@@ -2918,24 +2929,14 @@ function checkProject(project) {
       );
     }
 
-    const keys = clip.retime.keys.map((k) => {
-      const key = restoreKey('the retime curve', k, 'retime');
-      if (!Number.isFinite(key.value)) {
-        throw new Error(`the retime key at ${key.t}s maps to ${JSON.stringify(key.value)}: source time is a number`);
-      }
-      return key;
-    });
-    refuseFolds('the retime curve', keys);
-    // The fourth door onto the curve, and the one a file from outside comes through.
-    retime.assertMonotonic(keys);
-
     plannedClips.push({
       id: clip.id,
       take: take === null ? null : { id: take.id, hash: take.hash },
       start: clip.start,
       trim: clip.length ?? null,
       appliedPreset: clip.appliedPreset ?? null,
-      retime: { rate: clip.retime.rate, keys },
+      speed: clip.speed,
+      sourceStart: clip.sourceStart,
       look,
     });
   }
@@ -3092,8 +3093,8 @@ function applyProject(plan, sources = null) {
     clip.start = planned.start;
     clip.trim = planned.trim;
     clip.appliedPreset = planned.appliedPreset;
-    clip.retime.rate = planned.retime.rate;
-    clip.retime.keys = planned.retime.keys;
+    clip.speed = planned.speed;
+    clip.sourceStart = planned.sourceStart;
   }
   releaseUnusedFrames();
   orderClips();
@@ -3123,15 +3124,21 @@ function refuseResolvedDurations(plan, sources) {
     const source = sources.get(at)?.take ?? clips[at]?.source;
     if (!source || source.streaming) continue;
     const sourceDuration = source.duration ?? source.times?.[source.times.length - 1];
-    const curve = createRetime();
-    curve.rate = planned.retime.rate;
-    curve.keys = planned.retime.keys;
-    const length = planned.trim ?? curve.programDurationFor(sourceDuration);
+    // Ahead of the arithmetic below, which would answer a length of zero for this and call it
+    // resolved: an in-point past the end of the footage leaves the clip nothing to draw.
+    if (planned.sourceStart >= sourceDuration) {
+      throw new Error(
+        `clip ${planned.id} starts at source ${planned.sourceStart}s in ${sourceDuration}s of `
+        + 'footage: nothing of the take is left after its in-point',
+      );
+    }
+    const length = planned.trim
+      ?? clipAffordedSec({ speed: planned.speed, sourceStart: planned.sourceStart }, sourceDuration);
     const end = planned.start + length;
     if (!Number.isFinite(length) || !Number.isFinite(end)) {
       throw new Error(
         `clip ${planned.id} ends at ${String(end)} after resolving ${sourceDuration}s of footage: `
-        + 'its start, trim and retime must produce a finite project duration',
+        + 'its start, trim, speed and in-point must produce a finite project duration',
       );
     }
     const lastFrame = Math.floor(end * fps);
@@ -3783,90 +3790,6 @@ const counters = {
   bitmapDecodes: 0,
 };
 
-// One clip's map from its own program time to source time.
-const createRetime = () => ({
-  rate: 1,
-  keys: [],
-
-  sourceSecAt(programSec) { return retimeSourceSecAt(this, programSec); },
-
-  // The local slope, in source seconds per program second.
-  slopeAt(programSec) {
-    if (this.keys.length < 2) return this.rate;
-    return scalarSlopeAt(this.keys, programSec);
-  },
-
-  /**
-   * How many output frames back the curve reaches to cover `sourceSpanSec` ending
-   * at `programSec`.
-   */
-  framesBackFor(programSec, sourceSpanSec, outputFps, ceiling) {
-    if (!(sourceSpanSec > 0)) return { frames: 0, covered: true };
-    const at = this.sourceSecAt(programSec);
-    const limit = Math.max(0, Math.floor(ceiling));
-    for (let n = 1; n <= limit; n++) {
-      if (at - this.sourceSecAt(programSec - n / outputFps) >= sourceSpanSec - 1e-9) {
-        return { frames: n, covered: true };
-      }
-    }
-    return { frames: limit, covered: false };
-  },
-
-  /** The program position a source position sits at. */
-  programSecAt(sourceSec) { return retimeProgramSecAt(this, sourceSec); },
-
-  // How long a program is, given a source that long.
-  programDurationFor(sourceSec) { return Math.max(0, this.programSecAt(sourceSec)); },
-
-  /** Refuses a curve that runs downhill. Equal values are a hold and are legal. */
-  assertMonotonic(keys) {
-    for (const key of keys) {
-      // Handles first, because a curve can run downhill without any pair of key
-      // values doing so.
-      for (const [side, h] of [['easeOut', key.easeOut], ['easeIn', key.easeIn]]) {
-        if (h.length !== 1) {
-          throw new Error(
-            `the retime key at program ${key.t}s has a ${side} handle of ${h.length} control `
-            + 'points: the retime curve is a cubic, because the proof that a handle inside the '
-            + 'unit box cannot run source time backwards is a proof about a cubic and about '
-            + 'nothing else',
-          );
-        }
-        if (!h[0].every((c) => c >= 0 && c <= 1)) {
-          throw new Error(
-            `the retime key at program ${key.t}s has a ${side} handle at `
-            + `[${h[0].join(', ')}]: a handle outside the unit box bends the curve back on `
-            + 'itself inside the segment, and source time cannot run backwards',
-          );
-        }
-      }
-    }
-    for (let i = 1; i < keys.length; i++) {
-      if (keys[i].value < keys[i - 1].value) {
-        throw new Error(
-          `the retime curve falls from ${keys[i - 1].value}s to ${keys[i].value}s between `
-          + `program ${keys[i - 1].t}s and ${keys[i].t}s: source time cannot run backwards, `
-          + 'because neither accumulator can',
-        );
-      }
-    }
-    return keys;
-  },
-
-  serialise() {
-    return {
-      rate: this.rate,
-      keys: this.keys.map((k) => ({
-        t: k.t, value: k.value, easeOut: copyHandle(k.easeOut), easeIn: copyHandle(k.easeIn),
-      })),
-    };
-  },
-});
-
-// The selected clip's curve, as a live binding: every reader below names it rather than
-// reaching through a clip. Assigned by `selectClip`, which runs before anything reads it.
-let retime = null;
-
 /** Every selected-clip key time, rescaled by `k` when its slope changes. */
 function reparameteriseProgramTime(k, was) {
   rescaleClipKeys(was.keys, k, was.pivot);
@@ -3875,8 +3798,7 @@ function reparameteriseProgramTime(k, was) {
 /** Where a later rescale reads its times from. Live objects, and the `t` they had. */
 const programTimeSnapshot = () => ({
   keys: snapshotClipKeys(lookOf().tracks.values()),
-  // With one key, the rate changes the slope on both sides of that key rather than at zero.
-  pivot: retime.keys.length === 1 ? retime.keys[0].t : 0,
+  pivot: 0,
 });
 
 class LivePairSource {
@@ -3952,12 +3874,11 @@ const livePairs = new LivePairSource();
 const liveTransport = new LiveTransport(livePairs);
 
 /**
- * One layer of the composite: where it sits in the project, the frames it draws, the curve that
- * picks them and the cloud it draws them with.
+ * One layer of the composite: where it sits in the project, the frames it draws, how fast it
+ * runs through them and the cloud it draws them with.
  *
- * Clip-local time at project time `t` is `t - start`, and the curve maps that onto a position in
- * the source - so an offset into the take is something the curve already states and there is
- * deliberately no second field carrying it.
+ * Clip-local time at project time `t` is `t - start`. Two fields turn that into a source
+ * position: `sourceStart`, the in-point a head trim writes, and `speed`, the slider's rate.
  */
 class Clip {
   constructor(id, source, cloud, look = createLook()) {
@@ -3972,10 +3893,13 @@ class Clip {
     // The footage this clip draws, as `{ id, hash }`, or null before anything is open. The take
     // is named by hash so a rename carries it, and `source` is what that hash resolved to.
     this.take = null;
-    this.retime = createRetime();
+    // How fast this clip runs through its footage, in source seconds per project second.
+    this.speed = 1;
+    // The in-point: the source second at this clip's head, which a head trim moves.
+    this.sourceStart = 0;
     // Project seconds, and where the composite puts this clip.
     this.start = 0;
-    // Project seconds this clip runs for, or null to run for everything its curve affords. A
+    // Project seconds this clip runs for, or null to run for everything its footage affords. A
     // trim is where the edit stops using the take, which is a different fact from how much take
     // there is - so this is read as the answer rather than derived and compared to one.
     this.trim = null;
@@ -3991,12 +3915,12 @@ class Clip {
     this.drawnSinceReset = false;
   }
 
-  /** How much project time this clip's curve makes of the source behind it. */
+  /** How much project time this clip makes of the source left after its in-point. */
   get afforded() {
-    return this.source.streaming ? Infinity : this.retime.programDurationFor(this.source.duration);
+    return this.source.streaming ? Infinity : clipAffordedSec(this, this.source.duration);
   }
 
-  /** How long this clip runs in project seconds: its trim, or everything its curve affords. */
+  /** How long this clip runs in project seconds: its trim, or everything its footage affords. */
   get length() { return this.trim === null ? this.afforded : this.trim; }
 
   /** Where this clip stops, in project seconds. A trim past the source holds its last frame. */
@@ -4009,17 +3933,17 @@ class Clip {
 
   /** The source frame at or before a project position, as the lower half of a bracketing pair. */
   sourceFrameAt(programSec) {
-    return this.source.bracket(this.retime.sourceSecAt(programSec - this.start));
+    return this.source.bracket(clipSourceSecAt(this, programSec - this.start));
   }
 
   /** Where a source frame lands in project seconds, which is `sourceFrameAt` run backwards. */
   programSecOf(sourceFrame) {
-    return this.start + this.retime.programSecAt(this.source.times[sourceFrame]);
+    return this.start + clipProgramSecAt(this, this.source.times[sourceFrame]);
   }
 
-  /** How many output frames back this clip's curve reaches to cover `sourceSpanSec`. */
+  /** How many output frames back this clip reaches to cover `sourceSpanSec`. */
   surfaceFramesBack(programSec, sourceSpanSec, outputFps, ceiling) {
-    return this.retime.framesBackFor(programSec - this.start, sourceSpanSec, outputFps, ceiling);
+    return framesBackFor(this.speed, sourceSpanSec, outputFps, ceiling);
   }
 
   /**
@@ -4028,8 +3952,8 @@ class Clip {
    * A clip that appears mid-playback has whatever its ping-pong pair last drew still in it, so
    * without this the first frame after a cut shows no fade and no wake where the same instant
    * reached by seeking is pre-rolled and looks right. The window is this clip's own surface span
-   * read at its in-point, bounded by the source its head affords: the curve extrapolates outside
-   * its domain, so the walk stops where it would ask for footage from before the take began.
+   * read at its in-point, bounded by the footage in front of that in-point: a clip whose head is
+   * the head of the take has nothing to pre-roll over.
    */
   warmFrames(outputFps, ceiling) {
     if (this.source.streaming) return 0;
@@ -4040,32 +3964,22 @@ class Clip {
       && held.ceiling === ceiling && held.timingGen === timingGeneration) {
       return held.frames;
     }
-    const want = this.retime.framesBackFor(0, surfaceSec, outputFps, ceiling).frames;
+    const want = framesBackFor(this.speed, surfaceSec, outputFps, ceiling).frames;
     const frames = Math.min(want, this.headFrames(outputFps, want));
     this.warmCache = { surfaceSec, outputFps, ceiling, timingGen: timingGeneration, frames };
     return frames;
   }
 
-  /** How many output frames before its in-point this clip's curve still reaches new footage. */
+  /** How many output frames before its in-point this clip still reaches footage over. */
   headFrames(outputFps, limit) {
-    const floor = this.source.times[0];
-    let last = this.retime.sourceSecAt(0);
-    for (let n = 1; n <= limit; n++) {
-      const at = this.retime.sourceSecAt(-n / outputFps);
-      if (at < floor) return n - 1;
-      // A hold reaches no further back however long it is walked, so the walk stops where source
-      // time stops moving rather than re-binding the frame already bound for the whole edit.
-      if (!(at < last - 1e-9)) return n - 1;
-      last = at;
-    }
-    return limit;
+    return headFramesFor(this.speed, this.sourceStart, outputFps, limit);
   }
 }
 
 // The clip array is filled here, having been declared beside the cloud the first one draws with.
 clips.push(new Clip('c1', livePairs, bootCloud, bootLook));
 
-// Bumped by anything that moves where a clip sits or how its curve runs, which is what the warm
+// Bumped by anything that moves a clip's placement, speed or in-point, which is what the warm
 // window above is memoised against.
 let timingGeneration = 0;
 
@@ -4160,7 +4074,6 @@ function mintClipId() {
 function selectClip(clip) {
   selectedClip = clip;
   selectCloud(clip.cloud);
-  retime = clip.retime;
 }
 selectClip(clips[0]);
 
@@ -4305,7 +4218,7 @@ function renderProgramFrame(t) {
 
       // The one place program time becomes source time, through the clip's own zero.
       const local = t - clip.start;
-      const frame = clip.source.at(clip.retime.sourceSecAt(local));
+      const frame = clip.source.at(clipSourceSecAt(clip, local));
       for (const step of frame.steps) {
         step.makeCurrent();
         advanceSurfaceState(step.gapSec);
@@ -4386,8 +4299,54 @@ function renderProgramFrame(t) {
 // Navigation's own clock, kept out of the seam.
 let lastNavTime = 0;
 
+// Which fly keys are down, and whether shift is with them. Written from events and read by the
+// loop, because nothing but the loop may start a redraw.
+const flyHeld = new Set();
+let flyShift = false;
+// Wall clock at the previous fly frame, or 0 when the hold has not started. The free camera is
+// interactive, so it takes real seconds where auto-orbit takes the program delta.
+let flyLastAt = 0;
+const flyMove = new THREE.Vector3();
+// The look drag's live state, written by the pointer handlers far below and read here. Null
+// when no look drag is up; otherwise the last pointer position, since the turn is per-move.
+let lookDrag = null;
+
+/** Whether the held keys ask for a non-zero move. Shift gates the six, so it is a held key. */
+const flyInputActive = () => (
+  flyShift && flyDirection(flyHeld, freeCamera.quaternion, freeCamera.up, flyMove).lengthSq() > 0
+);
+
+/** Whether a held fly key may move the camera. `controls.enabled` is the program camera, a
+ *  gizmo drag, a node drag and a crop drag in one term - each already a reason the orbit stands
+ *  down. A look drag turns it off too and is the one that must not stop the flight, because
+ *  flying while you turn is what the mode is. */
+const flying = () => flyInputActive() && (controls.enabled || lookDrag !== null) && !exporting;
+
+/** Change the held keys or the shift they need, starting a new clock when the move starts or
+ *  stops. Shift comes through here for the same reason a key does: a resumed hold that kept the
+ *  old clock takes the stall cap as its first step. */
+function changeFlyKeys(change) {
+  const wasActive = flyInputActive();
+  change();
+  if (!wasActive || !flyInputActive()) flyLastAt = 0;
+}
+
+/** One frame of flight: the camera and its pivot translate by the same vector. */
+function advanceFly() {
+  if (!flying()) { flyLastAt = 0; return; }
+  const now = performance.now();
+  const dt = flyLastAt === 0 ? 0 : (now - flyLastAt) / 1000;
+  flyLastAt = now;
+  flyStep(flyHeld, dt, freeCamera.quaternion, freeCamera.up, flyMove);
+  freeCamera.position.add(flyMove);
+  // The pivot travels with the camera. `update()` rebuilds the position out of the target, so
+  // moving the camera alone would change the orbit's radius instead of where you are standing.
+  controls.target.add(flyMove);
+}
+
 // Auto-orbit gets the program delta, so the same orbit renders the same at any speed.
 function advanceNavigation(t) {
+  advanceFly();
   controls.update(Math.max(0, t - lastNavTime));
   lastNavTime = t;
 }
@@ -4430,7 +4389,7 @@ function streamMirrorPose() {
 // one-clip edit caches exactly what it always did.
 const CACHE_FRAMES = 192;
 // What one decoded frame costs resident: a depth block at two bytes a cell, plus the same grid
-// as an RGBA bitmap. Measured at 1.26 MiB against 1.24 by construction - docs/performance.md.
+// as an RGBA bitmap. Measured at 1.23 MiB against 1.24 by construction - docs/performance.md.
 const FRAME_BYTES = POINTS * 2 + POINTS * 4;
 // What a take's decoded frames may cost. Generous on purpose: it covers the eight clips
 // `CLIP_CEILING` allows, each pre-rolling two and a half seconds of persistence at 30fps.
@@ -4785,7 +4744,7 @@ function reportCappedSeek(seek) {
  * Everything here is one per project rather than one per clip: the output rate is the edit's own
  * coordinate, and `exclusive` serialises the renderer, so two of these would interleave
  * `setRenderTarget` calls. What belongs to one clip - its frames, its walk cursor, how far its
- * curve reaches back - it asks the clip for.
+ * source timing reaches back - it asks the clip for.
  */
 class TimelineTransport {
   constructor() {
@@ -4815,10 +4774,10 @@ class TimelineTransport {
 
   get programSec() { return this.frame / this.outputFps; }
 
-  /** The clip the panel, the lanes and the retime binding are pointed at. */
+  /** The clip the panel and the lanes are pointed at. */
   get clip() { return selectedClip; }
 
-  /** Program seconds, which is where the last clip stops. Its own curve is what says where. */
+  /** Program seconds, which is where the last clip stops. Each clip's end says where. */
   get duration() {
     let end = 0;
     for (const clip of clips) if (Number.isFinite(clip.end)) end = Math.max(end, clip.end);
@@ -4868,7 +4827,7 @@ class TimelineTransport {
    * The two halves have different owners. Surface memory is per cloud, so the surface half is
    * asked of each clip drawn here. A clip already inside its warm window needs the elapsed part
    * of that window rebuilt too. The project's surface half is the longest of them - one clip's
-   * curve can need three times another's to cover the same span of persistence. The afterimage
+   * timing can need three times another's to cover the same span of persistence. The afterimage
    * is one screen-space buffer over the whole composite, so the trails half is asked once.
    */
   preroll(programSec = this.programSec) {
@@ -5031,7 +4990,7 @@ class TimelineTransport {
       .every((held) => held <= MAX_SPAN_FRAMES);
 
     // Walked in from the head until every take's span fits its cache. Bisected rather than
-    // stepped: on a slow retime the window is the whole edit and stepping it is quadratic.
+    // stepped: on a slow clip the window is the whole edit and stepping it is quadratic.
     if (!fits(start)) {
       let lo = start;
       let hi = target;
@@ -5058,18 +5017,19 @@ class TimelineTransport {
   }
 
   async seekNow(programSec, options = {}) {
-    // Planned, fetched, then planned again: the retime curve can move under the await.
+    // Planned, fetched, then planned again: a clip's speed, in-point or start can move under
+    // the await.
     let planned = this.planSeek(programSec, options.frames);
     this.askFor(planned.spans);
     for (let attempt = 0; !this.resident(planned.spans); attempt++) {
       if (attempt >= SEEK_REPLANS) {
-        // Overtaken, not broken: the hand that moved the curve has already queued a repaint.
+        // Overtaken, not broken: the hand that moved the clip timing has already queued a repaint.
         this.overtaken++;
         if (this.overtaken > SEEK_OVERTAKEN_LIMIT) {
           this.overtaken = 0;
           throw new Error(
             `${SEEK_OVERTAKEN_LIMIT} seeks in a row were overtaken before they could land: `
-            + 'the span a seek plans is not becoming resident, which is not a moving curve',
+            + 'the span a seek plans is not becoming resident, which is not a moving clip',
           );
         }
         requestRepaint();
@@ -5127,7 +5087,7 @@ class TimelineTransport {
     this.askFor(spans);
     for (let attempt = 0; !this.resident(spans); attempt++) {
       if (attempt >= SEEK_REPLANS) {
-        throw new Error(`the retime curve moved under ${SEEK_REPLANS} plans of a draft at ${programSec}s`);
+        throw new Error(`a clip's timing moved under ${SEEK_REPLANS} plans of a draft at ${programSec}s`);
       }
       await this.fetch(spans);
       target = this.frameAt(programSec);
@@ -5212,7 +5172,7 @@ class TimelineTransport {
       if (want < clip.source.applied) {
         throw new Error(
           `playback at ${t.toFixed(3)}s wants source frame ${want} of clip ${clip.id} while the `
-          + `accumulators have consumed ${clip.source.applied}: the retime curve runs backwards here`,
+          + `accumulators have consumed ${clip.source.applied}: the clip runs backwards here`,
         );
       }
       if (!clip.source.resident(clip.source.applied + 1, want)) return false;
@@ -5631,7 +5591,6 @@ const ui = {
   source: document.getElementById('tSource'),
   rate: document.getElementById('tRate'),
   rateOut: document.getElementById('tRateOut'),
-  rateKey: document.getElementById('tRateKey'),
   fps: document.getElementById('tFps'),
   bed: document.getElementById('tBed'),
   rail: document.getElementById('tRail'),
@@ -6408,8 +6367,9 @@ for (const handle of [ui.in, ui.out]) {
     if (!timeline) return;
     handle.setPointerCapture(e.pointerId);
     handleDrag = { side, from: e.clientX, moved: false };
-    // Held back rather than let through: the strip below deselects on every press that is not on
-    // a clip, and grabbing a marker is not that press. `pointerup` hands it back if no drag came.
+    // `#tIn` and `#tOut` are siblings of `#tBed` rather than children, so this takes nothing off
+    // the ruler's scrub. What it stops is the bubble to `ui.beds`, which deselects on a press
+    // landing outside a clip - and grabbing a marker is not that press.
     e.stopPropagation();
   });
   handle.addEventListener('pointermove', (e) => {
@@ -6432,15 +6392,9 @@ for (const handle of [ui.in, ui.out]) {
       if (handleDrag?.side !== side) return;
       const dragged = handleDrag.moved;
       handleDrag = null;
-      // A press that never moved is not a trim. The grab zone reaches 12px inward over the lane
-      // whitespace a person presses to come off a clip, so on a long enough program the whole gap
-      // before the first clip is inside it and the deselect could not be made - and a click there
-      // set the in-point to whatever second it landed on. Both stop here: the range is untouched
-      // and the press goes where it was aimed.
-      if (!dragged) {
-        deselectClipRow();
-        return;
-      }
+      // A press that never moved is not a trim, so the range is left where it is. The zone is the
+      // ruler row alone, so a press meant for a lane never arrives here to be handed back.
+      if (!dragged) return;
       const t = programAtPointer(e);
       if (handle === ui.in) {
         setClipInOut({ in: Math.max(0, Math.min(t, clipOut ?? timeline.duration)) });
@@ -6483,20 +6437,49 @@ function clearClipRange() {
   history.commit();
 }
 
-const TYPING_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
-const isTyping = (el) => el instanceof HTMLElement && (TYPING_TAGS.has(el.tagName) || el.isContentEditable);
+// An input type that is not a text field. Anything else counts as text, including a type this
+// list has never heard of, so a text-like type added later defaults to keeping its keyboard.
+const NON_TEXT_INPUT_TYPES = new Set([
+  'range', 'checkbox', 'radio', 'button', 'submit', 'reset', 'color', 'file', 'image',
+]);
+// The keys a slider, a dropdown or a checkbox uses to operate itself. Everything else reaches
+// the editor, so a focused lens slider does not swallow cmd-z and the fly keys.
+const SELF_OPERATING_KEYS = new Set([
+  'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', ' ', 'Enter', 'Home', 'End', 'PageUp', 'PageDown',
+]);
+
+/** Whether a focused control takes text, which is the case that keeps the whole keyboard. */
+function takesText(el) {
+  if (!(el instanceof HTMLElement)) return false;
+  if (el.isContentEditable) return true;
+  if (el.tagName === 'TEXTAREA') return true;
+  if (el.tagName !== 'INPUT') return false;
+  return !NON_TEXT_INPUT_TYPES.has(el.type);
+}
+
+/** Whether the focused control has this key, so the editor must not take it off the control. */
+function controlKeeps(el, key) {
+  if (takesText(el)) return true;
+  if (!(el instanceof HTMLElement)) return false;
+  if (el.tagName !== 'INPUT' && el.tagName !== 'SELECT') return false;
+  return SELF_OPERATING_KEYS.has(key);
+}
 
 const SHORTCUTS = 'space play/pause · arrows step a frame, with shift a second · '
   + 'home/end · i/o set in/out, with shift jump to them · option-x uses the whole clip · '
   + 'del removes the selected key · '
   + 'm marks, [/] jump to the previous and next mark · '
-  + '+/- zoom the ruler, ,/. pan it, f fits the clip, z frames in..out · '
+  + '+/- zoom the ruler, ,/. pan it, f fits the clip · '
+  + 'shift-wasd fly, shift-q/e down and up, shift-drag turns the view, shift-wheel the lens · '
   + 'g moves and turns the selected clip · '
   + 'cmd-z undoes · h hides the panel';
 
 /** The editor's keyboard, and the guard that has to come with it. */
 addEventListener('keydown', (e) => {
-  if (isTyping(e.target)) return;
+  // Above the typing guard: shift on its own arrives as a keydown, and releasing it as a keyup
+  // with `shiftKey` already false.
+  changeFlyKeys(() => { flyShift = e.shiftKey; });
+  if (controlKeeps(e.target, e.key)) return;
   if (e.defaultPrevented) return;
 
   if (e.key === 'h' || e.key === 'H') {
@@ -6507,6 +6490,18 @@ addEventListener('keydown', (e) => {
     e.preventDefault();
     history.undo();
     return;
+  }
+  // The recorder's viewport orbits the same camera, so this sits above the clip guard below.
+  // A repeat is harmless: the set already holds the code. The key is recorded whether or not
+  // shift is down, so pressing shift onto a key already held starts the flight rather than
+  // waiting for the key to be pressed again; shift is what *takes* the key, so without it the
+  // key goes on to whatever else is bound to it.
+  if (isFlyKey(e.code) && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    changeFlyKeys(() => flyHeld.add(e.code));
+    if (e.shiftKey) {
+      e.preventDefault();
+      return;
+    }
   }
   if ((e.key === 'r' || e.key === 'R') && !e.metaKey && !e.ctrlKey && !e.altKey && !EDITING && ui.recGo && !ui.recGo.disabled) {
     e.preventDefault();
@@ -6604,14 +6599,29 @@ addEventListener('keydown', (e) => {
     case ',': case '<': e.preventDefault(); if (view.panBy(-0.25)) viewChanged(); return;
     case '.': case '>': e.preventDefault(); if (view.panBy(0.25)) viewChanged(); return;
     case 'f': case 'F': e.preventDefault(); if (view.fit()) viewChanged(); return;
-    case 'z': case 'Z':
-      e.preventDefault();
-      if (view.frame(clipIn, clipOut ?? view.duration)) viewChanged();
-      return;
     case '?': e.preventDefault(); say(SHORTCUTS); return;
     default:
   }
 });
+
+/** A key released outside the page never arrives, so losing the page releases everything. */
+function clearFlyKeys() {
+  flyHeld.clear();
+  flyShift = false;
+  flyLastAt = 0;
+}
+
+// Not behind the typing guard: a key released after the focus moved into an input would
+// otherwise stay held for ever.
+addEventListener('keyup', (e) => {
+  changeFlyKeys(() => {
+    flyShift = e.shiftKey;
+    flyHeld.delete(e.code);
+  });
+});
+addEventListener('blur', clearFlyKeys);
+document.addEventListener('focusin', (e) => { if (takesText(e.target)) clearFlyKeys(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) clearFlyKeys(); });
 
 /** How wide the 1.00x detent is, in pixels of the control it lives on. */
 const DETENT_PX = 3;
@@ -6640,7 +6650,7 @@ const sliderFromRate = (rate) => (
   / Math.log(RATE_MAX / RATE_MIN)
 );
 
-ui.rate.value = String(sliderFromRate(retime.rate));
+ui.rate.value = String(sliderFromRate(selectedClip.speed));
 
 /** What a speed gesture holds still, captured once when it starts. */
 let rateGesture = null;
@@ -6653,13 +6663,13 @@ function beginRateGesture({ fromKey = false } = {}) {
     fromKey,
     gen,
     // Disarmed for a gesture that begins inside the band at something other than 1.00x.
-    detentArmed: retime.rate === 1 || !insideDetent(sliderFromRate(retime.rate)),
-    // Through the clip's own zero: the curve's domain is clip-local, so feeding it the
-    // project second would anchor on the wrong source frame of a clip that starts after 0.
+    detentArmed: selectedClip.speed === 1 || !insideDetent(sliderFromRate(selectedClip.speed)),
+    // Through the clip's own zero: the map is clip-local, so feeding it the project second
+    // would anchor on the wrong source frame of a clip that starts after 0.
     source: sourceSecOfProgram(timeline.programSec),
     wasPlaying: timeline.playing,
     // The parameterisation the gesture started in. Every time is rescaled from these.
-    rate: retime.rate,
+    rate: selectedClip.speed,
     times: programTimeSnapshot(),
     // Fractions preserve footage when one clip is the whole program. A clip inside a larger edit
     // changes the program length non-uniformly, so its existing program bounds are held instead.
@@ -6694,7 +6704,8 @@ function endRateGesture() {
 /** Puts the slope at `rate` and carries the document with it. The order is load-bearing. */
 function applyRate(rate) {
   if (refuseEdit('a speed change')) return timeline ? timeline.programSec : 0;
-  retime.rate = rate;
+  // The seam: the slider and the gesture around it say rate, and the model says speed.
+  selectedClip.speed = rate;
   rateGesture.applied = true;
   const program = programHoldingAnchor();
   // `frameOf` rather than `frameAt`, which clamps to a clip range that is stale here.
@@ -6769,6 +6780,8 @@ let orbiting = false;
 let orbitSettling = false;
 // A flag rather than a position, since reading the transport from a control event is the loop.
 let orbitRedrawWanted = false;
+// Whether a fly key was held on the previous frame, so the release can be seen at all.
+let flyWasHeld = false;
 // Through `onNav`, because the object does not outlive a change of navigation's up.
 onNav('start', () => { orbiting = true; orbitSettling = false; });
 onNav('change', () => {
@@ -6803,9 +6816,16 @@ function pumpParkedDraft() {
     draftWanted = null;
     orbitRedrawWanted = false;
     orbitSettling = false;
+    flyWasHeld = false;
     gizmoWriteWanted = false;
     return;
   }
+  // A hold takes the same two paths a pointer orbit does: a draft-quality redraw per frame, and
+  // one accurate seek on the frame it ends.
+  const flyingNow = flying();
+  if (flyingNow) orbitRedrawWanted = true;
+  else if (flyWasHeld) orbitSettling = true;
+  flyWasHeld = flyingNow;
   // Before the drafts, because the gizmo's write is what the repaint below would be drawing.
   pumpGizmo();
   if (draftWanted !== null) {
@@ -6891,7 +6911,6 @@ const poseLaneFraction = (keys, t) => {
   return easeAt(keys[i].easeOut, keys[i + 1].easeIn, (t - keys[i].t) / span);
 };
 
-const RETIME_LANE_H = 40;
 // How far a curve is sampled across a lane. A smoothness choice rather than a pixel count.
 const CURVE_SAMPLES = 120;
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -6925,10 +6944,6 @@ const svg = (name, attrs) => {
 
 /** The value range a lane draws against. */
 function laneRange(owner) {
-  if (owner === 'retime') {
-    const total = Math.max(1e-6, timeline ? timeline.clip.source.duration : 1);
-    return { min: 0, max: total };
-  }
   const spec = params.spec(laneName(owner));
   return KINDS[spec.kind].range(spec);
 }
@@ -6971,9 +6986,6 @@ function laneRows() {
     }
   }
   rows.push({ owner: 'clip-add', label: '', kind: 'clip-add', height: CLIP_ADD_H });
-  if (retime.keys.length > 0) {
-    rows.push({ owner: 'retime', label: 'retime', kind: 'scalar', height: RETIME_LANE_H });
-  }
   // The project's own curves at the foot, which is everything a clip does not hold: the camera,
   // and the post chain every clip is seen through.
   for (const name of ['camera', ...scopeNames('project')]) {
@@ -7024,7 +7036,7 @@ const withLaneClip = (owner, write) => {
 // A clip row and the bar above it own no keys, so a lane's key list is empty rather than absent.
 const keysOf = (owner) => {
   if (owner === 'clip-add' || isClipRow(owner)) return [];
-  return owner === 'retime' ? retime.keys : (trackOf(owner)?.keys ?? []);
+  return trackOf(owner)?.keys ?? [];
 };
 
 /** The clip a lane owner's row is, or null where the owner is not a clip row. */
@@ -7036,7 +7048,6 @@ function laneReadout(owner) {
   // The length rather than the placement: where a clip sits is what its box already says, and
   // the rail is 96px wide, which fits one number and not two.
   if (clip) return Number.isFinite(clip.length) ? `${clip.length.toFixed(2)}s` : '∞';
-  if (owner === 'retime') return `${retime.slopeAt(programToLane(owner, playheadSec())).toFixed(2)}×`;
   // Out of the look the owner names rather than off the selection, or every clip's lane would
   // read the selected clip's number back however many clips are keyed.
   const name = laneName(owner);
@@ -7147,11 +7158,9 @@ function repositionLanes() {
 function lanePoints(owner) {
   const { min, max } = laneRange(owner);
   const span = Math.max(1e-9, max - min);
-  // Sampled on the lane's own clock: the walk below is over program seconds and a retime curve
-  // and a placement are both measured from their clip's in-point.
-  const at = owner === 'retime'
-    ? (t) => retime.sourceSecAt(programToLane(owner, t))
-    : (t) => KINDS[trackOf(owner).kind].at(owner, programToLane(owner, t));
+  // Sampled on the lane's own clock: the walk below is over program seconds and a clip's keys
+  // are measured from its in-point.
+  const at = (t) => KINDS[trackOf(owner).kind].at(owner, programToLane(owner, t));
   const points = [];
   // Sampled across the visible window rather than the clip, so nothing is drawn outside it.
   for (let i = 0; i <= CURVE_SAMPLES; i++) {
@@ -7284,23 +7293,6 @@ function handleSpan(keys, seg, side, index) {
   return { lo: Math.min(at(k - 1), at(k + 1), here), hi: Math.max(at(k - 1), at(k + 1), here) };
 }
 
-/** Holds a retime key inside its neighbours, in both time and value. */
-function clampRetimeKey(keys, key) {
-  const i = keys.indexOf(key);
-  // The curve is anchored at the origin, so its first key holds still in time.
-  if (i === 0) key.t = 0;
-  else {
-    const after = i < keys.length - 1 ? keys[i + 1].t : Infinity;
-    key.t = Math.max(keys[i - 1].t + KEY_GAP_SEC, Math.min(after - KEY_GAP_SEC, key.t));
-  }
-  const floor = i > 0 ? keys[i - 1].value : 0;
-  const ceiling = i < keys.length - 1 ? keys[i + 1].value : timeline.clip.source.duration;
-  key.value = Math.max(floor, Math.min(ceiling, key.value));
-}
-
-// The least program time two retime keys may be apart.
-const KEY_GAP_SEC = 1 / 240;
-
 /** Readouts only. Structure is `rebuildLanes`, and the two are kept apart on purpose. */
 function paintLanes() {
   for (const el of ui.rail.querySelectorAll('b[data-readout]')) {
@@ -7308,7 +7300,6 @@ function paintLanes() {
   }
   for (const [name, btn] of keyButtons) paintKeyButton(name, btn);
   paintClipCommands();
-  paintRateKey();
   paintMarkButton();
   paintEase();
 }
@@ -7330,23 +7321,19 @@ function lanesMoved() {
   paintLanes();
 }
 
-/** The retime curve or the output rate moved, so every position on the ruler did. */
+/** A clip's timing or the output rate moved, so every position on the ruler did. */
 function timingChanged({ moved = false } = {}) {
-  // Before the guard: the warm window is memoised against this and a recorder-side change to a
-  // curve still moves it, whether or not there is a strip to repaint.
+  // Before the guard: the warm window is memoised against this and a recorder-side timing change
+  // still moves it, whether or not there is a strip to repaint.
   timingGeneration++;
   if (!timeline) return;
   // Re-clamped against a duration this may have changed: the window is stored as fractions.
   view.reclamp();
-  if (rateFromSlider(ui.rate.value) !== retime.rate) {
-    ui.rate.value = String(sliderFromRate(retime.rate));
+  if (rateFromSlider(ui.rate.value) !== selectedClip.speed) {
+    ui.rate.value = String(sliderFromRate(selectedClip.speed));
   }
-  ui.rateOut.textContent = `${retime.rate.toFixed(2)}×`;
-  // A curve of no keys is `programSec * rate` and one of a single key is `value + programSec *
-  // rate`, so the slider still says what both of those do - `sourceSecAt` and `slopeAt` both read
-  // one key as rate-driven, and this used to be the only one of the three that did not.
-  ui.rate.disabled = selectedClipRow() === null || retime.keys.length > 1;
-  if (ui.rateKey) ui.rateKey.disabled = selectedClipRow() === null;
+  ui.rateOut.textContent = `${selectedClip.speed.toFixed(2)}×`;
+  ui.rate.disabled = selectedClipRow() === null;
   if (ui.fps) ui.fps.value = String(timeline.outputFps);
   buildRuler();
   paintMarks();
@@ -7369,14 +7356,15 @@ const openTakeHash = () => selectedClip.take?.hash ?? null;
 /**
  * The selected clip's map between its take's source time and the edit's program time.
  *
- * Through the clip's placement as well as its curve. A mark is a fact about footage, so it stays
- * keyed by take and two clips of one take share it - which is exactly why drawing one needs to
- * say which clip it is being drawn against, and the selection is what says.
+ * Through the clip's placement as well as its speed and in-point. A mark is a fact about footage,
+ * so it stays keyed by take and two clips of one take share it - which is exactly why drawing one
+ * needs to say which clip it is being drawn against, and the selection is what says.
  */
 const programSecOfSource = (sourceSec) => selectedClip.start
-  + selectedClip.retime.programSecAt(sourceSec);
-const sourceSecOfProgram = (programSec) => selectedClip.retime
-  .sourceSecAt(programSec - selectedClip.start);
+  + clipProgramSecAt(selectedClip, sourceSec);
+const sourceSecOfProgram = (programSec) => clipSourceSecAt(
+  selectedClip, programSec - selectedClip.start,
+);
 const markSourceSecOfProgram = (programSec) => Math.max(
   0, Math.min(selectedClip.source.duration, sourceSecOfProgram(programSec)),
 );
@@ -7385,11 +7373,10 @@ const markSourceSecOfProgram = (programSec) => Math.max(
  * The program second a lane's own clock starts at, and the two conversions across it.
  *
  * Zero for the project's own tracks, and the clip's in-point for every lane a clip owns: its
- * look, its placement and its retime curve. A lane that drew its keys at `view.pct(key.t)` would
- * put them `start` seconds early the moment its clip was placed anywhere but the head of the edit.
+ * look and its placement. A lane that drew its keys at `view.pct(key.t)` would put them `start`
+ * seconds early the moment its clip was placed anywhere but the head of the edit.
  */
 function laneEpoch(owner) {
-  if (owner === 'retime') return selectedClip.start;
   return trackEpoch(laneName(owner), laneClip(owner));
 }
 
@@ -7421,8 +7408,8 @@ function paintMarks() {
   if (!timeline || !clipGestureLive()) return;
   const total = view.duration;
   for (const mark of takeMarks) {
-    // Marks are source milliseconds and the ruler is program seconds, so ticks go
-    // through the curve.
+    // Marks are source milliseconds and the ruler is program seconds, so ticks go through the
+    // selected clip's placement, speed and in-point.
     const program = programSecOfSource(mark.sourceMs / 1000);
     const el = document.createElement('button');
     el.type = 'button';
@@ -8281,15 +8268,6 @@ ui.beds.addEventListener('pointerdown', (e) => {
     // Which of the three gestures this is: the head, the out-point, or the body.
     const grip = e.target.closest('.tclipedge');
     const side = grip ? grip.dataset.side : null;
-    // A head trim moves the clip's in-point, which its curve states. A curve of more than one key
-    // states far more than an in-point, and shifting it is a different edit - refused with the
-    // reason rather than left as an edge that silently does nothing on some clips.
-    if (side === 'head' && clip.retime.keys.length > 1) {
-      selectClipRow(clip);
-      say(`clip ${clip.id} carries a retime curve, so trimming its head means moving that curve - `
-        + 'this build does not do that from the edge');
-      return;
-    }
     if (refuseEdit('moving a clip')) return;
     const gen = takeTransport();
     const wasPlaying = timeline.playing || timeline.pendingPlay;
@@ -8369,18 +8347,13 @@ ui.beds.addEventListener('pointermove', (e) => {
 
   if (laneDrag.role === 'key') {
     key.t = Math.max(0, programToLane(row.owner, laneProgramAt(e.clientX)));
-    if (KINDS[row.kind].axisIsValue) key.value = value;
-    if (row.owner === 'retime') clampRetimeKey(keys, key);
-    else {
-      if (KINDS[row.kind].axisIsValue) {
-        // Through the registry's snapping without writing, so a key and a slider agree. By the
-        // owner's parameter rather than the owner, which for a clip's lane names both.
-        key.value = params.normalise(laneName(row.owner), key.value);
-      }
-      // A look track sorts, since its keys may be dragged past one another. The retime cannot.
-      trackOf(row.owner).keys.sort((x, y) => x.t - y.t);
+    if (KINDS[row.kind].axisIsValue) {
+      // Through the registry's snapping without writing, so a key and a slider agree. By the
+      // owner's parameter rather than the owner, which for a clip's lane names both.
+      key.value = params.normalise(laneName(row.owner), value);
     }
-    if (row.owner === 'retime') paintMarks();
+    // A look track sorts, since its keys may be dragged past one another.
+    trackOf(row.owner).keys.sort((x, y) => x.t - y.t);
   } else {
     const a = keys[laneDrag.seg];
     const b = keys[laneDrag.seg + 1];
@@ -8397,9 +8370,8 @@ ui.beds.addEventListener('pointermove', (e) => {
         (programToLane(row.owner, laneProgramAt(e.clientX)) - a.t) / dt)));
     // `dv` is non-zero by construction: a handle exists only where there was a shape.
     if (segmentHasShape(keys, laneDrag.seg, row.kind)) h[1] = (value - lo) / dv;
-    // A look handle may overshoot. The retime's may not.
-    if (row.owner === 'retime' || !KINDS[row.kind].overshoots) h[1] = Math.min(1, Math.max(0, h[1]));
-    else h[1] = Math.min(2, Math.max(-1, h[1]));
+    if (KINDS[row.kind].overshoots) h[1] = Math.min(2, Math.max(-1, h[1]));
+    else h[1] = Math.min(1, Math.max(0, h[1]));
   }
   lanesMoved();
   requestRepaint();
@@ -8412,7 +8384,7 @@ for (const type of ['pointerup', 'pointercancel']) {
       const { moved } = drag;
       clipDrag = null;
       // The warm window and every position on the ruler move with a clip, so this is the same
-      // door a retime change goes through rather than a lane rebuild.
+      // door a speed change goes through rather than a lane rebuild.
       if (moved) { timingChanged(); history.commit(); }
       if (drag.gen !== transportGen) return;
       if (!moved) {
@@ -8425,26 +8397,10 @@ for (const type of ['pointerup', 'pointercancel']) {
       return;
     }
     if (!laneDrag) return;
-    const wasRetime = laneDrag.row.owner === 'retime';
     laneDrag = null;
-    if (wasRetime) timingChanged();
-    else lanesChanged();
+    lanesChanged();
     history.commit();
   });
-}
-
-/** Removes a retime key, refusing the one removal that would leave the curve headless. */
-function removeRetimeKey(key) {
-  const i = retime.keys.indexOf(key);
-  if (i < 0) return false;
-  if (i === 0 && retime.keys.length > 1) {
-    say('the first retime key anchors the start of the clip - '
-      + 'remove the ones after it first');
-    return false;
-  }
-  retime.keys.splice(i, 1);
-  if (retime.keys.length === 1 && retime.keys[0].t === 0) retime.keys.length = 0;
-  return true;
 }
 
 /** Removes whichever key is selected in a lane. */
@@ -8455,11 +8411,7 @@ function deleteSelectedKey() {
   // A stale selection is not an error: an undo rebuilds every track from a snapshot.
   if (!keysOf(owner).includes(key)) { selection = null; return false; }
 
-  if (owner === 'retime') {
-    if (!removeRetimeKey(key)) return false;
-    selection = null;
-    timingChanged();
-  } else {
+  {
     // Through the clip the lane names, so a key removed on one clip's lane is removed from that
     // clip's track rather than from the selected clip's track of the same name.
     const name = laneName(owner);
@@ -8488,8 +8440,8 @@ function selectClipRow(clip) {
   // Every clip-scope control, because the values did not move - the clip under them did.
   paintClipPanel();
   paintGizmo();
-  // The retime binding, the ruler's mapping and the marks all move with the selection, which is
-  // what `timingChanged` already puts back together.
+  // The ruler's mapping and the marks both move with the selection, which is what
+  // `timingChanged` already puts back together.
   timingChanged();
   syncCropOutside();
   if (timeline && clip.take !== null) loadMarks(clip.take.id).catch(showTimelineError);
@@ -8521,8 +8473,7 @@ function paintClipCommands() {
   ui.moveClip.disabled = !selected;
   ui.rotateClip.disabled = !selected;
   ui.keyClip.disabled = !selected;
-  ui.rate.disabled = !selected || retime.keys.length > 1;
-  if (ui.rateKey) ui.rateKey.disabled = !selected;
+  ui.rate.disabled = !selected;
   ui.preset.disabled = !selected;
   for (const button of [ui.presetSave, ui.presetExport, ui.presetImport]) button.disabled = !selected;
   for (const button of [ui.mark, ui.camSensor, ui.camLevelReset, ui.cropBox, ui.cropFit, ui.cropReset]) {
@@ -8600,36 +8551,10 @@ async function addClipsFromTakes(ids, from) {
   return added;
 }
 
-/**
- * Moves a clip's head to `wantStart` while the footage under the rest of it holds still.
- *
- * The in-point is the curve's rather than a field of the clip's: with no keys the curve reads
- * `programSec * rate` and states an in-point of zero, and with one key at the origin it reads
- * `value + programSec * rate`. So trimming the head writes that one key, and trimming back to the
- * head of the take removes it again rather than leaving a curve that says nothing.
- */
+/** Moves a clip's head to `wantStart` while the footage under the rest of it holds still. */
 function headTrimTo(clip, wantStart, holdEnd) {
-  const curve = clip.retime;
-  const rate = curve.rate;
-  const held = curve.sourceSecAt(0);
-  // Bounded by the footage at one end - the head of the take - and by a clip still wide enough
-  // to grab at the other.
-  const floor = clip.start - held / Math.max(1e-9, rate);
-  const start = Math.max(0, Math.max(floor, Math.min(holdEnd - MIN_CLIP_SEC, wantStart)));
-  const sourceAtHead = held + (start - clip.start) * rate;
-  if (Math.abs(sourceAtHead) < 1e-9) curve.keys = [];
-  else if (curve.keys.length === 1) {
-    const key = curve.keys[0];
-    key.value = sourceAtHead + key.t * rate;
-  }
-  else {
-    curve.keys = [{
-      t: 0, value: sourceAtHead,
-      easeOut: copyHandle(EASE_OUT_LINEAR), easeIn: copyHandle(EASE_IN_LINEAR),
-    }];
-  }
-  clip.start = start;
-  clip.trim = Math.max(MIN_CLIP_SEC, holdEnd - start);
+  const sourceDuration = clip.source.streaming ? Infinity : clip.source.duration;
+  Object.assign(clip, headTrim(clip, wantStart, holdEnd, MIN_CLIP_SEC, sourceDuration));
 }
 
 /** Removes the selected clip. The last one refuses: an edit with no clip is not a document. */
@@ -8720,7 +8645,6 @@ function applyEasePreset(name) {
   if (spec.lastIn && segmentHasShape(keys, keys.length - 2, kind)) {
     keys[keys.length - 1].easeIn = copyHandle(spec.lastIn);
   }
-  if (selection.owner === 'retime') retime.assertMonotonic(retime.keys);
   lanesChanged();
   requestRepaint();
   history.commit();
@@ -8736,7 +8660,7 @@ for (const btn of ui.ease.querySelectorAll('button[data-ease]')) {
 
 /** Whether the selected key's handles may grow or shrink, and on how many sides. */
 function pointSides(delta, state) {
-  if (!state || selection.owner === 'retime') return [];
+  if (!state) return [];
   const { keys, i, kind } = state;
   const sides = [];
   if (i < keys.length - 1 && segmentHasShape(keys, i, kind)) sides.push('easeOut');
@@ -8808,10 +8732,8 @@ const paintEase = paintDynamicControls;
 
 /** The nearest key strictly before or after the playhead on the selected track, or null. */
 function neighbourKeyTime(direction) {
-  if (!timeline) return null;
-  // The fallback is what makes these a way to reach a key rather than dead until
-  // one is selected.
-  const owner = selection?.owner ?? 'retime';
+  if (!timeline || !selection) return null;
+  const { owner } = selection;
   const now = playheadSec();
   const tol = keyTolerance();
   // Through the lane's own clock: every key a clip owns is measured from its clip's in-point,
@@ -8845,43 +8767,6 @@ function paintKeyButton(name, btn) {
     ? 'none'
     : (track.keyAt(keyPlayhead(name), keyTolerance()) ? 'here' : 'some');
   btn.dataset.kf = state;
-}
-
-ui.rateKey?.addEventListener('click', () => {
-  if (!timeline || selectedClipRow() === null || refuseEdit('a retime key')) return;
-  const t = playheadSec();
-  const tol = keyTolerance();
-  const existing = retime.keys.find((k) => Math.abs(k.t - programToLane('retime', t)) <= tol);
-  // Through the same door the lane's delete uses, so the origin rule is stated once.
-  if (existing) {
-    if (!removeRetimeKey(existing)) return;
-  } else {
-    // The source time the curve already maps to, so planting a key never moves the image.
-    const local = programToLane('retime', t);
-    if (retime.keys.length === 0 && local > 0) {
-      retime.keys.push({
-        t: 0, value: retime.sourceSecAt(0),
-        easeOut: copyHandle(EASE_OUT_LINEAR), easeIn: copyHandle(EASE_IN_LINEAR),
-      });
-    }
-    retime.keys.push({
-      t: local, value: retime.sourceSecAt(local),
-      easeOut: copyHandle(EASE_OUT_LINEAR), easeIn: copyHandle(EASE_IN_LINEAR),
-    });
-    retime.keys.sort((x, y) => x.t - y.t);
-  }
-  timingChanged();
-  requestRepaint();
-  history.commit();
-});
-
-function paintRateKey() {
-  if (!ui.rateKey) return;
-  const t = playheadSec();
-  const tol = keyTolerance();
-  ui.rateKey.dataset.kf = retime.keys.length === 0
-    ? 'none'
-    : (retime.keys.some((k) => Math.abs(k.t - programToLane('retime', t)) <= tol) ? 'here' : 'some');
 }
 
 /** Updates the mark button icon: filled when the playhead is on a mark, stroked otherwise. */
@@ -9780,6 +9665,61 @@ addEventListener('pointerdown', (e) => {
   setPivotDistance(hit.distance);
 }, true);
 
+// The camera turning in place, where the orbit turns it about the pivot. `lookDrag` is declared
+// with the fly state, because the fly gate has to read it.
+const lookPivot = new THREE.Vector3();
+
+// After the pick above, so `nodeDrag` and `cropDrag` are already set by the time this reads them.
+addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || !e.shiftKey || e.ctrlKey || e.metaKey
+    || e.target !== renderer.domElement) return;
+  if (lookDrag || nodeDrag || cropDrag) return;
+  if (viewCamera !== freeCamera || !controls.enabled) return;
+  const view = viewUnder(e.clientX, e.clientY);
+  if (!view || view.plan) return;
+  e.preventDefault();
+  e.stopPropagation();
+  renderer.domElement.setPointerCapture(e.pointerId);
+  controls.enabled = false;
+  // Or the damping residual turns the camera under the first frames of the drag.
+  finishOrbitDrift();
+  // Decided here and never mid-gesture: a look stays a look when shift lets go, and an orbit
+  // stays an orbit when shift arrives. Changing meaning under the pointer would jump the camera.
+  lookDrag = { pointerId: e.pointerId, x: e.clientX, y: e.clientY };
+}, true);
+
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (!lookDrag || e.pointerId !== lookDrag.pointerId) return;
+  const dx = e.clientX - lookDrag.x;
+  const dy = e.clientY - lookDrag.y;
+  lookDrag.x = e.clientX;
+  lookDrag.y = e.clientY;
+  // The pivot rides a sphere about the camera, so letting go of shift orbits whatever is now in
+  // front of you at the distance it already had.
+  lookPivot.subVectors(controls.target, freeCamera.position);
+  lookOffset(lookPivot, freeCamera.up, dx, dy, freeCamera.fov, stageSize().h, lookPivot);
+  controls.target.copy(freeCamera.position).add(lookPivot);
+  // Never a render here: `renderProgramFrame` advances navigation, so it would ask for another.
+  orbitRedrawWanted = true;
+});
+
+function stopLookDrag() {
+  if (!lookDrag) return;
+  const { pointerId } = lookDrag;
+  lookDrag = null;
+  if (renderer.domElement.hasPointerCapture(pointerId)) renderer.domElement.releasePointerCapture(pointerId);
+  controls.enabled = viewCamera === freeCamera;
+  orbitSettling = true;
+}
+
+for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+  renderer.domElement.addEventListener(type, (e) => {
+    if (e.pointerId === lookDrag?.pointerId) stopLookDrag();
+  });
+}
+addEventListener('blur', stopLookDrag);
+document.addEventListener('visibilitychange', () => { if (document.hidden) stopLookDrag(); });
+
 function keyCameraHere() {
   if (!timeline) return;
   if (refuseEdit('keying the camera')) return;
@@ -9820,8 +9760,12 @@ const LENS_MAX_MM = 300;
 /** The lens row: a focal length the slider can hold, or which way it ran out of band. */
 function showLens(mm) {
   ui.camLens.value = Math.min(LENS_MAX_MM, Math.max(LENS_MIN_MM, mm)).toFixed(1);
-  if (mm < LENS_MIN_MM) ui.camLensOut.textContent = `wider than ${LENS_MIN_MM}mm`;
-  else if (mm > LENS_MAX_MM) ui.camLensOut.textContent = `longer than ${LENS_MAX_MM}mm`;
+  // The band is read at the resolution the row shows. A lens the wheel clamped to exactly 8mm
+  // comes back from `fov` as 7.99999999, and comparing the raw number called that wider than
+  // the band it had just been held inside.
+  const shown = Number(mm.toFixed(1));
+  if (shown < LENS_MIN_MM) ui.camLensOut.textContent = `wider than ${LENS_MIN_MM}mm`;
+  else if (shown > LENS_MAX_MM) ui.camLensOut.textContent = `longer than ${LENS_MAX_MM}mm`;
   else ui.camLensOut.textContent = `${mm.toFixed(1)}mm`;
 }
 
@@ -9856,6 +9800,34 @@ ui.camLens.addEventListener('input', () => {
   showLens(mm);
   requestRepaint();
 });
+
+// How much of the lens a pixel of wheel is worth. Multiplicative in millimetres, so a notch is
+// the same fraction of the lens at 8mm and at 300mm.
+const LENS_ZOOM_PER_PIXEL = 0.0015;
+
+// Captured on the window, because OrbitControls listens for the wheel on the canvas and would
+// dolly the same event.
+addEventListener('wheel', (e) => {
+  if (!e.shiftKey || e.ctrlKey || e.metaKey || e.target !== renderer.domElement) return;
+  if (viewCamera !== freeCamera || !controls.enabled) return;
+  const view = viewUnder(e.clientX, e.clientY);
+  if (!view || view.plan) return;
+  e.preventDefault();
+  e.stopPropagation();
+  // Shift and a wheel arrive with the axes swapped in some browsers, so the gesture reads
+  // whichever axis moved rather than the vertical one.
+  const delta = wheelPixels(e);
+  const pixels = Math.abs(delta.x) > Math.abs(delta.y) ? delta.x : delta.y;
+  const aspect = targetAspect();
+  const mm = focalLengthForVerticalFov(freeCamera.fov, aspect)
+    * Math.exp(-pixels * LENS_ZOOM_PER_PIXEL);
+  freeCamera.fov = verticalFovForFocalLength(
+    Math.min(LENS_MAX_MM, Math.max(LENS_MIN_MM, mm)), aspect,
+  );
+  freeCamera.updateProjectionMatrix();
+  paintLens();
+  requestRepaint();
+}, { capture: true, passive: false });
 
 // How far down the optical axis the orbit target lands.
 const SENSOR_VIEW_DISTANCE = 2.2;
@@ -10732,8 +10704,8 @@ addEventListener('keydown', (event) => {
     closeApplicationMenus({ restore: true });
     return;
   }
-  // `isTyping` stays below Escape: shutting a menu is right wherever the caret is.
-  if (isTyping(event.target) || !(event.metaKey || event.ctrlKey)) return;
+  // The guard stays below Escape: shutting a menu is right wherever the caret is.
+  if (controlKeeps(event.target, event.key) || !(event.metaKey || event.ctrlKey)) return;
   const key = event.key.toLowerCase();
   if (key === 'o' && EDITING) {
     event.preventDefault();
@@ -11359,18 +11331,14 @@ globalThis.__kinect = {
       }
       lanesChanged();
     },
-    setRetime({ rate = 1, keys = [] }) {
-      if (refuseEdit('a retime')) return;
-      retime.rate = rate;
-      // Built, then checked, then stored: the guard reads the handles a key will have.
-      const built = keys.map((k) => ({
-        t: k.t,
-        value: k.value,
-        easeOut: this.handleFrom(k.easeOut ?? EASE_OUT_LINEAR, 'easeOut', 'the retime'),
-        easeIn: this.handleFrom(k.easeIn ?? EASE_IN_LINEAR, 'easeIn', 'the retime'),
-      }));
-      retime.assertMonotonic(built);
-      retime.keys = built;
+    setSpeed(speed) {
+      if (refuseEdit('a speed change')) return;
+      selectedClip.speed = speed;
+      timingChanged();
+    },
+    setSourceStart(sec) {
+      if (refuseEdit('an in-point change')) return;
+      selectedClip.sourceStart = sec;
       timingChanged();
     },
     /**
@@ -11405,7 +11373,7 @@ globalThis.__kinect = {
   editor: {
     /** Which clip row the strip has selected, or null. Session state, never in the document. */
     clipSelection: () => selectedClipRow()?.id ?? null,
-    /** Where a mark ticks in program seconds, through the selected clip's curve and placement. */
+    /** Where a mark ticks in program seconds, through the selected clip's placement, speed and in-point. */
     markProgramSec: (sourceSec) => programSecOfSource(sourceSec),
     clipRange: () => ({ in: clipIn, out: clipOut }),
     setClipRange: (inVal, outVal) => {
@@ -11506,8 +11474,6 @@ globalThis.__kinect = {
   timeline: {
     open: openTake,
     transport: () => timeline,
-    // A getter and not the object: the binding is a view of the selected clip's curve.
-    get retime() { return retime; },
     counters,
     /** Resolves once every scheduled repaint has run and the transport's queue has drained. */
     async settled() {
@@ -11532,8 +11498,11 @@ globalThis.__kinect = {
         take: clip.take ? { ...clip.take } : null,
         start: clip.start,
         trim: clip.trim,
+        afforded: clip.afforded,
         length: clip.length,
         end: clip.end,
+        speed: clip.speed,
+        sourceStart: clip.sourceStart,
         showing: clip.showing,
         visible: clip.transform.visible,
         // Where this clip sits in the room, read off the group rather than off the registry:
@@ -11575,7 +11544,7 @@ globalThis.__kinect = {
     }),
     /** What each clip is doing at a program position, without rendering anything. */
     showingAt: (t) => clips.map((clip) => ({ id: clip.id, showing: clipShowingAt(clip, t) })),
-    /** Points the panel, the lanes and the retime binding at one clip by id. */
+    /** Points the panel and the lanes at one clip by id. */
     select(id) {
       const clip = clips.find((c) => c.id === id);
       if (!clip) throw new Error(`no clip called ${JSON.stringify(id)}: have ${clips.map((c) => c.id).join(', ')}`);
@@ -11590,9 +11559,12 @@ globalThis.__kinect = {
       return {
         frame: t.frame,
         programSec: t.programSec,
-        sourceSec: retime.sourceSecAt(t.programSec),
+        // Through the clip's placement as well as its speed: a program second fed straight into
+        // the clip-local map answers for the wrong footage on any clip that starts after zero.
+        sourceSec: sourceSecOfProgram(t.programSec),
         outputFps: t.outputFps,
-        rate: retime.rate,
+        speed: selectedClip.speed,
+        sourceStart: selectedClip.sourceStart,
         duration: t.duration,
         lastFrame: t.lastFrame,
         playing: t.playing,

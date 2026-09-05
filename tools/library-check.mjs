@@ -223,11 +223,6 @@ const MUTATIONS = {
     "  if (format === CAPTURE_FORMAT) return '';",
     "  return ''; /* mutation: every generation opens on this build's assumptions */",
   ]] },
-  // The retime guard comes off the file door.
-  'load-skips-monotonic': { file: 'web/main.js', edits: [[
-    '    retime.assertMonotonic(keys);',
-    '  /* mutation: the curve arrives unchecked */',
-  ]] },
   // The quaternion length check comes off, which is the gap step 5 carried: four finite numbers
   // accepted as a rotation, and a camera move nobody authored.
   'accept-any-quaternion': { file: 'web/main.js', edits: [[
@@ -259,11 +254,13 @@ const MUTATIONS = {
       }
       await mkdir(this.dir, { recursive: true });`],
   ] },
-  // Marks are drawn at their source fraction rather than through the retime curve, which is
-  // identical at rate 1 with no keys and wrong everywhere else.
+  // Marks are drawn at their source second rather than through the selected clip's placement,
+  // speed and in-point. The name stays because it is part of the proof invocation surface.
   'marks-ignore-retime': { file: 'web/main.js', edits: [[
-    '\n    const program = programSecOfSource(mark.sourceMs / 1000);\n',
-    '\n    const program = mark.sourceMs / 1000;\n',
+    '    const program = programSecOfSource(mark.sourceMs / 1000);\n'
+      + "    const el = document.createElement('button');",
+    '    const program = mark.sourceMs / 1000;\n'
+      + "    const el = document.createElement('button');",
   ]] },
   // The library skims a remote take at full resolution, promising a smoothness the
   // link does not have.
@@ -877,7 +874,7 @@ const MUTATIONS = {
     'const carriesRefusals = (take) => Array.isArray(take.openRefusals)\n  && take.openRefusals.length > 0\n',
   ]],
     fails: 'and a healthy node not refused for being healthy (wide: takes the link off, so it '
-      + 'stops at 125 of 392 - read the rows, not the total. docs/instruments.md says why)',
+      + 'stops at 125 of 392 - read the rows, not the total)',
   },
   // The link admits a manifest from the build before the refusals moved.
   'node-admits-an-old-manifest': { file: 'server/library.js', edits: [[
@@ -1559,7 +1556,7 @@ async function loadPlaywright() {
 }
 
 // Playwright drops the page's execution context on this rig, and it is not the code:
-// `docs/instruments.md` records it as a measured flake. Retried on that signature alone and
+// it is a measured flake. Retried on that signature alone and
 // with the count printed, because a check that retried real failures would report whichever
 // attempt it liked.
 async function retryOnContextLoss(label, work) {
@@ -2531,8 +2528,8 @@ async function runChecks() {
       'and it is the sentence about the frame it does not have rather than the one about bracketing a position',
       JSON.stringify(buttonWhy));
 
-    // The second surface that badges a refusal, and the reason there has to be one is in
-    // `docs/instruments.md`: the refusal moved to the server so that one take gets one sentence
+    // The second surface that badges a refusal. The refusal moved to the server so that one take
+    // gets one sentence
     // everywhere, and a control mutating a single surface left the other one's hard-coded copy
     // uncaught. The menu used to be that second surface and no longer composes a sentence at all;
     // the media picker draws the library's warning badges now, so the class has two members again
@@ -3321,7 +3318,9 @@ async function runChecks() {
     // one that makes every later mutation of `projects.html` mean anything.
     const PRESENT = 'projects-page-present';
     const DARK = 'projects-page-dark';
-    const localHash = (await getJson(`${macUrl}/library/takes`)).takes.find((t) => t.id === 'local-clip').hash;
+    const TRIMMED = 'projects-page-trimmed';
+    const localTake = (await getJson(`${macUrl}/library/takes`)).takes.find((t) => t.id === 'local-clip');
+    const localHash = localTake.hash;
     // Built off a document the editor wrote rather than composed here: `checkProject` demands a
     // weight for every reading and `READINGS` is built at run time out of the installed effect
     // manifests, so a body this file authored would be refused by the loader for reasons that
@@ -3338,6 +3337,9 @@ async function runChecks() {
     const one = JSON.parse(JSON.stringify(seed));
     one.clips = [{ ...one.clips[0], start: 0 }];
     one.clips[0].take = { id: 'local-clip', hash: localHash };
+    const trimmed = JSON.parse(JSON.stringify(one));
+    trimmed.clips[0].sourceStart = Math.min(2, localTake.durationSec / 3);
+    trimmed.clips[0].length = Math.max(1, Math.min(4, localTake.durationSec - trimmed.clips[0].sourceStart));
     const gone = JSON.parse(JSON.stringify(one));
     // Both clips carry their own length, and the missing one has to: `spanOf` falls back to the
     // take's duration, which is precisely what a machine that has not got the take cannot read.
@@ -3352,10 +3354,12 @@ async function runChecks() {
         id: 'nowhere',
         start: 4,
         length: 6,
+        sourceStart: 2.75,
         take: { id: 'reclaimed-take', hash: `sha256:${'a'.repeat(64)}` },
       },
     ];
     await writeDoc(macUrl, 'projects', PRESENT, one);
+    await writeDoc(macUrl, 'projects', TRIMMED, trimmed);
     await writeDoc(macUrl, 'projects', DARK, gone);
 
     const { page, errors } = await openPage(browser, projectsPage(macUrl));
@@ -3370,6 +3374,16 @@ async function runChecks() {
       'the page is served at /projects and lists what the store holds, which is what makes an '
       + 'interception of projects.html land somewhere rather than nowhere',
       rows.map((r) => r.name).join(', ') || 'the listing was empty');
+    await page.evaluate(`globalThis.__projects.drawn(${JSON.stringify(TRIMMED)})`);
+    const trimmedAtHead = await page.evaluate(
+      `globalThis.__projects.showing(${JSON.stringify(TRIMMED)})`,
+    );
+    const wantedHeadFrame = Math.round((trimmed.clips[0].sourceStart / localTake.durationSec)
+      * Math.max(0, localTake.frames - 1));
+    check(trimmedAtHead?.frame === wantedHeadFrame && trimmedAtHead?.drawnFrame === wantedHeadFrame,
+      'the projects page starts a trimmed clip skim at its in-point rather than at frame zero',
+      `frame ${trimmedAtHead?.frame}, drawn ${trimmedAtHead?.drawnFrame}, want ${wantedHeadFrame} `
+        + `for source ${trimmed.clips[0].sourceStart.toFixed(3)}s`);
     // Newest written first, and nothing is stored to know it: the dark one was written second.
     check(rows[0]?.name === DARK,
       'and it is ordered by when each project was last written, newest first',
@@ -3380,6 +3394,10 @@ async function runChecks() {
     check(named(DARK)?.missing === 1 && /reclaimed-take/.test(named(DARK)?.dark ?? ''),
       'and one whose footage is not here says so on its own row, naming the take it wants',
       `${named(DARK)?.missing} missing, "${named(DARK)?.dark ?? 'nothing said'}"`);
+    const missingSegment = named(DARK)?.segments?.find((segment) => segment.clip === 'nowhere');
+    check(missingSegment?.sourceStart === 2.75,
+      'a clip whose take is missing keeps its in-point unchanged while the projects page lays it out',
+      `sourceStart ${missingSegment?.sourceStart}`);
     check(/library/i.test(named(DARK)?.darkAct ?? ''),
       'and the control on it goes to the library rather than fetching, because the download and '
       + 'the two-machine state live there and a second copy of them here is the duplicated path',
@@ -3402,6 +3420,7 @@ async function runChecks() {
     await page.close();
     await writeDoc(macUrl, 'projects', PRESENT, null, 'DELETE');
     await writeDoc(macUrl, 'projects', DARK, null, 'DELETE');
+    await writeDoc(macUrl, 'projects', TRIMMED, null, 'DELETE');
   }
 
   console.log('\n[library] a project survives a round trip through a file');
@@ -3455,6 +3474,10 @@ async function runChecks() {
 
     const { page, errors } = await openPage(browser, recorderPage(macUrl), { width: 640, height: 400 });
     await page.waitForFunction('globalThis.__kinect !== undefined', null, { timeout: 40000 });
+    const liveClip = await page.evaluate('globalThis.__kinect.timeline.clips()[0]');
+    check(liveClip.afforded === Infinity && liveClip.length === Infinity,
+      'a streaming source affords an unbounded clip instead of resolving against a finite take duration',
+      `afforded ${String(liveClip.afforded)}, length ${String(liveClip.length)}`);
 
     // A look nothing defaults to, so a restore that did nothing cannot pass.
     const SCRAMBLE = {
@@ -3652,8 +3675,7 @@ async function runChecks() {
       'and putting the clip back leaves nothing parked, so the rows below serialise a document with no missing effect in it',
       JSON.stringify(cleaned));
 
-  // `JSON.stringify` turns NaN and undefined into null, so a case labelled NaN would
-  // silently be a case about null.
+  // Assigned inside the page so NaN and Infinity reach the door without JSON changing them to null.
     const refuse = async (label, source) => page.evaluate(`(() => {
       const k = globalThis.__kinect;
       const p = k.library.serialiseProjectBody();
@@ -3663,13 +3685,16 @@ async function runChecks() {
 
     const cases = [
       ['a project with no version', 'delete p.version;'],
-      ['a project from an older version', 'p.version = 0;'],
+      ['a version 7 project', 'p.version = 7;'],
       // Derived from the version this build writes rather than written down.
       ['a project from a newer version', `p.version = ${PROJECT_VERSION + 1};`],
       ['a version that is not a number', 'p.version = "1";'],
-      ['a retime curve that falls', 'p.clips[0].retime.keys = [{t:0,value:0},{t:1,value:2},{t:2,value:0.5}];'],
-      ['a retime handle outside the unit box',
-        'p.clips[0].retime.keys = [{t:0,value:0,easeOut: [[0.4, 1.9]],easeIn: [[0.6, 0]]},{t:2,value:1,easeOut: [[0.4, 0]],easeIn: [[0.6, 0]]}];'],
+      ['a negative in-point', 'p.clips[0].sourceStart = -0.25;'],
+      ['a non-finite in-point', 'p.clips[0].sourceStart = NaN;'],
+      ['an infinite in-point', 'p.clips[0].sourceStart = Infinity;'],
+      ['an in-point at the end of the footage',
+        'const c = k.timeline.clips()[0]; p.clips[0].sourceStart = c.sourceStart + c.afforded * c.speed;'],
+      ['an in-point past the footage', 'p.clips[0].sourceStart = 1e9;'],
       ['a camera key whose quaternion is not unit length',
         'p.composition.camera = [{t:0,value:{position:[0,0,3],quaternion:[0,0,0,1.4],fov:55}},{t:1,value:{position:[1,0,3],quaternion:[0,0,0,1],fov:55}}];'],
       ['a camera key whose quaternion is all zeros',
@@ -3699,7 +3724,7 @@ async function runChecks() {
       ['a project value in a clip block', 'p.clips[0].params.bloom = 0;'],
       ['a clip value in the project block', 'p.look.params.pointSize = 9;'],
       ['a view parameter in a clip block', 'p.clips[0].params.renderScale = 100;'],
-      ['a retime rate of zero or less', 'p.clips[0].retime.rate = 0;'],
+      ['a clip speed of zero or less', 'p.clips[0].speed = 0;'],
       ['a preset stamp that is not a name and a rev', 'p.clips[0].appliedPreset = { name: 42 };'],
       // The record a deliverable's embedded document carries.
       ['a suppressed list that is not a list', 'p.suppressed = "sparkle";'],
@@ -3718,6 +3743,18 @@ async function runChecks() {
     for (const { label, message } of results) {
       check(message !== 'ACCEPTED', `refused: ${label}`, message === 'ACCEPTED' ? 'ACCEPTED' : message.slice(0, 64));
     }
+    const messageFor = (label) => results.find((result) => result.label === label)?.message ?? '';
+    check(/version 7/.test(messageFor('a version 7 project'))
+      && /reads version 8/.test(messageFor('a version 7 project'))
+      && /no path from here/.test(messageFor('a version 7 project')),
+    'the version 7 refusal names both versions and says this build has no conversion path',
+    messageFor('a version 7 project').slice(0, 150));
+    check(/nothing of the take is left after its in-point/.test(messageFor('an in-point past the footage')),
+      'a version 8 in-point past finite footage is refused after the take duration resolves',
+      messageFor('an in-point past the footage').slice(0, 150));
+    check(/nothing of the take is left after its in-point/.test(messageFor('an in-point at the end of the footage')),
+      'and an in-point exactly at the finite footage end is refused by the same resolved-duration gate',
+      messageFor('an in-point at the end of the footage').slice(0, 150));
     const good = await refuse('an unmodified project', '');
     check(good.message === 'ACCEPTED', 'and an unmodified project still loads',
       good.message === 'ACCEPTED' ? '' : good.message.slice(0, 80));
@@ -3730,8 +3767,7 @@ async function runChecks() {
       const names = k.params.names('look').filter((n) => n.startsWith('glyph.'));
       // Read off the live registry rather than off \`spec\`, which answers with a projection
       // carrying \`default\` and not \`def\` - a probe pointed at a field that has never existed
-      // reads \`undefined\` on a correct build, which is the shape docs/instruments.md files
-      // under a reading that is not a finding. \`get\` cannot answer with anything the
+      // reads \`undefined\` on a correct build, which is a probe pointed at nothing, not a finding. \`get\` cannot answer with anything the
       // parameter could not hold.
       // Into the clip's block, because glyph binds the cloud - the two refused cases above
       // are one key short of this document and have to be short of it in the same block.
@@ -4084,7 +4120,7 @@ async function runChecks() {
     await page.close();
   }
 
-  console.log('\n[library] marks on the editor\'s scrubber, through the retime curve');
+  console.log('\n[library] marks on the editor\'s scrubber, through clip timing');
   {
     const { page, errors } = await openPage(browser, editorPage(macUrl, 'local-clip'), { width: 1100, height: 700 });
     await page.waitForFunction('Boolean(globalThis.__kinect?.timeline?.transport())', null, { timeout: 40000 });
@@ -4104,50 +4140,52 @@ async function runChecks() {
     check(flat[flat.length - 1]?.beyond === true,
       'and a mark the edit never reaches is drawn at the edge as unreachable rather than dropped');
 
-    // The probe has to stand where a wrong implementation would disagree.
-    const KEYS = [{ t: 0, value: 0 }, { t: 4, value: 0.6 }, { t: 6, value: 2.4 }];
-    await page.evaluate(`globalThis.__kinect.keyframes.setRetime({ rate: 1, keys: ${JSON.stringify(KEYS)} })`);
+    // The probe has to stand where source time, clip-local time and project time all disagree.
+    const TIMING = { start: 2, length: 10, speed: 0.5, sourceStart: 0.6 };
+    await page.evaluate(`(() => {
+      const k = globalThis.__kinect;
+      const body = k.library.serialiseProjectBody();
+      Object.assign(body.clips[0], ${JSON.stringify(TIMING)});
+      k.library.restoreProject(body);
+      k.editor.selectClipRow(body.clips[0].id);
+    })()`);
     await page.evaluate('globalThis.__kinect.timeline.settled()');
-    const retimed = await page.evaluate('globalThis.__kinect.library.markTicks()');
+    await page.waitForFunction(
+      (count) => globalThis.__kinect.library.marks().length === count,
+      flat.length,
+      { timeout: 15000 },
+    );
+    const timed = await page.evaluate('globalThis.__kinect.library.markTicks()');
     const shown = await page.evaluate('globalThis.__kinect.timeline.read()');
-    check(retimed.length === flat.length, 'a retime does not lose a tick');
+    check(timed.length === flat.length, 'a speed and in-point change does not lose a tick');
 
     // Asserted against positions computed here, not against "they moved".
-    const programOf = (sourceSec) => {
-      if (sourceSec <= KEYS[0].value) return KEYS[0].t;
-      for (let i = 0; i < KEYS.length - 1; i++) {
-        if (KEYS[i + 1].value < sourceSec) continue;
-        const span = (KEYS[i + 1].value - KEYS[i].value) / (KEYS[i + 1].t - KEYS[i].t);
-        return KEYS[i].t + (sourceSec - KEYS[i].value) / span;
-      }
-      const last = KEYS.length - 1;
-      const span = (KEYS[last].value - KEYS[last - 1].value) / (KEYS[last].t - KEYS[last - 1].t);
-      return KEYS[last].t + (sourceSec - KEYS[last].value) / span;
-    };
+    const programOf = (sourceSec) => TIMING.start + (sourceSec - TIMING.sourceStart) / TIMING.speed;
     const pct = (x) => Math.max(0, Math.min(1, x)) * 100;
     const expected = marks.map((m) => pct(programOf(m.sourceMs / 1000) / shown.duration));
-    // Where the wrong implementation would draw each tick.
+    // Where the mutation draws each tick when it treats source seconds as project seconds.
     const naive = marks.map((m) => pct(m.sourceMs / 1000 / shown.duration));
-    const off = marks.map((_, i) => Math.abs((retimed[i]?.left ?? Infinity) - expected[i]));
+    const off = marks.map((_, i) => Math.abs((timed[i]?.left ?? Infinity) - expected[i]));
     const discriminating = marks.map((_, i) => i).filter((i) => Math.abs(expected[i] - naive[i]) > 5);
     check(discriminating.length >= 2,
       'at least two marks land somewhere the source fraction cannot, which is what makes them probes',
-      marks.map((m, i) => `${(m.sourceMs / 1000).toFixed(1)}s: curve ${expected[i].toFixed(1)}% against fraction ${naive[i].toFixed(1)}%`).join('; '));
+      marks.map((m, i) => `${(m.sourceMs / 1000).toFixed(1)}s: timed ${expected[i].toFixed(1)}% against fraction ${naive[i].toFixed(1)}%`).join('; '));
     check(discriminating.every((i) => off[i] < 1.5),
-      'and each tick sits where the curve puts it rather than where the fraction would',
-      marks.map((m, i) => `${(m.sourceMs / 1000).toFixed(1)}s -> ${retimed[i]?.left?.toFixed(1) ?? 'missing'}% (want ${expected[i].toFixed(1)}%)`).join('; '));
+      'and each tick sits where the clip placement, speed and in-point put it',
+      marks.map((m, i) => `${(m.sourceMs / 1000).toFixed(1)}s -> ${timed[i]?.left?.toFixed(1) ?? 'missing'}% (want ${expected[i].toFixed(1)}%)`).join('; '));
 
     // A mark written from the editor lands in the take's sidecar.
-    await page.evaluate('globalThis.__kinect.timeline.transport().seek(1.0)');
+    const MARK_PROGRAM_SEC = 3.0;
+    await page.evaluate(`globalThis.__kinect.timeline.transport().seek(${MARK_PROGRAM_SEC})`);
     await page.evaluate('globalThis.__kinect.timeline.settled()');
     await page.evaluate('globalThis.__kinect.library.markHere()');
     const written = (await getJson(`${macUrl}/capture/local-clip/marks`)).marks;
     check(written.length === 5, 'pressing mark writes to the take\'s sidecar', `${written.length} marks now`);
-    const sourceAt1 = await page.evaluate('globalThis.__kinect.timeline.retime.sourceSecAt(1.0)');
+    const sourceAtMark = await page.evaluate('globalThis.__kinect.timeline.read().sourceSec');
     const fresh = written.find((m) => !['k0', 'k1', 'k2', 'kBeyond'].includes(m.id));
-    check(Math.abs(fresh.sourceMs - sourceAt1 * 1000) < 40,
+    check(Math.abs(fresh.sourceMs - sourceAtMark * 1000) < 40,
       'and it is stamped in source milliseconds rather than program time',
-      `${fresh.sourceMs}ms against source ${(sourceAt1 * 1000).toFixed(0)}ms at program 1.0s`);
+      `${fresh.sourceMs}ms against source ${(sourceAtMark * 1000).toFixed(0)}ms at program ${MARK_PROGRAM_SEC.toFixed(1)}s`);
 
     check(errors.length === 0, 'the marks path raises no page errors', errors.slice(0, 2).join(' | '));
     await page.close();
@@ -4401,7 +4439,7 @@ async function runChecks() {
     const SEEDED_PROJECT = {
       version: PROJECT_VERSION,
       look: { params: {}, tracks: {} },
-      composition: { retime: { rate: 1, keys: [] }, camera: [] },
+      composition: { camera: [] },
       outputSize: '1920x1080',
       appliedPreset: null,
     };

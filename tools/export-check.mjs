@@ -133,14 +133,30 @@ const MUTATIONS = {
   ]] },
   // The dominant screen-space term goes back to framebuffer pixels.
   'pointsize-absolute': { file: 'effects-builtin/glyph/size.vert.glsl', edits: [[
-    'gl_PointSize = clamp(pointSize * k / max(0.15, -mv.z), 1.0, 64.0);',
-    'gl_PointSize = clamp(pointSize * (1.0 / max(0.15, -mv.z)), 1.0, 64.0);',
+    'gl_PointSize = clamp(pointSize * zoom * k / max(0.15, -mv.z), 1.0, 64.0);',
+    'gl_PointSize = clamp(pointSize * zoom * (1.0 / max(0.15, -mv.z)), 1.0, 64.0);',
   ]] },
-  // The additive normalisation reads the drawn size, so the look sums four times too bright at
-  // twice the resolution.
-  'vsize-framebuffer': { file: 'web/cloud-shader.js', edits: [[
+  // The sprite stops following the lens, so a longer lens thins a surface into dots.
+  'lens-absolute': { file: 'effects-builtin/glyph/size.vert.glsl', edits: [[
+    'gl_PointSize = clamp(pointSize * zoom * k / max(0.15, -mv.z), 1.0, 64.0);',
+    'gl_PointSize = clamp(pointSize * k / max(0.15, -mv.z), 1.0, 64.0);',
+  ]] },
+  // The glyph branch's own base stops following the lens, so a half-mixed field thins under a
+  // longer one while the fully mixed cell term still follows it.
+  'glyph-base-lens-absolute': { file: 'effects-builtin/glyph/size.vert.glsl', edits: [[
+    'float base = clamp(pointSize * zoom * k / dist, 1.0, 64.0);',
+    'float base = clamp(pointSize * k / dist, 1.0, 64.0);',
+  ]] },
+  // The additive normalisation reads the size through the lens, so a big splat sums dimmer
+  // through a longer one.
+  'vsize-lensed': { file: 'web/cloud-shader.js', edits: [[
+    'vSize = gl_PointSize / (k * zoom);',
     'vSize = gl_PointSize / k;',
-    'vSize = gl_PointSize;',
+  ]] },
+  // Reading additive size in output pixels makes brightness change with output size.
+  'vsize-framebuffer': { file: 'web/cloud-shader.js', edits: [[
+    'vSize = gl_PointSize / (k * zoom);',
+    'vSize = gl_PointSize / zoom;',
   ]] },
   // Grain and scanlines go back to being sized in framebuffer pixels.
   'grade-absolute': { file: 'web/grade-shader.js', edits: [[
@@ -175,7 +191,7 @@ const MUTATIONS = {
     fails: 'the glow\'s chain following the buffer, which is the only live catcher in this suite '
       + 'for the reference the chain is frozen at. Its sibling `bloom-reference-1080` is NOT '
       + 'caught by anything here and is not a regression - `test/bloom-chain.test.mjs` is '
-      + 'what holds that half, and docs/instruments.md has the measurement',
+      + 'what holds that half',
   },
   // The chain frozen against 1080 rather than the height the look was graded at, so every output
   // size gets the same halo.
@@ -502,8 +518,7 @@ const INSTALL = `(() => {
     // clamps are a property of the scene and the camera rather than of the term
     // being mutated - but it is an assertion about a model of the code, and reading
     // the sizes back out of a transform-feedback pass is what would turn it into an
-    // assertion about the frame. Its one input that is read off the page rather than
-    // modelled is kScale, below.
+    // assertion about the frame. The output scale and reference lens are read off the page.
     drawnPointSizes(kScale) {
       const depth = k.uniforms.depthCurr.value.image.data;
       const fx = k.uniforms.focal.value.x;
@@ -540,7 +555,10 @@ const INSTALL = `(() => {
           if (viewZ > farthest) farthest = viewZ;
         }
       }
-      const at = (d) => (pointSize * kScale) / Math.max(0.15, d);
+      // The lens as the shader reads it; a build with no reference lens draws every lens alike.
+      const zoom = k.uniforms.lensReference
+        ? k.programCamera.projectionMatrix.elements[5] / k.uniforms.lensReference.value : 1;
+      const at = (d) => (pointSize * kScale * zoom) / Math.max(0.15, d);
       return { drawn, nearest, farthest, largest: at(nearest), smallest: at(farthest) };
     },
 
@@ -548,6 +566,11 @@ const INSTALL = `(() => {
       const gl = k.renderer.getContext();
       const w = gl.drawingBufferWidth;
       const h = gl.drawingBufferHeight;
+      // A frame at any other size than the one staged is a measurement, not a finding.
+      if (this.staged && (w !== this.staged[0] || h !== this.staged[1])) {
+        throw new Error('the stage moved to ' + w + 'x' + h + ' after settling at ' + this.staged.join('x')
+          + ', so ' + label + ' would be read at the wrong size');
+      }
       const px = new Uint8Array(w * h * 4);
       gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
       this.shots.set(label, { px, w, h });
@@ -576,6 +599,22 @@ const INSTALL = `(() => {
             dst[(y * W + x) * 4 + c] = Math.round(sum / n);
           }
         }
+      }
+      this.shots.set(out, { px: dst, w: W, h: H });
+      return { w: W, h: H };
+    },
+
+    // The centre 1/factor of a frame, at full resolution: what a lens factor times longer
+    // shows of the same pose, before its own magnification.
+    crop(label, out, factor) {
+      const { px, w, h } = this.shots.get(label);
+      const W = Math.floor(w / factor);
+      const H = Math.floor(h / factor);
+      const x0 = Math.floor((w - W) / 2);
+      const y0 = Math.floor((h - H) / 2);
+      const dst = new Uint8Array(W * H * 4);
+      for (let y = 0; y < H; y++) {
+        dst.set(px.subarray(((y0 + y) * w + x0) * 4, ((y0 + y) * w + x0 + W) * 4), y * W * 4);
       }
       this.shots.set(out, { px: dst, w: W, h: H });
       return { w: W, h: H };
@@ -775,6 +814,7 @@ const RES_ARM = `async ({ label, look, at, resLook, camera }) => {
   // pipeline looks alone, where the rebase arms never see it.
   const REGION_BASE = {
     'noise.amount': 0, 'push.amount': 0, 'noise.region': 0, 'mask.amount': 0, 'datamosh.amount': 0,
+    'glyph.amount': 0,
   };
   const merged = { ...REGION_BASE, ...resLook, ...look };
   const dropped = Object.keys(merged).filter((n) => !known.has(n));
@@ -799,6 +839,12 @@ const RES_ARM = `async ({ label, look, at, resLook, camera }) => {
     kScale,
     refHeight: k.uniforms.bufferHeight ? k.uniforms.bufferHeight.value : null,
     pointSize: k.uniforms.pointSize.value,
+    // The lens as the shader reads it and the cell the glyph field tiles, for modelling the
+    // glyph branch's sprite the way drawnPointSizes models the plain one.
+    zoom: k.uniforms.lensReference
+      ? k.programCamera.projectionMatrix.elements[5] / k.uniforms.lensReference.value : 1,
+    lensReference: k.uniforms.lensReference ? k.uniforms.lensReference.value : null,
+    latticeCell: k.uniforms.latticeCell ? k.uniforms.latticeCell.value : null,
     sizes: ex.drawnPointSizes(kScale),
     tiles: ex.tiles(label, 8, 5),
     pointRange: Array.from(gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)),
@@ -891,6 +937,9 @@ async function openPage(viewport, source = mutatedBody, html = null) {
   }
   await page.waitForFunction(() => !!globalThis.__kinect);
   await page.waitForFunction(() => !!globalThis.__kinect.timeline.transport(), null, { timeout: 20000 });
+  // The transport exists before the take finishes building its timeline rows.
+  await page.waitForFunction(() => !globalThis.__kinect.takeOpened || globalThis.__kinect.takeOpened(),
+    null, { timeout: 60000 });
   await page.evaluate(INSTALL);
   await setStage(page, viewport);
   const gpu = await page.evaluate(() => {
@@ -906,6 +955,9 @@ async function openPage(viewport, source = mutatedBody, html = null) {
     throw new Error(`software rasteriser (${gpu.renderer}) - the result would prove nothing`);
   }
   if (!gpu.colorBufferFloat) throw new Error('no EXT_color_buffer_float: the surface memory is not running at float');
+  if (gpu.buffer[0] !== viewport.width || gpu.buffer[1] !== viewport.height) {
+    throw new Error(`the stage moved to ${gpu.buffer.join('x')} after settling at ${viewport.width}x${viewport.height}`);
+  }
   return { page, errors, gpu, close: () => browser.close() };
 }
 
@@ -932,12 +984,11 @@ async function onFreshPage(what, work, attempts = 3) {
   }
 }
 
-/**
- * Resizes the stage and waits for the drawing buffer to actually become it. The target size
- * goes with the viewport, because the editor is letterboxed to the export aspect.
- */
+// The timeline height scales with the window, so resizing needs several corrections.
+const STAGE_ATTEMPTS = 12;
+/** Resizes the stage and waits for its drawing buffer to match the requested size. */
 async function setStage(page, size) {
-  for (let attempt = 1; attempt <= 4; attempt++) {
+  for (let attempt = 1; attempt <= STAGE_ATTEMPTS; attempt++) {
     // Settled before the strip is measured, and the buffer read again after it lands: the lane
     // stack is built after the transport exists, so a strip measured before it has its rows grows
     // under the viewport that was just sized to it. That left the editor reading pixels at one
@@ -955,26 +1006,21 @@ async function setStage(page, size) {
       width: size.width,
       height: size.height + furniture.strip + furniture.shell,
     });
-    await page.evaluate(`globalThis.__kinect.setOutputSize?.(${JSON.stringify(`${size.width}x${size.height}`)})`);
-    try {
-      await page.waitForFunction(
-        `(() => {
-          const gl = globalThis.__kinect.renderer.getContext();
-          return gl.drawingBufferWidth === ${size.width} && gl.drawingBufferHeight === ${size.height};
-        })()`,
-        null, { timeout: attempt === 1 ? 5000 : 10000 },
-      );
-      await page.evaluate('globalThis.__kinect.timeline.settled()').catch(() => {});
-      const held = await page.evaluate(`(() => {
-        const gl = globalThis.__kinect.renderer.getContext();
-        return [gl.drawingBufferWidth, gl.drawingBufferHeight];
-      })()`);
-      if (held[0] === size.width && held[1] === size.height) return;
-      if (attempt === 4) {
-        throw new Error(`the stage settled at ${held.join('x')} rather than ${size.width}x${size.height}`);
-      }
-    } catch (err) {
-      if (attempt === 4) throw err;
+    // The resize event changes the timeline height; a synchronous resize can briefly match first.
+    const held = await page.evaluate(`(async () => {
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      globalThis.__kinect.setOutputSize?.(${JSON.stringify(`${size.width}x${size.height}`)});
+      await globalThis.__kinect.timeline.settled();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const gl = globalThis.__kinect.renderer.getContext();
+      return [gl.drawingBufferWidth, gl.drawingBufferHeight];
+    })()`);
+    if (held[0] === size.width && held[1] === size.height) {
+      await page.evaluate(`globalThis.__ex.staged = ${JSON.stringify(held)}`);
+      return;
+    }
+    if (attempt === STAGE_ATTEMPTS) {
+      throw new Error(`the stage settled at ${held.join('x')} rather than ${size.width}x${size.height}`);
     }
   }
 }
@@ -1027,6 +1073,7 @@ console.log('\n[1] the take carries its own intrinsics');
 
 console.log('\n[2] the look holds at a different output size, and did not before');
 
+const LENS_CAMERA = { position: [0, 0.1, 1.6], quaternion: [0, 0, 0, 1] };
 const NEAR_CAMERA = { position: [0, 0.1, -0.2], quaternion: [0, 0, 0, 1], fov: 50 };
 const REGION_OFF = { 'noise.amount': 0, 'push.amount': 0, 'noise.region': 0, 'mask.amount': 0 };
 // The crop planes wide open, and they are in `OFF` because an arm applies its look over
@@ -1065,6 +1112,10 @@ const HD_LOOK = { ...CROSS_BUILD_OFF, additive: false, pointSize: HD_POINT_SIZE 
 const PIPELINES = [
   ['points', { look: OFF }],
   ['splat', { look: { ...OFF, additive: true, pointSize: 7 }, camera: NEAR_CAMERA }],
+  ['splat-large', {
+    look: { ...OFF, 'vignette.amount': 0, exposure: 0.25, additive: true, pointSize: 60 },
+    camera: { ...LENS_CAMERA, fov: 50 },
+  }],
   ['trails', { look: { ...OFF, trails: 0.5 } }],
   ['rgbsplit', { look: { ...OFF, 'rgbsplit.amount': 1.6 } }],
   ['scanlines', { look: { ...OFF, 'raster.amount': 1 } }],
@@ -1097,6 +1148,7 @@ const PIPELINES = [
 const RES_TOLERANCE = {
   points: { on: 'coarse', mean: 3.0, ratio: 0.005 },
   splat: { on: 'coarse', mean: 6.0, ratio: 0.005 },
+  'splat-large': { on: 'coarse', mean: 6.0, ratio: 0.005 },
   trails: { on: 'coarse', mean: 1.6, ratio: 0.005 },
   rgbsplit: { on: 'coarse', mean: 2.2, ratio: 0.005 },
   scanlines: { on: 'fine', mean: 4.0, ratio: 0.005, corr: 0.88 },
@@ -1209,6 +1261,13 @@ const rebaseGlowRef = await armAt(main.page, {
       : `points: ${one.small.sizes.smallest.toFixed(2)}..${one.small.sizes.largest.toFixed(1)}px at 600, `
         + `${one.big.sizes.smallest.toFixed(2)}..${one.big.sizes.largest.toFixed(1)}px at 1200, `
         + `over ${one.small.sizes.drawn} drawn points`);
+}
+
+{
+  const arm = after.get('splat-large').small;
+  const smallest = arm.sizes.smallest / arm.kScale;
+  check(smallest > 10.8, 'the large splats exceed the additive normalization threshold',
+    `smallest ${smallest.toFixed(2)} reference pixels, threshold 10.8`);
 }
 
 console.log('  ....  term            fine mean   coarse mean   lum ratio   texture   hp corr   judged on');
@@ -1376,6 +1435,113 @@ for (const [label, arm, glow] of [
     + `${fixed(litRatio, 5)}, luminance ratio ${fixed(ratio, 5)}, `
     + `worst of 40 tile means ${fixed(worst)}/255; chain ${chainOf(non169New)} against `
     + `${chainOf(rebaseNon169Old)}`);
+}
+
+// Compare the same surface: the wide frame's centre against the long frame reduced by its zoom.
+const LENS_ZOOM = 2;
+// The graded lens is the one the camera boots with, read off the registry rather than written here.
+const PROGRAM_FOV = await main.page.evaluate("globalThis.__kinect.params.spec('camera').default.fov");
+const LENS_LONG_FOV = (2 * Math.atan(Math.tan((PROGRAM_FOV * Math.PI) / 360) / LENS_ZOOM) * 180) / Math.PI;
+// The vignette is frame-space; leaving it on would compare different shading on the same surface.
+// The glyph arm is a quarter mixed, so the branch's own base term carries three quarters of
+// every sprite: a half mix caught the base mutation at 1.7x the tolerance, this at 2.4x. The
+// point size and cell put the farthest sprite above the 16-pixel legibility band on this
+// fixture, where at 40 and 0.05 m it was 10.2 px and the row read the crossfade.
+const LENS_GLYPH = 0.25;
+const LENS_PIPELINES = [
+  ['lens-points', { look: { ...OFF, 'vignette.amount': 0, additive: false, pointSize: 24 } }],
+  ['lens-splat', { look: { ...OFF, 'vignette.amount': 0, additive: true, pointSize: 40 } }],
+  ['lens-glyph', {
+    look: { ...OFF, 'vignette.amount': 0, additive: false, pointSize: 64, cell: 0.12, 'glyph.amount': LENS_GLYPH },
+  }],
+];
+const LENS_TOLERANCE = {
+  'lens-points': { mean: 3.0, ratio: 0.01 },
+  'lens-splat': { mean: 6.0, ratio: 0.01 },
+  'lens-glyph': { mean: 6.0, ratio: 0.01 },
+};
+// The glyph branch's sprite at a view distance, as size.vert.glsl writes it: the plain sprite
+// mixed with the cell, both through the lens.
+const glyphSpriteAt = (arm, d) => {
+  const base = Math.min(64, Math.max(1, (arm.pointSize * arm.kScale * arm.zoom) / Math.max(0.15, d)));
+  const cell = (arm.latticeCell * arm.lensReference * 540 * arm.kScale * arm.zoom) / Math.max(0.15, d);
+  return { base, mixed: base * (1 - LENS_GLYPH) + cell * LENS_GLYPH };
+};
+
+{
+  await setStage(main.page, REF);
+  const measured = new Map();
+  for (const [name, spec] of LENS_PIPELINES) {
+    const wide = await armAt(main.page, {
+      label: `${name}-wide`, look: spec.look, camera: { ...LENS_CAMERA, fov: PROGRAM_FOV },
+    });
+    const long = await armAt(main.page, {
+      label: `${name}-long`, look: spec.look, camera: { ...LENS_CAMERA, fov: LENS_LONG_FOV },
+    });
+    const m = await main.page.evaluate(`((n, z) => {
+      const ex = globalThis.__ex;
+      ex.crop(n + '-wide', n + '-wideCentre', z);
+      ex.down(n + '-long', n + '-longDown', z);
+      ex.down(n + '-wideCentre', n + '-wideCoarse', 4);
+      ex.down(n + '-longDown', n + '-longCoarse', 4);
+      // The control: the long frame against the wide one shrunk rather than cropped, which is
+      // a different picture unless the lens never reached the render.
+      ex.down(n + '-wide', n + '-wideShrunk', z);
+      ex.down(n + '-wideShrunk', n + '-shrunkCoarse', 4);
+      return {
+        fine: ex.diff(n + '-wideCentre', n + '-longDown'),
+        coarse: ex.diff(n + '-wideCoarse', n + '-longCoarse'),
+        control: ex.diff(n + '-shrunkCoarse', n + '-longCoarse'),
+        ratio: ex.lum(n + '-longDown').mean / ex.lum(n + '-wideCentre').mean,
+        controlRatio: ex.lum(n + '-longDown').mean / ex.lum(n + '-wideShrunk').mean,
+      };
+    })(${JSON.stringify(name)}, ${LENS_ZOOM})`);
+    measured.set(name, { ...m, wide, long });
+  }
+
+  const bad = [];
+  for (const [name, m] of measured) {
+    for (const arm of [m.wide, m.long]) {
+      const s = arm.sizes;
+      if (s.smallest < 1 || s.largest > Math.min(64, arm.pointRange[1])) {
+        bad.push(`${name} at ${arm.size.w}x${arm.size.h}: ${s.smallest.toFixed(2)}..${s.largest.toFixed(1)}px`);
+      }
+    }
+  }
+  const one = measured.get('lens-splat');
+  check(bad.length === 0,
+    'neither point-size clamp is active through either lens, so the comparison is about the lens',
+    bad.length ? bad.join(' | ')
+      : `lens-splat: ${one.wide.sizes.smallest.toFixed(2)}..${one.wide.sizes.largest.toFixed(1)}px at `
+        + `${fixed(PROGRAM_FOV, 2)} degrees, ${one.long.sizes.smallest.toFixed(2)}..`
+        + `${one.long.sizes.largest.toFixed(1)}px at ${fixed(LENS_LONG_FOV, 2)}`);
+  // The glyph sprite has to sit above the 16-pixel legibility band through both lenses and
+  // under the base clamp and the hardware ceiling through the long one, or a point would
+  // change from character to dust between the two frames for a reason that is not the lens.
+  {
+    const g = measured.get('lens-glyph');
+    const wideFar = glyphSpriteAt(g.wide, g.wide.sizes.farthest);
+    const longNear = glyphSpriteAt(g.long, g.long.sizes.nearest);
+    const ceiling = Math.min(255 * g.long.kScale, g.long.pointRange[1]);
+    check(wideFar.mixed >= 16 && longNear.base < 64 && longNear.mixed < ceiling,
+      'the glyph sprite is legible through both lenses and clamped through neither, so the glyph row is about the lens',
+      `mixed ${wideFar.mixed.toFixed(1)}px at the farthest point through ${fixed(PROGRAM_FOV, 2)} degrees, `
+      + `base ${longNear.base.toFixed(1)}px and mixed ${longNear.mixed.toFixed(1)}px at the nearest through `
+      + `${fixed(LENS_LONG_FOV, 2)}, against 16, 64 and ${ceiling}`);
+  }
+
+  for (const [name, m] of measured) {
+    const tol = LENS_TOLERANCE[name];
+    const margin = Math.min(m.control.mean / tol.mean, Math.abs(m.controlRatio - 1) / tol.ratio);
+    check(margin >= CONTROL_MARGIN,
+      `${name}: the lens reached the render - the long frame is not the wide one shrunk`,
+      `coarse mean ${fixed(m.control.mean)} against ${tol.mean}, luminance ratio ${fixed(m.controlRatio, 4)} `
+      + `against ${tol.ratio}: ${margin.toFixed(1)}x the tolerance`);
+    check(m.coarse.mean <= tol.mean && Math.abs(m.ratio - 1) <= tol.ratio,
+      `${name}: a ${fixed(LENS_LONG_FOV, 2)}-degree lens is the centre of the ${fixed(PROGRAM_FOV, 2)}-degree frame at ${LENS_ZOOM}x`,
+      `coarse mean ${fixed(m.coarse.mean)} <= ${tol.mean}, fine mean ${fixed(m.fine.mean)}, `
+      + `luminance ratio ${fixed(m.ratio, 4)} within ${tol.ratio}`);
+  }
 }
 
 console.log('\n[3] the crop box is editing furniture and cannot reach an exported pixel');
@@ -2087,7 +2253,7 @@ console.log('\n[9] an edit is refused while a render runs, and the file is the d
         ['a look value', () => k.params.set('opacity', 0.93)],
         ['an undo', () => k.keyframes.undo.pop()],
         ['a keyframe', () => k.keyframes.toggle('opacity')],
-        ['a retime', () => k.keyframes.setRetime({ rate: 2, keys: [] })],
+        ['a speed change', () => k.keyframes.setSpeed(2)],
         ['a trim', () => k.editor.setClipRange(0.1, 0.4)],
         ['a project load', () => k.library.loadProject('check-guard-doc', JSON.parse(before))],
       ];

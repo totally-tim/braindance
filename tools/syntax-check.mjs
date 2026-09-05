@@ -45,14 +45,14 @@ const MUTATIONS = {
   'web-citation-outlives-its-module': {
     file: 'CLAUDE.md',
     edits: [[
-      'which is the fault `web/main.js` has actually shipped twice',
-      'which is the fault `web/render-loop.js` has actually shipped twice',
+      'the reach through property dispatch inside `web/main.js`',
+      'the reach through property dispatch inside `web/render-loop.js`',
     ]],
   },
 
   'line-citation-past-the-end': {
     file: 'docs/proof-tools.md',
-    edits: [['`gpuTimer.poll` in `web/main.js` is and what made', '`gpuTimer.poll` in `web/main.js:98600` is and what made']],
+    edits: [['`gpuTimer.poll` in\n`web/main.js` is that shape', '`gpuTimer.poll` in\n`web/main.js:98600` is that shape']],
   },
 
   'manifest-does-not-parse': {
@@ -123,7 +123,7 @@ const MUTATIONS = {
 
   'doc-line-ends-in-whitespace': {
     file: 'docs/proof-tools.md',
-    edits: [['Counted rather than recalled:', 'Counted rather than recalled: ']],
+    edits: [['Per tool, read from the source:', 'Per tool, read from the source: ']],
     fails: 'and a prose line ending in a space, which is invisible on the page and invisible to '
       + 'a clean `git diff --check`',
   },
@@ -789,11 +789,9 @@ const declaredMutations = new Map();
 }
 
 // Every mutation the prose *offers* has to be one a tool declares, asked of the tables above so
-// there is no second list of names here to drift from them. Two forms, because they are the two
-// ways a page offers a control rather than remembers one: an invocation, and the control bullets
-// `docs/proof-tools.md` writes its per-control descriptions as. `docs/instruments.md` names
-// withdrawn and rejected controls on purpose - what it says about one is history, and history is
-// not an offer - so a sweep over bare prose names would fire on the case file doing its job.
+// there is no second list of names here to drift from them. Two forms offer a control: an
+// invocation, and the control bullets `docs/proof-tools.md` describes each one with. A bare name
+// in a sentence is a mention, not an offer, and is not asked.
 {
   const declaredBy = new Map();
   for (const [tool, names] of declaredMutations) {

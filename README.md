@@ -1,133 +1,97 @@
 # Braindance
 
-A volumetric capture and non-linear editing system for the Kinect v2. It records what a
-depth sensor saw, then lets you fly a camera through the recording afterwards.
+Volumetric capture and editing for the Kinect v2. It records what the depth sensor saw, then
+lets you fly a camera through the recording afterwards and render the result to video.
 
 ![A camera arcing across a recorded room, shaded by depth: the near column is warm
 yellow, the far wall cool blue, and the two slide past each other as the camera
 moves.](media/flythrough.gif)
 
-That move was never shot. The sensor never left its mount: the arc is five camera keyframes
-laid over the recording and rendered through the editor's export.
-
-**Status: complete and working, maintained as a personal project.** macOS (Apple Silicon)
-and Raspberry Pi capture nodes. No release cadence, no support commitment; see
-[CONTRIBUTING.md](CONTRIBUTING.md).
+**Status: experimental, maintained as a personal project.** Runs on macOS (Apple Silicon)
+and on a Raspberry Pi as a capture node. There is no release cadence and no support
+commitment. Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 > *Braindance* is a Cyberpunk term for a recorded experience you can step into and look
 > around inside. Not affiliated with CD Projekt Red or R. Talsorian Games.
 
-## Contents
-
-- [What you need](#what-you-need)
-- [Quickstart](#quickstart)
-- [Using it](#using-it): shoot a take, find it, edit it, get a video out
-- [Streaming to OBS](#streaming-to-obs)
-- [Building the native side](#building-the-native-side)
-- [Going deeper](#going-deeper): reference, architecture, measurements
-
 ## What you need
 
-- **A Kinect v2**, not manufactured since 2017. Without one you can still work on the
-  browser side and the server's pure logic; [CONTRIBUTING.md](CONTRIBUTING.md) says which
-  parts.
+- **A Kinect v2.** Without one you can still replay a capture and work on the browser side.
 - **Node 18.15 or newer.**
 - **macOS on Apple Silicon, or Debian / Raspberry Pi OS** for a capture node.
-- **The native grabber**, built once: [Building the native side](#building-the-native-side).
-- **ffmpeg** for video out, looked for at `/opt/homebrew/bin/ffmpeg`. `FFMPEG=` overrides.
-- **A capture.** None ships here, since `captures/` is gitignored. Record one as step 1.
+- **ffmpeg** for video out, expected at `/opt/homebrew/bin/ffmpeg`. Set `FFMPEG=` to override.
 
 ## Quickstart
 
 ```bash
 npm install
-npm run build:native      # one-time, offline; skip it if you have no sensor
-npm start                 # menu on http://localhost:8080
+npm run build:native      # one-time; needs the packages listed under Building the native side
+npm start                 # opens the menu on http://localhost:8080
 ```
 
-`npm start` lands on a menu: record a take, open your projects, or browse the media library.
+Skip the native build if you have no sensor.
+
+The menu offers three things: record a take, open your projects, or browse the media library.
 
 ![The menu, under a bar reading Braindance: three cards reading RECORD, PROJECTS and
 MEDIA LIBRARY.](media/menu.png)
 
-Two shortcuts past it:
+Two shortcuts:
 
 ```bash
-npm run record            # live sensor, and arm the first take at boot
-npm run replay            # replay a capture you already have, no sensor needed
+npm run record            # live sensor, first take armed at boot
+npm run replay            # replay captures/sample.knct, no sensor needed
 ```
 
-`npm run replay` looks for `captures/sample.knct`. `tools/make-fixture.js` loops a short
-capture into a long one, which is how the index and the frame API get tested without
-shooting for five minutes.
+No capture ships with the repo. Record one, or build a synthetic one with
+`npm run fixtures`.
 
 ## Using it
 
-### 1. Shoot a take
+### 1. Record a take
 
-Pick **Record**, then press **record** to arm. The recorder waits for the sensor's hello
-before opening a take, so the capture carries the intrinsics it was shot with; the panel
-counts frames and shows the recording time the disk has left.
+Pick **Record**, then press **record** to arm. The recorder waits for the sensor before opening
+a take, so every capture carries the sensor's calibration. The panel counts frames and
+shows how much recording time the disk has left.
 
-![The record surface in Blackwall: a room drawn as a crimson point cloud filling the
-frame, with an application bar across the top reading Record, File, Output and View, and
-a panel down the left whose four tabs are Record, Framing, Look and Region. The Record
-tab is open, showing the record and mark buttons, "not recording", colour camera and low
-light toggles, monitor decimation and the OBS output settings. The bar's right-hand end
-reads the sensor serial, its firmware and "29 fps in".](media/viewer.png)
+![The record surface in Blackwall: a room drawn as a crimson point cloud, with an
+application bar across the top reading Record, File, Output and View, a top-down inset in
+the corner, and a panel down the left whose four tabs are Record, Framing, Effects and
+Region. The Record tab is open, showing the record and mark buttons, "not recording", the
+recording time left, colour camera and low light toggles, the monitor's depth and every Nth
+sliders, and the OBS output settings with both source URLs.](media/viewer.png)
 
-**mark** drops a mark at the current frame, which shows up later on the media library's scrub bar
-and the editor's ruler. **stop** closes the take: the `.knct` and its `.idx` index land in
-`captures/`, with a `.marks.jsonl` sidecar if you marked anything. `R` and `M` do the same
-two things from the keyboard.
+- **mark** drops a mark at the current frame. Marks show up on the media library's scrub bar
+  and the editor's ruler.
+- **stop** closes the take. The `.knct` capture and its `.idx` index land in `captures/`,
+  with a `.marks.jsonl` sidecar if you marked anything.
+- `R` and `M` do the same two things from the keyboard.
 
-**The panel is four tabs rather than one column.** *Record* arms the sensor and points the
-OBS output somewhere; *Framing* levels the room and sets the clip box; *Look* is everything
-about how the cloud is drawn; *Region* holds displacement and the region box. The
-application bar above them carries what is not about the picture — the project, the export,
-the OBS status — and is the same bar on every surface.
+The panel has four tabs. **Record** arms the sensor and points the OBS output somewhere.
+**Framing** levels the room and sets the clip box. **Effects** is everything about how the
+cloud is drawn. **Region** holds displacement and the region box. The application bar above them
+carries the project, the export and the OBS status, and is the same on every surface.
 
-**The shading controls change what you are looking at, never what is written.** They used
-to be five buttons; they are five documents now, and the *Look* tab's picker offers them
-beside anything you have saved yourself.
+The **Effects** tab's preset picker holds the twelve shipped looks. Pick one to apply it.
+Shipped presets cannot be overwritten. **save** writes your own to `presets/`, and **export**
+and **import** move presets between machines as JSON. Every slider underneath stays
+adjustable, and a changed row grows a **↺** that resets just that one.
+[Presets](docs/reference.md#presets) lists the twelve.
 
-![The same surface with the Look tab open. A Preset picker is expanded over the panel,
-listing none, blackwall, contour, depth, ghost and rgb with blackwall highlighted, and a
-plus button for saving a new one. Underneath it the Style parameters — ghost, contour,
-blackwall, ghost rim, ghost fill, bands, thickness, wall sweep, scan, rim, thermal and
-edges — each carry a slider and a value.](media/look.png)
+![The same surface with the Effects tab open. The Preset picker is expanded over the
+panel, listing none, blackwall, cascade, contour, depth, ember, ghost, grille, rgb, rift and
+tearline with blackwall highlighted. Underneath it the Blackwall, Glitch and Points groups
+each carry sliders with values, and a changed row shows a reset arrow.](media/look.png)
 
-`blackwall`, `contour`, `depth`, `ghost` and `rgb` ship in `presets-builtin/` and cannot be
-overwritten, and beside them ship seven graded looks — `ember`, `grille`, `voxel`, `tearline`,
-`cascade`, `updraft` and `rift` — which are one reading with somebody's grade already on it
-rather than a place to start. The last two are `ember` under a datamosh and differ only in
-`datamosh.splay`: `updraft` streams the whole frame upward, `rift` pulls it apart from the line
-outward. **save** writes yours to `presets/`, and **export** and **import** move them
-between machines as JSON. Every scalar underneath is still yours to move, and a row you have
-changed grows a **↺** that puts just that one back.
-
-Package effects start out of the sidebar. Press **+ add effect** to search the installed
-packages and keep one in reach. A project, preset, value or keyframe that uses an effect
-reveals it automatically, so the rack cannot hide work. **Remove** is the only way to take
-an effect back out: when it carries values or keyframes the editor asks first, then resets
-all of its values and deletes all of its tracks as one undoable edit. The rack choice is a
-local panel preference and is not written into the project.
-
-**The effects those sliders drive are packages on disk, and they follow the same two-root
-rule.** Twenty-one ship in `effects-builtin/`, each a manifest beside the GLSL it splices into the
-shaders, and the page assembles both point-cloud programs, the grade pass, the parameter
-registry and the panel out of whatever is installed. `effects/` is the writable root: a package
-installed there under a shipped id shadows it, and deleting that copy brings the shipped one
-back, so there is always something to fall back to. A page that is open when an install happens
-rebuilds itself rather than needing a reload, and a clip naming an effect this machine has not
-got still opens — the missing part is carried, a badge in the application bar says what is
-parked, and export refuses until you say it may go without it.
+Effects are packages on disk. Press **+ add effect** in the sidebar to search the installed
+packages. **Remove** takes one out of the project, resetting its values and deleting its
+tracks as one undoable edit.
 [Installing an effect](docs/reference.md#installing-an-effect-and-taking-one-away) has the
-routes, the rules the door enforces and the `--effects` flags.
+package layout, the routes and the flags.
 
 ### 2. Find it in the media library
 
-**Media library** on the menu, or the link in any surface's header.
+Pick **Media library** on the menu, or the link in any surface's header.
 
 ![The media library: four take cards of identical size with depth thumbnails, each showing its
 duration, LOCAL badge, size, frame count, mark count and date above a New project from
@@ -136,25 +100,20 @@ NODE ONLY 0 and BOTH 0, and the application bar carries a link back to the menu,
 and Media library beside each other with Media library marked, and reads 4 takes, 04:58 and a linked
 node.](media/library.png)
 
-Every take is a same-size tile carrying its poster, duration, size, frame count, mark count
-and date. Skim a poster to scrub it; tap to open it large, with arrow keys stepping a frame
-and up and down moving between takes.
+Every take is a tile with its poster, duration, size, frame count, mark count and date. Skim a
+poster to scrub it. Tap to open it large, then arrow keys step a frame and up and down move
+between takes. The **⋯** menu holds **rename**, **show in the file manager** and **reclaim on
+node**. Started with `--node http://<capture-node>:8080`, the library also lists that node's
+takes, and the filter row splits it into *local*, *node only* and *both*.
 
-The **⋯** menu holds what does not fit on a 228px tile: **rename**, **show in the file
-manager** and **reclaim on node**. With a capture node linked, the filter row splits the
-media library into *local*, *node only* and *both*.
+### 3. Start a project
 
-### 3. Start a project on it
+**New project from this take** creates a project named after the take and opens the editor.
 
-**New project from this take** makes a project named after the take and lands you in the
-editor on it. Looking at footage and starting work on it are different acts, so they get
-different controls: the viewer shows you a take, and this makes something.
-
-**A project saves itself.** Every change that lands on the undo stack is written to the
-project's own file, so there is no save button and closing the tab loses nothing. **Projects**
-on the menu lists them, last-written first, and each row draws a picture of the edit you can
-drag through. That is where you pick up yesterday's work, and where you rename a project,
-duplicate one to try something, or delete one.
+Projects save themselves. Every change that lands on the undo stack is written to the
+project's file, so there is no save button. **Projects** on the menu lists them, last written
+first, with a thumbnail of the edit you can drag through. That is where you rename, duplicate
+or delete a project.
 
 ![The projects page: two rows, each a wide depth thumbnail of the edit beside the project
 name, when it was last written, its clip count, its shape and its rate, with a three-dot
@@ -171,143 +130,79 @@ its Camera tab, offering add key, delete key and set viewport to camera. Underne
 transport reads a program clock of 00:10.967 against the same source time, and the
 timeline's camera lane says 5 keys with a diamond under each.](media/editor.png)
 
-Drag to orbit, scroll to zoom, right-drag to pan, `H` hides the panel;
-[the controls reference](docs/reference.md#viewer-and-timeline-controls) has the timeline's
+Drag to orbit, scroll to zoom, right-drag to pan, `H` hides the panel.
+[The controls reference](docs/reference.md#viewer-and-timeline-controls) has the timeline's
 navigation. On a canted mount,
 [level the room](docs/reference.md#levelling-a-canted-mount) first.
 
 ### 4. Key a camera move
 
-Park the playhead, orbit to the pose you want, and press **add key** on the panel's
-*Camera* tab. Move, orbit, press again: a key takes the pose you are orbiting from, and
-dragging a path node in either the view or the top-down moves it. **delete key** removes
-the one under the playhead, and **set viewport to camera** puts your eye where the program
-camera is standing. The keyframe arrows beside the transport step between keys without
-hunting for the diamonds.
+Park the playhead, orbit to the pose you want, and press **add key** on the panel's **Camera**
+tab. Move, orbit, press again. Dragging a path node in the view or the top-down moves the
+key. **delete key** removes the key under the playhead, and **set viewport to camera** puts
+your eye where the program camera stands. The keyframe arrows beside the transport step
+between keys.
 
 Two clocks read under the transport. **program** is a position in the output, **source** a
-position in the capture; at 1.00× they agree, and pulling **speed** or keying the retime
-lane makes them diverge, so the footage slows while the camera keeps its own pace. See
+position in the capture. At 1.00× they advance together. Pulling **speed** makes them
+diverge, so the footage slows while the camera keeps its own pace. See
 [program time](docs/architecture.md#program-time-is-the-edit-coordinate).
 
-Nearly every slider carries a keyframe button, so a clip can dissolve from depth into
-Blackwall under the playhead. `depth ÷`, `every Nth` and `render %` are the exceptions:
-they change what you are looking at rather than what the frame is, so they are neither
-saved with the clip nor exported.
+Nearly every slider has a keyframe button, so a clip can dissolve from depth into Blackwall
+under the playhead. `depth ÷`, `every Nth` and `render %` are view settings, not part of the
+frame, so they are neither saved with the clip nor exported.
 
-### 5. Get a video out
+### 5. Export a video
 
-Set **in** and **out** on the timeline bar, then open **Output → Export** (`⌘E`), choose
-what you want out, and press **render**.
+Aspect ratio and frame rate belong to the project: set them under **Project settings** in the
+application bar. Then set **in** and **out** on the timeline bar, open **Output → Export**
+(`⌘E`), pick a resolution, a format and a name, and press **Export**.
 
-![The Export dialog. Aspect ratio runs across the top as 16:9, 1.90:1, 4:3, 1:1 and
-65:24 with 16:9 selected; below it a Resolution of 1920x1080 and a Frame rate of 30, then
-a Format row of MP4, MOV and PNG sequence with MP4 selected, an Output name whose
-placeholder is the take's id, and save a copy and render at the
+![The Export dialog. A Deliverable select with a new button, reading 1920x1080 h264
+underneath; a Resolution of 1920x1080; a Format row of MP4, MOV and PNG sequence with MP4
+selected; an Output name whose placeholder is the take's id; a Trim line reading
+00:00.000 to end, 10.80s at 30fps; and save a copy and Export at the
 foot.](media/export.png)
 
-**Three things come out, and they are for different jobs.** **MP4** is h264 and the one to
-send someone. **MOV** is ProRes 422 HQ at 10-bit 4:2:2, which is what an editor that is
-going to grade the shot wants. **PNG sequence** writes the frames themselves into a
-directory, for a compositor or for anything that should not be told about codecs at all.
-Aspect ratio and resolution are two controls over one list: the resolutions are grouped by
-shape, and pressing a ratio moves you into that group rather than filtering the others
-away, so the ratio row is a way of getting about a long list and the select still shows
-everything. Frame rate sits beside them because it used to have only a default — an edit
-went out at 30 with nothing on screen saying that had been chosen. Only h264 insists on
-even dimensions, so odd sizes stay available on the other two rather than being refused at
-the end of a render.
+| Format | What it is | Use it for |
+| --- | --- | --- |
+| MP4 | h264 | sending to someone |
+| MOV | ProRes 422 HQ, 10-bit 4:2:2 | grading in another editor |
+| PNG sequence | one file per frame in a directory | compositing |
 
-The render runs in the page, frame by frame through the program camera, pushing frames to
-ffmpeg over a socket. Each render gets its own directory under `exports/` with a `.job.json`
-carrying the whole project document, so nothing overwrites and every render is reproducible.
-**save a copy…** puts the file anywhere through the browser's file picker.
+The render runs in the page and lands in its own directory under `exports/` on the server.
+**save a copy…** puts the file anywhere through the browser's file picker. It is disabled in a
+browser without one, and for a PNG sequence, which is a directory.
 
-**The batch path has no button anywhere in the browser.** `POST /jobs` takes the project
-document, one capture content hash per clip and the output's name, size and rate, all of them
-required and all validated at enqueue so the queue refuses work it already knows cannot run.
-A render you have already done carries them all in its sidecar, so the shortest correct
-request is that file with a new name over it:
-
-```bash
-jq -s 'max_by(.created) |
-       {project, captures, output: "take2-again", width: 960, height: 540, fps: 30}' \
-   exports/*/take2.mp4.job.json |
-  curl -sX POST http://localhost:8080/jobs -H 'content-type: application/json' -d @-
-node tools/render-worker.mjs --url http://localhost:8080 --drain
-```
-
-`max_by` is doing real work there: exporting `take2` twice leaves two directories the glob
-matches, and two JSON objects concatenated into one request body is not JSON at all.
-
-A worker claims only jobs matching the renderer class of the browser it will draw in, so it
-cannot be handed work that would come back looking different. `--drain` exits when the queue
-has nothing *for this worker*, and exits non-zero if what is left is pinned elsewhere. The
-queue is records on disk, so it survives a restart.
-
-**The trim is the one thing that travels on a `deliverable`.** Adding
-`"deliverable": {"in": 0, "out": 1.967}` cuts the render to those seconds, and a job posted
-without one renders the whole clip. Size, rate and codec stay at the top level, which is
-where the queue validates them and where the worker reads them back. The sidecar does not
-record the trim, so the recipe above reproduces a trimmed render at full length unless you
-add the deliverable back yourself.
+Renders can also be queued from the command line without the browser. See
+[batch rendering](docs/reference.md#batch-rendering).
 
 ## Streaming to OBS
 
-Two outputs, and they are different pictures rather than two views of one. Both URLs are
-printed twice over: in the record panel's *Output* group, where you are already standing
-when you point the thing at OBS, and in **Output → OBS**, which is the same two addresses
-with a **copy** button on each, the camera and resolution beside them, and a line saying
-how many sources are actually attached right now.
+Two outputs, both listed with copy buttons under **Output → OBS**:
 
 | What | How | What it is |
 | --- | --- | --- |
-| the viewport | browser source on `/program` | this renderer, at a fixed size, no chrome |
+| the viewport | browser source on `/program` | this renderer at a fixed size, no chrome |
 | the webcam | browser source on `/camera.mjpg` | the colour camera's own 1920x1080 frame |
 | the keyed webcam | browser source on `/key` | the same frame with everything outside the crop box cut away, alpha to OBS |
 
 Add a *Browser Source*, paste the URL, set *Width* and *Height*. The webcam is always
-1920x1080; the viewport is whatever you set in the panel. OBS's own virtual camera publishes
-either one to Zoom or Meet, so nothing here installs a system camera extension.
+1920x1080. The viewport is whatever you set in the panel, and has two modes: *program camera*
+frames the keyed camera, *mirror* follows what the operator is orbiting. OBS's own virtual
+camera publishes either one to Zoom or Meet.
 
-**The webcam is not the colour on the wire.** Type 2 carries the *registered* colour,
-resampled into the depth camera's 70.6° frustum from the colour camera's 84.1° and holed
-wherever the depth solve failed, which is right for texturing a cloud and useless as a
-picture of a room. The native 1080p frame is therefore a second stream on its own thread,
-emitted only while subscribed, because the encode costs 5.50 ms (90 sensor frames, no warmup
-discarded, q80, TJSAMP_420, FASTDCT) against a 7.1 ms serial loop and its ~50 Mbit/s
-backpressures the grabber and costs the take.
-
-**The keyed webcam is that frame with the room cut away, and the Framing group is its whole
-control.** Registering colour onto the cloud already computes the depth of every colour pixel,
-so while a `/key` page is attached the grabber ships that depth too, as a second greyscale JPEG
-at 8 bits over the sensor's range, and the page cuts the picture by the crop box the cloud
-draws, in sensor metres before levelling. There is no body tracking, because libfreenect2 has
-none: a person against a wall inside the box is keyed with the wall. The box's side faces land
-about five centimetres from where the cloud draws them, the depth camera's offset from the
-colour camera, never at the silhouette. Quantise plus encode costs 6.5 ms mean over 60 keys on
-an M2 Max, on the thread the colour encode already runs on, so one thread carries about 12 ms a
-frame against 33 there; the capture node is unmeasured and decides. The depth is a floor plan of
-the room, and `/key` hands it to anything that can reach the port.
-
-The viewport has two modes: *program camera* frames the keyed camera at a fixed size,
-*mirror* follows what the operator is orbiting. Mirror re-renders their viewpoint rather
-than copying their pixels, because a browser source renders its own context.
-
-**It renders once per sensor frame, and OBS is the clock after that.** CEF renders offscreen
-and OBS pulls the latest texture at canvas rate, so the two clocks beat: negligible at a flat
-30.00fps, uneven on a degraded link. The source shows its delivered rate, its missed count,
-and the decimation it was granted if it is being served coarse.
-
-Turning colour off restarts the grabber and **drops a live webcam mid-call**, with the
-endpoint answering 503 and the reason. `/camera.mjpg` serves the camera to anything that can
-reach the port, so read [SECURITY.md](SECURITY.md) before `--host 0.0.0.0`.
+The keyed webcam cuts the frame by the crop box in sensor metres, and the depth behind the
+cut is the same floor plan the cloud draws, so it is a hole in the picture, not a body
+matte. Turning the colour camera off restarts the grabber and drops a live webcam mid-call.
+`/camera.mjpg` and `/key` serve the camera to anything that can reach the port, so read
+[SECURITY.md](SECURITY.md) before passing `--host 0.0.0.0`.
 
 ## Building the native side
 
-Both builds are one-time and neither needs the network. libfreenect2's source is at
-`third_party/libfreenect2` (upstream v0.2.1 plus our declared edits, see
-`third_party/UPSTREAM.md`) and builds into the gitignored `vendor/prefix`.
+Both builds are one-time and offline. libfreenect2 lives at `third_party/libfreenect2`
+(upstream v0.2.1 plus the edits declared in `third_party/UPSTREAM.md`) and builds into the
+gitignored `vendor/prefix`.
 
 ```bash
 brew install libusb jpeg-turbo cmake                       # macOS
@@ -316,36 +211,17 @@ sudo apt install libusb-1.0-0-dev libturbojpeg0-dev cmake \
 npm run build:native
 ```
 
-The GL packages are on the Debian line because the `linux` preset builds depth on OpenGL, and
-libfreenect2 treats a missing GLFW as a reason to build without it rather than to stop: this
-line lacking them produced a CPU-only library and a build that reported success. The build
-refuses that now, but the refusal is a worse way to find out than installing them here.
-
-`build:native` picks a preset from the platform (`macos` on OpenCL, `linux` on OpenGL for the
-Pi), resolves Homebrew's prefix rather than assuming one, and refuses with the `brew install`
-line you need. `--preset macos|linux` overrides, `--clean` discards the vendored build, and
-`node tools/build-native.mjs --help` has the rest. The wrong preset costs a refusal rather
-than a silent slow path, since `--pipeline` is guarded by whichever backend the library was
-actually compiled with.
-
-The flags live in that script, one copy, beside the comments explaining why each is what it
-is. It closes by running the grabber it just built rather than checking that the file exists,
-since a stale binary and one linked against a moved prefix both exist perfectly well.
-`node tools/vendor-check.mjs` proves the source is upstream v0.2.1 plus exactly the declared
-edits, offline.
+`build:native` picks the `macos` preset (OpenCL) or the `linux` preset (OpenGL, for the Pi)
+from the platform and ends by running the grabber it just built. The GL packages on the Debian
+line are required: without them libfreenect2 builds a CPU-only library, and the build refuses
+that. `node tools/build-native.mjs --help` lists the overrides.
 
 ## Going deeper
 
-- **[docs/reference.md](docs/reference.md)** is the command line, the viewer and timeline
-  controls, levelling a canted mount, the five readings, presets, and installing an effect.
-- **[docs/architecture.md](docs/architecture.md)** is how the pieces fit, the four surfaces,
-  the effect store and how the shaders are assembled from it, program time as the edit
-  coordinate, surface memory, frame interpolation and the `.knct` wire format.
-- **[docs/performance.md](docs/performance.md)** is what this costs: rendering cost, the USB
-  topology that was the whole bottleneck, the OpenCL and CPU depth solves, and the things
-  that looked obviously worth doing and were measured not to be.
-
-Behind those sit the working notes: [docs/measurement.md](docs/measurement.md) for how this
-rig is measured, [docs/instruments.md](docs/instruments.md) for every way a check here has
-claimed a property it was not testing, and [docs/proof-tools.md](docs/proof-tools.md) for
-what each tool needs before it will run.
+- **[docs/reference.md](docs/reference.md)**: the command line, the controls, levelling,
+  the readings, presets, effects and batch rendering.
+- **[docs/architecture.md](docs/architecture.md)**: how the pieces fit, program time, the
+  effect store and the `.knct` wire format.
+- **[docs/performance.md](docs/performance.md)**: what things cost, with the measurements.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)**: what you can work on without a sensor, and how
+  changes are proven.

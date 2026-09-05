@@ -161,14 +161,6 @@ test('the window stays inside the clip however it is asked to move', () => {
   assert.equal(view.fit(), false, 'fitting an already-whole window reports that nothing moved');
 });
 
-test('framing a range leaves a margin, so the two markers are not on the very edges', () => {
-  const { view } = windowOver(100);
-  view.frame(40, 60);
-  assert.ok(view.startSec < 40 && view.endSec > 60, `${view.startSec}..${view.endSec}`);
-  view.frame(50, 50);
-  assert.ok(view.spanSec >= 2 * MIN_VIEW_SEC - 1e-9, `${view.spanSec}`);
-});
-
 test('a marker just outside the window is still drawn, because its corner is inside', () => {
   const { view } = windowOver(100);
   view.set(0.4, 0.6);

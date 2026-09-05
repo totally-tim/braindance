@@ -1,760 +1,811 @@
 # Reference
 
-Command line, controls, the five readings and presets. [README.md](../README.md) has the
-usage path; this is the detail behind it.
+The command line, the controls, the readings, the presets, the queue and the effect store.
+[README.md](../README.md) walks the path from a take to a video; this page is the detail
+behind each step.
 
 ## Command line
 
-Options pass through to the grabber:
+The server is `node server/index.js`, and every flag is optional. Paths default relative to
+the checkout.
 
-```bash
-node server/index.js --pipeline cpu     # CPU depth instead of OpenCL
-node server/index.js --no-color         # depth only, no colour stream
-node server/index.js --port 9000
-node server/index.js --record           # a flag, not a path - takes are named and
-                                        # placed in captures/ by the recorder
-node server/index.js --replay captures/session.knct
-node server/index.js --host 0.0.0.0     # reachable from other machines - see below
-node server/index.js --effects ~/fx     # where an installed effect package lands
-node server/index.js --builtin-effects ./effects-builtin  # what the build ships with
-```
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--port N` | `8080` | The port to listen on. |
+| `--host ADDR` | `127.0.0.1` | The address to bind. A non-loopback address makes the server reachable from other machines; `::1` stays loopback. |
+| `--record` | off | Arms the first take at boot. |
+| `--replay PATH` | none | Loops a recorded capture instead of reading a sensor. |
+| `--pipeline NAME` | the grabber's own pick | Depth processor: `gl`, `cl` or `cpu`. Handed to the grabber. |
+| `--no-color` | colour on | Depth only. Handed to the grabber. |
+| `--grabber "BIN ARGS"` | none | The grabber binary and its own arguments, as one space-separated string. |
+| `--captures DIR` | `captures/` | Where takes are recorded and read back. |
+| `--projects DIR` | `projects/` | Where project documents live. |
+| `--presets DIR` | `presets/` | The writable preset library. |
+| `--builtin-presets DIR` | `presets-builtin/` | The read-only preset library the build ships. |
+| `--effects DIR` | `effects/` | The writable effect root an install lands in. |
+| `--builtin-effects DIR` | `effects-builtin/` | The effect root the build ships. |
+| `--deliverables DIR` | `deliverables/` beside the captures directory | Where saved export settings live. |
+| `--jobs DIR` | `jobs/` | The render queue's records. |
+| `--node URL` | none | A capture node this instance links to, so its takes appear in the library here. |
+| `--node-name NAME` | `node` | The label that node is listed under. |
+| `--name NAME` | `mac` when `--node` is given, else `node` | The name this instance reports as. |
+| `--reveal-with PROG` | the platform file manager | The program `POST /library/reveal/:id` starts. |
 
-**The two effect roots are the fork mechanism, so pointing one of them somewhere else
-moves what shadows what.** `--builtin-effects` is the shipped set and nothing in this
-program writes into it; `--effects` is the writable root an install lands in, and an id
-present in both resolves from there. Both default to directories beside the checkout, and
-the flags exist because a proof tool needs a search path it controls rather than the one
-the developer happens to have installed packages into. A server whose builtin root is
-missing refuses to boot rather than answering an empty list, since a broken install must
-not read as nothing-installed.
+**The two effect roots are the fork mechanism.** Nothing writes into `--builtin-effects`, an
+install lands in `--effects`, and an id present in both resolves from there. A server whose
+builtin root is missing refuses to boot, so a broken install cannot read as nothing installed.
 
-**`--record` arms the *first* take rather than offering the recorder.** The flag is read
-once at boot and spent when you stop that take; arming again is the record button. So
-`npm run record` writes from the moment the server is up, and `npm start` is the one that
-lets you decide when.
+**`--record` arms the first take and is then spent**, so stopping that take gives the recorder
+back its button. `--replay` loops a recorded capture with no sensor attached, replaying the
+arrival spacing the capture was recorded at, which on a degraded link is uneven.
 
-`--replay` loops a recorded capture, for iterating on shaders with the sensor unplugged. It
-replays the *recorded* arrival spacing rather than a uniform 30fps: a degraded link runs
-p50 64ms against p90 222ms, so even pacing would hand the viewer the one cadence that never
-happens.
+### Grabber flags
+
+`--pipeline` and `--no-color` are read by the server and handed on. Every other grabber flag
+rides inside the `--grabber` string.
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--quality N` | `80` | JPEG quality, 1 to 100, for the colour stream. |
+| `--log LEVEL` | `warning` | `none`, `error`, `warning`, `info` or `debug`. `debug` adds libfreenect2's per-packet USB diagnostics. |
+| `--min-depth M` | `0.05` | Nearest depth in metres that reaches a frame. |
+| `--max-depth M` | `9.0` | Furthest depth in metres that reaches a frame. |
+| `--no-low-light` | low light on | Turns off the low-light exposure mode. |
+| `--profile` | off | One CSV row per frame on stderr at exit, timing the serial half of the frame loop. |
+| `--dump-corpus DIR` | none | Writes registration inputs for the comparison corpus. |
+| `--dump-count N` | `24` | How many frames that dump holds. |
+| `--help` | | Prints the usage, the pipelines this build offers and the stdin commands, then exits. |
+| `--dump-every N` | `10` | Dumps every Nth frame. |
+
+**`--min-depth` and `--max-depth` decide what exists.** They clip on the GPU before a frame is
+built, so a point outside them is never recorded. The viewer's own `near` and `far` only hide
+points that already arrived, so putting a preview range on the grabber flags destroys footage.
 
 ## Reaching it from another machine
 
-**There is no authentication anywhere in this program**, so whoever can reach the port can
-arm the recorder and start or stop a take. The server binds `127.0.0.1` unless you pass
-`--host`, and says on stdout when it did.
+There is no authentication anywhere in this program. Whoever reaches the port can arm the
+recorder, start and stop a take, write documents and install effects. The server binds
+`127.0.0.1` unless you pass `--host`, and prints on stdout what it bound.
 
-Mutating routes and the WebSocket upgrade require a same-origin `Origin` and an address
-rather than a hostname. The socket is included because `WebSocket` is exempt from the
-same-origin policy and sends no preflight; the hostname half exists because comparing
-`Origin` against `Host` was measured reaching every mutating route on the default loopback
-bind through DNS rebinding. It stops hostile pages and nothing else: curl and other machines
-on the Wi-Fi send no origin and are allowed everything. `tools/guard-check.mjs` proves both
-halves, and [SECURITY.md](../SECURITY.md) has the threat model.
+Three checks stand between a page you merely visit and a route that changes something. A
+request that fails one is refused before its body is read.
+
+| Check | Refusal |
+| --- | --- |
+| `Origin`, when the caller sends one, matches `Host`, and `Host` is an address, `localhost` or a `.local` name | 403 |
+| The method is one the route declares | 405, with an `Allow` header |
+| The request declares `application/json` | 415 |
+
+The WebSocket upgrade goes through the same origin check on both its paths, `/` for the frame
+stream and `/export` for a running render. A caller sending no `Origin` is not a browser and
+is allowed everything, so `curl` and other machines on the network are unrestricted.
+[SECURITY.md](../SECURITY.md) carries the threat model.
 
 ## Viewer and timeline controls
 
-Drag to orbit, scroll to zoom, right-drag to pan, `H` hides the panel.
+| Gesture | What it does |
+| --- | --- |
+| Left-drag on the picture | Orbits about the pivot. |
+| Right-drag on the picture | Pans the camera. |
+| Wheel over the picture | Dollies in and out. |
+| Shift-drag on the picture | Turns the view in place, without moving the camera. |
+| Shift-wheel over the picture | Changes the lens, bounded by 8mm and 300mm. |
+| Left-press on the picture | Moves the orbit pivot to the depth under the pointer. |
+| Drag a crop face handle | Writes that face, through the door the sliders use. |
+| Drag a clip box on the strip | Moves the clip in program time. |
+| Drag either edge of a clip box | Trims that end. |
+| Wheel over the ruler | Zooms the ruler window about the pointer. |
+| Drag the overview box | Pans the ruler window. |
+| Click the overview | Centres the ruler window on that point, keeping its width. |
+| Drag on the ruler | Scrubs, drawing draft frames, and seeks for real on release. |
+| Drag a cut marker | Moves the in-point or the out-point. |
+| Horizontal wheel over the ruler or overview | Pans the ruler window. |
+| Double-click a key in a lane | Deletes it. |
+| Drag the grip above the transport | Changes how much height the lanes get. |
 
-**The orbit turns about whatever you pressed on.** A left press reads the depth under the
-pointer and moves the pivot along the view axis to that range, so orbiting a subject four metres
-out turns around it rather than swinging it across the frame. The pivot stays on the view axis,
-which is why the press changes nothing to look at - what changes is the turning radius. A press
-on the background, on a hole in the depth returns, or on geometry outside the crop box leaves
-the pivot where it was, and **Reset** still goes to the home pose rather than to the last pivot
-you picked. The pick reads the depth frame and not the drawn picture, so with the displacement
-effects or the datamosh up it lands on the surface that is really under the pointer rather than
-on the smear the eye is aimed at.
+| Key | What it does |
+| --- | --- |
+| `space` | Plays and pauses. |
+| `←` `→` | Steps one output frame, or one second with shift. |
+| `home` `end` | Goes to the in-point and the out-point. |
+| `i` `o` | Sets the trim at the playhead. With shift, jumps to it. |
+| `option-x` | Restores the whole clip. |
+| `del` `backspace` | Removes the selected mark, else the selected key, else the selected clip. |
+| `m` | Plants a mark at the playhead, or takes away the one already there. |
+| `[` `]` | Goes to the previous and next mark. |
+| `+` `=` `-` `_` | Zooms the ruler about the playhead. |
+| `,` `.` | Pans the ruler. |
+| `f` | Fits the ruler to the clip. |
+| `g` | Cycles the selected clip's move and turn handles. |
+| `h` | Hides the panel. |
+| `?` | Says this list. |
+| `cmd-z` `ctrl-z` | Undoes. |
+| `cmd-o` `ctrl-o` | Goes to the projects page. |
+| `cmd-e` `ctrl-e` | Opens the export dialog. |
+| `r` `m` | Starts or stops a take, and marks a running one, on the record surface. |
+| `esc` | Closes an open menu, or the effect picker. |
+| shift and `w` `a` `s` `d` | Flies the camera. |
+| shift and `q` `e` | Takes the camera down and up. |
+| up, down, page up, page down, home, end | Move the focused lane splitter: one lane row, four rows, or to either bound. |
 
-The ruler shows a *window* of the clip, because a fifteen-minute take across one screen puts
-a keyframe against gradations forty times coarser than the thing being placed. Scroll to
-zoom about the pointer, `+`/`-` about the playhead, `,`/`.` to pan, `F` to fit the clip, `Z`
-to frame the trim. The overview underneath is always the whole clip: drag its box to pan, click
-to go there.
+**Shift is the free camera's modifier**, and without it the six flight keys do nothing. `w`
+follows the view direction, and `q` and `e` follow the current navigation vertical: the
+levelled room in the normal view, the sensor's own vertical in sensor view. Flying carries the
+orbit pivot with the camera.
 
-Press `I` and `O` to set the trim at the playhead. Choose **Output > Whole clip**, or press
-Option-X, to restore `{ in: 0, out: null }`. The null end means the range continues to the end
-if the program later grows; writing the current duration would freeze it there instead.
+**A focused text field keeps the whole keyboard**, and gaining text focus releases any flight
+keys being held. Sliders, dropdowns and other non-text inputs keep only the arrows, space,
+enter, home, end and the page keys, so a focused slider still nudges with the arrows while
+shift-`w` flies and `cmd-z` undoes.
 
-**Loop**, at the right of the transport row, plays that trimmed range round instead of stopping
-at its end: reaching the out-point seeks back to the in-point and playback carries on. It is off
-whenever the editor opens, because the transport is built fresh each time and a loop you set on
-one take is not a fact about the next one.
+**A shift-drag turns the view the way you drag it**, which is the opposite of an orbit: drag
+right and the view turns right, so the scene sweeps left. A drag the height of the stage turns
+the view by one field of view, so a longer lens turns through a smaller angle. The camera does
+not move, so letting go of shift orbits whatever you are now looking at.
 
-**Clips are the rows at the head of the lane stack**, one box each from where a clip starts to
-where it ends, above the curves that animate them. The full-width `+` below the last clip opens
-the media library's takes even when no row is selected. The first one you choose lands at the
-playhead on a row of its own. With no selection, it copies the first clip's look; otherwise it
-copies the selected clip's. `delete clip` removes the selected one, and so does `Delete`. There is
-a button as well as a key because the Pi's touchscreen has neither a Delete key nor a drag affordance to
-discover. Click a box to select that clip, drag it along the strip to move it, and drag either
-edge to trim it. The edit refuses to delete its last clip, because a project carries at least
-one.
+**The orbit turns about whatever you pressed on.** A left press moves the pivot along the view
+axis to the depth under the pointer, and a press on the background, on a hole in the returns
+or on geometry outside the crop box leaves the pivot where it was. The pick reads the depth
+frame, so it lands on the surface really under the pointer even
+with the displacement effects or the datamosh up.
 
-**The two edges do different things.** The right edge moves where the edit stops using the take,
-which is the clip's own `length`. The left edge is a head trim: the clip starts later in the take,
-its out-point stays where it is, and the footage under what is left does not move — the same
-project second stands on the same source frame afterwards. That in-point is written as the clip's
-retime curve, one key at the origin, because a clip states where it starts in the take through its
-curve rather than through a field of its own; trimming back to the head of the take removes the
-key again. A curve of one key is still a rate, so the speed slider goes on working through a head
-trim and only goes quiet once a clip carries a curve that says more than an in-point. **On such a
-clip the head edge refuses and says so** — moving a keyed curve's domain is a different edit and
-this build does not do it from the edge.
+**The ruler shows a window of the clip**, and the overview underneath is always the whole clip.
 
-**Which clip is selected is the session's and not the document's.** It decides what the panel
-writes to, which curve the retime lane draws, and which clip the ruler's marks are drawn against
-— and it is deliberately not saved, because which clip you are looking at is not part of the edit
-and a document recording it would make two people's saves of the same work differ. Opening a take
-selects its clip, because a take builds a project of one clip of footage you have just chosen and
-there is nothing there to choose between; loading a project selects nothing, because a document
-does not record which clip was being worked on and picking one would be a guess. Pressing on the
-empty part of the lane stack takes the selection off every clip.
+**A seek whose pre-roll was cut short says so on the strip**, once per distinct cap, and the
+message carries the arithmetic: how many frames short it was, which take held the window down,
+how many clips are cut on that take, how many frames they asked its cache for between them,
+and what that cache holds. A seek short for any other reason names the shortfall and the
+pre-roll it had computed. `reportCappedSeek` in [`web/main.js`](../web/main.js) writes both.
 
-**With no clip selected the panel keeps its clip half on screen and greys it out.** That is where
-a loaded project of several clips lands you, which is the case worth showing the split in. The rows
-below `points`, `framing`, `colour` and the rest write one clip's cloud; `post`, `motion`'s
-trails and the rest of the grade write the project. Hiding the clip half would make the split
-something you have to remember, so it is dimmed and inert instead, and selecting any clip brings
-it back showing that clip's values. Selecting a different clip repaints every one of them.
+### Menus
 
-**A clip's own keyed parameters nest under its row and fold with it.** The chevron in the rail
-appears once a clip has something keyed; at four clips with a keyed look each a flat stack is one
-pile of lanes belonging to nobody. The project's own curves — the camera, and the post chain
-every clip is seen through — stay at the foot of the stack, outside every clip.
+| Menu | Item | What it does |
+| --- | --- | --- |
+| File | Open | Goes to the projects page. |
+| File | Rename project… | Opens a modal and renames the document. |
+| File | Duplicate project | Stamps a copy and leaves you editing the copy. |
+| File | Project settings… | The shape the stage is letterboxed to and the rate frames come out at. |
+| Output | Whole clip | Restores the trim to `{ in: 0, out: null }`. |
+| Output | Export | Opens the export dialog. |
+| Output | Output to OBS | The two OBS addresses, with a copy button on each. |
+| View | Default camera position | Goes to the home pose. |
+| View | Show top view | Toggles the top-down inset. |
+| View | Show sidebar | Toggles the panel. |
+| View | Import Look, Export Look | Reads and writes a preset file. |
+| View | Stats for nerds | Toggles the readouts over the picture. |
 
-**`move` and `rotate` put handles on the selected clip in the viewport**, and `G` cycles the two.
-A clip carries a position and a rotation in the room and nothing else — no scale, because
-`pointSize` is measured in screen pixels and would not scale with the geometry, and the fog is
-world-space. While the handles have the pointer the orbit stands down and comes back on release.
-The handles draw over the finished picture, so effects change what is behind them and never the
-handles themselves. An export detaches their hit target as well as hiding them, then restores it
-afterwards, so dragging where an invisible handle was cannot move the clip under a running export.
+### Transport and clip controls
 
-**`key` beside them keyframes that placement at the playhead**, and presses again to take the key
-away. It is there because a placement is edited in the world and so has no panel row and no
-keyframe control beside one, and without it the first key on a placement track could not be
-planted at all. It reads the three states a panel row's diamond reads: filled where a key is under
-the playhead, outlined where the track carries keys elsewhere, plain where there are none. Once a
-track has keys a handle drag writes one at the playhead, the same as moving a slider does. Those
-keys are measured from the clip's own in-point rather than from the head of the edit, so dragging
-the clip along the strip carries the move it was given with it.
+| Control | What it does |
+| --- | --- |
+| play | Plays and pauses. |
+| playback, source | The playhead in program seconds and in the selected clip's source seconds. |
+| mark | Plants a mark at the playhead, or takes away the one already there. |
+| speed | The selected clip's rate, 0.1x to 4x. The travel is logarithmic, with a detent at 1.00x. |
+| clip: `delete clip`, `move`, `rotate`, `key` | Removes the selected clip, arms its move or turn handles in the viewport, and keyframes its placement at the playhead. |
+| `+` below the last clip row | Opens the media library's takes. |
+| camera: eye, diamond | Looks through the program camera, and keyframes it at the playhead. |
+| Camera tab: `add key`, `delete key` | Writes a camera key at the playhead, and removes the one under it. |
+| loop | Plays the trimmed range round instead of stopping at its end. Off whenever the editor opens. |
 
-**Marks stay keyed by the take and are drawn against the selected clip.** A mark is a fact about
-footage, so two clips of one take share them; where a mark ticks on the ruler is that source
-second put through the selected clip's curve *and* its placement, which is why the same mark sits
-somewhere else when you select the other clip of the same take.
+**`move` and `rotate` put handles on the selected clip in the viewport**, and `g` cycles the
+two. A clip carries a position and a rotation in the room and nothing else. While the handles
+have the pointer the orbit stands down, and an export detaches their hit target as well as
+hiding them. Once a placement track has keys a handle drag writes one at the playhead, and
+`key` plants the first. Placement keys are measured from the clip's own in-point, so dragging
+the clip along the strip carries its move with it.
 
-**mark** plants one at the playhead and presses again to take that one away, and `M` does the
-same from the keyboard. "Already at the playhead" means within half an output frame either side,
-so a press never has two marks to choose between.
+**Marks are keyed by the take and drawn against the selected clip**, so two clips of one take
+share them. Where a mark ticks is that source second put back through the selected clip's
+`sourceStart`, `speed` and placement, which is why the same mark sits somewhere else under the
+other clip. "Already at the playhead" means within half an output frame.
 
-**The `lens` row on the *Camera* tab says what the camera's `fov` says, in the millimetres a
-lens is sold under.** It is a 35mm equivalent against the full-frame gate — 36x24mm, so a
-43.27mm diagonal — and the shape it measures against is the *project's* aspect rather than the
-window's, which is why resizing the browser or pulling `render %` leaves the number where it
-was. The camera opens on a 22.7mm lens at 16:9, which is the 50-degree vertical field both
-cameras boot at, and **sensor view** lands near 18mm because that is what the Kinect's own
-intrinsics work out to across its 424 rows. Moving the row writes the camera you are composing
-through, which is the one **add key** reads, so a lens reaches the shot when you key it and not
-before. Under **set viewport to camera** the row reads the shot instead and goes inert, for the
-reason the orbit does the same there: the program camera's lens is what its keys say, so it
-follows the playhead through a keyed move rather than taking a new value. The row offers 8mm to
-300mm and says which way it ran out past either end — the angle
-itself is never clamped, because the sensor's intrinsics have to be free to imply anything.
+### Key options
+
+The `key options` chip shapes the segments either side of the selected key, and the handles in
+the lane reach anything in between.
+
+| Button | What it does |
+| --- | --- |
+| `<` `>` | Goes to the previous and next key on this parameter. |
+| `lin` | Straight segments either side. |
+| `in`, `out` | Eases the incoming side and the outgoing side. They are two separate numbers. |
+| `smooth` | Brings the rate to zero at the key, cubic. |
+| `glide` | Brings the rate and the acceleration to zero at the key, quintic. |
+| `hold` | Holds the value across the segment, which flattens both of its ends. |
+| `ends` | Glides the track's first departure and last arrival, leaving every key between them alone. Press it from anywhere on the track. |
+| `−pt`, `+pt` | Removes and adds a control point on this key's handles, up to four a side. |
+| `delete` | Deletes the selected key. |
+
+**`ends` is the one to reach for on a camera.** An unshaped move departs the first key and
+arrives at the last with a step in speed where you want a ramp. `smooth` on an interior key
+brings the camera to a near halt as it passes, which is what a deliberate pause wants and not
+what easing a whole move wants. `+pt` leaves the curve exactly where it was; `−pt` moves the
+shape, because a curve of one degree is not generally a curve of the degree below.
+
+Easing remaps the traversal and moves no key, so the camera's route through the world does not
+change. The beads on the path in the viewport are sampled at equal intervals of program time,
+so they bunch where the camera is slow.
+
+### The lens row
+
+The `lens` row on the Camera tab says what the camera's `fov` says, in the millimetres a lens
+is sold under: a 35mm equivalent against the full-frame gate, measured against the project's
+aspect, so resizing the browser leaves the number where it was. The
+camera opens on 22.7mm at 16:9 and sensor view lands near 18mm. The row offers 8mm to 300mm
+and says which way it ran out past either end, though the angle itself is never clamped. Under
+**set viewport to camera** the row reads the shot and goes inert.
 `verticalFovForFocalLength` and `focalLengthForVerticalFov` in
-[`web/lens.js`](../web/lens.js) are the conversion, and it is the same arithmetic either way
-round.
+[`web/lens.js`](../web/lens.js) are the conversion.
 
-**Easing a move.** Select a key and the `key options` row shapes the segments either side of
-it: `lin`, `in`, `out`, `smooth`, `glide` and `hold`, or drag the handles in the lane for
-anything in between. `in` writes the incoming side and `out` the outgoing one, so they are two
-different numbers rather than two halves of one, and `hold` reaches into the next key because
-holding a value across a segment means flattening both ends of it.
+Point sizes use the camera's 50-degree boot lens as their reference. A longer lens magnifies
+the splats with the scene, preserving surface brightness while the points stay within their
+size bounds. `lensReference` in [`web/cloud-shader.js`](../web/cloud-shader.js) sets the reference;
+sensor view receives the same correction through the take's intrinsics.
 
-`ends` is the odd one and the one you probably want on a camera: it is about the *track*
-rather than about the selected key, shaping the move's departure and its arrival in one press
-and leaving every key between them alone. Press it from anywhere on the track.
-
-This works on the camera track as well as on the look scalars, and what it shapes there is
-*when* the camera arrives rather than where it goes. The route stays the Catmull-Rom through
-your keys whatever the handles say — easing remaps the traversal and moves no key — which is
-why the composition track can have a lane at all without contradicting the rule that a camera
-move cannot be judged from a graph. The camera lane draws that remap directly: one ramp per
-segment, rising from the key it leaves to the key it reaches, so a linear segment is a plain
-diagonal and an eased one visibly is not. Judge the result in the world instead — the beads
-on the path are sampled at equal intervals of program time, so they bunch where the camera is
-slow and spread where it is fast.
-
-**A camera move starts and stops at speed until you ease it, and `ends` is the one press that
-fixes it.** The spline holds the end pose beyond the outer keys while its tangent there is
-half the first segment's average velocity, so an unshaped move departs the first key and
-arrives at the last with a step in speed rather than a ramp — measured on three keys dollying
-4m over 4s, 0 to 0.63 m/s across a single 30fps output frame at the start, and 0.31 to 0 at
-the end. After `ends` the same move departs at 0.0007 m/s and arrives at 0.0005, which is two
-hundred times smaller and below anything a frame can show.
-
-This used to be two presses of `smooth`, one on the first key and one on the last, with an
-inviting wrong move in between: `smooth` on an *interior* key brings the camera to a near halt
-as it passes, so easing "the whole move" by pressing every key produced a stutter at each one.
-That still works and is still what you want when a deliberate pause at a key is the intent —
-`ends` exists because the common case should not require knowing any of it.
-
-**`glide` is `smooth` one degree up, and the difference is acceleration rather than speed.** A
-cubic can bring the camera's *rate* to zero at a key but never its acceleration, so a `smooth`
-departure still steps from no acceleration to some. `glide` puts two control points on each
-side of the segment instead of one, which makes the timing curve the quintic
-`6u⁵ − 15u⁴ + 10u³` — the shape whose first *and* second derivatives vanish at both ends. It
-costs a slightly faster midpoint, 1.875× the average rate against the cubic's 1.724×. `ends`
-applies the glide shape, so the one-press fix is already the C2 one.
-
-**`+pt` and `−pt` set how many control points a key's handles carry**, which is the degree of
-the segments either side. `+pt` is exact: the extra handle appears, every other one shifts to
-keep the curve exactly where it was, and not a rendered frame changes — so it is safe to press
-while judging a move. `−pt` cannot be exact, because a curve of one degree is not generally a
-curve of the degree below, so removing a point moves the shape. Four points a side is the
-ceiling. The retime curve is deliberately excluded from both: the argument that a handle
-inside the unit box cannot run source time backwards is an argument about a cubic, and it does
-not survive the extra degree.
-
-**Glitch** tears bands of the feed sideways, and it is seven controls rather than
-one because the interesting looks live off the diagonal. `amount` is the master and the one
-worth keyframing — it scales density and shove together, so corruption fades in and out on a
-single track. `density` is what fraction of the bands tear at a full master and `shove m` is
-how far one travels, in metres in the room: sparse-and-violent and dense-and-subtle are the
-two ends those give you, and neither is reachable from a single slider. `flare` is the cyan
-a torn band burns, per metre it was shoved, so a bigger tear lights harder on its own.
-`band rows` is the height of a band in the sensor's own scanlines — 424 over that many bands,
-so 35 at the default of 12 — and `rate hz` is how often the torn set is redrawn, where 0
-freezes the pattern where it stands rather than switching it off.
-
-`axis` is which way the bands run, from the sensor's rows at 0 to its columns at 1, and the
-fractions between are the point: at 0.5 the bands cross the frame on a diagonal, which is a
-look neither end reaches. It is a blend of the two image axes rather than an angle in degrees,
-because the bands are cut in the sensor's frame where 512 columns meet 424 rows and a band is
-a run of scanlines rather than a distance — there is no square in which an angle would mean
-what an angle means. The raster's `angle` under Post is the one that gets degrees, because it
-runs in screen space where the pixels are square. Turning the axis changes which bands tear
-and not which way they slide: the shove stays along sensor x, so a column of bands shears
-across itself rather than along itself, and there is no separate shear control because the
-pair that could disagree buys nothing the references show.
-
-The tear is applied in the sensor's frame before the camera sees it, so it is only
-screen-horizontal from head-on: orbit around a torn band and it shoves in depth instead, and
-a levelled room tears along the angle the mount was really at. That is the effect saying the
-*volume* is corrupt rather than the picture, and it is why the group sits at the displacement
-stage next to what moves points rather than in `Post` next to `raster.amount`.
-
-**`lattice.amount`** rebuilds the volume on a grid: every axis quantised to `cell m`, so surfaces
-break into steps and the cloud reads as something being reconstructed rather than something
-that was measured. It is the last displacement applied, after the tear, so what gets snapped
-is where the point actually ends up — a grid cut before the turbulence would be smoothly
-pushed back off itself. **It snaps in the levelled frame**, so the cells line up with the room
-rather than with the bracket: level a canted mount afterwards and the grid does not re-cut.
-The cell is metres in the room like the other displacements, so a look gives the same grid at
-any export size.
-
-**`glyph.amount`** draws every point as a character rather than as a round splat, and it has no grid
-of its own — it rides `lattice.amount` and `cell`, which already cut the room into cubes and
-move each point to the centre of the cube it falls in. One cell draws one character, so the
-characters stand in the room at the size the room gives them and recede with it, which is
-what a pass stamping text onto the finished frame could not draw at all. The master
-crossfades the mark rather than switching it: at 0.5 every cell is a dot with a character
-glowing inside it, and the sprite grows from `pointSize` to cell-sized along the same blend,
-so one character comes to stand for one cube of room.
-
-**Riding the lattice is why glyphs read as characters only near `lattice.amount` 1.0.** The lattice
-is a blend from the measured surface to the reconstructed one rather than a switch, so at 0.5
-each point sits halfway to its cell centre and you get several copies of one character
-smeared along that path. At `lattice.amount` 1.0 with `glyph.amount` 0 you have the `voxel` recipe fully
-engaged — every point on its cell centre, drawn as a round splat — and raising `glyph.amount` turns
-those dots into characters without moving one of them. The shipped `voxel` document is not that
-picture, and the difference is worth knowing before you reach for it as a reference: it names
-`lattice.amount` 0.55 on a 3.5cm cell, halfway along the blend this paragraph opened on, so it keeps
-some of the smear deliberately.
-**At `lattice.amount` 0 with `glyph.amount` 1 the picture is mush**, because every one of the 217,088 points
-draws a cell-sized character at its own unquantised position — that is authoring rather than a
-defect, and nothing gates one control on the other.
-
-**Three keys decide which character a cell draws, and they add and wrap rather than mixing.**
-`tone key` reads where the cell sits between the clip planes, `hash key` reads a hash of the
-cell itself, and `rain key` reads the falling counter passing through it; the three weights
-sum into one index into a table of sixty-four 8x8 bitmasks and wrap. They sum rather than
-blend the way the five readings do because character indices do not average — character 3
-half-and-half with character 9 is character 6, an unrelated symbol rather than anything
-between the two. All three are weights from 0 to 1, and `hash key` is the only one of them
-that defaults to 1 rather than to 0 — so raising `glyph.amount` on its own gives the field one key,
-the cell's, which is the reading the reference frames have. It reaches nothing while `glyph.amount`
-is 0.
-
-**The table is sorted by ink**, punctuation at the sparse end and dense kana at the other, so
-the tone key reads it as a tone ramp and the hash key reads the same table as noise with
-neither having to choose. What that costs is a latin ramp: a luminance sweep runs through
-kana, so the picture is ASCII art drawn in an alphabet that is not ASCII.
-
-**The tone key is a fact about the cell and not about the point, and that is what stops the
-lattice turning it into noise.** It reads a range and not a colour, and the difference only shows
-where a cell holds sources that disagree: collapse a few hundred depth texels onto one cell and a
-key reading each point's own colour picks a different character for each of them, drawn at the
-same snapped position, so the cell paints the union of several characters. On a `cascade`-shaped
-fixture that is 30.65% of the frame inked against 8.66% — three and a half times the ink, and none
-of it the character anybody asked for. There is no cell-constant reading of the drawn colour to
-key on instead: the colour is built per fragment out of five readings and everything the tone
-stage adds, and inside one cell it still varies through the camera texel, through the raw sample
-depth, and through the rain's own lift. So the key reads the range. For `cascade` the two are the
-same thing — it is `readDepth` alone, so its colour *is* the depth ramp read at that range — and
-they part company furthest under `readRgb`, where a white shirt and the black wall behind it sit
-at one depth and take one character.
-
-**It only bites where the characters actually resolve, which bounds the whole thing and is the
-first place a re-measurement goes wrong.** Below the legibility band `glyphMix` is 0, the mark is
-a round splat, and the tone key reaches no pixel at all — so a build with the defect and a build
-without it draw identical frames for a reason that has nothing to do with the key. On a 1080p
-export `cascade`'s 5.5cm cell falls under the band past about four metres; on a 360-tall stage it
-happens at about 1.2m, because at 4.1m that cell rasterises to 4.6 framebuffer pixels against
-17.3 at 1.1m. Measured there, interleaved over three rounds against a build carrying the shipped
-per-point key, every arm repeating its mask and its pixel count identically: a wall ramped ±120mm
-about 2500mm inked 106,282 pixels against 114,537, and a flat wall at the same depth 36,340
-against 40,207. The flat wall is the honest reading of the *meaning* change alone, since a
-homogeneous cell has no occupants that can disagree; the ramped one carries the union defect on
-top of it. Both arms had `fade` and `wake` forced to 0, which changes nothing about the character
-— they scale alpha and never reach the index — and without which a point born on an injected
-frame carries a fade of exactly 0 and the whole frame comes back black.
-
-**The mark crossfades back to the round splat at whichever floor it hits first: the look's own,
-between sixteen and eight reference pixels, or what the buffer can actually resolve**, so the
-near room is text and the far room is texture. At full `glyph.amount` on `cascade`'s 5.5cm cell the
-look's band is 4.0 to 8.0 metres out, the same metres at 1080p and in a 4K export; a buffer
-shorter than 1080 pulls the boundary nearer because eight framebuffer pixels stop existing
-sooner, which is the buffer being honest about what it can draw rather than the look changing.
-Cut-away geometry is outside all of this and falls back to the round mask outright, because a
-piece of scaffolding that is still legible is still reading as surface.
-The reason the floor exists at all is that an 8x8 bitmask sampled
-across eight pixels is a different random set of bits every time the camera moves rather than a
-small character, which bloom then amplifies. Clamping the
-sprite to a legible minimum instead would keep far cells readable and stop them being
-cell-sized, which collapses the recession at depth into the flat screen grid a cell-per-cube
-was chosen over. A keyed camera `fov` sweeps the band the same way walking closer does — a
-zoom makes characters resolve out of texture mid-clip — and that is the recession being true
-rather than a defect: the marks are objects in the room at a size the room gives them, and a
-narrower field gives every object more pixels.
-
-**`rain.amount`** is a term of its own rather than a setting inside the glyph field, and it works
-over round splats. It computes one scalar per point out of world height and program time,
-brightens what a drop head passes, and the glyph field's `rain key` reads that same scalar to
-scramble the character — one source and two consumers, the arrangement `duotone` already has,
-so a wave descending through a room is reachable for any look that is not drawing text and
-`voxel` gets it for nothing. `fall m/s` is how fast a head descends, `head gap m` how many
-metres of column separate one head from the next, and `trail m` how many metres of afterglow
-sit above it: 0.55, 1.3 and 0.45 by default. Only `trail m` belongs to `rain.amount` alone — `fall
-m/s` and `head gap m` shape the drop coordinate *both* consumers read, so with `rain.amount` at 0 and
-`glyph.amount` and `rain key` up they still move the picture, by changing which character the passing
-counter scrambles a cell to. With both masters at 0 none of the three reaches a pixel, which
-is what keeps a look that never asked for any of this rendering the frame it always did. A head
-every `head gap` metres rather than one head that wraps is what keeps two or three running in
-a column at once, and the trail sitting *above* the head is what makes it read as falling
-rather than as a band sliding through. Nothing in it accumulates — the value is a pure
-function of program time and world position, so a seek lands on exactly the frame playback
-would have drawn there, which `timeline-check` holds.
-
-**The two groups sit at the two stages they belong to rather than together.** `Glyph` is
-immediately after `Points`, because what mark gets drawn is what `Points` is about, and `Rain`
-is beside `Style`, because what colour a point takes is what `Style` is about — so the rain's
-home does not depend on glyphs being switched on. The cost that accepts is that the
-falling-code look is authored in two places on the panel, and `cascade` is the shipped
-document that holds it: the lattice at 1.0 on a 5.5cm cell, `glyph.amount` at 1.0, the hash key full
-and the rain key at 0.6, the rain at 0.8 falling 0.55 m/s with heads 1.3m apart, over a depth
-reading with a green duotone, a toe and bloom on top.
-
-**Every effect is one panel group of its own, and a core group holds only the spine's own
-controls.** Twelve effects used to draw loose inside `Style`, `Post`, `Displacement` and
-`Region`, mixed in with `rim`, `bloom`, `crush`, `cell m` and the region box — so they had no
-heading to collapse, and the hover-X that takes an effect out of the rack never appeared on
-them, because `groupOwner` refuses a group with more than one owner. Each of them now declares
-its own group and its own heading. The rule is a convention rather than a refusal: the install
-door still accepts a parameter that names a core group, because an effect may one day have a
-term that genuinely belongs beside the spine's, and a door that forbade it would be a rule
-written where the exception cannot be made. A term under its own heading drops the prefix it
-only carried to stay legible loose in a shared group, so `duotone hue` is `hue` and `streak
-angle` is `angle`; `halation` and `stock` keep theirs, which is the inconsistency this convention
-inherited rather than one it introduced.
-
-**One effect is one group even when its terms belong to two stages.** `Turbulence` is the case:
-three of its terms displace and the fourth, `scramble`, reads the region box, and they sit
-together under one heading so the hover-X removes the whole effect rather than three quarters of
-it. Where the slider is drawn and what the shader does are separate facts — `scramble` still
-consumes the region service at gate order 200, between `push` and `mask`, wherever the panel puts
-it.
-
-**On the Look tab one row moved, and it had to.** `Thermal`, `Edges` and `Duotone` sit where
-their rows sat inside `Style`, ahead of `Rain`; `RGB split`, `Grain`, `Streak` and `Vignette` sit
-where theirs sat inside `Post`, ahead of `Datamosh`. A grouping change that also re-laid out the
-panel would be two changes arriving as one, and the second is the one nobody asked for. The
-exception is `crush`, which the registry declares after those four effects and which therefore
-drew below them: a core group is emitted whole before the groups anchored under it, so a term
-that stays in `Post` cannot stay below effects that have left it. `Post` is now `bloom` and
-`crush` together, which is the pair the grade pass already describes - the rolloff and the
-black-toe crush ride along with the same pass - so the one row this cost is a row that reads
-better where it landed.
-
-**The Region tab reads the box first and then the readings of it, in the order the shader takes
-them.** `Region (metres)`, then `Region push`, `Turbulence`, `Region mask` and `Ripple` at gate
-orders 100 to 400, then `Displacement` and `Lattice`. Reading down the tab is reading the
-pipeline, which is worth more than keeping `Turbulence` next to the other thing that displaces:
-a panel that draws its stages out of order teaches the wrong thing every time somebody looks
-at it. **The two numbers are equal by hand and nothing holds them equal** — a fifth effect
-consuming the region service, or a gate order changed without its panel order following, draws
-the tab out of pipeline order and makes this paragraph wrong rather than merely stale. That
-order is the reason `region` sits before `displacement`
-in the panel spine, which is the one place the spine's order is a statement about meaning rather
-than about history.
-
-**`ripple.amount`** is the region read a fourth way, after displacing, scrambling and masking: a wave
-travelling out along the radius, in metres at a full weight, so the volume breathes where
-`push` only swells it. `per m` is its spacing and `hz` its speed — and the wave
-advances in eighths of a cycle rather than sliding, which is the character rather than a
-limitation: the surface arrives at each step instead of gliding between them, so it reads as
-machinery rather than as breathing. A speed of 0 freezes it where it stands rather than
-switching it off, the way `rate hz` does under Glitch, and both keyframe.
-
-`turbulence` displaces points with a noise field. `near`/`far` is the most useful control
-for isolating a person from the room. `cull speckle` drops points whose neighbours disagree,
-cleaning up the sensor's edge noise (sigma ~= 3.5 + 1.3*d mm, so 4.6mm at 0.75m and 10mm at
-4.25m). `render %` scales the drawing buffer and is the one control that reliably buys back
-frame time, for the reason [rendering cost](performance.md#rendering-cost) gives.
-
-Two controls decide how much white lands on the geometry, and they are the first to reach
-for if the look is blown out. **`blackwall.scan`** keys off distance rather than screen position, so
-it crosses an angled surface as a drifting diagonal band; wide and hot it reads as a light
-leak, so it is kept narrow and cyan. **`rim`** brightens depth discontinuities and gives the
-subject its edge, but under additive blending plus bloom it washes broad surfaces white, so
-turn it down before turning down bloom.
-
-**The seven grade terms share one pass, and the pass carries the tonemap.** `rgb split`,
-`raster.amount`, `grain.amount`, `streak.amount`, `halation.amount`, `stock.amount` and
-`vignette.amount` each switch it on, because a full-screen read and
-write that changes nothing is worth skipping. What rides along with it is the highlight rolloff
-and the black-toe crush, so a look with all seven at zero is not the same image without seven
-effects: it also has lifted blacks and no rolloff, and additive accumulation clips to flat
-white where it would otherwise keep its hue. Raising any one of the seven brings the grade back.
-The vignette used to be part of that bundle and is now its own control, which is why a project
-saved before it existed loses its corner falloff until it names one.
-
-**`streak.amount`** bleeds light across the frame. Each pixel gathers back along the streak's axis and
-keeps the brightest thing it finds, decayed by distance, so a highlight smears the way a sensor
-smears one down a column of wells — sixteen taps at geometric spacing, reaching about 168 pixels
-at the 1080p reference. `angle` beside it is which way, in degrees, and **0 is straight
-down**, which is what this term did when it did nothing else: a look authored before the control
-existed names no angle and keeps the fall it was graded with, to the bit. Positive turns the
-smear clockwise on the glass, so 90 runs it across to the left, 180 sends it up and -90 across to
-the right, and the same half-turn is reachable either way round. It is degrees rather than the
-axis blend `axis` under Glitch gets, because this runs in the grade pass in screen space where
-the pixels are square and an angle means what an angle means, where the tear is quantised in the
-sensor's own frame and has no square to mean it in. It is a gather over the current frame rather
-than a buffer that accumulates across frames: a buffer would smear along whatever the camera did
-last, so an orbit would drag every streak sideways and a seek would arrive carrying the streak
-the scrub built rather than the one playback would have.
-
-**`halation.amount`** is the warm ring film puts around a highlight, with three settings under it
-in a `Halation` group of its own on the raster's precedent — a term that grows sub-controls gets
-a heading rather than crowding `Post`. What makes it worth having beside bloom is the colour. A bloom halo is the highlight's own colour spread
-outward, so a cold window blooms cold; on film the light goes through the emulsion, scatters off
-the base behind it and exposes it a second time, and what comes back is red-orange whatever
-colour went in. So what this gathers is a brightness and not a colour: sixteen taps on a disc
-around each pixel, each one counted by how far its luminance sits above `halation threshold` and
-by how far away it is, and the colour comes from `halation tint` alone — 0 is deep red, 1 is
-amber, and there is no hue control because a look asks how much of a ramp it wants rather than
-for a different ramp. `halation radius` is how wide the ring is, in pixels at the 1080p
-reference like every other screen-space term, and it widens the ring without dimming it: the
-taps are normalised by their own distance weights, so what the falloff decides is the ring's
-shape and not how much light is in it. Raise `halation threshold` and only the brightest things
-scatter; drop it and the whole frame starts to glow. The three settings are inert while the
-amount is at zero, which is what keeps them from switching the pass on by themselves.
-
-**`trails`** is the buffer that paragraph rules out, and the one look term whose length is
-counted in frames rather than in seconds. It hands its value straight to the afterimage pass's
-damp, and that pass multiplies the picture it is holding once per rendered frame with nothing
-in the expression about how long a frame lasted, so what the control sets is a number of
-frames and not a duration: at 0.9 the trail is down to 12% after twenty of them, which is
-0.83s of a 24fps deliverable and 0.33s of a 60fps one. `fade` and `wake` are in milliseconds
-for the reason [surface memory](architecture.md#surface-memory) gives, and this term is the
-exception to that rather than a second expression of it — so a look graded at one output rate
-does not keep its trail at another. It applies to `reach` and `decay` under Datamosh as well and
-to nothing else: those two passes are the only ones in the chain that carry anything from one
-render to the next, and both count what they carry in renders.
-
-**`datamosh.amount`** is the picture dissolving into vertical needles, and it is the one pass in
-the chain that reads the frame it drew last time. Every frame the picture is pulled a little way
-along Y and what it leaves behind does not clear, so a highlight stretches into a streak that
-grows for as long as the pass remembers. `amount` is the master and the one worth keyframing: at
-zero the pass is switched off and costs nothing, so the dissolve arrives and clears on one track.
-
-`reach px` is how far the picture is pulled each rendered frame, in pixels at the 1080p reference,
-and `decay` is what fraction of the trail survives a frame — the two together set how long a
-needle is. The blend is a per-channel maximum rather than a mix, so a highlight leaves a needle
-and the dark between the needles stays dark; a mix feeds the whole frame back into itself and
-greys it over in about a second.
-
-`splay` is which of the two readings of "vertically" you want. At 0 the whole frame drags one way,
-and that way is up rather than down — the pass fills a fragment from below it, so there is no
-setting that streams the picture downward as a sheet. At 1 it is pulled *away* from `line`, so everything above that
-height streaks upward and everything below it streaks down, and the frame comes apart from the
-middle out. `line` is where that split sits, as a fraction of frame height from the bottom.
-`grain px` is how wide a column of the picture pulling by one amount is: at 1 the frame is a field
-of separate needles, and at 16 it comes apart in ribbons. Ragged rather than a clean stretch is
-the whole difference between this and a vertical zoom.
-
-`drift` blends the fixed column pattern into the animated one, so its full range is exactly 0 to
-1. The shader clamps that blend at both ends; exposing values above 1 would add dead slider travel.
-`speed` sets the animated pattern's clock and does nothing while drift is zero.
-
-`refresh s` is the one control that is not only a look: it is how long the pass is allowed to
-remember, and every that many seconds of program time the picture snaps back to the frame it was
-handed. That snap is the pulse the look wants and it is also what makes the timeline work — a seek
-decodes forward from the last one, the way seeking to a keyframe does — so a long refresh is a
-long dissolve *and* a long pre-roll on every scrub.
+The one-pixel floor and ordinary points' 64-pixel ceiling still limit the sprites. Their onset
+depends on point size, depth and output size. Bloom, vignette and the glyph legibility band
+also remain screen-space effects, so brightness can still change and dust can become characters
+through a longer lens. Existing shots at other lenses change appearance.
 
 ## The edit, and what comes out of it
 
-Two menus, because there are two questions and one of them used to answer both. **File >
-Project settings** holds the shape the stage is letterboxed to and the rate the frames come
-out at, and both are undoable document state. **Output > Export** holds the resolution, the
-format, the output name and a readout of the trim the press will take, and all of those
-belong to a deliverable — one of several files you might make from the edit.
+**Clips are the rows at the head of the lane stack**, one box each from where a clip starts to
+where it ends. An edit holds between one and eight. The full-width `+` below the last row
+opens the media library's takes, and the take you choose lands at the playhead on a row of its
+own, copying the selected clip's look or, with no selection, the first clip's.
 
-**Nothing on either menu saves the edit, because it saves itself.** Every change that lands on
-the undo stack is written to the project's own file, so there is no save entry and no shortcut for
-one. The file the edit lives in is a third question and `File` answers it too: `Rename project`
-opens a modal, because a name is typed, and `Duplicate project` stamps a copy and leaves you
-editing the copy rather than the original — which is what forking an idea means once there is no
-save to withhold. Deleting a project is on the projects page and deliberately not here, since
-autosave would write the file straight back the moment you touched anything. `Cmd/Ctrl+O` goes to
-the projects page.
+**The two edges do different things.** The right edge moves where the edit stops using the
+take, which is the clip's own `length`. The left edge is a head trim: the clip starts later in
+the take, its out-point stays where it is, and the footage under what is left does not move,
+so the same project second stands on the same source frame afterwards. That in-point is the
+clip's `sourceStart`. A trim writes no keyframe and touches no lane.
 
-**The shape is the edit's because the camera was keyed against a frame.** A 65:24 shot
-reopened at 16:9 is a different shot with the same keys, which is the class of silent
-reinterpretation the point-size rebase already taught this repo to refuse. The resolution is
-*not* the edit's, and that is the same argument read the other way: every screen-space term
-is expressed against 1080p and bloom's chain is frozen at 600 whatever the buffer is, so
-1920x1080 and 1280x720 of one edit are the same picture and neither needs re-keying. So the
-resolution menu offers only sizes of the project's shape — a size of another shape would be
-a reframe, and reframing is what Project settings is for.
+**Which clip is selected is the session's and not the document's.** It decides what the panel
+writes to and which clip the ruler's marks are drawn against. Opening a take selects its clip;
+loading a project selects nothing; pressing the empty part of the lane stack clears the
+selection, and the panel then greys its clip half out. The rows under `points`, `framing`,
+`colour` and the rest write one clip's cloud, while `post`, `motion`'s trails and the rest of
+the grade write the project, so every clip is seen through them. A clip's keyed parameters
+nest under its row and fold with it, and the project's curves stay at the foot of the stack.
 
-A project stores the shape as the reduced integer pair rather than as a ratio, and the two
-are not interchangeable: the "1.90:1 DCI" the menu prints is really 1.8963, so a document
-carrying that decimal would record a shape 0.2% away from the one the clip was composed
-for and the editor would reframe it on the next open. `2048x1080` reduces to `[256, 135]`
-exactly, and every other group in the table reduces exactly too.
+**Nothing saves the edit, because it saves itself.** Every change that lands on the undo stack
+is written to the project's file, so there is no save entry and no shortcut for one. Deleting
+a project is on the projects page, since autosave here would write the file straight back.
 
-**The rate is the edit's because `trails` is counted in output frames**, for the reason the
-paragraph above gives — the same document at two rates is two different looks, so a rate
-chosen per deliverable would mean two files of one edit carrying two grades with nothing on
-screen saying so. Moving it also made a rate change undoable, which it had never been: the
-handler committed to the stack, and the snapshot it compared held nothing for it to notice.
+**Shape and rate live in Project settings; resolution, format and output name live on a
+deliverable.** The camera was keyed against a frame, so reopening a 65:24 shot at 16:9 would
+be a different shot with the same keys, and the resolution menu therefore offers only sizes of
+the project's shape. Two sizes of one shape are the same picture, because every screen-space
+term is expressed against 1080p. A project stores the shape as the reduced integer pair, so
+"1.90:1 DCI" is `[256, 135]`, which is exact where 1.8963 is 0.2% off.
 
-A deliverable saved by an older build names an output rate this build would ignore, so it is
-refused at the picker rather than read — set the rate in Project settings and save it again.
-A *project* saved by an older build carries an `outputSize` instead of a shape, and that one
-is read rather than refused: its ratio is the shape it was framed at, and its pixels are
-handed to the deliverable, so it renders exactly what it rendered before. A hand-typed size
-of a shape the table has nothing for keeps its own size and lights no shape button, which is
-honest rather than tidy — the stage really is that shape.
+Project settings offers 24, 30, 60 and 120 frames a second.
+
+| Shape | Sizes |
+| --- | --- |
+| 16:9 | 960x540, 1280x720, 1920x1080, 3840x2160 |
+| 1.90:1 DCI | 2048x1080, 4096x2160 |
+| 4:3 | 1440x1080, 2880x2160 |
+| 1:1 | 1080x1080, 2160x2160 |
+| 65:24 | 2730x1008, 3900x1440 |
+
+| Format | `codec` | File | What it is for |
+| --- | --- | --- | --- |
+| MP4 | `h264` | `.mp4` | h264 at crf 18, the one to send someone. Even dimensions only. |
+| MOV | `prores` | `.mov` | ProRes 422 HQ, 10-bit 4:2:2, for an editor who will grade the shot. |
+| PNG sequence | `pngseq` | a directory of `.png` | The frames themselves, for a compositor. |
+| — | `lossless` | `.mkv` | FFV1 at rgb24. The export dialog does not offer it; name the codec through `POST /jobs` or the `/export` socket. |
+
+The render runs in the page, frame by frame through the program camera, pushing frames to
+ffmpeg over a socket. Each render gets its own directory under `exports/` holding the artifact
+and a `.job.json` sidecar, so nothing is overwritten. **save a copy…** puts the file anywhere
+through the browser's file picker.
 
 ### A clip that needs an effect this build has not got
 
-A look parameter is named after the effect it belongs to — `rain.speed`, `glyph.tone` — and a
-document lists the effects it is built from. Open a clip whose list names one this machine
-does not have, and the clip **opens**: the installed part renders, and the values and keys
-under the missing effect are parked, which means they are carried and never evaluated. Saving
-writes every parked key back holding exactly the value it arrived with, so working on somebody
-else's clip on a machine without their effects costs nothing and destroys nothing. It is the
-values that are preserved and not the file: the parked keys land after the installed ones and
-the numbers go through a JSON round trip, so the document's revision moves. A name this build
-simply does not know is still refused, and so is a name whose effect *is* here with a key that
-is not — a typo and a half-installed package are both broken, and only a whole effect that is
-absent gets parked. A document that names an effect only through a keyframe track and carries
-none of its values is refused too, on the same rule as a document that names half of one:
-every effect a clip uses arrives whole or not at all.
+A look parameter is named after the effect it belongs to, like `rain.speed`, and a document
+lists the effects it is built from. Open a clip whose list names one this machine does not
+have and the clip opens: the installed part renders, and the values and keys under the missing
+effect are parked, meaning carried and never evaluated. Saving writes every parked key back
+holding the value it arrived with, though the document's revision still moves.
 
-The application bar says so while such a clip is open: `missing: rain 1.0.0 — 4 values, 2
-tracks parked`, one entry per missing effect, quoting the version the document was authored
-against and counting what is being carried. Beside each entry is a **suppress** toggle.
+Only a whole absent effect is parked. A name this build does not know at all is refused, and
+so is a name whose effect is here with a key that is not, or a document naming an effect
+through a keyframe track while carrying none of its values.
 
-**An effect that is here at another version gets a line on the same bar and nothing else**:
-`document requires glyph 1.0.0, installed is 2.0.0`. The clip loads and the installed version
-draws it, because a version string says nothing about which direction is compatible and
-refusing would put a wall in front of every clip on the machine the first time an effect was
-retuned. What the load owes is the sentence, since only the person reading it knows whether
-the difference matters. There is no toggle beside it and export is not refused for it. The
-notice goes on the next save, and that is the design rather than a bug: the list is derived
-from what is installed, so saving records the version this machine actually built with.
+The application bar says so while such a clip is open, one entry per missing effect:
+`missing: rain 1.0.0 — 4 values, 2 tracks parked`. Beside each entry is a **suppress** toggle.
+An effect that is here at another version gets a line and nothing else, like
+`document requires glyph 1.0.0, installed is 2.0.0`; the clip loads, the installed version
+draws it, and the next save records the version this machine actually built with.
 
 **Export is refused while anything the clip needs is missing**, and the refusal names the
-effects and their versions. That is the point of parking rather than the price of it: a video
-leaves this machine and nothing in it says a layer of the look was absent when it was made, so
-the one artifact that cannot explain itself is the one this build will not produce by accident.
-Pressing **suppress** on an entry is the operator saying that this render may go without that
-effect. It is per effect — suppress one while another is still missing and the export is still
-refused, naming the other — and it is session state rather than document state, so it never
-travels with the clip. **It is also per document**: opening another project ends every
-suppression, even one missing the same effect, because a decision about this render of this
-clip is not a decision about the next one. An undo keeps it, since an undo is the same clip.
-The render's own record, the `.job.json` beside the video, carries a
-`suppressed` list of the ids and versions it went without, and keeps the parked values, so the
-file says what was skipped instead of pretending the clip never asked.
+effects and their versions. **suppress** says this render may go without that effect. It is
+per effect, so suppressing one while another is still missing leaves the export refused. It is
+session state and per document: opening another project ends every suppression, and an undo
+keeps it. The render's `.job.json` carries a `suppressed` list of what it went without.
 
-A queued render is the same rule with nobody watching. The job carries the effects its project
-requires — **derived at the queue from the namespaces the project's own values and tracks
-carry**, so a body whose list disagrees with its values is refused at enqueue by name rather
-than queued and discovered inside a render — and a worker that has not got one of them **fails
-the job with a reason naming it** rather than rendering, unless the job was queued with
-`suppressEffects` covering it. A version the worker has and the job did not ask for is logged
-and rendered, which is the same call the editor's notice makes.
+## The record surface and OBS
 
-**A job names one capture per clip**, by content hash, in project order. That list is derived
-the same way and for the same reason: it comes off the clips rather than from the caller, so a
-job disagreeing with its own document about the footage it renders is refused at enqueue naming
-both lists. Repeats are kept and the order is the document's — two clips of one take is an edit
-the list has to be able to spell, and two clips whose footage is swapped is a different edit
-that has to read differently. The worker resolves every hash against its own library **before it
-opens a browser**, and a hash it has not got fails the job naming *the take*. Then it loads the
-project, which opens each clip's footage by hash, and **attests what the page actually opened
-against what the job asked for, clip by clip and in order** — a set comparison would call a
-render with two clips' footage swapped the one that was asked for. A worker also refuses a job
-envelope from a version it does not read, naming the version: version 2 carries the list of
-captures where version 1 carried a single string, and this repo ships no conversion.
+The record surface shares the viewer and its camera, and adds what the sensor and the monitor
+are doing. `r` starts and stops a take and `m` marks a running one.
 
-The editor has no entry that comes up on no footage — `/edit` with neither a take nor a project
-redirects to the projects page — so the worker brings the page up on the first clip's take and lets
-the project open the rest. That bootstrap is the one thing here still resolving a hash to an id.
+| Control | What it does |
+| --- | --- |
+| record | Starts a take, and stops the one running. |
+| mark | Marks the running take at the moment you press. |
+| colour camera | Whether the colour stream runs at all. With it off, exposure means nothing and the control says so. |
+| low light | The sensor's low-light exposure mode. |
+| Monitor: depth ÷ | Sends every Nth depth sample, 1 to 16, so a thin link still shows a picture. |
+| Monitor: every Nth | Sends one frame in N, 1 to 30. |
+| Monitor: allow cost | Consents to a monitor setting finer than the recording cap. The Record button does not carry that consent, so a costly monitor still refuses to arm. |
 
-**A queue call that did not work is never read as a store with nothing in it.** The worker asks
-its own server what is installed once per job, and what footage it holds once per job, and a
-failed answer — a dropped connection, a 500, a proxy reporting its own failure with a 200 — is
-retried a few times seconds apart before the job is failed at all. Both readings go through one
-retry, so a server that cannot be reached says so in one voice however many routes a job needs.
-If it still cannot read, the job comes back naming *the read*, never naming a package or a take
-the machine has not got: those sentences send whoever is looking at the queue to different
-machines, and only one of them is about the job.
+**A monitor decimates what this browser is shown and never what the take records.** Going into
+a recording, a monitor finer than a divisor of 4 or a stride of 3 is refused at the record
+boundary, because a finer monitor costs the take; coarser settings pass. A monitor
+on loopback is exempt, since it costs the link nothing. A running stream is never capped
+mid-take.
 
-### Installing an effect, and taking one away
+**Output > Output to OBS** carries the two source URLs and the settings behind them.
 
-`PUT /effects/<id>` installs a package, `DELETE /effects/<id>` removes one, and
-`POST /effect-refusals` sets aside a package a page could not compile. The body is
-`{manifest, chunks}` — the manifest as JSON and a map of file name to GLSL text — and the id in
-the path is the namespace its parameters carry, so a manifest declaring a different one is
-refused rather than guessed at. An id is lowercase letters and digits, up to 64 of them: it is a
-directory name, and every copy this program renames out of the way is that name with a suffix on
-it, so an id long enough to leave no room for one under `NAME_MAX` is a package nothing could set
-aside once it was installed.
+| Control | What it does |
+| --- | --- |
+| Camera: Program, Viewport | Whether the browser source renders the program camera or the viewport you are looking through. |
+| Resolution | 1920x1080, 1280x720, 3840x2160, or `custom…`. |
+| Custom output size | A `WxH` pair, revealed by `custom…`. |
+| Browser source, copy | The program-out URL for an OBS browser source. |
+| Webcam source, copy | The colour camera's own 1080p frame, at `/camera.mjpg`. |
+| open source | Opens the browser source in a tab. |
 
-**An install lands in `effects/` and never in `effects-builtin/`**, which is the whole of the
-fork mechanism: a package installed under a shipped id shadows it, and deleting that copy brings
-the shipped one back. Nothing reachable from the network can edit or remove what the build shipped
-with, so there is always a package to fall back to — and a `DELETE` aimed at a builtin nothing is
-forking is refused by name rather than silently doing nothing. Deleting a package that exists only
-in `effects/` uninstalls it, at which point every open document's values under it park exactly as
-they would on a machine that never had it.
+The dialog also says how many webcam sources are attached right now. It counts `/camera.mjpg`
+subscribers only, so a browser source on `/program` does not show there.
 
-**Nothing here compiles GLSL, so the page that discovers a package will not link is what
-quarantines it.** The door refuses a chunk naming something this build has not got and cannot
-refuse one whose GLSL is merely wrong — a missing brace, a `vec3` assigned to a `float` — because
-that is a shader that fails to link, which is a log line inside the driver rather than anything
-the server can see. `warmPrograms` collects those failures and throws, so the page rolls back onto
-the set it was holding; without somewhere to report it the store would go on serving the package
-and every *fresh* page load would compile it at boot and die there. So the page posts to
-`POST /effect-refusals` with the driver's own sentence, and `serveEffectRefusal` renames each user
-copy aside under `<id>.<seq>.incompatible` — the same rename the boot gate makes, so the package
-is still on disk to be repaired and the shipped one answers for that id again. The ids it names
-are the packages that *changed* in that adoption, because a link failure is about the assembled
-program and never says whose GLSL it was: the set the page was drawing with linked, so the culprit
-is among the ones that arrived or moved revision, and all of them are named in the reason when it
-is more than one. Only a link failure may do it. The same rollback catches a document this page
-could not carry onto the new manifest, and `setAsideUnlinkable` is called on a mark the throw
-carries rather than on the rollback having happened, because renaming a fork aside for a fault in
-one clip is a page destroying somebody's work to report its own. The reason is cut to 500
-characters and flattened to one line by both ends, and the flattening is of every control
-character rather than of whitespace alone: this rig's driver answers a `float` assigned to a
-`vec3` with 193 characters carrying two NUL bytes inside the sentence, and a NUL is not
-whitespace, so a collapse of `\s` alone put one into a line somebody reads in a terminal. It grants no
-authority the caller did not have, which is the first thing anybody asks about a route that
-renames a directory on a name off the wire: `PUT` and `DELETE` are on this same server behind this
-same guard and neither asks who is calling, and this does strictly less than either. An id with no
-copy in the user root is skipped rather than refused, per id, because a page that failed to link
-has the ids it was assembling from and no reason to know which root each came out of — the answer
-names what was set aside and what was not, with a reason for each. The store's generation moves
-when anything is set aside, so the page that just called it is handed the working set on its next
-poll.
+## Levelling a canted mount
 
-**A package that this build could not compile is refused at the door, and the refusal names the
-rule it broke.** That matters more than it sounds: a package is GLSL spliced into two shader
-programs and a table of parameters spliced into the registry, and both of those are assembled
-while the page is still loading — so a bad package that landed would not fail its install, it
-would fail the *next page load*, with nothing on screen and the only evidence in a console nobody
-has open. So the door runs before a byte is written: the id and the manifest have to agree, the
-package format has to be one this build reads (a later one is refused rather than adapted), a file
-name has to be a bare name in the package's own directory, at most one parameter may be the
-master and its default has to be the value the effect is absent at, the kind and the binding have
-to be ones the registry implements, every uniform a parameter binds has to be declared by some
-program and every uniform the package declares has to be bound by one of its own parameters or
-listed under `hostDriven`, which is not a list a package writes freely — it names the uniforms
-this build's own render loop drives, which is `rainPhase` and nothing else, because an exemption
-a package issues itself is the rule gone — every joint a chunk names has to exist in a spine, and
-every identifier a chunk reaches for has to be something this build has. Seven more rules are
-about the package as a whole rather than about one entry in it, because every rule above is
-satisfied as many times as a package repeats a correct entry: a package holds at most 64 files and
-256 KiB of chunk text (the widest that ships holds eight files and under 17 kilobytes, and every
-read of the store hashes every file of every package), its manifest holds at most 32 KiB (the
-widest that ships is the glitch's at 2,740 bytes over seven parameters, and a manifest is written
-to disk, hashed on every read and turned into a control per parameter on every open page — so
-twelve thousand correct parameters carrying one small chunk of GLSL passes every rule above it and
-fits inside a request body), a binding has to be the *shape* of the uniform it writes — `axisDeg`
-and `centeredEdges` need a `vec2`, while `degToRad` and a plain binding need a `float` — and may
-not aim at an array at all, since every
-binding writes one cell and three.js takes its uploader off the declaration, a binding that
-declares `gates` has to be something the grade gate can read, so not either vector transform,
-whose two-component value is not a scalar amount, and not a table the gate does not collect, a
-step may not be finer than `1e-6`, which is a grid neither the rounding nor a 32-bit float can resolve, and a
-parameter may only name a panel group this build holds or one its own package declares, with a
-package group key that collides with either refused by name. A parameter names its group and
-nothing else about the panel: which tab it draws on is the group's fact, so a manifest carries no
-tab of its own. It used to carry one that nothing read and that five effects stated wrongly,
-which is the shape of thing a reader believes because no check ever contradicted it. A refused package leaves nothing
-behind.
+A sensor bolted to a dashboard shoots a room that arrives on its side, and nothing measures
+the angle, because libfreenect2 exposes camera intrinsics and no accelerometer.
 
-**A page that is open when an install happens rebuilds itself.** Both shader programs are
-reassembled and swapped, the registry and the panel are rebuilt from the new set, and every value
-is written back through the same door a slider uses — so the controls show what the registry
-holds, the values in flight are where they were, and a newly installed effect's parked values
-come back and apply. A newly installed package stays out of the sidebar until it is added or used.
-What you were looking at survives it: the tab that was up stays up, a group
-you had collapsed stays collapsed, and the preset picker still lists what it listed. Each of
-those was read once at boot before, so after the first install the panel either lost them or went
-on reporting a state it no longer had. A package that changed no GLSL is adopted without recompiling anything,
-which is what keeps a retune from clearing the trails on a page mid-playback. Other browsers
-converge on their own within a few seconds; the poll stands down while an export, a preset
-gesture or a keyframe evaluation is running, because a rebuild between two frames of a render is
-a file that changes look halfway through — and it asks again after its last read, so a gesture
-that starts while it is reading defers it rather than being run over by it.
+| Control | What it does |
+| --- | --- |
+| `tilt` | Turns the room about its horizontal axis, -90 to 90 degrees. |
+| `roll` | Turns the room about the view axis, -180 to 180 degrees. |
+| `reset rotation` | Zeroes both in one press. |
+| `sensor view` | Puts the camera where the Kinect is, looking the way the Kinect looks. |
+| `show crop box` | Draws the six crop faces in the picture and the top-down, with a handle on each. |
+| `fit box to take` | Shrinks the box onto what the take holds. Editor only. |
+| `crop` | Whether the box bites, over all six faces at once. |
+| `left`, `right`, `bottom`, `top` | The four side faces, in sensor metres. |
+| `near`, `far` | The depth range, which both crops and normalises the depth ramp. |
+| `revert all to default` | Throws away every framing value on the tab. |
 
-**A package this build stores and cannot compile is a rollback and a sentence.** The door checks
-vocabulary and is not a compiler, so GLSL that is syntactically broken while naming only things
-this build has gets through it — and a shader that will not link is a log line in WebGL rather
-than an exception. The page detects it while it warms the swapped programs and refuses the
-install: it goes back to the effects it was drawing with, keeps the document it had, and says
-which shader did not compile.
+`tilt` and `roll` rotate the room, so the turntable's pole, the
+top-down inset, auto-orbit's axis and the exported frame all come level together. Set them by
+eye against the top-down, which is where a canted room reads as canted. There is no third
+angle, because yaw is what dragging on the picture already does. Crop faces and the region
+stay in sensor metres and are tested before the model matrix, so a box shrunk onto a subject
+stays there when the room levels underneath it.
 
-A fork may add parameters and retune the ones it inherits. It may not **drop** one: the panel's
-declaration order places every shipped parameter by hand, so a fork short of one is a build whose
-registry cannot assemble at all, and that is refused at the door with the names it dropped.
+**`show crop box` is a viewer control and writes nothing.** The drag writes, through the same
+registry door the sliders use, so a dragged face keys and undoes exactly as a typed one does.
+No preset can carry a face: a preset document naming the crop, the clip planes or the
+levelling is refused.
+A face gets a handle in a view that can show it moving, which is why the top-down carries
+`left`, `right`, `near` and `far`, and the picture carries all six. While the box is on
+screen the points it cuts draw faintly, so you can see what a face is about to remove. None of
+it reaches an exported frame or the OBS output.
 
-**An upgrade can refuse a fork that was fine when you installed it, and it says so at startup
-rather than at the next page load.** A fork is held against the build it was installed on, and
-this program's shaders gain, lose and rename the joints a chunk can name — so a new build may not
-be able to assemble a fork an old one accepted, and the fork would still shadow the shipped
-package it forks. The store therefore asks the install door about every package in `effects/`
-each time it starts. One the door now refuses is renamed to `<id>.<seq>.incompatible`, the shipped
-package answers for that id again, and the log line names the id and the rule:
+**`crop` releases by not testing the faces, and it leaves them where they are**, so `near` and `far` still
+normalise the depth ramp while the crop is off. With the crop released the box draws dashed
+and grey.
+
+## The five readings
+
+Five readings of the take, split on the panel into what colours a point and what is then made
+of it. Each is a weight from 0 to 1, so they mix.
+
+| Reading | Parameter | What it does |
+| --- | --- | --- |
+| colour | `readRgb` | Registered colour mapped onto the depth points. |
+| depth | `readDepth` | A cool-to-warm ramp across the clip range. |
+| ghost | `ghost.amount` | A luminance shell that glows along depth discontinuities. |
+| contour | `contour.amount` | Topographic bands sweeping through depth. |
+| blackwall | `blackwall.amount` | A crimson containment volume with a cyan scan sweep and torn datastream bands. |
+
+![The five readings on one frame of one take: colour, depth, ghost and contour in a
+grid, and Blackwall full width beneath them.](../media/shading-modes.png)
+
+All five are the same frame from the same pose, each at its own brightness. The room was shot
+unlit, so colour and contour read a signal the sensor barely produced, while Blackwall blends
+additively into bloom and blows out early.
+
+**They are weights and not a mode.** The shader sums whichever are non-zero and divides by the
+sum of the weights, so colour at 0.6 against depth at 0.4 is a 60/40 blend. Each is an
+ordinary registry parameter, so each keyframes, and a single reading at 1.0 is the identity.
+Their tuning keyframes too: the colour's `saturation`, the depth ramp's `gamma`, the ghost
+shell's `rim` and `fill`, the contour's `bands /m` and `thickness`, and Blackwall's `sweep`
+and `scan`.
+
+## The look panel
+
+The panel is generated from the registry at boot. A parameter is one entry naming its group
+and label, and the row, bounds, readout and keyframe control are built from that, so an effect
+cannot get a control the registry does not own. Bounds are authoring travel and not
+mathematical limits: mixes, angles and positions keep their full semantic range, and
+amplifiers end where the live picture stops producing a useful new setting.
+
+Rows declared under another parameter hide while that master sits at its absent value.
+Package-effect rows stay hidden until the effect is added with **+ add effect** or one of its
+values or tracks carries work. Removing an effect resets every value and deletes every track
+in one undoable edit and asks nothing first: **remove** in the picker and the cross on a group
+header are the same edit, and undo takes either back.
+
+**Units.** Displacements are metres in the levelled room, so a look gives the same picture at
+any export size. `pointSize` and every other screen-space term are pixels at 1080p. `trails`,
+`reach px` is reference pixels at 1080p and `decay` is a multiplier applied once per rendered
+frame, so both count renders where `trails` counts them too, and a look graded at one output
+rate does not keep its trail at another. `fade` and `wake` are milliseconds, and
+`refresh s` is program seconds.
+
+**Every effect is one panel group of its own**, and a core group holds only the spine's own
+controls. The Region tab draws in the order the shader takes them: `Region (metres)`, then
+`Region push`, `Turbulence`, `Region mask` and `Ripple` at gate orders 100 to 400, then
+`Displacement` and `Lattice`.
+
+| Effect | Tab | Parameters | What it does |
+| --- | --- | --- | --- |
+| `blackwall` | Effects | `amount` `sweep` `scan` | A crimson containment volume, a cyan scan sweep keyed off distance, and torn datastream bands. |
+| `contour` | Effects | `amount` `bands` `width` | Topographic bands through depth. |
+| `datamosh` | Effects | `amount` `reach` `decay` `splay` `line` `grain` `drift` `speed` `cycleRefresh` `refresh` | Pulls the picture along Y each frame and keeps what it leaves, so highlights stretch into needles. |
+| `duotone` | Effects | `amount` `hue` `split` `span` `motion` | A tonal transform between two depth-keyed poles, with `motion` keying the same poles on axial speed. |
+| `edges` | Effects | `amount` | Draws depth discontinuities. |
+| `ghost` | Effects | `amount` `rim` `fill` | A luminance shell glowing along depth discontinuities. |
+| `glitch` | Effects | `amount` `density` `shove` `tint` `bands` `axis` `rate` | Tears bands of the feed sideways in the sensor's own frame. |
+| `glyph` | Effects | `amount` `tone` `hash` `rain` | Draws each lattice cell as a character out of a table of sixty-four 8x8 bitmasks. |
+| `grain` | Effects | `amount` | Film grain over the finished frame. |
+| `halation` | Effects | `amount` `radius` `threshold` `tint` | The warm ring film puts around a highlight, gathered on brightness alone, so the ring is red-orange whatever colour went in. |
+| `lattice` | Region | `amount` | Quantises every axis to `cell m` in the levelled frame, so surfaces break into steps. |
+| `mask` | Region | `amount` | Reads the region box as a mask. |
+| `noise` | Region | `amount` `scale` `speed` `region` | Turbulence: displaces points with a noise field, and `scramble` reads the region box. |
+| `push` | Region | `amount` | Swells the volume out along the region box's radius. |
+| `rain` | Effects | `amount` `speed` `span` `trail` | A falling counter keyed on world height and program time, brightening what a drop head passes. |
+| `raster` | Effects | `amount` `angle` `pitch` `hard` | Scanlines, turnable to a vertical grille, with `hardness` squaring the wave. |
+| `rgbsplit` | Effects | `amount` | Separates the channels across the frame. |
+| `ripple` | Region | `amount` `freq` `speed` | A wave travelling out along the region radius, advancing in eighths of a cycle. |
+| `stock` | Effects | `amount` `balance` `split` `latitude` | The emulsion's own colour, keyed on exposure and built to leave luminance alone. |
+| `streak` | Effects | `amount` `angle` | Gathers back along an axis and keeps the brightest thing it finds, so highlights smear. |
+| `thermal` | Effects | `amount` | A thermal palette over the reading. |
+| `vignette` | Effects | `amount` | Corner falloff. |
+
+Seven grade terms share one full-screen pass, and the pass carries the tonemap: `rgbsplit`,
+`raster`, `grain`, `streak`, `halation`, `stock` and `vignette`. Each switches it on. The
+highlight rolloff and the black-toe `crush` ride along with the pass, so a look with all seven
+at zero also has lifted blacks and no rolloff, and additive accumulation clips to flat white.
+`crush` is a sub-control of that pass and not an eighth term gating it, so raising it
+alone does nothing.
+
+**The glyph field rides the lattice**, which is its only grid: `lattice.amount`
+and `cell m` cut the room into cubes and move each point to the centre of its cube, and one
+cell draws one character. Characters therefore read as characters only near `lattice.amount`
+1.0, and the mark crossfades back to a round splat below the legibility band, so the near room
+is text and the far room is texture. `tone key`, `hash key` and `rain key` add and wrap rather
+than mixing, and `hash key` is the only one defaulting to 1. `fall m/s` and `head gap m` shape
+the drop coordinate the `rain key` reads as well as the rain's own, so they move the picture
+with `rain.amount` at 0.
+
+**`glitch.axis` is a blend of the two image axes and not an angle in degrees**, from the
+sensor's rows at 0 to its columns at 1, because a band is a run of scanlines in the sensor's
+own frame. The tear is applied before the camera sees it, so orbiting around a torn band shows
+it shoved in depth. `raster.angle` and `streak.angle` get degrees instead, because they run in
+screen space where the pixels are square; `streak.angle` 0 is straight down.
+
+`datamosh.refresh` is how long that pass may remember: the picture snaps back to the frame it
+was handed every that many seconds of program time, and a seek decodes forward from the last
+snap, so a long refresh is a long pre-roll on every scrub. Nothing in the rain accumulates, so
+a seek there lands on exactly the frame playback would have drawn.
+
+`rim` brightens depth discontinuities and gives a subject its edge, but under additive
+blending plus bloom it washes broad surfaces white, so turn it down before turning down bloom.
+`render %` scales the drawing buffer and is the one control that reliably buys back frame
+time. Both `render %` and `auto-orbit` are viewer state: not saved with the clip, not
+exported.
+
+## Presets
+
+A preset is look values and nothing else. Framing belongs to the shot, so
+applying one never moves your camera, a clip, its crop, its clip planes or its levelling, and
+a preset document that names framing is refused before any value is written.
+
+**Applying one is not all on one clip.** A preset's cloud values, meaning point size, the
+readings and every effect that binds the cloud, land on the selected clip. Its post-chain
+values, meaning bloom, trails, crush and the rest of the grade, are the project's, so applying
+a graded look to one clip of four regrades the other three. The editor says how many of the
+values it wrote were the shared half.
+
+A preset is `{ version, values }`, plus a `requires` list of `{ id, version }` when the look
+touches any effect, derived from the values themselves. A parameter's key is dotted by
+the effect it belongs to, like `glyph.tone`, and a core value that belongs to no effect stays
+bare, like `pointSize` or `readDepth`.
+
+Twelve ship read-only from `presets-builtin/` and are marked `·` in the picker.
+
+| Preset | Reading | What it is |
+| --- | --- | --- |
+| `rgb` | colour | One reading and little else, so a grade can start from it. |
+| `depth` | depth | The same, on the depth ramp. |
+| `ghost` | ghost | The same, on the ghost shell. |
+| `contour` | contour | The same, on the contour bands. |
+| `blackwall` | blackwall | The same, plus fourteen values across glitch, RGB split, raster, grain and vignette. |
+| `ember` | blackwall | A finished grade: a warm duotone at hue 28, a raster at pitch 0.4 and a toe over the reading. |
+| `grille` | blackwall | `ember` regraded to a neutral hue around a harder, wider grille: raster pitch 0.2, hardness 0.95. |
+| `tearline` | blackwall | `ember` regraded around the tear: glitch at 0.3 against 0.1, streak at 0.45. |
+| `voxel` | blackwall | The lattice at 0.55 on a 3.5cm cell, so the volume reads as reconstructed. |
+| `cascade` | depth | Falling code: the lattice at 1.0 on a 5.5cm cell, glyphs full, hash key full and rain key at 0.6, over a green duotone. |
+| `updraft` | blackwall | `ember`'s grade with the datamosh over it, `splay` 0, streaming the whole frame upward. |
+| `rift` | blackwall | The same with `splay` 1, pulling the frame apart from `line` outward. |
+
+**All twelve name the whole look**: the 27 bare core values every look owes, plus every
+parameter of each effect the document claims, which the all-or-none reading rule makes at
+least the three reading packages. Applying a whole look resets every effect the document does
+not claim back to that effect's own defaults. A preset naming two values is equally valid and
+leaves everything else where the grade left it, but a partial preset does not stamp the clip,
+because the stamp answers "what look is this clip wearing".
+
+**The five reading weights tick and untick together.** A file naming any reading has to name
+all five, because the ones it omits stay at whatever the clip was already wearing and two
+fifths of a blend renders as a mixture nobody authored. A file naming none of them is a look
+that is not about the reading. Everything in between is refused.
+
+**Saving and exporting both ask which look values go in**, every box ticked by default. A
+whole-look save sheds an ordinary effect sitting wholly at its own defaults, because a
+whole-look apply restores it to those defaults anyway; the three reading packages stay whole
+even at their defaults, and a subset save sheds nothing.
+
+**Saving over a shipped name forks it**: the write lands in your library and shadows the
+built-in, and deleting the fork brings the shipped look back. `export` writes the look on
+screen, which is not the document the picker names once you have moved a slider, as
+`<name>.braindance-preset.json`. `import` validates against the registry before saving, so a
+scalar carrying a string fails at the key that is wrong and `__proto__` is refused as an
+unknown parameter.
+
+**This build reads project version 8 alone**, which places footage with each clip's `speed`
+and `sourceStart`. A file from any older version is refused naming its own version, and there
+is no conversion.
+
+## Batch rendering
+
+`POST /jobs` takes the project document, one capture content hash per clip and the output's
+name, size and rate. All four are required. There is no button for this anywhere in the
+browser.
+
+**What enqueue checks and what it does not.** It checks that `project` is an object carrying
+some `version`, that every clip names a content hash, that `captures` equals those hashes one
+for one and in order, that `project.requires` claims exactly the effect namespaces the values
+and tracks use with no repeats, that `suppressEffects` is a list of effect ids, and that the
+output name, size, rate and codec pass the same validator the export dialog uses. It also
+refuses an output name a queued or running job already holds. It does **not** check the
+project's version number beyond its presence, and it stores `deliverable` exactly as given. So
+a project from another build and a malformed deliverable both enqueue cleanly: the page refuses
+a project version it does not read, and `applyDeliverable` refuses a deliverable that is not
+version 2 or whose `outputSize` is another shape. The worker applies a deliverable only when it
+is truthy, so a `false` or `null` one renders the whole clip.
+
+| Field | Required | What it is |
+| --- | --- | --- |
+| `project` | yes | The project document body, meaning what `serialiseProjectBody()` returns. The store's `{ name, rev, body }` envelope is refused. |
+| `captures` | yes | One `sha256:…` content hash per clip, in project order, repeats kept. |
+| `output` | yes | The output's base name: a letter or digit, then letters, digits, dots, dashes and underscores. |
+| `width`, `height` | yes | Positive integers. `h264` needs both even, and one RGBA frame may not exceed 96 MiB. |
+| `fps` | yes | A positive number. |
+| `codec` | no, `h264` | `h264`, `prores`, `pngseq` or `lossless`. |
+| `renderer` | no, unpinned | The renderer class a worker must match to claim the job. Unpinned means any worker may take it. |
+| `suppressEffects` | no, empty | Effect ids this render may go without. |
+| `deliverable` | no | A version 2 deliverable document, which trims the render. |
+
+The queue derives `requires` from the namespaces the project's own values and tracks carry,
+and derives the footage list from the clips, so a body whose lists disagree with its values is
+refused at enqueue by name, before a browser and a minute of GPU. Two jobs cannot reserve one
+output name while either is queued or running.
+
+A render you have already done carries the same fields in its `.job.json` sidecar under
+`exports/`, so the shortest correct request is that file with a new name over it:
+
+```bash
+jq -s 'max_by(.created) |
+       {project, captures, output: "take2-again", width: 960, height: 540, fps: 30}' \
+   exports/*/take2.mp4.job.json |
+  curl -sX POST http://localhost:8080/jobs -H 'content-type: application/json' -d @-
+node tools/render-worker.mjs --url http://localhost:8080 --drain
+```
+
+`max_by` picks one sidecar when the glob matches several, because exporting `take2` twice
+leaves two directories and two JSON objects concatenated into one body is not JSON at all. The
+object above drops the sidecar's `renderer`, so the re-render is unpinned.
+
+**A worker claims only jobs matching its browser's renderer class**, read off the page it will
+actually draw in, so it cannot be handed work that would come back looking different.
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--url URL` | `http://localhost:8080` | The queue to claim from. |
+| `--name NAME` | `worker` | The name this worker reports on a claim. |
+| `--max N` | `16`, or `1` under `--once` | How many jobs this run will take. |
+| `--once` | off | Takes one job and stops. |
+| `--drain` | off | Stops as soon as the queue holds nothing for this worker. |
+| `--poll MS` | `2000` | How long to wait between claims without `--drain`. |
+| `--beat MS` | `15000` | How often a running job says it is still there. |
+| `--headed` | headless | Runs Chromium with a window. |
+| `--help` | | Prints the usage and exits. |
+
+**`--drain` bounds the wait and `--max` bounds the work, so exit 0 does not mean the queue is
+empty.** A run stops after `--max` jobs whatever is left behind it, and `--drain` only decides
+whether it waits for more work in the meantime. The exits are 0 when every job it took
+succeeded or the queue answered with no job, 1 when a job failed or the claim request itself
+failed, and 2 when the claim came back 409 or 5xx, which is work pinned to another renderer
+class or a server error.
+
+The queue is records on disk, so it survives a restart. A worker heartbeats while it renders,
+and `POST /jobs/:id/requeue` puts a job back, refusing a running job heard from within the
+last 120 seconds.
+
+**The trim travels on `deliverable`**, and a job without one renders the whole clip. The
+worker applies it through the door the editor uses, so it is a whole version 2 deliverable
+document and not a bare pair of seconds:
+
+```json
+"deliverable": {"version": 2, "in": 0, "out": 1.967,
+                "outputSize": "960x540", "codec": "h264", "name": "take2-again"}
+```
+
+`outputSize` has to be a size of the shape the project is framed at, or the render fails
+naming the shape. Size, rate and codec still live at the top level, which is where the queue
+validates them and where the worker reads them back. **The sidecar does not record the trim**,
+so the recipe above reproduces a trimmed render at full length unless you add the deliverable
+back yourself.
+
+A worker launches Chromium at startup, to read its renderer class off a real page. Then, per
+job, it resolves every capture hash against its own library before it loads the project, and a
+hash it has not got fails the job naming the take. After the load it attests what the page
+actually opened against what the job asked for, clip by clip and in order. It refuses a job
+envelope from a version it does not read, and fails a job naming an effect it has not got
+unless `suppressEffects` covers it. A failed read of its own server is retried a few times
+before the job is failed at all, and the job then comes back naming the read itself, never a
+package or a take the machine has not got.
+
+## HTTP routes
+
+Every route is on one table that is also the dispatcher, served at `GET /library/routes`. A
+route with a write method goes through the three checks under
+[Reaching it from another machine](#reaching-it-from-another-machine).
+
+| Route | Method | What it does |
+| --- | --- | --- |
+| `/capture/:id/hello` | GET | The capture's own hello stanza. |
+| `/capture/:id/index` | GET | The frame index. |
+| `/capture/:id/extent` | GET | How much of the capture is on disk. |
+| `/capture/:id/file` | GET | The capture's bytes. |
+| `/capture/:id/frame/:n` | GET | One frame's payload. |
+| `/capture/:id/frames/:a-:b` | GET | A run of frames as the file's own slice. |
+| `/capture/:id/marks` | GET, POST | Reads and writes the take's marks. |
+| `/capture/:id/marks/log` | GET | The marks with their write log. |
+| `/library/takes` | GET | The takes on this machine, with storage left. |
+| `/library/all` | GET | Every take here and on the linked node. |
+| `/library/remaining` | GET | Recording time left at the current rate. |
+| `/library/downloads` | GET | Transfers currently moving bytes. |
+| `/library/descriptors` | GET | Open descriptors against captures held. |
+| `/library/routes` | GET | This table. |
+| `/library/writes` | GET | Write counts per store. |
+| `/library/remote-frame/:id/:n` | GET | One frame of a node-only take, fetched through here. |
+| `/library/download/:id` | POST | Pulls a take from the linked node. |
+| `/library/delete/:id` | POST | Deletes a take. |
+| `/library/reclaim/:id` | POST | Deletes the local copy of a take the node still holds. |
+| `/library/sync-marks/:id` | POST | Pushes marks to the node. |
+| `/library/rename/:id` | POST | Renames a take. |
+| `/library/reveal/:id` | POST | Starts the file manager on the take. |
+| `/projects/all` | GET | Lists project documents. |
+| `/projects/:name` | GET, PUT, POST, DELETE | Reads, writes and deletes one project. |
+| `/projects/:name/rename` | POST | Renames a project. |
+| `/presets` | GET | Lists presets, builtin and forked. |
+| `/presets/:name` | GET, PUT, POST, DELETE | Reads, writes and deletes one preset. |
+| `/deliverables` | GET | Lists saved export settings. |
+| `/deliverables/:name` | GET, PUT, POST, DELETE | Reads, writes and deletes one deliverable. |
+| `/effects` | GET | Lists installed effects with the store's generation. |
+| `/effects/:id` | GET, PUT, DELETE | Reads, installs and removes one package. |
+| `/effects/:id/file/:name` | GET | One chunk's own bytes, as `text/plain`. |
+| `/effect-refusals` | POST | Sets aside packages a page could not compile. |
+| `/camera.mjpg` | GET | The colour camera as MJPEG. The one embeddable route. |
+| `/sensor/health` | GET | What the sensor is doing. |
+| `/record/state` | GET | Whether a take is running. |
+| `/record/start` | POST | Starts a take. |
+| `/record/stop` | POST | Stops it. |
+| `/record/mark` | POST | Marks the running take. |
+| `/jobs` | GET, POST | Lists the queue and enqueues a render. |
+| `/jobs/claim` | POST | Hands the oldest claimable job to a worker of a named renderer class. |
+| `/jobs/:id` | GET | One job, without its lease. |
+| `/jobs/:id/finish` | POST | Reports an outcome against the lease the claim handed out. |
+| `/jobs/:id/heartbeat` | POST | Says the claim is still rendering. |
+| `/jobs/:id/requeue` | POST | Puts a job back on the queue, still pinned. |
+
+Every read route strips a job's `lease`, because the lease is the capability `finish` demands.
+
+## Installing an effect and taking one away
+
+`PUT /effects/<id>` installs a package and `DELETE /effects/<id>` removes one. The body is
+`{manifest, chunks}`: the manifest as JSON, and a map of file name to GLSL text. The id in the
+path is the namespace the package's parameters carry, so a manifest declaring a different one
+is refused. An id starts with a lowercase letter and continues in lowercase letters and
+digits, up to 64 characters.
+
+**An install lands in `effects/` and never in `effects-builtin/`.** A package installed under
+a shipped id shadows it, and deleting that copy brings the shipped one back. Nothing reachable
+from the network can edit or remove what the build shipped with, so there is always a package
+to fall back to, and a `DELETE` aimed at a builtin nothing is forking is refused by name.
+Deleting a package that exists only in `effects/` uninstalls it, at which point every open
+document's values under it park.
+
+**A page that is open when an install happens rebuilds itself.** All three shader programs
+are reassembled and swapped — the cloud, the grade and the mosh — the registry and the panel
+are rebuilt, and every value is written
+back through the door a slider uses, so a newly installed effect's parked values come back and
+apply. The tab that was up stays up and a group you had collapsed stays collapsed. A package
+that changed no GLSL is adopted without recompiling anything. Other browsers converge within a
+few seconds; the poll stands down while an export, a preset gesture or a keyframe evaluation
+is running, and asks again afterwards.
+
+### What the door refuses
+
+The door runs before a byte is written, because a bad package that landed would not fail its
+install, it would fail the next page load with nothing on screen. It refuses:
+
+- an id and a manifest that disagree, or a package format later than this build reads;
+- a file name that is not a bare name in the package's own directory;
+- more than one parameter marked master, or a master whose default is not the value the
+  effect is absent at;
+- a parameter kind or binding the registry does not implement;
+- a binding whose shape does not match the uniform it writes, or one aiming at an array;
+- a binding declaring `gates` that the grade gate cannot read;
+- a step finer than `1e-6`;
+- a uniform a parameter binds that no program declares, or a uniform the package declares that
+  none of its own parameters binds and `hostDriven` does not name. `hostDriven` names the
+  uniforms this build's render loop drives, which is `rainPhase` and nothing else;
+- a chunk naming a joint no spine has, or reaching for an identifier this build has not got.
+  A spine is one shader program written as fixed GLSL with named gaps in it, and a joint is
+  one of those gaps; a chunk names the joint it fills in its `stage` field, or a single `slot` such as
+  `v.pointSize` that replaces one expression, and
+  [`web/cloud-shader.js`](../web/cloud-shader.js),
+  [`web/grade-shader.js`](../web/grade-shader.js) and
+  [`web/mosh-shader.js`](../web/mosh-shader.js) hold the three spines;
+- a parameter naming a panel group this build does not hold and the package does not declare,
+  or a package group key colliding with either;
+- a package over 64 files, over 256 KiB of chunk text, or with a manifest over 32 KiB.
+
+A refused package leaves nothing behind. A parameter names its group and nothing else about
+the panel, so a manifest carries no tab. **A fork may add parameters and retune the ones it
+inherits, and may not drop one**: the panel places every shipped parameter by hand, so a fork
+short of one is a registry that cannot assemble, and the door names what it dropped.
+
+### What the door cannot see
+
+Nothing here compiles GLSL. The door refuses a chunk naming something this build has not got
+and cannot refuse one whose GLSL is merely wrong, because that is a shader that fails to link,
+which is a log line inside the driver.
+
+The page detects it while it warms the swapped programs: it rolls back onto the set it was
+holding, keeps the document it had, and says which shader did not compile. It then posts to
+`POST /effect-refusals` with the driver's own sentence, and the server renames each user copy
+aside as `<id>.<seq>.incompatible`, so the package is still on disk to be repaired and the
+shipped one answers for that id again. The ids it names are the packages that changed in that
+adoption, because a link failure is about the assembled program and never says whose GLSL it
+was. Only a link failure may set anything aside, an id with no copy in the user root is
+skipped, and the answer names what was set aside and what was not, with a reason for each.
+
+### The boot gate
+
+A fork is held against the build it was installed on, and this program's shaders gain, lose
+and rename the joints a chunk can name. So the store asks the install door about every package
+in `effects/` each time it starts. One the door now refuses is renamed to
+`<id>.<seq>.incompatible`, the shipped package answers for that id again, and the log names
+the id and the rule:
 
 ```
 effect rain was installed by an earlier build of this program and this one refuses it: effect
@@ -764,266 +815,9 @@ back, and the shipped package answers for that id again
 ```
 
 Nothing deletes that directory. Fix what the sentence names, rename it back to `<id>`, and
-restart — or install the repaired package over the top, which leaves the aside where it is for
-you to remove by hand.
+restart, or install the repaired package over the top and remove the aside by hand.
 
 One package refused this way never costs its neighbours: each is held against the shipped set
-plus the packages already validated beside it, so a fork that cannot assemble is renamed aside on
-its own and the healthy ones next to it go on serving. And if the rename itself cannot be made —
-a filesystem that refuses it, a name already taken sixteen ways — the server still comes up, says
-so on the same line, and goes on serving the package it has just announced it cannot use. A build
-that boots with a broken package is one you can read this log on; a build that will not boot is a
-machine with nothing to read at all.
-
-## Levelling a canted mount
-
-A sensor bolted to a dashboard shoots a room that arrives on its side, and nothing measures
-the angle, since libfreenect2 exposes camera intrinsics and no accelerometer. `tilt` and
-`roll` under Framing rotate the *room* rather than the camera, so the turntable's pole, the
-top-down inset, auto-orbit's axis and the exported frame all come level together. Set them
-by eye against the top-down, which is where a canted room reads as canted, and **Reset
-rotation** zeroes both in one press. There is no third angle because yaw is what dragging on
-the picture already does.
-
-Crop faces and the region stay in sensor metres and are tested before the model matrix, so a
-box shrunk onto a subject stays there when the room levels underneath it. `level-check`
-holds that as a bit-identity.
-
-**Show crop box** draws the six faces in the picture and in the top-down, and puts a handle
-on each face you can drag with the pointer. It is a viewer control and writes nothing: the
-drag itself writes, through the same registry door the sliders use, so a dragged face keys,
-undoes and presets exactly as a typed one does. A face is offered a handle in a view that can
-show it moving, which is why the top-down carries `left`, `right`, `near` and `far` and not
-`bottom`/`top`, and why the far plane has no handle when you are looking straight down the
-axis it moves along — turn the orbit and it appears. While the box is on screen the points it
-cuts draw faintly rather than vanishing, so you can see what a face is about to remove and
-drag it onto something deliberately. None of that reaches an exported frame or the OBS
-output, which `export-check` asserts as byte-identity.
-
-**`crop`** is whether the box bites, over all six faces at once, and it is a look value like
-any other — it keys, it presets, and it exports what you see. It releases by not testing
-rather than by moving the planes, so `near` and `far` still normalise the depth ramp while
-the crop is off and the picture you get back is the room, not a re-grade of it. Use it to
-check what a tight box removed without losing the numbers; **revert all to default** is the
-other way back and throws them away. With the crop released the box draws dashed and grey.
-
-## The five readings
-
-Five readings of the take, split on the panel into what colours a point and what is then
-made of it. Each is a weight from 0 to 1, so they mix.
-
-| Reading | What it does |
-| --- | --- |
-| colour (source) | registered colour mapped onto the depth points |
-| depth (source) | cool-to-warm ramp across the clip range |
-| ghost (treatment) | luminance shell that glows along depth discontinuities |
-| contour (treatment) | topographic bands sweeping through depth |
-| blackwall (treatment) | crimson containment volume, cyan scan sweep, torn datastream bands |
-
-![The five readings on one frame of one take: colour, depth, ghost and contour in a
-grid, and Blackwall full width beneath them.](../media/shading-modes.png)
-
-All five are the same frame from the same pose, each at its own brightness: the room was
-shot unlit, so colour and contour read a signal the sensor barely produced while Blackwall
-blends additively into bloom and blows out early.
-
-**They are weights and not a mode.** The shader sums whichever are non-zero and divides by
-the sum of the weights, so colour at 0.6 against depth at 0.4 is a 60/40 blend. Each is an
-ordinary registry parameter, so each keyframes, and a single reading at 1.0 is arithmetically
-the identity; `registry-check` hashes each reading's framebuffer against the mode it replaced.
-
-Seven constants that were literals inside the old shader branch are registry parameters too,
-so they keyframe: the colour's saturation, the depth ramp's gamma, the ghost shell's rim
-exponent and fill, the contour's bands per metre and line thickness, and the Blackwall scan
-speed. Each defaults to the literal it replaced.
-
-**The duotone sits on top of all five**, beside `thermal.amount` and `edges.amount` and for their reason:
-a term written into one reading is inert in every other. It is a tonal transform rather than
-a tint, because its two poles carry luminance as well as hue — the near one runs toward black
-and the far one toward hot, so one term gives both the depth-keyed palette and the near-black
-figure against a burning core. A plain global toe cannot draw that second thing at all, since
-it darkens near and far alike, which is why there is no separate silhouette control to look
-for. `duotone` is how far the image lands between the poles, `hue` turns both of
-them together, and `split` is the depth they meet at, as a fraction of the clip range
-— so the crossover is a place in the room rather than a fraction of the frame. The pair itself
-is baked, the way `heatRamp` and `depthRamp` are: what is parameterised is how you use them.
-
-**`duotone.motion`** keys those same two poles on speed as well, so whatever is moving through
-the room comes out hot against a room graded by distance. It is the reading the depth key
-cannot draw on its own: a subject and the wall behind it are graded by where they stand, so a
-person walking through a scene is exactly as cold as the air they walk through until something
-keys on the walking. The speed is axial and is measured from the two depth frames the renderer
-already holds rather than from a flow pass, so what it sees is what the sensor sees — somebody
-walking toward it rather than across it. A point reaches the hot pole at 1200 mm/s, about the
-axial speed of an ordinary walk, and the amount pushes toward that pole rather than adding to
-it, so the far half of a room is already hot and has nothing to gain while the effect keeps its
-room where the picture is near-black, which is where a subject usually is. `snap mm` bounds it
-at both ends: a jump larger than it reads as a different surface rather than as fast motion,
-which is what stops every silhouette burning, and the same threshold caps the fastest speed a
-pair can express at `snap mm` over the gap between the two frames — 7500 mm/s at the default
-over a 30fps stream, and proportionally less over a slower link.
-
-**The scanlines term is a raster now**, with three settings under it in a `Raster` group of
-its own. `angle` turns it — at 0 it is the horizontal scanline it has always been, at 90 the
-dense vertical column grille the reference frames slice a picture into — and because it keys,
-a raster can rotate under the playhead. `pitch` is the line frequency, promoted from a literal
-and defaulting to it — and **the settings worth having are below that default, not above it**,
-because the wave is sized against 1080p and 1.3 is already about 220 cycles across the frame.
-That is a television scanline; the wide bands the reference frames cut a picture into want
-something under 0.6, and 0.1 is bands you can read across the room. The slider ends at 1.5 because
-the settings above it only make a line thinner than the pixel drawing it, which is aliasing rather
-than a raster.
-`hardness` squares the wave into a grille with dark gaps between the
-lines, and it is the one that makes the other two worth having: an angle over a sine only ever
-buys rotated softness, where the references are hard line grilles.
-
-They are settings of `raster.amount` rather than terms beside it, so only the master gates the
-grade pass — raise the angle with the master at zero and nothing happens, which is deliberate,
-since switching a full-screen pass on to draw nothing is the no-op the gate exists to refuse.
-The angle is one parameter behind a two-component uniform, computed in double on the way
-through for the reason `contour.width`'s two band edges are: taking the sine in the shader is
-allowed to be a couple of thousandths off, and a raster meant to run along y then leaks a
-whisker of x.
-
-**`film stock`** is the emulsion's own colour, in a `Film stock` group of its own, and it keys
-on exposure rather than on distance. That is what separates it from the duotone above: the
-duotone is keyed to depth, replaces the colour outright and runs per point, where this biases
-the colour the assembled frame already has — so a point, the bloom halo around it and the
-halation ringing that halo are toned together, which nothing in the point program can do. It is
-built to leave exposure alone, and it now does it for every colour rather than for the greys. The
-tinted pixel is scaled back onto the luminance the pixel arrived with, so the outgoing luminance
-is the incoming one by construction whatever the hue. The line that stood here divided the *tint*
-by the tint's own luminance, which cancels only when every channel of the pixel is the same
-number: worked through the shipped poles in double precision — arithmetic over the shader's own
-literals rather than a rendered frame — the tungsten shadow pole took pure red to 0.8599 of its
-luminance and pure blue to 1.2793, with the tungsten highlight pole running the other way at
-1.1139 and 0.8067. Grey came back at exactly 1.0000 at all four poles, which is how a claim that
-wrong survived being looked at, and it is also why the whole-frame reading recorded here (three
-frames, mean luma 124.91 at one end of the balance against 125.06 at the other, 0.12%) could not
-see it: a mean over a frame averages a red that has been pushed down against a blue that has been
-pushed up, and a mostly-desaturated frame has little of either.
-
-`stock balance` is the axis between two stocks and **its two halves are different shapes**. At
--1 it is a tungsten-balanced stock shot in daylight: shadows cool toward cyan-blue and highlights
-stay warm, which is the split most people mean by a film look. At +1 it is the mismatch the
-other way round and the whole frame sits warm, because both stocks put warm highlights up and
-what actually walks along the axis is the shadow. `stock split` is the luminance where cool
-becomes warm and `stock latitude` is how wide the crossover is either side of it — they go on
-deciding where and how wide across the whole axis, they simply stop straddling a hue boundary
-once the balance is past neutral. All three are settings of `stock.amount` and are inert while
-it is at zero.
-
-`crush` is the toe under the grade's Reinhard curve, promoted from a literal and defaulting to
-it. It is a sub-control of the grade pass rather than an eighth term gating it — raise it on its
-own and nothing happens, because the pass only runs when one of the seven terms above asks for
-it. That asymmetry is deliberate: its default is not zero, so gating
-on it would hold the pass open for every look there has ever been.
-
-The panel is generated from the registry at boot. A parameter is one entry naming its group
-and label, and the row, bounds, readout and keyframe control are built from that, so an
-effect cannot get a control the registry does not own. Package-effect rows are hidden until
-the effect is added with **+ add effect** or any of its values or tracks carries work.
-Rows declared `under` another parameter are hidden while that master is at its absent value.
-Removing one resets every value and deletes every track in one undoable edit, and it asks
-nothing first: **remove** in the picker and the cross that appears on a group's own header when
-you hover it are the same edit, and undo is what takes either of them back.
-The local rack preference is panel state, not project state. The generator refuses to boot
-if the rows it emitted are not the parameters that were declared.
-
-The bounds are authoring travel, not mathematical limits. Mixes, angles and positions keep their
-full semantic range. Amplifiers end where the live picture stops producing a useful new setting,
-so a small pointer move remains a small change and the slider has no dead or destructive tail.
-Every shipped preset sits on those same grids.
-
-## Presets
-
-Selecting Blackwall used to apply twelve post-chain values with it. They are separate now: a
-preset is look values and nothing else. Framing is the shot rather than the look, so applying one
-never moves your camera, a clip, its crop, its clip planes or its levelling.
-
-**Applying one is not all on one clip.** A preset's cloud values — point size, the readings and
-every effect that binds the cloud — land on the selected clip. Its post-chain values —
-bloom, trails, crush, the rest of the grade — are the project's, so they land once and every
-other clip in the edit is seen through them. That is a real consequence rather than a footnote:
-applying a graded look to one clip of four regrades the other three. The editor says how many of
-the values it just wrote were the shared half, and the save dialog says the same thing in words.
-
-A preset is `{ version, values }`, plus a `requires` list when the look touches any effect,
-and the keys it names in `values` are its scope. A parameter's key is dotted by the effect it
-belongs to — `glyph.tone`, `raster.pitch` — and a core value that belongs to no effect stays
-bare, like `pointSize` or `readDepth`. `requires` is `[{ id, version }]`, one entry per effect
-the values touch, derived from them rather than typed: a look that never raises the rain
-carries no entry for it. Twelve ship read-only from `presets-builtin/` and are marked `·` in the
-picker. Five of them — `rgb`, `depth`,
-`ghost`, `contour` and `blackwall` — are one per reading and differ in little else, so they
-are where a grade starts, with `blackwall.json` carrying the twelve values the old mode
-wrote. The other seven — `ember`, `grille`, `voxel`, `tearline`, `cascade`, `updraft` and
-`rift` — are graded looks in their own right: all of them read Blackwall except `cascade`,
-which reads depth, and each spends a duotone, a raster and a toe on top of that reading, so
-applying one takes a finished grade rather than clearing the desk. `updraft` and `rift` are
-`ember`'s grade with the datamosh over it and differ only in `datamosh.splay` — 0 streams the
-whole frame upward, 1 pulls it apart from `datamosh.line` outward.
-Nothing in the format marks the difference and nothing should — they are all documents, and
-the split is editorial. A preset naming two values is equally valid, and applying it leaves
-everything else where the grade left it.
-
-**All twelve name the whole look**: the 27 bare core values every look owes, plus every parameter
-of each effect the document itself touches — so picking one gives you that look whatever was
-on screen before it. The all-or-none reading rule means all twelve also name the three reading
-packages, Ghost, Contour and Blackwall, with all nine of their parameters. A shipped whole look
-therefore names at least 36 values. `blackwall.json` claims five more effects whose fourteen
-parameters bring it to 50. Applying a whole look resets every effect the document does not
-claim back to that effect's own defaults, which is what makes leaving an ordinary effect out
-and writing it in at its defaults describe the same look. Core framing — levelling, the clip planes
-and the crop box — is the shot rather than the look, so no preset document can name it and
-neither a look nor `none` reframes what you framed. An effect parameter remains a look value if
-its manifest places its control in the Framing panel; panel placement is layout, not file meaning.
-`library-check` holds the rule against the
-registry: a new core value fails all twelve until each names it, and a new parameter added to an
-effect fails only the documents whose `requires` already claims that effect — an effect
-nothing has reached yet fails nothing, because nothing claims it.
-
-Saving and exporting both ask which preset values go in, every box ticked by default, so a sparse
-preset takes deliberate effort. A whole-look save still sheds what it can: an ordinary effect
-sitting wholly at its own defaults leaves no trace in the saved file, because the whole-look
-apply above restores that same effect to those same defaults whenever the document does not
-claim it. The three reading packages stay whole even at their defaults, because a document
-naming `readRgb` and `readDepth` must also carry the other three reading weights. A subset save
-sheds nothing, because a picked value at its default is still a value somebody chose. The
-boxes derive from the preset boundary in the registry, so a look parameter added later appears
-under its own heading by existing and a framing parameter never appears there.
-
-**The five reading weights tick and untick together.** A file naming any reading has to name
-all five, because the ones it omits stay at whatever the clip was already wearing, and two
-fifths of a blend renders as a mixture nobody authored. A file naming none of them is a look
-that is not about the reading, which is fine. `refusePresetBody` refuses everything in
-between.
-
-**A partial preset does not stamp the clip**, because the stamp answers "what look is this
-clip wearing" and a document short even one of the values its own core and effects call for
-did not answer it. The two surfaces that report an apply say which of the two happened, and a
-document naming the whole look stamps it. Framing is not part of that answer and a document that
-tries to name it is refused before any value is written.
-
-**Saving over a shipped name forks it**: the write lands in your library and shadows the
-built-in, and deleting the fork brings the shipped look back.
-
-`export` writes the look on screen (not the document the picker names, which diverge the
-moment you move a slider) as `<name>.braindance-preset.json`, and `import` reads one back.
-The bytes are the document, so a look is something you can commit, mail, or edit in a text
-editor.
-
-An imported file is validated against the registry before it is saved: a scalar carrying a
-string fails at the key that is wrong instead of writing a plausible-looking look, and
-`__proto__` is refused as an unknown parameter. A file is the one door nothing upstream
-validates, so `editor-check` section 12 drives the round trip in a browser, with
-`import-skips-normalise` as the mutation that must break it.
-
-Documents from before the readings are version 3 and will not open, and there is nothing to
-run: the one-shot conversion this repo used to ship was deleted once every document it could
-act on had already been converted. This build reads version 7 alone — a version 6 document
-carried one take at the top and one undivided look under it rather than a `clips` array, and a
-version 5 document still spelled its parameters bare (`glyphTone` rather than `glyph.tone`) and
-carried no `requires` list, so both are refused the same way a version 3 or 4 one is, and there
-is no conversion for either: every document this project holds was re-authored at 7. A file from
-any older version is refused, naming its own version, and stays refused.
+plus the packages already validated beside it. If the rename cannot be made, the server still
+comes up, says so on the same line, and goes on serving the package it has just announced it
+cannot use.

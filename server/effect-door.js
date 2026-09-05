@@ -178,6 +178,74 @@ const uniformTypesIn = (text) => {
 
 const uniformsIn = (text) => new Set(uniformTypesIn(text).keys());
 
+// GLSL refuses two declarations of one name in one scope, and a chunk spliced into a function
+// body shares that scope with the spine's own locals. Scope-aware, because a nested block may
+// shadow an outer name and the shipped ripple does. Returns the first name declared twice.
+const GLSL_QUALIFIER = /^(?:const|highp|mediump|lowp|precise|invariant|flat|smooth|centroid|in|out|inout|uniform)\s+/;
+const GLSL_NOT_A_TYPE = new Set(['return', 'precision', 'else', 'discard', 'break', 'continue', 'struct', 'layout', 'if', 'for', 'while', 'do', 'switch', 'case']);
+const declaredNamesIn = (statement) => {
+  let src = statement.trim();
+  while (GLSL_QUALIFIER.test(src)) src = src.replace(GLSL_QUALIFIER, '');
+  const head = src.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s*\[[^\]]*\])*\s+([A-Za-z_][A-Za-z0-9_]*)/);
+  if (!head || GLSL_NOT_A_TYPE.has(head[1])) return [];
+  const names = [];
+  let depth = 0;
+  let part = '';
+  const parts = [];
+  for (const ch of src.slice(head[0].length - head[2].length)) {
+    if (ch === '(' || ch === '[') depth++;
+    else if (ch === ')' || ch === ']') depth--;
+    if (ch === ',' && depth === 0) { parts.push(part); part = ''; } else part += ch;
+  }
+  parts.push(part);
+  for (const p of parts) {
+    const m = p.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)\s*([\[=]|$)/);
+    // A name followed by a parenthesis is a function, and a prototype may be repeated.
+    if (m) names.push(m[1]);
+  }
+  return names;
+};
+const redeclaredIn = (text) => {
+  const src = withoutComments(text).replace(/^\s*#[^\n]*/gm, ' ');
+  const scopes = [new Set()];
+  const declare = (name) => {
+    const scope = scopes[scopes.length - 1];
+    if (scope.has(name)) return name;
+    scope.add(name);
+    return null;
+  };
+  let buffer = '';
+  let parens = 0;
+  for (const ch of src) {
+    if (ch === '(') parens++;
+    else if (ch === ')') parens--;
+    if (ch === ';' && parens === 0) {
+      for (const name of declaredNamesIn(buffer)) if (declare(name)) return name;
+      buffer = '';
+    } else if (ch === '{') {
+      const head = buffer.trim();
+      scopes.push(new Set());
+      const loop = head.match(/^for\s*\(([^;]*);/);
+      const fn = head.match(/^(?:[A-Za-z_][A-Za-z0-9_]*\s+)+[A-Za-z_][A-Za-z0-9_]*\s*\(([^)]*)\)$/);
+      const inner = loop ? [loop[1]] : fn ? fn[1].split(',') : [];
+      for (const stmt of inner) for (const name of declaredNamesIn(stmt)) if (declare(name)) return name;
+      buffer = '';
+    } else if (ch === '}') {
+      scopes.pop();
+      buffer = '';
+    } else {
+      buffer += ch;
+    }
+  }
+  return null;
+};
+
+// Whether a chunk declares the name anywhere, so the refusal can point at the file.
+const declaresName = (text, name) => {
+  const src = withoutComments(text).replace(/^\s*#[^\n]*/gm, ' ');
+  return src.split(/[;{}]/).some((statement) => declaredNamesIn(statement).includes(name));
+};
+
 const spineTextByProgram = (spines) => Object.fromEntries(
   Object.entries(spines).map(([name, spine]) => [
     name,
@@ -306,6 +374,12 @@ export function doorRefusal(candidate, { beside = [], spines }) {
     if (typeof chunks[file] !== 'string') {
       return `effect ${id} declares the chunk ${JSON.stringify(file)} and its text did not arrive - `
         + 'a package assembled without one of its chunks is a program with a block missing';
+    }
+    // A macro can expand to a declaration the scope walk below never sees, and a conditional can
+    // hide one from it, so the compiler would be the first thing to read what the door accepted.
+    if (/^\s*#/m.test(withoutComments(chunks[file]))) {
+      return `effect ${id}'s ${file} carries a preprocessor directive - a chunk is spliced into a program the spine `
+        + 'writes, and a directive can produce or hide a declaration this door cannot see, so none is accepted';
     }
   }
   for (const file of Object.keys(chunks)) {
@@ -629,6 +703,16 @@ export function doorRefusal(candidate, { beside = [], spines }) {
     programs = assembleShaders(spines, packages);
   } catch (err) {
     return `effect ${id} does not assemble into this build's shaders: ${err.message}`;
+  }
+  for (const [program, { vertexShader, fragmentShader }] of Object.entries(programs)) {
+    for (const [half, text] of [['vertex', vertexShader], ['fragment', fragmentShader]]) {
+      const twice = redeclaredIn(text);
+      if (twice === null) continue;
+      const own = Object.entries(chunks).filter(([, t]) => declaresName(t, twice)).map(([f]) => f);
+      return `effect ${id} does not assemble into this build's shaders: ${JSON.stringify(twice)} is declared `
+        + `twice in one scope of the ${program} ${half} program${own.length ? `, and ${own.join(', ')} of ${id} declares it` : ''} - `
+        + 'a chunk is spliced into the spine\'s own function body, so a local the spine already holds is a link error at boot';
+    }
   }
 
   // ---- the two ends of every uniform, per program

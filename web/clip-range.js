@@ -3,7 +3,7 @@
 // Two numbers and the one door that writes them. The numbers are program seconds rather
 // than frames, so they survive an output-fps change, and `out` is `null` when the clip
 // runs to the end of the program - a statement rather than a time, because "to the end"
-// has to survive a retime that lengthens the program and a duration written down here
+// has to survive a speed change that lengthens the program and a duration written down here
 // would freeze it at today's length.
 //
 // **The door is a file because the claim it makes could not be true inside one.** The
@@ -32,7 +32,7 @@
 // same answer and a second copy of it is the drift this design keeps refusing.
 //
 // `null` is a statement rather than a time, and it is only ever legal at the out point:
-// there it means "to the end", which has to survive a retime that lengthens the program
+// there it means "to the end", which has to survive a speed change that lengthens the program
 // and so cannot be written down as a number. At the in point, and for anything else that
 // is not a finite number, there is no reading to recover - so it is refused.
 export function clipBoundOrThrow(value, which) {
@@ -110,7 +110,7 @@ export function writeClipRange(values, dur) {
   if (dur !== null) {
     clipIn = Math.max(0, Math.min(clipIn, dur));
     // `null` still means "to the end", which is a different statement from a number that
-    // happens to equal the duration: "whole clip" has to survive a retime that lengthens
+    // happens to equal the duration: "whole clip" has to survive a speed change that lengthens
     // the program, and a duration written in here would freeze it at today's length.
     if (clipOut !== null) clipOut = Math.max(clipIn, Math.min(clipOut, dur));
   }

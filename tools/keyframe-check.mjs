@@ -1,6 +1,6 @@
 // Proves the keyframe layer: the three interpolation kinds are the curves the design names,
-// evaluation writes them through the registry, the retime curve maps program time to source time
-// including a hold, and undo restores the document and never the view. Invocations and mutations:
+// evaluation writes them through the registry, clip timing maps program time to source time,
+// and undo restores the document and never the view. Invocations and mutations:
 // docs/proof-tools.md.
 //
 // Every expected value is computed here rather than read back off the page, and each kind carries a
@@ -50,21 +50,25 @@ const MUTATIONS = {
   // starting at zero and clip time and project time were the same number. Section 6h is the only
   // thing in the suite that can see either, because every other arm here parks a clip at zero.
   //
-  // The gesture anchors on the source second at the playhead, read out of a clip-local curve
-  // with a project second: on a clip starting at 10s it anchors ten seconds of source too late.
+  // The gesture anchors on the source second at the playhead without subtracting the clip start.
   'rate-anchor-skips-clip-start': { file: 'web/main.js', edits: [[
     '    source: sourceSecOfProgram(timeline.programSec),',
-    '    source: retime.sourceSecAt(timeline.programSec),',
+    '    source: clipSourceSecAt(selectedClip, timeline.programSec),',
   ]],
-    fails: 'the speed gesture anchoring on the source second read out of a clip-local curve with '
-      + 'a project second. Reddens 1 in 6h: on a clip starting at 10s the anchor is ten '
+    fails: 'the speed gesture anchoring on the source second without subtracting the clip start. '
+      + 'Reddens 1 in 6h: on a clip starting at 10s the anchor is ten '
       + 'seconds of source too late, so the playhead lands at 16s where it should land at 11s',
   },
-  // And the landing runs back the same way, so the playhead is put at a clip second read as a
-  // project one and leaves the clip being edited.
+  // And the landing runs back the same way, so a clip second is read as a project second.
   'rate-landing-skips-clip-start': { file: 'web/main.js', edits: [[
     '  return Math.max(0, Math.min(programSecOfSource(rateGesture.source), timeline.duration));',
-    '  return Math.max(0, Math.min(retime.programSecAt(rateGesture.source), timeline.duration));',
+    `  return Math.max(
+    0,
+    Math.min(
+      clipProgramSecAt(selectedClip, rateGesture.source),
+      timeline.duration,
+    ),
+  );`,
   ]],
     fails: 'and the same conversion run back the other way, so the landing is a clip second read '
       + 'as a project one. Reddens 2 in 6h, and the second is the shape of the bug: the '
@@ -111,21 +115,10 @@ const MUTATIONS = {
       + 'against that one\'s 6, and every route row stays green, because a camera ignoring '
       + 'its handles still travels the same curve at the wrong times',
   },
-  // The pre-roll reads the slope at the target instead of asking how far back the curve
-  // covers the span, so a hold answers "no frames needed".
-  'preroll-slope-at-target': { file: 'web/main.js', edits: [[
-    '      const back = clip.surfaceFramesBack(programSec, surfaceSec, this.outputFps, this.lastFrame);',
-    `    // Step 4's two lines restored verbatim, zero-slope branch and all: the slope
-    // at a point times a frame count, and a hold answering "no frames needed" for
-    // the case that needs the most. The window query goes unused, which is the
-    // shape of the finding - a tangent has no window to ask about.
-      const sourcePerFrame = Math.abs(clip.retime.slopeAt(programSec - clip.start)) / this.outputFps;
-      const back = { frames: sourcePerFrame > 0 ? Math.ceil(surfaceSec / sourcePerFrame) : 0, covered: true };`,
-  ]] },
-  // The retime stops being a curve and goes back to a constant slope.
-  'retime-ignores-keys': { file: 'web/main.js', edits: [[
-    '  sourceSecAt(programSec) { return retimeSourceSecAt(this, programSec); },',
-    '  sourceSecAt(programSec) { return programSec * this.rate; },',
+  // The in-point drops out of the mapping, so a trimmed clip reads the take from its head.
+  'source-start-ignored': { file: 'web/clip-plan.js', edits: [[
+    '  return sourceStart + localSec * speed;',
+    '  return localSec * speed;',
   ]] },
   // The evaluator announces its writes, so every evaluated frame schedules a seek.
   // Everything a clip owns read and written at program time rather than on the clip's own clock,
@@ -220,7 +213,7 @@ const MUTATIONS = {
           this.overtaken = 0;
           throw new Error(
             \`\${SEEK_OVERTAKEN_LIMIT} seeks in a row were overtaken before they could land: \`
-            + 'the span a seek plans is not becoming resident, which is not a moving curve',
+            + 'the span a seek plans is not becoming resident, which is not a moving clip',
           );
         }
         requestRepaint();
@@ -263,32 +256,6 @@ const MUTATIONS = {
   slerpB.fromArray(b.value.quaternion);
   slerpA.slerp(slerpB, u);`,
     '  slerpA.fromArray(a.value.quaternion);',
-  ]] },
-  // The retime's editing doors stop holding a key inside its neighbours.
-  'retime-unclamped': { file: 'web/main.js', edits: [
-    [`  const floor = i > 0 ? keys[i - 1].value : 0;
-  const ceiling = i < keys.length - 1 ? keys[i + 1].value : timeline.clip.source.duration;
-  key.value = Math.max(floor, Math.min(ceiling, key.value));`,
-      '  key.value = Math.max(0, Math.min(timeline.clip.source.duration, key.value));'],
-    ['      if (keys[i].value < keys[i - 1].value) {', '      if (false) {'],
-  ] },
-  // The handle half of the retime guard goes and the key-value half stays: two claims.
-  'retime-handle-unchecked': { file: 'web/main.js', edits: [[
-    '        if (!h[0].every((c) => c >= 0 && c <= 1)) {',
-    '        if (false) {',
-  ]] },
-  // The animation loop stops catching, so the pair source's refusal escapes it.
-  'tick-uncaught': { file: 'web/main.js', edits: [[
-    `    try {
-      this.tickNow(nowMs);
-    } catch (err) {`,
-    `    if (true) {
-      this.tickNow(nowMs);
-      return;
-    }
-    try {
-      this.tickNow(nowMs);
-    } catch (err) {`,
   ]] },
   // The furniture goes back inside the frame, where it broke step 4.
   'chrome-in-frame': { file: 'web/main.js', edits: [[
@@ -568,34 +535,6 @@ function uniformCatmull(points, s) {
     + (-p0[d] + 3 * p1[d] - 3 * p2[d] + p3[d]) * u * u * u));
 }
 
-/** Program to source, the way the page's curve does it: linear outside the keys. */
-const retimeAt = (curve, t) => (curve.keys.length === 0
-  ? t * curve.rate
-  : (curve.keys.length === 1
-    ? curve.keys[0].value + (t - curve.keys[0].t) * curve.rate
-    : scalarAt(curve.keys, t, true)));
-
-/**
- * How many output frames back the curve reaches to cover `span` source seconds ending at `t`. This
- * tool's own walk over its own curve, which the page's number is compared to.
- */
-function framesBack(curve, t, span, fps, ceiling) {
-  if (!(span > 0)) return 0;
-  const at = retimeAt(curve, t);
-  for (let n = 1; n <= ceiling; n++) {
-    if (at - retimeAt(curve, t - n / fps) >= span - 1e-9) return n;
-  }
-  return ceiling;
-}
-
-/** What the arithmetic this replaced would have said: the tangent at the target. */
-function framesBackByTangent(curve, t, span, fps) {
-  const h = 1e-6;
-  const slope = Math.abs((retimeAt(curve, t + h) - retimeAt(curve, t - h)) / (2 * h));
-  const perFrame = slope / fps;
-  return perFrame > 0 ? Math.ceil(span / perFrame) : 0;
-}
-
 const index = await (await fetch(`${URL_BASE}/capture/${TAKE}/index`)).json();
 const stamps = index.frames.stampMs;
 const TIMES = stamps.map((s) => (s - stamps[0]) / 1000);
@@ -619,37 +558,6 @@ const check = (ok, label, detail = '') => {
 };
 const show = (d) => `max ${d.max}/255, mean ${d.mean.toFixed(4)}, ${d.pct.toFixed(3)}% of pixels differ`;
 const worst = (xs) => xs.reduce((a, b) => Math.max(a, b), 0);
-
-// Both sized against the take's real duration rather than a round number. The ramp runs slow then
-// fast, so the pre-roll question has a different answer at either end.
-const RAMP = {
-  rate: 1,
-  keys: [
-    { t: 0, value: 0 },
-    { t: 6, value: 3 },
-    { t: 10, value: 15 },
-  ],
-};
-// A four-second freeze: source time stops, so a pre-roll here reaches back through it.
-const HOLD = {
-  rate: 1,
-  keys: [
-    { t: 0, value: 0 },
-    { t: 4, value: 8 },
-    { t: 7, value: 8 },
-    { t: 11, value: 16 },
-  ],
-};
-// Drawn with ease handles, so the slope changes everywhere - the case where a tangent at
-// the target is furthest off.
-const EASED_RAMP = {
-  rate: 1,
-  keys: [
-    { t: 0, value: 0, easeOut: [[0.85, 0.05]], easeIn: LIN_IN },
-    { t: 10, value: 20, easeOut: LIN_OUT, easeIn: [[0.15, 0.95]] },
-  ],
-};
-const FLAT = { rate: 1, keys: [] };
 
 const INSTALL = `(() => {
   const k = globalThis.__kinect;
@@ -736,10 +644,6 @@ console.log = (...parts) => {
 };
 const note = (text) => errors.push(`${section} | ${String(text).split('\n')[0]}`);
 
-// Each has to actually arrive: a fragment that matched nothing means the section stopped
-// provoking what it was written to provoke.
-const expected = [];
-const expectError = (fragment, why) => expected.push({ fragment, why, seen: false });
 page.on('pageerror', (err) => note(err));
 page.on('console', (msg) => { if (msg.type() === 'error') note(msg.text()); });
 page.on('response', (res) => { if (!res.ok()) note(`${res.status()} ${res.url()}`); });
@@ -850,11 +754,8 @@ console.log(`[keyframe] stage ${gpu.buffer.join('x')}, take ${TAKE}: ${TIMES.len
 
 /**
  * How much footage this file's rows need, and the refusal when the take is shorter. A short take
- * goes wrong two ways and one is silent: section 4e clamps and reddens, while 4f and 6d carry
- * retime keys at source 12, 20 and 15, so a curve reaching the end of the footage early takes the
- * dragged key off the ruler and two more rows pass because a key never dragged never slid under its
- * neighbour. The scan holds this number against the deepest second the file's own text seeks to; it
- * cannot see the retime values above.
+ * must be long enough for the deepest source and program positions exercised below. The scan holds
+ * this number against the deepest second the file's own text seeks to.
  */
 const NEEDS_TAKE_SEC = 24;
 const ownSource = readFileSync(fileURLToPath(import.meta.url), 'utf8');
@@ -866,9 +767,8 @@ if (deepestSeek > NEEDS_TAKE_SEC) {
 }
 if (!(SOURCE_DURATION >= NEEDS_TAKE_SEC)) {
   console.log(`\n[keyframe] DID NOT RUN - the take "${TAKE}" holds ${SOURCE_DURATION.toFixed(2)}s of source and `
-    + `these rows need ${NEEDS_TAKE_SEC}s: they seek to ${deepestSeek}s and retime through source 20s. `
-    + 'Under a shorter take the program collapses, the dragged key leaves the ruler and the gesture never '
-    + 'happens - four rows redden and two pass against nothing. Point --take at a longer capture '
+    + `these rows need ${NEEDS_TAKE_SEC}s: they seek to ${deepestSeek}s and exercise a trimmed in-point. `
+    + 'Under a shorter take the program clamps before the positions being tested. Point --take at a longer capture '
     + '(tools/make-fixture.js loops a short one).');
   process.exit(2);
 }
@@ -887,7 +787,11 @@ process.on('uncaughtException', lost);
 const settle = () => page.evaluate('globalThis.__kinect.timeline.settled()');
 const diff = (a, b) => page.evaluate(`globalThis.__kf.diff(${src(a)}, ${src(b)})`);
 const setTracks = (spec) => page.evaluate(`globalThis.__kinect.keyframes.setTracks(${src(spec)})`);
-const setRetime = (curve) => page.evaluate(`globalThis.__kinect.keyframes.setRetime(${src(curve)})`);
+const setTiming = (speed = 1, sourceStart = 0) => page.evaluate(`(() => {
+  const k = globalThis.__kinect;
+  k.keyframes.setSourceStart(${src(sourceStart)});
+  k.keyframes.setSpeed(${src(speed)});
+})()`);
 const specOf = (name) => page.evaluate(`globalThis.__kinect.params.spec(${src(name)})`);
 
 /**
@@ -936,7 +840,7 @@ const RGB_LOOK = shippedDoc('rgb').values;
 // later somewhere else.
 console.log('\n== 0. an evaluated frame schedules no work of its own ==');
 {
-  await setRetime(FLAT);
+  await setTiming();
   await setTracks({ bloom: [{ t: 0, value: 0.5 }, { t: 4, value: 0.9 }] });
   // On a budget, because that failure returns no answer at all: the settle helper waits on
   // a queue growing faster than it drains. A healthy build answers in under a second.
@@ -1232,7 +1136,7 @@ console.log('\n== 1c. the camera\'s handles shape when it arrives, not where it 
 
 console.log('\n== 2. evaluation at a program position writes what the tracks say ==');
 {
-  await setRetime(FLAT);
+  await setTiming();
   await setTracks({ bloom: EASED, additive: STEPS, camera: PATH });
   await settle();
 
@@ -1377,7 +1281,7 @@ const arm = (label, kind, targetSec, frames = null) => page.evaluate(`(async () 
 })()`);
 
 {
-  await setRetime(FLAT);
+  await setTiming();
   await setTracks(LOOK_TRACKS);
   await settle();
 
@@ -1440,7 +1344,7 @@ console.log('\n== 3b. a seek that jumps from a cheap look to an expensive one ==
     trails: [{ t: 0, value: 0 }, { t: 8, value: 0.9 }],
     wake: [{ t: 0, value: 0 }, { t: 8, value: 1500 }],
   };
-  await setRetime(FLAT);
+  await setTiming();
   await setTracks(COLD);
   await applyLook(BLACKWALL_LOOK);
   await settle();
@@ -1497,7 +1401,7 @@ console.log('\n== 3b. a seek that jumps from a cheap look to an expensive one ==
 // damp is constant.
 console.log('\n== 3c. a pre-roll whose window is dearer than its target ==');
 {
-  await setRetime(FLAT);
+  await setTiming();
   await applyLook(RGB_LOOK);
   // Fade and wake at zero and unkeyed, so the surface half cannot mask the trails half.
   await page.evaluate(`globalThis.__kinect.params.apply(${src({ fade: 0, wake: 0 })})`);
@@ -1559,283 +1463,106 @@ console.log('\n== 3c. a pre-roll whose window is dearer than its target ==');
 }
 
 
-console.log('\n== 4. program time maps to source time through the curve ==');
+console.log('\n== 4. clip speed and in-point map program time to source time ==');
 {
-  for (const [label, curve] of [['ramp', RAMP], ['hold', HOLD]]) {
-    await setRetime(curve);
-    await setTracks({});
-    await settle();
-
-    const probes = [];
-    for (let i = 0; i <= 24; i++) probes.push((i / 24) * 11);
-    const read = await page.evaluate(`(() => {
-      const r = globalThis.__kinect.timeline.retime;
-      const t = globalThis.__kinect.timeline.transport();
-      return {
-        source: ${src(probes)}.map((p) => r.sourceSecAt(p)),
-        // Which capture frame the transport would bracket, so the mapping is
-        // checked all the way down to the index rather than only as arithmetic.
-        bracket: ${src(probes)}.map((p) => t.clip.sourceFrameAt(p)),
-        duration: t.duration,
-      };
-    })()`);
-
-    const wantSource = probes.map((p) => retimeAt(curve, p));
-    const sourceErr = worst(read.source.map((v, i) => Math.abs(v - wantSource[i])));
-    const wantBracket = read.source.map((s) => bracketOf(s));
-    const bracketBad = read.bracket.filter((b, i) => b !== wantBracket[i]).length;
-    // The program length is where the curve first reaches the end of the take, by bisection.
-    let lo = 0;
-    let hi = 200;
-    for (let i = 0; i < 60; i++) {
-      const mid = (lo + hi) / 2;
-      if (retimeAt(curve, mid) < SOURCE_DURATION) lo = mid;
-      else hi = mid;
-    }
-    console.log(`  ${label}: worst source error ${sourceErr.toExponential(1)}s over 25 positions; `
-      + `duration ${read.duration.toFixed(4)}s against ${hi.toFixed(4)}s computed here`);
-    check(sourceErr < 1e-6, `${label}: the curve maps program time to the source times it should`,
-      `worst ${sourceErr.toExponential(2)}s`);
-    check(bracketBad === 0, `${label}: and the transport brackets the capture frames the index names`,
-      `${bracketBad} of ${probes.length} wrong`);
-    check(Math.abs(read.duration - hi) < 1e-3,
-      `${label}: and the program runs until the curve reaches the end of the take`,
-      `${read.duration.toFixed(4)}s against ${hi.toFixed(4)}s`);
-  }
-
-  // The control: the flat curve has to give different answers, or the three above
-  // would pass on a page that ignored its keys entirely.
-  await setRetime(FLAT);
-  const flat = await page.evaluate('[5, 8, 10].map((p) => globalThis.__kinect.timeline.retime.sourceSecAt(p))');
-  const ramped = [5, 8, 10].map((p) => retimeAt(RAMP, p));
-  const gap = worst(flat.map((v, i) => Math.abs(v - ramped[i])));
-  console.log(`  a curve-free retime at the same positions is ${gap.toFixed(2)}s away from the ramp`);
-  check(gap > 1, 'and a page ignoring its keys would land somewhere else entirely', `${gap.toFixed(2)}s apart`);
-}
-
-
-console.log('\n== 4b. a hold freezes source time, and the image with it ==');
-{
-  await setRetime(HOLD);
-  await setTracks({});
-  // Every term that reads program time turned off - scan, grain, scanlines, RGB split and glitch
-  // all take `uniforms.time`, which keeps running under a freeze. Persistence stays on.
-  await applyLook(BLACKWALL_LOOK);
-  const TIME_FREE = { 'blackwall.scan': 0, 'grain.amount': 0, 'raster.amount': 0, 'rgbsplit.amount': 0, 'glitch.amount': 0, 'noise.amount': 0, trails: 0 };
-  await page.evaluate(`globalThis.__kinect.params.apply(${src(TIME_FREE)})`);
-  await settle();
-
-  const inside = [4.6, 5.4, 6.2, 6.9];
-  const read = await page.evaluate(`(async () => {
-    const k = globalThis.__kinect;
-    const kf = globalThis.__kf;
-    const t = k.timeline.transport();
-    const out = [];
-    for (const [i, p] of ${src(inside)}.entries()) {
-      const before = kf.counters();
-      await t.seek(p);
-      const pixels = kf.grab('hold-' + i);
-      out.push({
-        p,
-        source: k.timeline.retime.sourceSecAt(p),
-        frame: t.clip.sourceFrameAt(p),
-        advances: kf.since(before).stateAdvances,
-        hash: await kf.sha(pixels),
-      });
-    }
-    return out;
-  })()`);
-
-  const sourceSpread = worst(read.map((r) => Math.abs(r.source - read[0].source)));
-  console.log(`  four positions across the freeze (${inside.join('s, ')}s) all map to source `
-    + `${read[0].source.toFixed(4)}s, capture frame ${read[0].frame}; spread ${sourceSpread.toExponential(1)}s`);
-  check(sourceSpread < 1e-9, 'source time does not advance through a hold', `${sourceSpread.toExponential(2)}s`);
-  check(new Set(read.map((r) => r.frame)).size === 1,
-    'so the same capture frame is under the playhead throughout', `${new Set(read.map((r) => r.frame)).size} frames`);
-
-  const advances = read.map((r) => r.advances);
-  console.log(`  the surface memory advanced ${advances.join(', ')} times across the four seeks`);
-  const holdDiffs = [];
-  for (let i = 1; i < inside.length; i++) holdDiffs.push(await diff('hold-0', `hold-${i}`));
-  console.log(`  and the image at each: ${holdDiffs.map(show).join(' | ')}`);
-  check(holdDiffs.every((d) => d.max <= SAME_MAX),
-    'and a seek to any of them lands on the same image', holdDiffs.map((d) => d.max).join(', '));
-
-  // The control: a position outside the hold has to differ, or "the same image"
-  // above would be a statement about a renderer that had stopped working.
-  await page.evaluate(`(async () => {
-    const k = globalThis.__kinect;
-    await k.timeline.transport().seek(9.5);
-    globalThis.__kf.grab('after-hold');
-    return true;
-  })()`);
-  const past = await diff('hold-0', 'after-hold');
-  console.log(`  a position past the freeze, at 9.5s: ${show(past)}`);
-  check(past.max >= CONTROL_MIN && past.pct >= CONTROL_MIN_PCT,
-    'while a position past it is a different image, so this can tell them apart', show(past));
-
-  // A hold freezes the footage by holding source time still, and everything the look drives
-  // off program time carries on.
-  await page.evaluate(`(async () => {
-    const k = globalThis.__kinect;
-    const kf = globalThis.__kf;
-    const t = k.timeline.transport();
-    k.params.apply({ 'blackwall.scan': 0.35, 'grain.amount': 0.22, 'raster.amount': 0.35 });
-    await k.timeline.settled();
-    for (const [i, p] of ${src(inside)}.entries()) {
-      await t.seek(p);
-      kf.grab('lively-' + i);
-    }
-    return true;
-  })()`);
-  const lively = await diff('lively-0', 'lively-3');
-  console.log(`  with the scan sweep and grain back on, the same two positions: ${show(lively)}`);
-  check(lively.max >= CONTROL_MIN,
-    'and program time keeps running under the freeze, which is what makes it the coordinate',
-    show(lively));
-}
-
-
-console.log('\n== 4c. the pre-roll asks how far back the curve covers a source span ==');
-{
-  // Placed where the answer is interesting: inside one straight segment the tangent is the
-  // curve, so the discriminating positions reach back across a change of slope.
-  const CASES = [
-    { label: 'ramp, slow side', curve: RAMP, at: 4.0 },
-    { label: 'ramp, fast side', curve: RAMP, at: 9.0 },
-    { label: 'ramp, just past a knee', curve: RAMP, at: 6.1 },
-    { label: 'S-curve, early', curve: EASED_RAMP, at: 2.0 },
-    { label: 'S-curve, late', curve: EASED_RAMP, at: 8.5 },
-    { label: 'hold, before it', curve: HOLD, at: 3.0 },
-    { label: 'hold, inside it', curve: HOLD, at: 6.0 },
-    { label: 'hold, just past it', curve: HOLD, at: 7.5 },
+  const cases = [
+    { label: 'half speed from source 4s', speed: 0.5, sourceStart: 4, probes: [0.5, 3, 7] },
+    { label: 'double speed from source 3s', speed: 2, sourceStart: 3, probes: [0.5, 2, 6] },
   ];
-  console.log('  method: Blackwall at fade 120 + wake 550 = 0.670s of source persistence, 30 fps out.');
-  console.log('  configuration            window  tangent   source span the window covers');
-  const rows = [];
-  for (const c of CASES) {
-    await setRetime(c.curve);
-    await applyLook(BLACKWALL_LOOK);
-    await settle();
-    const got = await page.evaluate(`(() => {
-      const k = globalThis.__kinect;
-      const t = k.timeline.transport();
-      return {
-        plan: t.preroll(${src(c.at)}),
-        span: k.uniforms.fadeTime.value + k.uniforms.wakeTime.value,
-        fps: t.outputFps,
-        lastFrame: t.lastFrame,
-      };
-    })()`);
-    const want = framesBack(c.curve, c.at, got.span, got.fps, got.lastFrame);
-    const tangent = framesBackByTangent(c.curve, c.at, got.span, got.fps);
-    const covers = retimeAt(c.curve, c.at) - retimeAt(c.curve, c.at - got.plan.surface / got.fps);
-    rows.push({ ...c, got, want, tangent, covers });
-    console.log(`  ${c.label.padEnd(22)} ${String(got.plan.surface).padStart(6)} `
-      + `${String(tangent).padStart(8)}   ${covers.toFixed(4)}s of ${got.span.toFixed(3)}s`);
-  }
-  for (const r of rows) {
-    check(r.got.plan.surface === r.want,
-      `${r.label}: the window query counts the frames this tool counts`,
-      `${r.got.plan.surface} against ${r.want}`);
-  }
-  for (const r of rows) {
-    check(r.covers >= r.got.span - 1e-6,
-      `${r.label}: and the frames it counted really do cover fade plus wake`,
-      `${r.covers.toFixed(4)}s of ${r.got.span.toFixed(3)}s`);
-  }
-  // On a constant slope the two agree; inside a hold the tangent answers "no frames".
-  const differing = rows.filter((r) => r.tangent !== r.want).length;
-  const holdRow = rows.find((r) => r.label === 'hold, inside it');
-  console.log(`  ${differing} of ${rows.length} configurations disagree with the tangent arithmetic; `
-    + `inside the hold it asks for ${holdRow.tangent} frames against ${holdRow.want}`);
-  check(differing >= 3, 'and the tangent arithmetic would have given different answers',
-    `${differing} of ${rows.length} differ`);
-  check(holdRow.tangent === 0 && holdRow.want > 0,
-    'including a hold, where a slope of zero covers no source span at all whatever it is multiplied by',
-    `tangent ${holdRow.tangent}, window ${holdRow.want}`);
-}
-
-
-console.log('\n== 4d. a seek across a ramp and across a hold reproduces its playback ==');
-{
-  // Just past the knee, so the pre-roll window reaches back across a change of slope.
-  for (const [label, curve, target] of [['ramp', RAMP, 6.1], ['hold', HOLD, 6.0]]) {
-    await setRetime(curve);
-    await setTracks(LOOK_TRACKS);
-    await applyLook(BLACKWALL_LOOK);
-    await settle();
-
-    const played = await arm(`${label}-played`, 'playback', target);
-    const seeked = await arm(`${label}-seeked`, 'seek', target);
-    // The control is the pre-roll the tangent arithmetic would have asked for, not zero.
-    const span = await page.evaluate(
-      'globalThis.__kinect.uniforms.fadeTime.value + globalThis.__kinect.uniforms.wakeTime.value',
-    );
-    const tangent = framesBackByTangent(curve, target, span, seeked.state.outputFps);
-    const old = await arm(`${label}-tangent`, 'seek', target, tangent);
-
-    const same = await diff(`${label}-played`, `${label}-seeked`);
-    const apart = await diff(`${label}-played`, `${label}-tangent`);
-    console.log(`  ${label} at ${target}s: pre-roll ${seeked.seek.plan.frames} frames `
-      + `(surface ${seeked.seek.plan.surface}, trails ${seeked.seek.plan.trails}), playback rendered `
-      + `${played.delta.renders}`);
-    console.log(`    seek vs playback        ${show(same)}`);
-    console.log(`    tangent-sized (${String(tangent).padStart(3)}) vs it  ${show(apart)}`);
-    check(same.max <= SAME_MAX, `${label}: the computed pre-roll reproduces the playback`, show(same));
-    if (label === 'hold') {
-      check(apart.max >= CONTROL_MIN,
-        `${label}: and the tangent-sized pre-roll does not, which is the finding this replaces`,
-        show(apart));
-    }
-  }
-}
-
-
-// A seek plans which source frames it needs, awaits them, and renders; the curve can move inside
-// that await, and then the render walks the source backwards and the pair source refuses. The first
-// arm moves `rate` alone, which is step 4's own path, and `ensure` is wrapped so the curve changes
-// exactly as the fetch resolves.
-console.log('\n== 4e. the retime curve moving while a seek is fetching ==');
-{
-  await setTracks({});
-  await applyLook(BLACKWALL_LOOK);
-  // Drained first: rewriting the curve while a mode's own seek is fetching is contention
-  // the check manufactured, and what fails is an operation nobody is testing.
-  await settle();
-
-  // From one keyed curve to another rather than from no keys to keys: a lane appearing
-  // mid-seek resizes the stage, and two images of different sizes cannot be compared.
-  for (const [label, before, after] of [
-    ['rate, the step 4 path', { rate: 1, keys: [] }, { rate: 0.25, keys: [] }],
-    ['keys, the step 5 path', RAMP, HOLD],
-  ]) {
-    await setRetime(before);
+  const mapped = [];
+  for (const c of cases) {
+    await setTiming(c.speed, c.sourceStart);
+    await setTracks({});
     await settle();
     const got = await page.evaluate(`(async () => {
       const k = globalThis.__kinect;
-      const kf = globalThis.__kf;
+      const t = k.timeline.transport();
+      const positions = [];
+      for (const p of ${src(c.probes)}) {
+        await t.seek(p);
+        positions.push({
+          programSec: t.programSec,
+          sourceSec: k.timeline.read().sourceSec,
+          bracket: t.clip.sourceFrameAt(p),
+        });
+      }
+      const clip = k.timeline.clips()[0];
+      return {
+        positions,
+        duration: t.duration,
+        speed: clip.speed,
+        sourceStart: clip.sourceStart,
+      };
+    })()`);
+    const wantSource = c.probes.map((p) => c.sourceStart + p * c.speed);
+    const sourceError = worst(got.positions.map((p, i) => Math.abs(p.sourceSec - wantSource[i])));
+    const wrongBrackets = got.positions.filter(
+      (p, i) => p.bracket !== bracketOf(wantSource[i]),
+    ).length;
+    const wantDuration = Math.max(0, (SOURCE_DURATION - c.sourceStart) / c.speed);
+    mapped.push({ ...c, got, wantSource });
+
+    console.log(`  ${c.label}: source ${got.positions.map((p) => p.sourceSec.toFixed(3)).join(', ')}; `
+      + `duration ${got.duration.toFixed(4)}s against ${wantDuration.toFixed(4)}s`);
+    check(got.speed === c.speed && got.sourceStart === c.sourceStart,
+      `${c.label}: the clip holds the timing this arm asked for`,
+      `${got.sourceStart}s at ${got.speed}x`);
+    check(sourceError < 1e-6,
+      `${c.label}: program positions map through the clip's speed and in-point`,
+      `worst ${sourceError.toExponential(2)}s`);
+    check(wrongBrackets === 0,
+      `${c.label}: and the transport brackets the capture frames the index names`,
+      `${wrongBrackets} of ${c.probes.length} wrong`);
+    check(Math.abs(got.duration - wantDuration) < 1e-3,
+      `${c.label}: and the program runs for the footage left after the in-point at that speed`,
+      `${got.duration.toFixed(4)}s against ${wantDuration.toFixed(4)}s`);
+  }
+
+  const firstAtThree = mapped[0].wantSource[1];
+  const secondAtTwo = mapped[1].wantSource[1];
+  check(Math.abs(firstAtThree - secondAtTwo) > 0.5,
+    'the two timing arms map their middle probes to different footage, so identity timing cannot satisfy both',
+    `${firstAtThree.toFixed(3)}s against ${secondAtTwo.toFixed(3)}s`);
+}
+
+
+console.log('\n== 4e. clip timing moving while a seek is fetching ==');
+{
+  await setTracks({});
+  await applyLook(BLACKWALL_LOOK);
+  await settle();
+
+  const cases = [
+    {
+      label: 'speed',
+      before: { speed: 1, sourceStart: 3 },
+      after: { speed: 0.25, sourceStart: 3 },
+    },
+    {
+      label: 'in-point',
+      before: { speed: 1, sourceStart: 3 },
+      after: { speed: 1, sourceStart: 8 },
+    },
+  ];
+
+  for (const c of cases) {
+    await setTiming(c.before.speed, c.before.sourceStart);
+    await settle();
+    const got = await page.evaluate(`(async () => {
+      const k = globalThis.__kinect;
       const t = k.timeline.transport();
       const source = t.clip.source;
-      // Emptied first, or there is nothing to await and the window this is about
-      // never opens. The first run of this check counted zero interruptions and
-      // reported two failures against a seek that never fetched anything at all.
       source.cache.clear();
       const real = source.ensure.bind(source);
       let hits = 0;
-      // Armed only around the seek under test. Without the flag the rewrite lands
-      // in whatever operation happens to be fetching - a repaint queued behind a
-      // mode click, in the run that found this - and what fails is that operation
-      // rather than the claim, which is a check measuring its own interference.
       let armed = false;
-      source.ensure = (a, b) => real(a, b).then((r) => {
-        // Once, as the first fetch resolves. Rewriting it on every fetch would
-        // never converge, and this is testing a curve that moved rather than a
-        // curve that will not stop moving - the bound covers that separately.
-        if (armed && hits++ === 0) k.keyframes.setRetime(${src(after)});
-        return r;
+      source.ensure = (a, b) => real(a, b).then((result) => {
+        if (armed && hits++ === 0) {
+          if (${src(c.label)} === 'speed') k.keyframes.setSpeed(${src(c.after.speed)});
+          else k.keyframes.setSourceStart(${src(c.after.sourceStart)});
+        }
+        return result;
       });
-      await k.timeline.settled();
       let threw = null;
       let landed = null;
       try {
@@ -1845,227 +1572,58 @@ console.log('\n== 4e. the retime curve moving while a seek is fetching ==');
         threw = String(err.message ?? err);
       } finally {
         armed = false;
+        source.ensure = real;
       }
-      // Read here, before anything is allowed to settle. A stand-down asks for a
-      // repaint, and a repaint that lands resets this counter - so reading it after
-      // a settle reports zero for a seek that never landed at all. That is what the
-      // first version of this section did, and it passed.
       const overtaken = t.overtaken;
-      const at = t.programSec;
-      const sourceAt = k.timeline.retime.sourceSecAt(at);
-      source.ensure = real;
-      // Settled before reading, because an overtaken seek stands down quietly and
-      // leaves the landing to the repaint it queued. The claim is that the playhead
-      // ends up where the winning curve puts it, not that one particular call did
-      // the rendering.
       await k.timeline.settled();
+      const read = k.timeline.read();
+      const clip = k.timeline.clips()[0];
       return {
-        threw, hits, overtaken, at, sourceAt, landed: landed !== null,
-        rate: k.timeline.retime.rate,
-        keys: k.timeline.retime.keys.length,
+        threw,
+        hits,
+        overtaken,
+        landed: landed !== null,
+        at: read.programSec,
+        sourceAt: read.sourceSec,
+        speed: read.speed,
+        sourceStart: read.sourceStart,
+        start: clip.start,
       };
     })()`);
-    // As a position rather than as pixels: the two operations reach the same place through
-    // different amounts of queued work, so a pixel equality moved between runs.
-    const wantSource = retimeAt(after, got.at);
+
+    const wantSource = c.after.sourceStart + (got.at - got.start) * c.after.speed;
     const drift = Math.abs(got.sourceAt - wantSource);
-    console.log(`  ${label}: the curve was rewritten on fetch ${got.hits > 0 ? 'yes' : 'NO'}, `
+    console.log(`  ${c.label}: timing changed on fetch ${got.hits > 0 ? 'yes' : 'NO'}, `
       + `seek ${got.threw ? `threw: ${got.threw}` : (got.landed ? 'landed' : 'STOOD DOWN')} `
-      + `with ${got.overtaken} stand-downs; playhead at program ${got.at.toFixed(3)}s -> source `
-      + `${got.sourceAt.toFixed(4)}s against ${wantSource.toFixed(4)}s computed here`);
-    check(got.hits > 0, `${label}: the fetch really was interrupted, so this tested something`,
+      + `with ${got.overtaken} stand-downs; ${got.sourceStart}s at ${got.speed}x maps `
+      + `${got.at.toFixed(3)}s to source ${got.sourceAt.toFixed(4)}s`);
+
+    check(got.hits > 0,
+      `${c.label}: the fetch really was interrupted, so this tested something`,
       `${got.hits} interruptions`);
-    check(got.threw === null, `${label}: the seek re-planned around it instead of refusing`,
+    check(got.speed === c.after.speed && got.sourceStart === c.after.sourceStart,
+      `${c.label}: the timing change really landed during the fetch`,
+      `${got.sourceStart}s at ${got.speed}x`);
+    check(got.threw === null,
+      `${c.label}: the seek re-planned around it instead of refusing`,
       got.threw ?? '');
-    // The load-bearing one: a stand-down asks for a repaint that arrives at the same place a
-    // moment later, so every downstream reading looks right while nothing under test ran.
     check(got.landed === true && got.overtaken === 0,
-      `${label}: and the seek itself landed rather than standing down for a repaint`,
+      `${c.label}: and the seek itself landed rather than standing down for a repaint`,
       `landed ${got.landed}, ${got.overtaken} stand-downs`);
     check(Math.abs(got.at - 12.0) < 1e-6,
-      `${label}: at the program position it was asked for`, `${got.at.toFixed(4)}s of 12s`);
+      `${c.label}: at the program position it was asked for`,
+      `${got.at.toFixed(4)}s of 12s`);
     check(drift < 1e-6,
-      `${label}: reading the source time the winning curve maps it to`,
+      `${c.label}: reading the source time the winning timing maps it to`,
       `${drift.toExponential(2)}s adrift`);
   }
-  await setRetime(FLAT);
-}
-
-
-// Both accumulators advance one source frame at a time, so a descending segment asks the pair
-// source to go backwards and it refuses - and that refusal used to arrive from inside the animation
-// loop, which three then stops driving.
-console.log('\n== 4f. a retime curve that runs downhill ==');
-{
-  await setTracks({});
-  await setRetime({ rate: 1, keys: [{ t: 0, value: 0 }, { t: 8, value: 12 }, { t: 14, value: 20 }] });
-  await settle();
-
-  // (a) the programmatic door - a project file is a door too.
-  const refused = await page.evaluate(`(() => {
-    try {
-      globalThis.__kinect.keyframes.setRetime({ rate: 1, keys: [
-        { t: 0, value: 0 }, { t: 5, value: 12 }, { t: 9, value: 4 } ] });
-      return null;
-    } catch (err) { return String(err.message ?? err); }
-  })()`);
-  console.log(`  a falling curve through setRetime: ${refused ? 'refused' : 'ACCEPTED'}`);
-  check(refused !== null, 'a curve that falls is refused rather than stored', refused ?? 'accepted');
-  const holdOk = await page.evaluate(`(() => {
-    try {
-      globalThis.__kinect.keyframes.setRetime(${src(HOLD)});
-      return true;
-    } catch { return false; }
-  })()`);
-  check(holdOk === true, 'while a hold, which is equal values, still is not');
-
-  // The other way to author a descent, invisible to a values-only check: ascending keys with an
-  // outgoing handle that overshoots, shallow enough to hide inside single capture brackets.
-  const HANDLE_DESCENT = { rate: 1, keys: [
-    { t: 0, value: 0, easeOut: [[0.3, 1.6]], easeIn: [[2 / 3, 2 / 3]] },
-    { t: 8, value: 6, easeOut: [[1 / 3, 1 / 3]], easeIn: [[2 / 3, 2 / 3]] },
-  ] };
-  const handleRefused = await page.evaluate(`(() => {
-    try {
-      globalThis.__kinect.keyframes.setRetime(${src(HANDLE_DESCENT)});
-      return null;
-    } catch (err) { return String(err.message ?? err); }
-  })()`);
-  // The largest drawdown rather than a peak followed by a minimum: the descent is a dip mid-segment
-  // and the curve still ends at its highest value, so "maximum then minimum" finds nothing.
-  const sampled = [];
-  for (let i = 0; i <= 320; i++) sampled.push(scalarAt(HANDLE_DESCENT.keys, (i / 320) * 8, true));
-  let high = -Infinity;
-  let drawdown = 0;
-  let from = 0;
-  let to = 0;
-  for (const v of sampled) {
-    if (v > high) high = v;
-    if (high - v > drawdown) { drawdown = high - v; from = high; to = v; }
-  }
-  console.log(`  keys 0 -> 6 with an easeOut y of 1.6: ${handleRefused ? 'refused' : 'ACCEPTED'}; `
-    + `that curve reaches ${from.toFixed(3)}s and falls back to ${to.toFixed(3)}s, `
-    + `a drawdown of ${drawdown.toFixed(3)}s`);
-  check(drawdown > 0.02,
-    'the handle really does bend the curve back on itself, so there is something to refuse',
-    `${drawdown.toFixed(4)}s of drawdown`);
-  check(handleRefused !== null,
-    'and a handle outside the unit box is refused, not only falling key values',
-    handleRefused ?? 'accepted');
-  // The control: an in-box handle is still accepted, so this bounds the handle rather than
-  // banning easing the retime at all.
-  const easedOk = await page.evaluate(`(() => {
-    try {
-      globalThis.__kinect.keyframes.setRetime({ rate: 1, keys: [
-        { t: 0, value: 0, easeOut: [[0.3, 0.95]], easeIn: [[2 / 3, 2 / 3]] },
-        { t: 8, value: 6, easeOut: [[1 / 3, 1 / 3]], easeIn: [[2 / 3, 2 / 3]] } ] });
-      return true;
-    } catch { return false; }
-  })()`);
-  check(easedOk === true, 'while an eased retime with both handles inside it still is not');
-
-  // (b) the editing door - dragged with a real pointer, well past the neighbour.
-  await setRetime({ rate: 1, keys: [{ t: 0, value: 6 }, { t: 8, value: 12 }, { t: 14, value: 20 }] });
-  await settle();
-  await settle();
-  const lane = await page.evaluate(`(() => {
-    const el = [...document.querySelectorAll('#tBeds .tlane')].find((l) => l.dataset.owner === 'retime');
-    const key = el.querySelectorAll('.tkey')[1];
-    const r = key.getBoundingClientRect();
-    const box = el.getBoundingClientRect();
-    return { x: r.left + r.width / 2, y: r.top + r.height / 2, bottom: box.bottom };
-  })()`);
-  await page.mouse.move(lane.x, lane.y);
-  await page.mouse.down();
-  // Past the floor of the lane, which without a clamp asks for a value under the key before it.
-  await page.mouse.move(lane.x, lane.bottom + 40, { steps: 6 });
-  await page.mouse.up();
-  await settle();
-  const dragged = await page.evaluate(
-    'globalThis.__kinect.timeline.retime.keys.map((k) => ({ t: k.t, value: k.value }))',
-  );
-  const falls = dragged.some((k, i) => i > 0 && k.value < dragged[i - 1].value - 1e-9);
-  console.log(`  dragged the middle key to the floor of its lane: `
-    + `${dragged.map((k) => k.value.toFixed(2)).join(' -> ')}`);
-  check(!falls, 'and a key dragged below the one before it stops there instead of going under',
-    JSON.stringify(dragged));
-  check(Math.abs(dragged[1].value - dragged[0].value) < 1e-6,
-    'landing exactly on it, so the clamp is what stopped it rather than the drag being short',
-    `${dragged[1].value.toFixed(4)} against ${dragged[0].value.toFixed(4)}`);
-
-  // (c) the backstop - one that arrives anyway must not take the page with it.
-  const survived = await page.evaluate(`(async () => {
-    const k = globalThis.__kinect;
-    const t = k.timeline.transport();
-    const frames = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-    k.keyframes.setRetime({ rate: 1, keys: [{ t: 0, value: 0 }, { t: 12, value: 18 }] });
-    await k.timeline.settled();
-    await t.seek(4.0);
-    // Past every guard, straight onto the object, which is the only way to produce
-    // one now and is exactly the "arrives anyway" this backstop is for.
-    //
-    // The descent starts from where the walk already stands rather than from
-    // somewhere else on the take: 6.0s of source at 4.0s of program, which is
-    // exactly what the seek above just consumed. A curve that also *jumped* would
-    // ask for frames nobody has fetched, and playback would sit waiting for them
-    // instead of trying to walk backwards - which is a stall, not this claim.
-    k.timeline.retime.keys = [
-      { t: 0, value: 8, easeOut: [[1 / 3, 1 / 3]], easeIn: [[2 / 3, 2 / 3]] },
-      { t: 12, value: 2, easeOut: [[1 / 3, 1 / 3]], easeIn: [[2 / 3, 2 / 3]] },
-    ];
-    const before = k.timeline.counters.renders;
-    await t.play();
-    const startedPlaying = t.playing;
-    // Long enough for the walk to catch up with itself. The seek that preceded the
-    // swap left the source walk well behind where the new curve points, so the
-    // first few steps move *forward* through that backlog and only start going
-    // backwards once they reach it - the refusal is a second or so in, not
-    // immediate, and a short wait reports a page that simply had not got there yet.
-    for (let i = 0; i < 90 && t.playing; i++) await frames();
-    const afterCrash = {
-      playing: t.playing,
-      note: document.getElementById('tNote').textContent,
-      rendered: k.timeline.counters.renders - before,
-    };
-    // Put a sane curve back and ask the loop to work. If the callback stopped being
-    // driven this is where it shows - nothing renders, whatever the transport says.
-    k.keyframes.setRetime({ rate: 1, keys: [{ t: 0, value: 0 }, { t: 12, value: 18 }] });
-    await k.timeline.settled();
-    await t.seek(1.0);
-    const settledRenders = k.timeline.counters.renders;
-    await t.play();
-    for (let i = 0; i < 20; i++) await frames();
-    t.pause();
-    return { startedPlaying, afterCrash, alive: k.timeline.counters.renders - settledRenders };
-  })()`);
-  console.log(`  a curve written straight onto the object, then play: transport `
-    + `${survived.afterCrash.playing ? 'still playing' : 'paused'}, note `
-    + `"${survived.afterCrash.note.slice(0, 60)}"`);
-  console.log(`  with a sane curve back, the animation loop rendered ${survived.alive} frames`);
-  // Renders are the wrong measure of that: it refuses on the first step.
-  check(survived.startedPlaying === true,
-    'playback really was running when it met the curve',
-    `rendered ${survived.afterCrash.rendered} frames before refusing`);
-  check(survived.afterCrash.playing === false,
-    'a curve that cannot be walked pauses the transport rather than running into it');
-  check(survived.afterCrash.note.length > 0, 'and says why on the strip rather than only in the console',
-    survived.afterCrash.note);
-  // One error, and the run-wide assertion is told to expect it and to fail without it.
-  expectError('the retime curve runs backwards here',
-    'the refusal a downhill curve produces, caught by the loop rather than by the page dying');
-  // The load-bearing one: everything above is also true of a page whose animation loop has
-  // stopped being driven, because a paused transport renders nothing either way.
-  check(survived.alive > 0,
-    'and the animation loop is still being driven afterwards, which is the whole of the claim',
-    `${survived.alive} frames rendered after`);
-  await setRetime(FLAT);
-  await settle();
+  await setTiming();
 }
 
 
 console.log('\n== 5. undo restores the document and never the view ==');
 {
-  await setRetime(FLAT);
+  await setTiming();
   await setTracks({});
   await applyLook(RGB_LOOK);
   await settle();
@@ -2084,7 +1642,7 @@ console.log('\n== 5. undo restores the document and never the view ==');
   // A look value lives in the project's block or in a clip's, depending on where it writes, so
   // a reading of "the look" that named one block would pass on whatever happened to be empty.
   const looksOf = (doc, kind) => Object.assign({}, doc.look[kind], ...doc.clips.map((c) => c[kind]));
-  const retimeOf = (doc) => doc.clips[0].retime;
+  const timingOf = (doc) => ({ speed: doc.clips[0].speed, sourceStart: doc.clips[0].sourceStart });
 
   // (a) one drag is one level, not one per pointer move.
   const before5 = await depth();
@@ -2143,8 +1701,6 @@ console.log('\n== 5. undo restores the document and never the view ==');
 
   // (d) and none of it is in the snapshot, so an undo cannot put it back.
   const snapshot = await project();
-  // A v3 document is `{ look: { mode, params, tracks }, composition: { retime, camera } }`,
-  // and read flat the `in` below throws rather than failing.
   const snapshotParams = looksOf(snapshot, 'params');
   check(!('renderScale' in snapshotParams) && !('spin' in snapshotParams),
     'the snapshot holds no view state at all, in either of the two blocks a look value can sit in',
@@ -2155,7 +1711,8 @@ console.log('\n== 5. undo restores the document and never the view ==');
   await page.evaluate(`(() => {
     const k = globalThis.__kinect;
     k.keyframes.setTracks(${src(keyed)});
-    k.keyframes.setRetime(${src(RAMP)});
+    k.keyframes.setSourceStart(3);
+    k.keyframes.setSpeed(2);
     k.keyframes.undo.commit();
   })()`);
   await settle();
@@ -2181,16 +1738,22 @@ console.log('\n== 5. undo restores the document and never the view ==');
     };
   })()`);
   await settle();
-  // Tracks are look and the curve is the clip's, so the two readings come from two places.
+  // Tracks are look and timing is the clip's, so the two readings come from two places.
   const undoneTracks = looksOf(undone.project, 'tracks');
-  const undoneRetime = retimeOf(undone.project);
-  console.log(`  a track and a retime curve pushed one level (${depthWithKeys}), then undone: `
+  const withTiming = timingOf(withKeys);
+  const undoneTiming = timingOf(undone.project);
+  console.log(`  a track and clip timing pushed one level (${depthWithKeys}), then undone: `
     + `tracks ${Object.keys(looksOf(withKeys, 'tracks')).join(',') || 'none'} -> `
     + `${Object.keys(undoneTracks).join(',') || 'none'}, `
-    + `retime keys ${retimeOf(withKeys).keys.length} -> ${undoneRetime.keys.length}`);
+    + `timing ${withTiming.sourceStart}s at ${withTiming.speed}x -> `
+    + `${undoneTiming.sourceStart}s at ${undoneTiming.speed}x`);
   check(undone.popped === true, 'the stack had something to pop');
-  check(Object.keys(undoneTracks).length === 0 && undoneRetime.keys.length === 0,
-    'and undo took the keys and the curve back off', JSON.stringify(undoneTracks));
+  check(withTiming.speed === 2 && withTiming.sourceStart === 3,
+    'the committed snapshot really changed both timing fields', JSON.stringify(withTiming));
+  check(Object.keys(undoneTracks).length === 0
+    && undoneTiming.speed === 1 && undoneTiming.sourceStart === 0,
+    'and undo took the keys off and restored the clip timing',
+    `${JSON.stringify(undoneTracks)}, ${JSON.stringify(undoneTiming)}`);
   check(undone.frameAfter === undone.frameBefore, 'and left the playhead exactly where it was',
     `frame ${undone.frameBefore} -> ${undone.frameAfter}`);
   check(undone.scaleAfter === undone.scaleBefore, 'and did not touch render scale',
@@ -2234,20 +1797,20 @@ console.log('\n== 5. undo restores the document and never the view ==');
 
 console.log('\n== 6. look in lanes, composition in the world ==');
 {
-  await setRetime(FLAT);
+  await setTiming();
   await setTracks({ bloom: EASED, additive: STEPS, camera: PATH });
   await settle();
   // The keyed lanes. The stack also carries the clip bar and a row per clip, which are the
   // edit's structure rather than its animation and are `editor-check` section 22's to count.
   const lanes = (await page.evaluate('globalThis.__kinect.keyframes.lanes()'))
-    .filter((l) => l.kind !== 'clips' && l.kind !== 'clip');
+    .filter((l) => l.kind !== 'clips' && l.kind !== 'clip' && l.kind !== 'clip-add');
   const named = await page.evaluate('globalThis.__kinect.keyframes.names()');
   // A clip's own row is the edit's structure and is excluded; its keyed parameters are not -
   // they are lanes like any other and they are qualified by the clip that holds them, which is
   // what stops eight clips of one keyed parameter drawing the selected clip's keys eight times.
   const dom = await page.evaluate(
     "[...document.querySelectorAll('#tBeds .tlane')].map((el) => el.dataset.owner)"
-    + ".filter((o) => o !== 'clips' && !/^clip:[^/]+$/.test(o))",
+    + ".filter((o) => o !== 'clips' && o !== 'clip-add' && !/^clip:[^/]+$/.test(o))",
   );
   console.log(`  three keyed parameters give lanes ${dom.join(', ')}; `
     + `the registry declares ${lanes.map((l) => `${l.owner}:${l.kind}`).join(' ')}`);
@@ -2270,7 +1833,8 @@ console.log('\n== 6. look in lanes, composition in the world ==');
   const empty = await page.evaluate(`(() => {
     globalThis.__kinect.keyframes.setTracks({});
     return [...document.querySelectorAll('#tBeds .tlane')]
-      .filter((el) => el.dataset.owner !== 'clips' && !/^clip:[^/]+$/.test(el.dataset.owner)).length;
+      .filter((el) => el.dataset.owner !== 'clips' && el.dataset.owner !== 'clip-add'
+        && !/^clip:[^/]+$/.test(el.dataset.owner)).length;
   })()`);
   check(empty === 0, 'and a clip with no keys has none at all, which is the nine-into-five deletion',
     `${empty} lanes`);
@@ -2329,71 +1893,11 @@ console.log('\n== 6b. dragging a path node in the top-down moves it across the f
 }
 
 
-// The retime curve is the one track whose value changes how long the program is, so editing a key
-// rescales the ruler it is drawn on. Left alone that is a feedback loop: drag down, the clip slows,
-// the program lengthens, the ruler rescales, and the key moves under a pointer that
-// never moved sideways.
-console.log('\n== 6d. a retime key dragged down changes the speed, not when it is ==');
-{
-  await setTracks({});
-  await setRetime({ rate: 1, keys: [{ t: 0, value: 0 }, { t: 15, value: 15 }] });
-  await settle();
-  // Drained again after the curve is set: a repaint left over from an earlier section gets
-  // overtaken here, which is correct behaviour and nothing to do with the claim.
-  await settle();
-  const lane = await page.evaluate(`(() => {
-    const el = [...document.querySelectorAll('#tBeds .tlane')].find((l) => l.dataset.owner === 'retime');
-    const key = el.querySelectorAll('.tkey')[1];
-    const r = key.getBoundingClientRect();
-    const box = el.getBoundingClientRect();
-    return {
-      x: r.left + r.width / 2, y: r.top + r.height / 2,
-      top: box.top, height: box.height,
-      value: globalThis.__kinect.timeline.retime.keys[1].value,
-    };
-  })()`);
-  // The walk is in seconds converted to pixels, not in pixels: the lane draws zero to the capture's
-  // own length across forty pixels, so what a pixel is worth depends on the fixture. The pixels
-  // come from where the page actually drew the key, read back off the drawing rather than assumed.
-  const frac = (lane.y - lane.top) / lane.height;
-  const perPx = (lane.value / Math.max(1e-6, 1 - frac)) / lane.height;
-  const dropPx = (lane.value * 0.75) / Math.max(1e-9, perPx);
-  const steps = [1, 2, 3, 4].map((i) => Math.round((dropPx * i) / 4));
-  const walk = [];
-  await page.mouse.move(lane.x, lane.y);
-  await page.mouse.down();
-  for (const dy of steps) {
-    await page.mouse.move(lane.x, lane.y + dy);
-    walk.push(await page.evaluate(`(() => {
-      const k = globalThis.__kinect;
-      return { t: k.timeline.retime.keys[1].t, value: k.timeline.retime.keys[1].value,
-        duration: k.timeline.transport().duration };
-    })()`));
-  }
-  await page.mouse.up();
-  await settle();
-  console.log(`  four vertical moves of ${steps.join(', ')}px, at ${perPx.toFixed(3)}s per pixel: `
-    + `t ${walk.map((w) => w.t.toFixed(3)).join(' ')}`);
-  console.log(`  against value ${walk.map((w) => w.value.toFixed(2)).join(' ')} `
-    + `and program length ${walk.map((w) => w.duration.toFixed(1)).join(' ')}s`);
-  const slid = worst(walk.map((w) => Math.abs(w.t - 15)));
-  check(slid < 0.01, 'the key holds its program time through a vertical drag',
-    `worst ${slid.toFixed(4)}s of slide`);
-  check(Math.abs(walk[3].value - walk[0].value) > 1,
-    'while its value moved, so the drag was doing something',
-    `${walk[0].value.toFixed(2)} to ${walk[3].value.toFixed(2)}`);
-  check(walk[3].duration > walk[0].duration * 1.5,
-    'and the program got longer, which is what slowing a clip means',
-    `${walk[0].duration.toFixed(1)}s to ${walk[3].duration.toFixed(1)}s`);
-  await setRetime(FLAT);
-}
-
-
 // Both are gesture wiring, so the button is clicked and the handle dragged with a real
 // pointer rather than with dispatched events.
 console.log('\n== 6e. keying from the panel, and dragging a handle ==');
 {
-  await setRetime(FLAT);
+  await setTiming();
   await setTracks({});
   await applyLook(BLACKWALL_LOOK);
   await settle();
@@ -2949,6 +2453,7 @@ console.log('\n== 6h. a speed change holds the playhead on the frame it was park
   const START = 10;
   const PARKED = 12;
   const TO = 2;
+  const SOURCE_START = 4;
 
   // Nothing is keyed and no export range is set here on purpose. A rate change rescales the
   // in/out pair, and `frameAt` clamps every seek into it, so a range would move under the
@@ -2959,23 +2464,30 @@ console.log('\n== 6h. a speed change holds the playhead on the frame it was park
     const doc = k.library.serialiseProjectBody();
     doc.clips[0].start = ${START};
     doc.clips[0].length = null;
-    doc.clips[0].retime = { rate: 1, keys: [] };
+    doc.clips[0].speed = 1;
+    doc.clips[0].sourceStart = ${SOURCE_START};
     k.library.restoreProject(doc);
     await k.timeline.settled();
     k.timeline.transport().pause();
     k.editor.setClipRange(0, null);
     await k.timeline.transport().seek(${PARKED});
     await k.timeline.settled();
-    const shot = () => ({
-      programSec: k.timeline.transport().programSec,
-      rate: k.timeline.retime.rate,
-      range: k.editor.clipRange(),
-      start: k.timeline.clips()[0].start,
-      end: k.timeline.clips()[0].end,
-    });
+    const shot = () => {
+      const read = k.timeline.read();
+      const clip = k.timeline.clips()[0];
+      return {
+        programSec: read.programSec,
+        sourceSec: read.sourceSec,
+        speed: read.speed,
+        sourceStart: read.sourceStart,
+        range: k.editor.clipRange(),
+        start: clip.start,
+        end: clip.end,
+      };
+    };
     const before = shot();
-    // The slider driven through its own events rather than through the setRetime handle,
-    // because the fault is in the gesture: setRetime writes the curve and anchors nothing.
+    // The slider is driven through its own events because the fault under test is in the gesture's
+    // source-frame anchor rather than in the direct speed door.
     const el = document.getElementById('tRate');
     el.value = String(k.editor.rateSlider.toValue(${TO}));
     el.dispatchEvent(new Event('input'));
@@ -2989,17 +2501,28 @@ console.log('\n== 6h. a speed change holds the playhead on the frame it was park
   // so that many source seconds at 1x. At `TO` the clip reaches the same source second in half
   // the time, so the frame that was under the playhead is now at `START + local / TO`.
   const want = START + (PARKED - START) / TO;
-  console.log(`  a clip at ${START}s parked at ${PARKED}s, ${before.rate}x -> ${after.rate}x: `
+  console.log(`  a clip at ${START}s with a ${SOURCE_START}s in-point, parked at ${PARKED}s, `
+    + `${before.speed}x -> ${after.speed}x: `
     + `playhead ${before.programSec.toFixed(3)}s -> ${after.programSec.toFixed(3)}s, `
+    + `source ${before.sourceSec.toFixed(3)}s -> ${after.sourceSec.toFixed(3)}s, `
     + `clip ${before.start}..${before.end.toFixed(2)}s -> ${after.start}..${after.end.toFixed(2)}s`);
 
   check(before.start === START && Math.abs(before.programSec - PARKED) < 1e-6,
     'the clip under this section starts away from the head of the edit and the playhead is '
     + 'parked inside it, which is what lets the rows below be false',
     `start ${before.start}s, playhead ${before.programSec}s`);
-  check(Math.abs(after.rate - TO) < 1e-6 && after.rate !== before.rate,
+  check(before.sourceStart === SOURCE_START,
+    'and the clip has a trimmed head, so this arm can see the in-point survive the speed change',
+    `${before.sourceStart}s`);
+  check(Math.abs(after.speed - TO) < 1e-6 && after.speed !== before.speed,
     'and the slider really moved the slope, or none of the rows below are about a speed change',
-    `${before.rate}x -> ${after.rate}x`);
+    `${before.speed}x -> ${after.speed}x`);
+  check(after.sourceStart === before.sourceStart,
+    'the speed change keeps the clip head on the same source frame',
+    `${before.sourceStart}s -> ${after.sourceStart}s`);
+  check(Math.abs(after.sourceSec - before.sourceSec) < 1e-3,
+    'and keeps the source frame under the parked playhead',
+    `${before.sourceSec.toFixed(4)}s -> ${after.sourceSec.toFixed(4)}s`);
   check(after.range.out === null,
     'and no export range is standing that could clamp the landing, so the row below reads the '
     + 'anchor rather than a cut',
@@ -3017,7 +2540,8 @@ console.log('\n== 6h. a speed change holds the playhead on the frame it was park
     const k = globalThis.__kinect;
     const doc = k.library.serialiseProjectBody();
     doc.clips[0].start = 0;
-    doc.clips[0].retime = { rate: 1, keys: [] };
+    doc.clips[0].speed = 1;
+    doc.clips[0].sourceStart = 0;
     k.library.restoreProject(doc);
     k.keyframes.undo.commit();
     await k.timeline.settled();
@@ -3025,18 +2549,7 @@ console.log('\n== 6h. a speed change holds the playhead on the frame it was park
 }
 
 
-{
-  const unexpected = errors.filter((text) => {
-    const match = expected.find((e) => text.includes(e.fragment));
-    if (match) match.seen = true;
-    return !match;
-  });
-  check(unexpected.length === 0, 'the page logged no errors it was not asked for',
-    unexpected.slice(0, 3).join(' | '));
-  for (const e of expected) {
-    check(e.seen, `and the one it was asked for arrived: ${e.why}`, e.seen ? '' : 'never logged');
-  }
-}
+check(errors.length === 0, 'the page logged no errors', errors.slice(0, 3).join(' | '));
 
 if (SHOTS) {
   await page.locator('#stage').screenshot({ path: join(SHOTS, 'keyframe-stage.png') });

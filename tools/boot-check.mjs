@@ -87,8 +87,8 @@ const MUTATIONS = {
   'panel-does-not-follow-the-selection': {
     file: 'web/main.js',
     edits: [[
-      '  paintClipPanel();\n  paintGizmo();\n  // The retime binding',
-      '  paintGizmo();\n  // The retime binding',
+      '  paintClipPanel();\n  paintGizmo();\n  // The ruler\'s mapping',
+      '  paintGizmo();\n  // The ruler\'s mapping',
     ]],
     fails: 'the pre-fix build: the panel written by value writes alone, so selecting a clip '
       + 'leaves every clip-scope control showing the clip selected before it. Reddens the two '

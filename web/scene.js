@@ -168,6 +168,7 @@ function useViewCamera(cam) {
 }
 
 export {
+  PROGRAM_FOV,
   renderer,
   scene,
   freeCamera,

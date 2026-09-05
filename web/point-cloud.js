@@ -9,7 +9,8 @@
 
 import * as THREE from 'three';
 import { DEPTH_H, DEPTH_W, POINTS } from './format.js';
-import { scene } from './scene.js';
+import { scene, PROGRAM_FOV } from './scene.js';
+import { projectionScaleForVerticalFov } from './lens.js';
 import {
   CLIP_FAR_DEFAULT, CLIP_NEAR_DEFAULT, CROP_LIMIT, outsideCropBox,
 } from './crop-box.js';
@@ -96,6 +97,8 @@ export function createPointCloud(sourceCells, stateTexture, program) {
     // What this hardware will rasterise a point sprite at - a bound on the machine rather than a
     // value anybody chose, so not a registry parameter. The 64 is the literal it stands in for.
     pointCeiling: { value: 64 },
+    // The lens every look is graded through; the shader reads any other lens as magnification.
+    lensReference: { value: projectionScaleForVerticalFov(PROGRAM_FOV) },
     pointSize: { value: 9 },
     opacity: { value: 1 },
     exposure: { value: 1.15 },
