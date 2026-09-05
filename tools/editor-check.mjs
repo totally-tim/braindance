@@ -2312,18 +2312,17 @@ const MUTATIONS = {
   'crop-axes-swapped': {
     file: 'web/cloud-shader.js',
     edits: [[
-      '  if (cropOn == 1.0 && (pos.x < cropL || pos.x > cropR || pos.y < cropB || pos.y > cropT)) {',
-      '  if (cropOn == 1.0 && (pos.y < cropL || pos.y > cropR || pos.x < cropB || pos.x > cropT)) {',
+      '  if (outsideLateral(pos.xy)) {',
+      '  if (outsideLateral(pos.yx)) {',
     ]],
   },
 
   'crop-in-image-space': {
     file: 'web/cloud-shader.js',
     edits: [[
-      '  if (cropOn == 1.0 && (pos.x < cropL || pos.x > cropR || pos.y < cropB || pos.y > cropT)) {',
+      '  if (outsideLateral(pos.xy)) {',
       '  float wedge = 2.0 / max(0.001, z);\n'
-      + '  if (cropOn == 1.0 && (pos.x * wedge < cropL || pos.x * wedge > cropR\n'
-      + '   || pos.y * wedge < cropB || pos.y * wedge > cropT)) {',
+      + '  if (outsideLateral(pos.xy * wedge)) {',
     ]],
   },
 

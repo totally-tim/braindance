@@ -749,6 +749,15 @@ half measures 7.1 ms against a 33 ms budget. That figure is a correction: it was
 p50. Its occlusion filter's share has *not* been re-measured here and should not be quoted as
 if it had.
 
+**The keyed webcam's encode rides the colour encoder's thread.** Quantise plus greyscale JPEG
+of the 1920x1080 depth measures 6.5 ms mean over 60 keys on an M2 Max at -O2, beside the
+5.50 ms colour encode, so one thread carries about 12 ms a frame against a 33 ms budget there;
+the loop's own share is the copy, p50 0.16 ms over 360 calls with 40 warmup discarded. The
+capture node has not been measured and is the number that decides. One JPEG fact worth
+keeping: level 1, the smallest reading, survives an accurate inverse DCT and reads back as 0
+through a fast one, measured on a flat field at quality 90, so the lowest step of the range
+can decode as no reading.
+
 **The orbit pivot's press cannot be made free, and a target write has never been free.** The
 pick that moves the pivot was designed to leave the camera bit-identical, so that
 `renderedCameraChanged` would stay false and no screen-space history would be cleared. It cannot:

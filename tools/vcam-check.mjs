@@ -1,8 +1,7 @@
 #!/usr/bin/env node
-// The output to OBS: the webcam serves the colour camera, and the take never learns about it. Two
-// outputs share one sink - a program-out page OBS opens as a browser source, and an MJPEG endpoint
-// it opens as a media source - and they have different failure modes, so this file has
-// different arms for them.
+// OBS receives the point-cloud program, the live colour camera, and the colour camera keyed by
+// live depth. They have different failure modes, so this file has different arms for them and for
+// the take that must never receive either live-only stream.
 //
 // The discriminator is geometric rather than perceptual. The wire already carries colour - type 2's
 // registered 512x424 JPEG - and an implementation that upscaled that to 1080p would look almost
@@ -11,17 +10,19 @@
 // margin and a cyan right one in that difference, which no upscale can invent.
 //
 // It spawns its own server and needs none running; the stream is `tools/fake-grabber.mjs`, so no
-// sensor is required, and ffmpeg builds and decodes the fixture. Section 5 needs a GPU browser and
-// `--no-browser` drops it. Section 6 needs a non-internal IPv4 and exits 2 as UNPROVEN rather than
-// passing quietly without one. What it does not prove is OBS: that a browser source renders WebGL
-// at 1080p and that OBS samples it at canvas rate are facts measured with OBS in front of you.
+// sensor is required, and ffmpeg builds and decodes the fixture. Sections 5 and 9 need a GPU browser
+// and `--no-browser` drops them. Sections 6 and 7 need a non-internal IPv4 and exit 2 as UNPROVEN
+// rather than passing quietly without one. What it does not prove is OBS: that a browser source
+// renders WebGL at 1080p and that OBS samples it at canvas rate require OBS in front of you.
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MessageParser, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR } from '../server/protocol.js';
+import WebSocket from 'ws';
+import { MessageParser, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, TYPE_KEY } from '../server/protocol.js';
+import { decodePair, quantiseDepthMm } from '../web/key-stream.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -175,6 +176,275 @@ const MUTATIONS = {
       '',
     ]],
   },
+
+  // A key encoder that runs before anybody asks consumes the same HD thread as the colour camera
+  // for every frame. The first row in section 7 asks while no client exists, so no neighbouring
+  // assertion has to infer the absence from a later stream.
+  'key-runs-unasked': {
+    file: 'server/key-stream.js',
+    edits: [[
+      'this.demand = new OnDemand({ request, count: () => this.clients.size });',
+      'this.demand = new OnDemand({ request, count: () => 1 });\n    this.demand.settle();',
+    ]],
+    fails: 'section 7\'s first row, which reads type 4 at the writer before any key client exists',
+  },
+
+  // The socket is attached and receives the acknowledgement, but the demand edge never reaches
+  // the grabber. The run must finish and name the absent type 4 stream rather than time out.
+  'key-never-asks': {
+    file: 'server/key-stream.js',
+    edits: [[
+      '    this.demand.settle();\n    this.#sendStatus(ws);',
+      '    this.#sendStatus(ws);',
+    ]],
+    fails: 'the section 7 writer and pair rows, section 8 pair precondition, and section 9 drawing precondition',
+  },
+
+  'unavailable-key-costs-the-take': {
+    file: 'server/key-stream.js',
+    edits: [[
+      'return this.unavailable ? [] : this.describe().filter((c) => !c.loopback);',
+      'return this.describe().filter((c) => !c.loopback);',
+    ]],
+    fails: 'the unavailable remote subscription and depth-only recording rows in section 7',
+  },
+
+  'depth-only-take-gets-live-data': {
+    file: 'server/index.js',
+    edits: [['    recorder.write(msg.raw);',
+      '    recorder.write(camera.color ? msg.raw : Buffer.concat([msg.raw,\n'
+      + '      Buffer.from([0x54, 0x43, 0x4e, 0x4b, 4, 0, 0, 0, 1, 0, 0, 0, 0])]));']],
+    fails: 'the depth-only file census row in section 7',
+  },
+
+  'key-recovery-is-not-announced': {
+    file: 'server/key-stream.js',
+    edits: [['    for (const ws of this.clients.keys()) this.#sendStatus(ws);', '']],
+    fails: 'the source recovery row in section 9',
+  },
+
+  'key-outage-keeps-picture': {
+    file: 'web/key-frames.js',
+    edits: [['    this.clear();', '    // The mutation leaves the last framebuffer visible.']],
+    fails: 'the outage clear and late-decode transparency rows in section 9',
+  },
+
+  'key-decode-survives-outage': {
+    file: 'web/key-frames.js',
+    edits: [['    this.generation++;', '    // The mutation lets an obsolete decode finish.']],
+    fails: 'the late-decode transparency row in section 9',
+  },
+
+  'operator-reconnect-keeps-old-framing': {
+    file: 'web/main.js',
+    edits: [['    else sendProgramOutState();', '    // The mutation advertises only on request.']],
+    fails: 'the socket reconnect and operator reload rows in section 9',
+  },
+
+  // A stale depth stamp behind the colour it is paired with reproduces the one-frame silhouette
+  // lag at the wire seam without changing either JPEG. The fake writer stamps the two equal.
+  'pair-serves-stale-depth': {
+    file: 'server/key-stream.js',
+    edits: [[
+      'const pair = { depthTs: key.ts, colourTs, fx: key.fx, fy: key.fy, cx: key.cx, cy: key.cy, rangeM: key.rangeM };',
+      'const pair = { depthTs: key.ts - 1, colourTs, fx: key.fx, fy: key.fy, cx: key.cx, cy: key.cy, rangeM: key.rangeM };',
+    ]],
+    fails: 'section 7\'s pair-stamp row alone: the colour stamp is now newer than the depth stamp',
+  },
+
+  // The last client goes away and the key stream stays wanted forever. Kept on KeyStream.detach
+  // rather than the shared OnDemand class, so the webcam linger rows remain a control.
+  'key-linger-never-fires': {
+    file: 'server/key-stream.js',
+    edits: [[
+      '  detach(ws) {\n'
+      + '    if (!this.clients.delete(ws)) return;\n'
+      + '    console.log(`[key] client gone (${this.clients.size} left)`);\n'
+      + '    this.demand.settle();\n'
+      + '  }',
+      '  detach(ws) {\n'
+      + '    if (!this.clients.delete(ws)) return;\n'
+      + '    console.log(`[key] client gone (${this.clients.size} left)`);\n'
+      + '  }',
+    ]],
+    fails: 'section 7\'s leaving-stops-it row alone, after the six-second linger has elapsed',
+  },
+
+  // The plausible wrong input: throw away the colour camera's outer field, reduce what remains to
+  // the registered grid, then scale it back to 1080p. Memoised so the control asks geometry rather
+  // than starving the server event loop with one ffmpeg per frame.
+  'key-upscales-grid': {
+    file: 'server/key-stream.js',
+    edits: [[
+      "import { OnDemand } from './on-demand.js';",
+      "import { OnDemand } from './on-demand.js';\nimport { execFileSync } from 'node:child_process';\n"
+      + 'let gridUpscaledOnce = null;\n'
+      + 'function gridUpscaledDepth(jpeg) {\n'
+      + '  if (gridUpscaledOnce) return gridUpscaledOnce;\n'
+      + '  try {\n'
+      + '    gridUpscaledOnce = execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y",\n'
+      + '      "-i", "pipe:0", "-vf", "crop=1460:1080:230:0,scale=512:424:flags=neighbor,scale=1920:1080:flags=neighbor",\n'
+      + '      "-pix_fmt", "gray", "-frames:v", "1", "-q:v", "2", "-f", "mjpeg", "pipe:1"],\n'
+      + '      { input: jpeg, maxBuffer: 64 * 1024 * 1024 });\n'
+      + '  } catch { gridUpscaledOnce = jpeg; }\n'
+      + '  return gridUpscaledOnce;\n'
+      + '}',
+    ], [
+      'whole ??= encodePair({ ...pair, colour, depth: key.jpeg });',
+      'whole ??= encodePair({ ...pair, colour, depth: gridUpscaledDepth(key.jpeg) });',
+    ], [
+      'elided ??= encodePair({ ...pair, colour: null, depth: key.jpeg });',
+      'elided ??= encodePair({ ...pair, colour: null, depth: gridUpscaledDepth(key.jpeg) });',
+    ]],
+    fails: 'section 8\'s outer-depth and writer-passthrough rows, plus the page rows whose planted '
+      + 'margins the upscale removed',
+  },
+
+  // The depth still has the right dimensions and values, but it is no longer the JPEG the writer
+  // emitted. Memoised for the same reason as the colour-path control above.
+  'key-reencodes-in-flight': {
+    file: 'server/key-stream.js',
+    edits: [[
+      "import { OnDemand } from './on-demand.js';",
+      "import { OnDemand } from './on-demand.js';\nimport { execFileSync } from 'node:child_process';\n"
+      + 'let reencodedDepthOnce = null;\n'
+      + 'function reencodedDepth(jpeg) {\n'
+      + '  if (reencodedDepthOnce) return reencodedDepthOnce;\n'
+      + '  try {\n'
+      + '    reencodedDepthOnce = execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y",\n'
+      + '      "-i", "pipe:0", "-pix_fmt", "gray", "-frames:v", "1", "-q:v", "5", "-f", "mjpeg", "pipe:1"],\n'
+      + '      { input: jpeg, maxBuffer: 64 * 1024 * 1024 });\n'
+      + '  } catch { reencodedDepthOnce = jpeg; }\n'
+      + '  return reencodedDepthOnce;\n'
+      + '}',
+    ], [
+      'whole ??= encodePair({ ...pair, colour, depth: key.jpeg });',
+      'whole ??= encodePair({ ...pair, colour, depth: reencodedDepth(key.jpeg) });',
+    ], [
+      'elided ??= encodePair({ ...pair, colour: null, depth: key.jpeg });',
+      'elided ??= encodePair({ ...pair, colour: null, depth: reencodedDepth(key.jpeg) });',
+    ]],
+    fails: 'section 8\'s row comparing every served depth JPEG with the writer log',
+  },
+
+  // A type 4 reaches the recorder. Section 3 already holds the class as "only hello and frames";
+  // attaching a key client in that section makes this control reach that existing row.
+  'key-reaches-recorder': {
+    file: 'server/index.js',
+    edits: [[
+      '    keyStream.offer(msg.payload);',
+      '    keyStream.offer(msg.payload);\n    recorder.write(msg.raw);',
+    ]],
+    fails: 'section 3\'s existing row that permits only hello and type 2 frames in a take',
+  },
+
+  // The remote key stream vanishes from the same refusal table the webcam already occupies.
+  'refusal-ignores-key': {
+    file: 'server/index.js',
+    edits: [[
+      "    ...keyStream.subscribersCostingTheTake()\n"
+      + "      .map(() => ({ kind: 'key', at: 'the keyed colour camera at full rate' })),",
+      '',
+    ]],
+    fails: 'section 7\'s two remote-key refusal rows; the loopback row stays green',
+  },
+
+  // An opaque clear turns every rejected pixel into black. The key still computes the right mask,
+  // so only the output page can catch this.
+  'key-writes-opaque': {
+    file: 'web/key.js',
+    edits: [[
+      'renderer.setClearColor(0x000000, 0);',
+      'renderer.setClearColor(0x000000, 1);',
+    ]],
+    fails: 'section 9\'s five transparency probes and binary-alpha row',
+  },
+
+  // The picture ignores the switch and all six faces. Rows drive the faces one at a time, so this
+  // cannot pass merely because the default box happens to contain the fixture.
+  'key-ignores-crop-faces': {
+    file: 'web/key.js',
+    edits: [[
+      '  uniforms.cropOn.value = faces.crop ? 1 : 0;',
+      '  uniforms.cropOn.value = 0;',
+    ]],
+    fails: 'section 9\'s default-far, moved-far, near and image-left lateral cuts',
+  },
+
+  // Keep only the four lateral faces. The lateral cut stays green, which is what separates this
+  // from the control above; the near and far rows carry the missing depth pair.
+  'key-tests-four-faces': {
+    file: 'web/key-shader.js',
+    edits: [[
+      '  if (outsideDepthPair(z)) {\n'
+      + '    gl_FragColor = vec4(0.0);\n'
+      + '    return;\n'
+      + '  }\n\n',
+      '',
+    ]],
+    fails: 'section 9\'s default-far, moved-far and near rows while its lateral row stays green',
+  },
+
+  // Put the crop test after a levelling rotation. This needs two files because the correct page
+  // deliberately does not hand tilt to the shader at all. The section drives tilt alone and
+  // compares the whole RGBA frame before and after it.
+  'key-tests-after-levelling': {
+    file: 'web/key.js',
+    edits: [[
+      "  cropT: { value: FRAMING_DEFAULTS.top },\n};",
+      "  cropT: { value: FRAMING_DEFAULTS.top },\n  tilt: { value: FRAMING_DEFAULTS.tilt },\n};",
+    ], [
+      "  top: FRAMING_DEFAULTS.top,\n};",
+      "  top: FRAMING_DEFAULTS.top,\n  tilt: FRAMING_DEFAULTS.tilt,\n};",
+    ], [
+      '  uniforms.cropOn.value = faces.crop ? 1 : 0;\n',
+      '  uniforms.cropOn.value = faces.crop ? 1 : 0;\n  uniforms.tilt.value = faces.tilt;\n',
+    ], [
+      '  if (typeof values.crop === \'boolean\') faces.crop = values.crop;\n',
+      '  if (typeof values.crop === \'boolean\') faces.crop = values.crop;\n'
+      + '  if (Number.isFinite(values.tilt)) faces.tilt = values.tilt;\n',
+    ], [
+      'uniform float cropOn, nearClip, farClip, cropL, cropR, cropB, cropT;',
+      'uniform float cropOn, nearClip, farClip, cropL, cropR, cropB, cropT, tilt;',
+      'web/key-shader.js',
+    ], [
+      '  float z = v / DEPTH_LEVELS * rangeM;\n'
+      + '  if (outsideDepthPair(z)) {\n'
+      + '    gl_FragColor = vec4(0.0);\n'
+      + '    return;\n'
+      + '  }\n\n'
+      + '  // A fragment samples at the centre of its pixel, so this already carries the half that\n'
+      + '  // \\`unproject\\` in web/cloud-shader.js adds to an integer index. Both axes negated with it, which\n'
+      + '  // is what puts image-left on positive x.\n'
+      + '  vec2 pixel = uv * imageSize;\n'
+      + '  vec2 lateral = vec2(-(pixel.x - cx) / fx, -(pixel.y - cy) / fy) * z;\n'
+      + '  if (outsideLateral(lateral)) {',
+      '  float z = v / DEPTH_LEVELS * rangeM;\n\n'
+      + '  // Wrong on purpose: rotate the sensor point before asking the crop box.\n'
+      + '  vec2 pixel = uv * imageSize;\n'
+      + '  vec2 lateral = vec2(-(pixel.x - cx) / fx, -(pixel.y - cy) / fy) * z;\n'
+      + '  float a = radians(tilt);\n'
+      + '  vec3 levelled = vec3(lateral.x, lateral.y * cos(a) + z * sin(a),\n'
+      + '    lateral.y * sin(a) - z * cos(a));\n'
+      + '  if (outsideDepthPair(-levelled.z) || outsideLateral(levelled.xy)) {',
+      'web/key-shader.js',
+    ]],
+    fails: 'section 9\'s bit-identity row after tilt 14, with every crop face held fixed',
+  },
+
+  // Treat the missing reading as the near face rather than as no geometry. The hole in the
+  // subject is the object every other region probe would skip.
+  'zero-depth-is-nearest': {
+    file: 'web/key-shader.js',
+    edits: [[
+      '  if (v == 0.0) {\n'
+      + '    gl_FragColor = vec4(0.0);\n'
+      + '    return;\n'
+      + '  }',
+      '  if (v == 0.0) v = nearClip / rangeM * DEPTH_LEVELS;',
+    ]],
+    fails: 'section 9\'s zero-depth-hole row alone',
+  },
 };
 
 if (MUTATE && !MUTATIONS[MUTATE]) {
@@ -203,17 +473,19 @@ for (const name of ['node_modules', 'vendor', 'captures']) {
 mkdirSync(join(WORK, 'takes'), { recursive: true });
 if (MUTATE) {
   const spec = MUTATIONS[MUTATE];
-  const path = join(WORK, spec.file);
-  let source = readFileSync(path, 'utf8');
-  for (const [from, to] of spec.edits) {
+  const changed = new Map();
+  for (const [from, to, editFile = spec.file] of spec.edits) {
+    const path = join(WORK, editFile);
+    let source = changed.get(path) ?? readFileSync(path, 'utf8');
     const hits = source.split(from).length - 1;
     if (hits !== 1) {
-      console.error(`mutation ${MUTATE} matched ${hits} times in ${spec.file}, expected exactly 1 - refusing to run an unmutated server`);
+      console.error(`mutation ${MUTATE} matched ${hits} times in ${editFile}, expected exactly 1 - refusing to run an unmutated server`);
       process.exit(2);
     }
     source = source.replace(from, to);
+    changed.set(path, source);
   }
-  writeFileSync(path, source);
+  for (const [path, source] of changed) writeFileSync(path, source);
 }
 
 let checked = 0, failed = 0;
@@ -253,7 +525,7 @@ const EMIT_LOG = join(WORK, 'emitted.log');
 const start = async (extra = []) => {
   const log = await new Promise((resolve, reject) => {
     const grabber = `${join(WORK, 'tools/fake-grabber.mjs')} --source ${SOURCE} --fps 30 --hd `
-      + `--emit-log ${EMIT_LOG}`;
+      + `--key --emit-log ${EMIT_LOG}`;
     const child = spawn(process.execPath, [
       join(WORK, 'server/index.js'), '--port', String(PORT),
       '--captures', join(WORK, 'takes'), '--grabber', grabber, ...extra,
@@ -329,6 +601,47 @@ function subscribe(host = '127.0.0.1') {
   return state;
 }
 
+/** A WebSocket that leaves the monitor population and keeps the key pairs it receives. */
+function subscribeKey(host = '127.0.0.1') {
+  const state = { pairs: [], raw: [], attached: false, closed: false, errors: [] };
+  const ws = new WebSocket(`ws://${host}:${PORT}`);
+  state.socket = ws;
+  ws.on('open', () => ws.send(JSON.stringify({ key: true })));
+  ws.on('message', (data, isBinary) => {
+    if (!isBinary) {
+      try {
+        const message = JSON.parse(data.toString('utf8'));
+        if (message?.key?.attached === true) {
+          state.attached = true;
+          state.loopback = message.key.loopback;
+        }
+      } catch (err) {
+        state.errors.push(err.message);
+      }
+      return;
+    }
+    // The server sends ordinary type 2 monitor frames before it acknowledges the mode switch. A
+    // pair has no discriminator, so the acknowledgement is the seam and bytes before it are not
+    // decoded as pairs.
+    if (!state.attached) return;
+    try {
+      const raw = Buffer.from(data);
+      state.raw.push(raw);
+      state.pairs.push(decodePair(raw));
+    } catch (err) {
+      state.errors.push(err.message);
+    }
+  });
+  ws.on('error', (err) => state.errors.push(err.message));
+  ws.on('close', () => { state.closed = true; });
+  state.ready = waitFor(() => state.attached, 8000, 'the socket to become a key client');
+  state.stop = async () => {
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close();
+    await waitFor(() => state.closed, 2000, 'the key socket to close').catch(() => {});
+  };
+  return state;
+}
+
 /**
  * What the writer says it emitted, as `type -> [{ hash, body }]`. `hash` is the whole payload;
  * `body` is the part body a reader downstream receives, or null where the two are the same thing. A
@@ -360,6 +673,20 @@ const near = (got, want) => got.every((v, i) => Math.abs(v - want[i]) <= COLOUR_
 const dims = (jpeg) => execFileSync('ffprobe', [
   '-v', 'error', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', 'pipe:0',
 ], { input: jpeg, maxBuffer: 16 * 1024 * 1024 }).toString().trim().split(',').map(Number);
+
+/** Decode one greyscale JPEG into its 1920x1080 byte plane. */
+const greyOf = (jpeg) => execFileSync('ffmpeg', [
+  '-hide_banner', '-loglevel', 'error', '-i', 'pipe:0',
+  '-f', 'rawvideo', '-pix_fmt', 'gray', 'pipe:1',
+], { input: jpeg, maxBuffer: 16 * 1024 * 1024 });
+
+/** Decode a transparent screenshot without flattening it onto a background. */
+const rgbaOf = (png) => execFileSync('ffmpeg', [
+  '-hide_banner', '-loglevel', 'error', '-i', 'pipe:0',
+  '-f', 'rawvideo', '-pix_fmt', 'rgba', 'pipe:1',
+], { input: png, maxBuffer: 16 * 1024 * 1024 });
+const rgbaAt = (rgba, x, y, width = 1920) => [...rgba.subarray((y * width + x) * 4, (y * width + x) * 4 + 4)];
+const hashOf = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 console.log(`\n[vcam] ${MUTATE ? `mutation ${MUTATE}` : 'unmutated'}, port ${PORT}\n`);
 
@@ -457,6 +784,8 @@ try {
     await start();
     const sub = subscribe();
     await sub.ready;
+    const key = subscribeKey();
+    await key.ready;
     await wait(800);
 
     const started = await post('/record/start');
@@ -465,6 +794,7 @@ try {
     const stopped = await post('/record/stop');
     ok('and stops', stopped.status === 200);
     sub.stop();
+    await key.stop();
     await wait(400);
 
     const dir = join(WORK, 'takes');
@@ -719,6 +1049,319 @@ try {
     remote.stop();
     await stopAll();
   }
+
+  console.log('\n7. the keyed depth is asked for, paired, and stops again');
+  {
+    rmSync(EMIT_LOG, { force: true });
+    await start();
+    await wait(1500);
+    const before = emitted().get(TYPE_KEY)?.length ?? 0;
+    ok('no key message is emitted while nothing is subscribed', before === 0, `${before} emitted`);
+
+    const key = subscribeKey();
+    await key.ready;
+    const arrived = await waitFor(() => key.pairs.length > 10, 8000, 'more than ten key pairs')
+      .then(() => true, () => false);
+    const during = emitted().get(TYPE_KEY)?.length ?? 0;
+    ok('subscribing asks the grabber for keyed depth', during > 10, `${during} emitted`);
+    ok('and paired colour and depth reach the socket', arrived && key.pairs.length > 10,
+      `${key.pairs.length} pairs, ${key.errors.length} decode errors`);
+
+    const state = (await api('/record/state')).body;
+    ok('the key client is in the recorder\'s own accounting',
+      Array.isArray(state?.key?.subscribers) && state.key.subscribers.length === 1,
+      JSON.stringify(state?.key?.subscribers));
+    const mismatchedStamps = key.pairs.filter((p) => p.colourTs !== p.depthTs);
+    ok('every pair keeps the equal colour and depth stamps the fake writer emitted',
+      key.pairs.length > 0 && mismatchedStamps.length === 0,
+      `${mismatchedStamps.length} of ${key.pairs.length} pairs differ; `
+      + `last delta ${key.pairs.length ? key.pairs.at(-1).depthTs - key.pairs.at(-1).colourTs : 'n/a'}ms`);
+    ok('a loopback key client does not refuse the take', state?.monitors?.wouldRefuse === false,
+      JSON.stringify(state?.monitors?.costingTheTake));
+
+    await key.stop();
+    // Past the shared six-second linger. Take the first count after the stop should have landed,
+    // then watch another window: a count taken at detach would still include the linger by design.
+    await wait(7500);
+    const atStop = emitted().get(TYPE_KEY)?.length ?? 0;
+    await wait(1500);
+    const after = emitted().get(TYPE_KEY)?.length ?? 0;
+    ok('leaving stops keyed depth again after the linger', after === atStop, `${atStop} -> ${after}`);
+    await stopAll();
+
+    // The loopback row above makes the ordinary proof path cheap. This second arm creates the
+    // branch the take refusal is about; without a LAN address the whole tool already ends UNPROVEN
+    // in section 6, so this does not turn a missing branch into a pass.
+    if (LAN) {
+      rmSync(EMIT_LOG, { force: true });
+      await start(['--host', '0.0.0.0']);
+      const remote = subscribeKey(LAN);
+      await remote.ready;
+      await waitFor(async () => ((await api('/record/state')).body?.key?.subscribers ?? []).length === 1,
+        8000, 'the remote key client to appear in recorder accounting');
+      const remoteState = (await api('/record/state')).body;
+      ok('a remote key client is charged to the take',
+        remoteState?.key?.subscribers?.every((s) => s.loopback === false) === true
+        && (remoteState?.monitors?.costingTheTake ?? []).some((c) => c.kind === 'key'),
+        JSON.stringify({ subscribers: remoteState?.key?.subscribers, costing: remoteState?.monitors?.costingTheTake }));
+      const refused = await post('/record/start');
+      ok('and pressing record refuses it by the keyed camera it names',
+        refused.status === 409
+        && String(refused.body?.error ?? '').includes('key at the keyed colour camera at full rate'),
+        `status ${refused.status}: ${String(refused.body?.error ?? '').slice(0, 100)}`);
+      // A failed refusal starts a take, so clean it up before the next server regardless of verdict.
+      await post('/record/stop').catch(() => {});
+      let depthOnlyHello = false;
+      remote.socket.on('message', (bytes, binary) => {
+        if (binary) return;
+        try { const h = JSON.parse(bytes.toString()); if (h.serial && h.color === false) depthOnlyHello = true; }
+        catch { /* binary and malformed input are counted by subscribeKey */ }
+      });
+      remote.socket.send(JSON.stringify({ camera: { color: false } }));
+      await waitFor(() => depthOnlyHello, 25000, 'the depth-only grabber to handshake');
+      const unavailable = (await api('/record/state')).body;
+      ok('an unavailable remote key stays attached without charging the take',
+        unavailable.key.available === false && unavailable.key.subscribers.some((c) => !c.loopback)
+        && !unavailable.monitors.costingTheTake.some((c) => c.kind === 'key'));
+      const started = await post('/record/start');
+      ok('a depth-only take starts with that remote key still attached', started.status === 200,
+        `status ${started.status}: ${JSON.stringify(started.body)}`);
+      if (started.status === 200) {
+        await waitFor(async () => (await api('/record/state')).body.frames > 5, 8000, 'depth-only recorded frames');
+        await post('/record/stop');
+        const file = join(WORK, 'takes', `${started.body.takeId}.knct`);
+        const records = new MessageParser().push(readFileSync(file));
+        const frames = records.filter((m) => m.type === TYPE_FRAME);
+        ok('the resulting take contains depth-only frames and no live-only messages',
+          frames.length > 5 && frames.every((m) => m.payload.readUInt32LE(4) === 0)
+          && records.every((m) => m.type === TYPE_HELLO || m.type === TYPE_FRAME),
+          `${frames.length} depth frames, types ${[...new Set(records.map((m) => m.type))]}`);
+      }
+      await remote.stop();
+      await stopAll();
+    }
+  }
+
+  console.log('\n8. keyed depth is the 1080p colour-space picture and reaches the client unchanged');
+  {
+    rmSync(EMIT_LOG, { force: true });
+    await start();
+    const key = subscribeKey();
+    await key.ready;
+    const arrived = await waitFor(() => key.pairs.length > 10, 8000, 'key pairs for the depth picture')
+      .then(() => true, () => false);
+    const pair = key.pairs.at(-1);
+    ok('a key pair arrived for the depth picture checks below', arrived && Boolean(pair),
+      `${key.pairs.length} pairs, ${key.errors.length} decode errors`);
+    if (pair) {
+      const [w, h] = dims(pair.depth);
+      ok('the key is native 1920x1080 depth, not the 512x424 grid scaled up',
+        w === 1920 && h === 1080, `${w}x${h}`);
+
+      const grey = greyOf(pair.depth);
+      const sample = (x, y) => grey[y * 1920 + x];
+      const expected = {
+        left: quantiseDepthMm(1000, pair.rangeM),
+        right: quantiseDepthMm(4000, pair.rangeM),
+        wall: quantiseDepthMm(3000, pair.rangeM),
+      };
+      const left = sample(100, 100);
+      const right = sample(1820, 100);
+      const wall = sample(1200, 100);
+      ok('its left margin is the planted 1.0m colour-space reading', Math.abs(left - expected.left) <= 1,
+        `${left}, expected ${expected.left}`);
+      ok('its right margin is the planted 4.0m colour-space reading', Math.abs(right - expected.right) <= 1,
+        `${right}, expected ${expected.right}`);
+      ok('and its middle is the planted 3.0m wall rather than another margin', Math.abs(wall - expected.wall) <= 1,
+        `${wall}, expected ${expected.wall}`);
+
+      const emittedBodies = new Set((emitted().get(TYPE_KEY) ?? []).map((e) => e.body).filter(Boolean));
+      const strangers = key.pairs.filter((p) => !emittedBodies.has(hashOf(p.depth)));
+      ok('every served depth JPEG is byte for byte the one the writer emitted',
+        emittedBodies.size > 0 && strangers.length === 0,
+        `${strangers.length} of ${key.pairs.length} served depths are not in `
+        + `${emittedBodies.size} writer bodies`);
+      const distinct = new Set(key.pairs.map((p) => hashOf(p.depth)));
+      ok('the constant fixture stays one distinct depth payload through the pairer', distinct.size === 1,
+        `${distinct.size} distinct payloads across ${key.pairs.length} pairs`);
+    }
+    await key.stop();
+    await stopAll();
+  }
+
+  console.log('\n9. the key page writes alpha from the unlevelled crop box and nothing else');
+  if (NO_BROWSER) {
+    console.log('  (skipped: --no-browser)');
+  } else {
+    let chromium = null;
+    try {
+      ({ chromium } = await import('playwright'));
+    } catch {
+      try {
+        const root = execFileSync('npm', ['root', '-g'], { encoding: 'utf8' }).trim();
+        ({ chromium } = await import(`file://${join(root, 'playwright/index.mjs')}`));
+      } catch { /* reported below */ }
+    }
+    if (!chromium) {
+      untested.push('playwright is not installed, so the keyed page\'s alpha was never asked'
+        + ' - install playwright, or pass --no-browser and mean it');
+    } else {
+      await start();
+      const browser = await chromium.launch({
+        args: ['--use-gl=angle', '--use-angle=default', '--enable-unsafe-swiftshader'],
+      });
+      const operator = await browser.newPage({ viewport: { width: 900, height: 600 } });
+      await operator.addInitScript(() => {
+        const Socket = WebSocket;
+        globalThis.WebSocket = class extends Socket {
+          constructor(...args) { super(...args); globalThis.__proofSocket = this; }
+        };
+      });
+      await operator.goto(`http://127.0.0.1:${PORT}/record`);
+      await operator.waitForFunction(() => Boolean(globalThis.__kinect?.params));
+
+      // Opened second, so its request for the whole program-out state reaches the operator rather
+      // than being broadcast into an empty socket population.
+      const page = await browser.newPage({ viewport: { width: 900, height: 600 } });
+      const pageErrors = [];
+      page.on('pageerror', (err) => pageErrors.push(err.message));
+      await page.addInitScript(() => {
+        const decode = createImageBitmap;
+        globalThis.__heldKeyBitmaps = [];
+        globalThis.__holdKeyDecode = false;
+        globalThis.createImageBitmap = async (...args) => {
+          const hold = globalThis.__holdKeyDecode;
+          const bitmap = await decode(...args);
+          if (!hold) return bitmap;
+          return new Promise((resolve) => globalThis.__heldKeyBitmaps.push(() => resolve(bitmap)));
+        };
+      });
+      await page.goto(`http://127.0.0.1:${PORT}/key`);
+      await page.waitForFunction(() => Boolean(globalThis.__key));
+      const drew = await page.waitForFunction(() => globalThis.__key.frames > 5, null, { timeout: 10000 })
+        .then(() => true, () => false);
+      ok('the key page receives pairs and draws from them', drew,
+        drew ? `${await page.evaluate('__key.frames')} frames` : 'no frame in 10 seconds');
+
+      if (drew) {
+        const setFaces = async (values) => {
+          await operator.evaluate((next) => {
+            for (const [name, value] of Object.entries(next)) globalThis.__kinect.params.set(name, value);
+          }, values);
+          const watched = Object.fromEntries(Object.entries(values).filter(([name]) => (
+            name !== 'tilt' || MUTATE === 'key-tests-after-levelling'
+          )));
+          await page.waitForFunction((want) => {
+            const got = globalThis.__key.faces();
+            return Object.entries(want).every(([name, value]) => got[name] === value);
+          }, watched);
+          const beforeFrames = await page.evaluate('__key.frames');
+          await page.waitForFunction((n) => globalThis.__key.frames > n, beforeFrames);
+        };
+        const shot = async () => {
+          const png = await page.locator('#key').screenshot({ omitBackground: true });
+          return { png, rgba: rgbaOf(png) };
+        };
+
+        await setFaces({ crop: true, near: 0.05, far: 2, left: -7, right: 7, bottom: -7, top: 7, tilt: 0 });
+        const base = await shot();
+        const pageSize = await page.evaluate('__key.size');
+        const [shotW, shotH] = dims(base.png);
+        ok('the source canvas and the captured frame are 1920x1080 in a 900x600 window',
+          pageSize.w === 1920 && pageSize.h === 1080 && shotW === 1920 && shotH === 1080,
+          `canvas ${pageSize.w}x${pageSize.h}, screenshot ${shotW}x${shotH}`);
+
+        const left = rgbaAt(base.rgba, 100, 100);
+        const right = rgbaAt(base.rgba, 1820, 100);
+        ok('with far at 2.0m the 1.0m left margin is opaque magenta',
+          left[3] === 255 && near(left.slice(0, 3), [255, 0, 255]), `rgba(${left})`);
+        ok('while the 4.0m right margin is transparent', right[3] === 0, `rgba(${right})`);
+
+        await setFaces({ far: 0.8, tilt: 0 });
+        const farCut = await shot();
+        const farLeft = rgbaAt(farCut.rgba, 100, 100);
+        ok('moving far to 0.8m cuts the 1.0m margin', farLeft[3] === 0, `rgba(${farLeft})`);
+
+        await setFaces({ far: 2, near: 1.2, tilt: 0 });
+        const nearCut = await shot();
+        const nearLeft = rgbaAt(nearCut.rgba, 100, 100);
+        const subject = rgbaAt(nearCut.rgba, 800, 400);
+        ok('moving near to 1.2m cuts the 1.0m margin and keeps the 1.5m subject',
+          nearLeft[3] === 0 && subject[3] === 255,
+          `left rgba(${nearLeft}), subject rgba(${subject})`);
+
+        await setFaces({ near: 0.05, right: 0.5, tilt: 0 });
+        const sideCut = await shot();
+        const sideLeft = rgbaAt(sideCut.rgba, 100, 100);
+        ok('moving right cuts image-left, whose unprojected x is positive', sideLeft[3] === 0,
+          `rgba(${sideLeft})`);
+
+        await setFaces({ right: 7, bottom: -0.2, top: 0.2, tilt: 0 });
+        const untilted = await shot();
+        await setFaces({ tilt: 14 });
+        const tilted = await shot();
+        ok('turning the room by tilt 14 moves no keyed edge', hashOf(untilted.rgba) === hashOf(tilted.rgba),
+          `${hashOf(untilted.rgba).slice(0, 12)} then ${hashOf(tilted.rgba).slice(0, 12)}`);
+
+        const hole = rgbaAt(base.rgba, 960, 540);
+        ok('the planted zero-depth hole is transparent rather than treated as the nearest reading',
+          hole[3] === 0, `rgba(${hole})`);
+        const alpha = new Set();
+        for (let i = 3; i < base.rgba.length; i += 4) alpha.add(base.rgba[i]);
+        ok('the hard key writes binary alpha at every pixel',
+          [...alpha].every((v) => v === 0 || v === 255) && alpha.has(0) && alpha.has(255),
+          `alpha levels ${[...alpha].slice(0, 12).join(', ')}`);
+        ok('and the page reports no decode error or browser error',
+          (await page.evaluate('__key.errors')) === 0 && pageErrors.length === 0,
+          `decode ${await page.evaluate('__key.errors')}, page ${pageErrors.slice(0, 2).join(' | ')}`);
+
+        await setFaces({ far: 2, bottom: -7, top: 7, tilt: 0 });
+        await operator.evaluate(() => {
+          globalThis.__proofSocket.close();
+          globalThis.__kinect.params.set('far', 4);
+        });
+        const resynced = await page.waitForFunction(() => __key.faces().far === 4, null, { timeout: 5000 })
+          .then(() => true, () => false);
+        ok('socket reconnect advertises a framing change made while disconnected', resynced,
+          `key far ${await page.evaluate('__key.faces().far')}, operator far 4`);
+        await operator.reload();
+        await operator.waitForFunction(() => Boolean(globalThis.__kinect?.params));
+        const ownerFar = await operator.evaluate('__kinect.params.get("far")');
+        const reloaded = await page.waitForFunction((far) => __key.faces().far === far, ownerFar, { timeout: 5000 })
+          .then(() => true, () => false);
+        ok('operator reload replaces the keyed framing with the operator registry', reloaded,
+          `key far ${await page.evaluate('__key.faces().far')}, operator far ${ownerFar}`);
+
+        await setFaces({ far: 2 });
+        await page.evaluate(() => { globalThis.__holdKeyDecode = true; });
+        await page.waitForFunction(() => __heldKeyBitmaps.length >= 2);
+        await operator.locator('#colorCam').click();
+        await page.waitForFunction(() => __key.lastColourTs === null, null, { timeout: 3000 });
+        const empty = (rgba) => { for (let i = 3; i < rgba.length; i += 4) if (rgba[i] !== 0) return false; return true; };
+        const framesAtOutage = await page.evaluate('__key.frames');
+        const outage = await shot();
+        ok('colour off clears every pixel of the keyed output to transparent', empty(outage.rgba));
+        await page.evaluate(() => {
+          globalThis.__holdKeyDecode = false;
+          globalThis.__heldKeyBitmaps.splice(0).forEach((release) => release());
+        });
+        await page.waitForTimeout(150);
+        const afterDecode = await shot();
+        ok('an old decode finishing after the outage cannot repaint the person', empty(afterDecode.rgba)
+          && (await page.evaluate('__key.frames')) === framesAtOutage);
+        const beforeRecovery = await page.evaluate('__key.frames');
+        await operator.locator('#colorCam').click();
+        const recovered = await page.waitForFunction((n) => __key.frames > n + 2, beforeRecovery, { timeout: 25000 })
+          .then(() => true, () => false);
+        const recovery = await shot();
+        ok('colour returning restores the keyed picture on the same page', recovered
+          && rgbaAt(recovery.rgba, 100, 100)[3] === 255 && rgbaAt(recovery.rgba, 1820, 100)[3] === 0);
+      }
+
+      await browser.close();
+      await stopAll();
+    }
+  }
 } catch (err) {
   // A run that threw did not finish, and that is a different answer from a claim that failed. Under
   // `--mutate` a harness timeout would otherwise be recorded as the mutation being caught.
@@ -740,7 +1383,7 @@ if (untested.length) {
   process.exit(2);
 }
 if (MUTATE) {
-if (MUTATIONS[MUTATE]?.fails) console.log(`[vcam] it should redden: ${MUTATIONS[MUTATE].fails}`);
+  if (MUTATIONS[MUTATE]?.fails) console.log(`[vcam] it should redden: ${MUTATIONS[MUTATE].fails}`);
   // Exit code alone cannot tell "the mutation was caught" from "the tool crashed before asserting
   // anything", so the count is what the verdict is made of.
   if (failed === 0) { console.log('[vcam] NOT CAUGHT - the check passed a server it should have rejected'); process.exit(1); }

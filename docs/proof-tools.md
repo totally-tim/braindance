@@ -72,7 +72,8 @@ node tools/effect-conformance-check.mjs --mutate leaks-at-zero # ... a floor und
 node tools/monitor-check.mjs                              # step 9: the monitor's decimation, the take it must not touch, and the picture it shows
 node tools/sensor-view-check.mjs                          # the intrinsics a take was shot with, against a build that assumes them
 node tools/level-check.mjs                                # levelling: the room turns, and the crop, the top-down and the sensor view keep their meaning
-node tools/vcam-check.mjs                                 # the output to OBS: the colour camera, the take it must not touch, and the source's picture
+node tools/hd-encoder-check.mjs                           # native pairing under backlog, key range, held colour and RGBX; needs C++ and TurboJPEG
+node tools/vcam-check.mjs                                 # the output to OBS: the colour camera, the keyed webcam, the take neither may touch, and both pages' pictures
 node tools/guard-check.mjs                                # the socket's origin rule, the bind, and the rebinding rule
 node tools/jobs-check.mjs                                 # step 8: the queue, the pin, a real render, and a job
                                                           #   whose deliverable this build cannot read, which has to
@@ -813,6 +814,18 @@ one.** `channel: 'chromium'` rather than the bundled headless shell, which has n
 back to SwiftShader - a class nothing else can reproduce, which the worker refuses outright
 rather than pinning jobs to.
 
+**`hd-encoder-check`** compiles the `HdEncoder` class directly from `native/grabber.cpp`
+with the output sink in `test/fixtures/hd-encoder.cpp`, and links the installed TurboJPEG.
+It needs a C++ compiler and TurboJPEG headers and library; it needs no sensor. The sink
+blocks the first colour write while the producer submits the next colour. The assertions
+read both identities and decoded pixels, including held colour, invalid input, RGBX, and
+an excessive capture maximum. This proves encoder correctness, not sensor throughput.
+Run all four controls with `--mutate`: `pair-borrows-newer-colour` must fail the backlog
+identity and pixel rows; `key-range-unbounded` the range and empty-depth rows;
+`rgbx-read-as-bgrx` the red/blue row; `held-colour-gets-depth-time` the held-colour row.
+The tool prints assertion counts. Exit 2 means it did not finish; a mutation with zero
+failed assertions is NOT CAUGHT even though it exits 1.
+
 **`vcam-check`** spawns its own server on 8361 and needs none running, but it needs a capture at
 `captures/sample.knct` to loop, ffmpeg and ffprobe, and a GPU browser for section 5
 (`--no-browser` drops it and says so). It writes takes into its own staged tree, so it never
@@ -827,6 +840,15 @@ missing address rather than passing quietly — `guard-check`'s answer to the sa
 not `monitor-check`'s, which turns it into a failed assertion. Both exit-2 reasons carry their
 own remedy now, because the verdict line used to append playwright's advice to whatever it was
 given and would have told an operator missing a LAN address to install a browser.
+
+The keyed runtime arms also drive an unavailable non-loopback subscription through the
+recording route and inspect the depth-only file it writes. The browser arms reconnect and
+reload the operator, switch colour off and on, and release a deliberately delayed decode
+after the outage. The controls are `unavailable-key-costs-the-take`,
+`operator-reconnect-keeps-old-framing`, `key-outage-keeps-picture`, and
+`key-decode-survives-outage`. `depth-only-take-gets-live-data` falsifies the file census,
+and `key-recovery-is-not-announced` falsifies recovery. Each names its failing rows
+in the tool's mutation table.
 
 **Its own server-readiness wait is on the sensor rather than on a constant**, and that was a
 bug rather than a nicety. `viewer on` is printed inside `httpServer.listen`'s callback, which

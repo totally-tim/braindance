@@ -753,7 +753,23 @@ type 2  frame  [u32 depthBytes][u32 colorBytes][u64 timestampMs]
                [JPEG of the registered 512x424 colour image]
 type 3  colour [u64 timestampMs][JPEG of the native 1920x1080 colour image]
                Live only, and only while something is subscribed.
+type 4  key    [u64 timestampMs][u64 colourTs][f32 fx][f32 fy][f32 cx][f32 cy][f32 rangeM]
+               [greyscale JPEG 1920x1080: depth per colour pixel, 0 = no reading,
+                else metres = v / 255 * rangeM]
+               Live only, and only while a /key page is attached. Asking for it
+               turns the colour on with it.
 ```
+
+A pending encoder job holds an immutable colour image with its depth. Replacing pending
+work drops the whole job. A held colour frame keeps its original identity when depth
+advances; the server sends a pair only when the declared colour identity matches the
+encoded webcam image. The key scale is capped at 65.535 metres, the capture's u16 limit.
+The live header has no backward reader; the grabber and server must run the same build.
+
+The operator registry owns output framing and advertises its full state whenever its
+socket connects. The server relays it without maintaining another registry. The keyed
+page clears to transparent on an outage, disconnection, failed decode, or one second
+without a new colour identity. Clearing also invalidates any decode still in progress.
 
 **`format` is the generation of the capture format, and a take carrying no `format` key is
 generation zero.** Nothing migrates old captures, because rewriting a capture to add a key
@@ -790,9 +806,13 @@ recorder can fill in. Takes shot before this carry the session stamp and nothing
 distinguishes them from takes shot after, so their dates stay as they were: wrong in the same
 way, and not detectable without a marker that was deliberately not added.
 
-**Type 3 is live-only, so "byte-identical" means identical to the type 1 and 2 subsequence.**
-The colour message is dropped at the recorder, because a third message type in the file would
-move every take's content hash, which is the key the library joins two machines on.
+**Types 3 and 4 are live-only, so "byte-identical" means identical to the type 1 and 2
+subsequence.** Both are dropped at the recorder, because a third message type in the file would
+move every take's content hash, which is the key the library joins two machines on. The
+intrinsics ride the key message rather than the hello for the same reason: no take can use them,
+so no take carries them. `web/key-stream.js` is the one spelling of the quantisation and of the
+pair the server pushes to a key client over the WebSocket, and a socket is a monitor or a key
+client, never both, which is what keeps the binary channel free of a discriminator.
 `vcam-check --mutate hd-reaches-recorder` keeps that true.
 
 Measured over a real capture: 434,176 bytes of depth plus a 49-59KB JPEG, 486KB per frame. At

@@ -65,6 +65,10 @@ Everything, to everyone who can route to the port:
   plainest thing on the list — no framing to decode and no client to write, just a URL that
   shows the room to anyone who opens it. Nothing has to be recording for it to work, and
   opening it starts the encode rather than joining one already running.
+- `GET /key`, and the WebSocket `{key: true}` behind it: **the colour camera keyed by depth,
+  and the depth itself.** The page draws the room cut away, and the pair it is fed carries the
+  depth of every colour pixel, which is a floor plan of the room to anyone who opens it. Opening
+  it starts both encodes on the sensor.
 
 The origin rule covers this route as it covers the mutating ones, and it buys the same narrow
 thing: a browser that *declares* a foreign origin is refused. An `<img>` tag sends no origin at

@@ -8,7 +8,7 @@ import { pipeline } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join, normalize, extname, sep, resolve } from 'node:path';
 import { WebSocketServer } from 'ws';
-import { MessageParser, encodeMessage, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, MAX_PAYLOAD_BYTES } from './protocol.js';
+import { MessageParser, encodeMessage, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, TYPE_KEY, MAX_PAYLOAD_BYTES } from './protocol.js';
 import { openCapture, withCapture, captureIdFor, openCaptureCount, decimatePayload, cloudExtent } from './capture.js';
 import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
 import {
@@ -24,6 +24,7 @@ import { moshSpine } from '../web/mosh-shader.js';
 import { Recorder } from './recorder.js';
 import { JobStore } from './jobs.js';
 import { Webcam } from './webcam.js';
+import { KeyStream } from './key-stream.js';
 import { requireMutation, originAllowed, sameOriginBrowser } from './http-guard.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -899,6 +900,8 @@ function consumersCostingTheTake() {
       .map((m) => ({ kind: 'monitor', at: `÷${m.divisor} ×${m.stride}` })),
     ...webcam.subscribersCostingTheTake()
       .map(() => ({ kind: 'webcam', at: 'the colour camera at full rate' })),
+    ...keyStream.subscribersCostingTheTake()
+      .map(() => ({ kind: 'key', at: 'the keyed colour camera at full rate' })),
   ];
 }
 
@@ -1117,6 +1120,17 @@ const serveRecordState = async (req, res) => {
       served: webcam.served,
       dropped: webcam.dropped,
     },
+    // The same shape for the same kind of consumer, plus the one reading the webcam has no twin
+    // for: a keyed pair needs a colour frame to pair with, and `withoutColour` counts the depth
+    // pictures that arrived before one did.
+    key: {
+      subscribers: keyStream.describe(),
+      available: keyStream.unavailable === null,
+      unavailable: keyStream.unavailable,
+      served: keyStream.served,
+      dropped: keyStream.dropped,
+      withoutColour: keyStream.withoutColour,
+    },
   });
 };
 
@@ -1318,6 +1332,9 @@ const PAGES = {
   // The program-out source, which OBS opens as a browser source: the same renderer drawing the
   // same scene, so a second page would be a second renderer to keep in step.
   '/program': 'index.html',
+  // The third OBS output: the colour camera keyed by its own depth. A page of its own rather than a
+  // mode of the viewer, because it draws a video frame and never the point cloud.
+  '/key': 'key.html',
 };
 
 // One dispatcher, and the only place a mutating route is let through. Returns false for a path no
@@ -1551,7 +1568,10 @@ function setSensorState(state) {
   broadcastText(JSON.stringify({ status: state }));
   // The webcam cannot outlive the sensor being live, and hanging it off the state change rather
   // than off each path that causes one keeps a route added later from missing a case.
-  if (state !== 'live') webcam.setUnavailable(`the sensor is ${state}`);
+  if (state !== 'live') {
+    webcam.setUnavailable(`the sensor is ${state}`);
+    keyStream.setUnavailable(`the sensor is ${state}`);
+  }
 }
 
 // Colour on/off has to restart the grabber because it decides which streams the device is told to
@@ -1590,6 +1610,7 @@ wss.on('connection', (ws, req) => {
   ws.send(JSON.stringify({ camera }));
   sendMonitor(ws);
   ws.on('error', (err) => console.error('[server] socket error:', err.message));
+  ws.on('close', () => keyStream.detach(ws));
 
   ws.on('message', (raw) => {
     let msg;
@@ -1599,6 +1620,18 @@ wss.on('connection', (ws, req) => {
       return; // a client sending junk is not the server's problem
     }
     if (!msg) return;
+
+    // A socket is a monitor or a key client and never both. The binary channel carries type 2
+    // frames to one and keyed pairs to the other with no discriminator in front of either, so
+    // what keeps them apart is that leaving `monitors` is what `broadcastFrame` skips on.
+    if (msg.key === true) {
+      monitors.delete(ws);
+      keyStream.attach(ws, loopback);
+      // Answered, and the answer is the seam: this socket was granted frames on connect, so the
+      // client needs to know which binary message is the first one that is a pair.
+      ws.send(JSON.stringify({ key: { attached: true, loopback } }));
+      return;
+    }
 
     // Answered on every attempt, accepted or not, so the client renders what it was granted: one
     // that assumed its request took effect would draw a `÷4` label over a full-rate stream.
@@ -1737,8 +1770,19 @@ let requestHdColor = null;
 const webcam = new Webcam({
   request: (wanted) => requestHdColor?.(wanted),
 });
+
+// Asks the grabber to start or stop the keyed depth encode. `key on` implies the colour encode, so
+// the colour this pairs with is the frame the webcam is already holding rather than a second decode.
+let requestKey = null;
+
+const keyStream = new KeyStream({
+  request: (wanted) => requestKey?.(wanted),
+  webcam,
+  maxBuffered: MAX_BUFFERED,
+});
 if (REPLAY) {
   webcam.setUnavailable(`this server is replaying ${basename(REPLAY)}, so there is no colour camera to serve`);
+  keyStream.setUnavailable(`this server is replaying ${basename(REPLAY)}, so there is no colour camera to key`);
 }
 
 // One take is one file, and the recorder holds that identity. Created here rather than inside
@@ -1785,6 +1829,10 @@ function handleMessage(msg) {
     //
     // The payload is [u64 timestampMs][JPEG], and the JPEG goes out untouched.
     webcam.offer(Buffer.from(msg.payload.subarray(8)), Number(msg.payload.readBigUInt64LE(0)));
+  } else if (msg.type === TYPE_KEY) {
+    // The key clients and nothing else: there is deliberately no `recorder.write` here, for the
+    // reason above. A type 4 in a capture would move the content hash of every take.
+    keyStream.offer(msg.payload);
   }
 }
 
@@ -1922,8 +1970,12 @@ function startLive() {
             // A new grabber has never heard of the subscriber still attached and its encoder starts
             // off, so without this the webcam comes back open, subscribed and permanently silent.
             // This is also the one place it becomes available at all.
-            if (camera.color) webcam.setAvailable();
+            if (camera.color) {
+              webcam.setAvailable();
+              keyStream.setAvailable();
+            }
             webcam.reassert();
+            keyStream.reassert();
           }
         }
       } catch (err) {
@@ -1948,6 +2000,7 @@ function startLive() {
       // The picture goes with the grabber too, said as a sentence: a webcam that answers "the
       // grabber is restarting" is one somebody waits three seconds for rather than debugs.
       webcam.setUnavailable('the grabber is restarting');
+      keyStream.setUnavailable('the grabber is restarting');
       // The take ends here. One take is one continuous stream with one hello and monotonic stamps,
       // and a blend fraction across a restart seam has no meaning. Nothing is discarded.
       recorder.split().catch((err) => console.error(`[recorder] ${err.message}`));
@@ -1974,6 +2027,11 @@ function startLive() {
     child?.stdin.write(`hd-color ${wanted ? 'on' : 'off'}\n`);
   };
 
+  requestKey = (wanted) => {
+    if (!camera.color) return;
+    child?.stdin.write(`key ${wanted ? 'on' : 'off'}\n`);
+  };
+
   applyCamera = (next) => {
     const needsRestart = next.color !== camera.color;
     const lowLightChanged = next.lowLight !== camera.lowLight;
@@ -1993,6 +2051,7 @@ function startLive() {
       // reason in front of whoever loses the picture.
       if (!camera.color) {
         webcam.setUnavailable('colour is off on this grabber, so there is no colour camera to serve');
+        keyStream.setUnavailable('colour is off on this grabber, so there is no colour camera to key');
       }
       console.log(`[server] colour camera ${camera.color ? 'on' : 'off'} - ${child ? 'restarting grabber' : 'takes effect on the next spawn'}`);
       if (child) {

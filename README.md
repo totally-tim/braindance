@@ -262,6 +262,7 @@ how many sources are actually attached right now.
 | --- | --- | --- |
 | the viewport | browser source on `/program` | this renderer, at a fixed size, no chrome |
 | the webcam | browser source on `/camera.mjpg` | the colour camera's own 1920x1080 frame |
+| the keyed webcam | browser source on `/key` | the same frame with everything outside the crop box cut away, alpha to OBS |
 
 Add a *Browser Source*, paste the URL, set *Width* and *Height*. The webcam is always
 1920x1080; the viewport is whatever you set in the panel. OBS's own virtual camera publishes
@@ -274,6 +275,18 @@ picture of a room. The native 1080p frame is therefore a second stream on its ow
 emitted only while subscribed, because the encode costs 5.50 ms (90 sensor frames, no warmup
 discarded, q80, TJSAMP_420, FASTDCT) against a 7.1 ms serial loop and its ~50 Mbit/s
 backpressures the grabber and costs the take.
+
+**The keyed webcam is that frame with the room cut away, and the Framing group is its whole
+control.** Registering colour onto the cloud already computes the depth of every colour pixel,
+so while a `/key` page is attached the grabber ships that depth too, as a second greyscale JPEG
+at 8 bits over the sensor's range, and the page cuts the picture by the crop box the cloud
+draws, in sensor metres before levelling. There is no body tracking, because libfreenect2 has
+none: a person against a wall inside the box is keyed with the wall. The box's side faces land
+about five centimetres from where the cloud draws them, the depth camera's offset from the
+colour camera, never at the silhouette. Quantise plus encode costs 6.5 ms mean over 60 keys on
+an M2 Max, on the thread the colour encode already runs on, so one thread carries about 12 ms a
+frame against 33 there; the capture node is unmeasured and decides. The depth is a floor plan of
+the room, and `/key` hands it to anything that can reach the port.
 
 The viewport has two modes: *program camera* frames the keyed camera at a fixed size,
 *mirror* follows what the operator is orbiting. Mirror re-renders their viewpoint rather
