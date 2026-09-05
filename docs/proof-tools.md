@@ -27,6 +27,7 @@ Per tool, read from the source:
 | `index-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no 2 GiB fixture, a stale anchor, a crash |
 | `registry-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: a stale anchor, a crash, no browser |
 | `timeline-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `DID NOT RUN`: a take under 12s |
+| `preview-check` | pass, or a **catch** | a failed assertion, a crash, or a miss | not used |
 | `keyframe-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or the page stopped answering | `DID NOT RUN`: a take under 24s |
 | `export-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or a crash (it has no crash handler) | not used |
 | `editor-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a take under 32s, a stale anchor |
@@ -216,6 +217,65 @@ assertions. That run did not run; re-run it, and read nothing off its count.
   document composites differently depending on how its clips are listed.
 - **`take-not-shared`** — every clip opens its own copy of its take, so two clips of one take
   carry two indexes and two caches.
+
+## `preview-check`
+
+```
+node tools/preview-check.mjs --url http://localhost:8080 --take fixture-1g
+```
+
+Needs `--url`, a GPU browser, and a take with at least nine seconds of
+footage. It uses an isolated browser profile and leaves its screenshot and assertion report in
+a temporary directory printed at exit. It drives the preview settings in View and the Play button, compares
+every RGB byte against an accurate live render, checks the preview's visible position and its
+removal on pause and resize, then checks cache boundaries, invalidation, animated keys,
+free-camera views, reload persistence, overlapping clips, and storage failures. The top-down
+inset must match the live pixels for either selected clip. Other rows drive cross-tab eviction
+and clear, corrupt-frame repair, error containment, source prefetch before a cache boundary,
+and preserved-page lifecycle events. The ordinary run also waits for the renderer's idle release.
+The pixel comparisons use a 1000 by 700 browser viewport at device scale 1; their source is
+whichever take `--take` names. The overlap/feedback row uses the timeline tool's 2/255
+tolerance and repeats the sequential-versus-seek comparison on the live renderer beside it;
+the other cached-image rows require exact equality. These establish correctness, not a sensor
+performance claim.
+
+Add `--http-origin` to run the editor at `http://preview.local` through a browser-only resolver
+mapping to the host at `--url`. This is a real non-secure browser origin using the same server;
+the tool asserts that Web Crypto is absent. It does not open a LAN listener or test a physical
+network link.
+
+The timeline, editor, export, and boot tools turn idle rendering off in their isolated browser
+profiles. Their foreground checks must not compete with a second renderer; `preview-check`
+drives that renderer and its idle preference explicitly.
+
+The coverage rows compare the visible band against ruler ticks and the playhead while zooming
+and panning. They remove stored frames to expose a gap, check the readiness percentage, and
+scrub through the band. The preview controls must belong to View, with no popup on the timeline.
+A parked timeline is watched through a `MutationObserver` on the band for one second and must
+rebuild nothing. The storage key must be a 64-character digest. A pointer moved across the
+page for 3.5 seconds must not postpone idle rendering. The decode-stall row slows
+`createImageBitmap` to 150 ms and plays a cached range: playback must hold for the decode,
+counting `stalls`, with no live seek and no `resumes`. The quota row also reads the editor's
+status line for the failure.
+
+Its controls are `--mutate cache-never-displays`, `--mutate edits-keep-old-previews`,
+`--mutate preview-skips-history`, `--mutate preview-ignores-free-camera`,
+`--mutate first-frame-is-skipped`, `--mutate late-decode-survives-camera-change`,
+`--mutate live-resume-skips-history`, `--mutate hidden-preview-stays-visible`,
+`--mutate preview-is-misplaced`, `--mutate preview-plan-is-empty`,
+`--mutate cache-boundary-stays-cold`, `--mutate corrupt-frame-stops-idle`,
+`--mutate clear-allows-stale-render`, `--mutate preview-error-stops-loop`,
+`--mutate manual-render-skips-settle`, `--mutate camera-drag-rebuilds-identity`, and
+`--mutate storage-changes-stay-local`, `--mutate stale-storage-error-survives`, and
+`--mutate clear-keeps-frame-blobs`, `--mutate coverage-uses-whole-clip`,
+`--mutate coverage-hides-gaps`, `--mutate coverage-stays-in-overview`,
+`--mutate late-decode-forces-live-seek`, `--mutate parked-coverage-repaints`,
+`--mutate hover-counts-as-interaction`, `--mutate identity-stays-plain`, and
+`--mutate preview-error-stays-in-menu`.
+Each intercepts the changed module in both browser contexts and must fail its declared assertion.
+A mutation exits zero only when that assertion
+fails and the browser loaded the changed module. The ordinary run exits zero only with no
+failed assertions. Run one GPU proof at a time and keep served code unchanged during it.
 
 ## `keyframe-check`
 

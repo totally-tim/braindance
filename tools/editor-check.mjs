@@ -971,23 +971,8 @@ const MUTATIONS = {
     ]],
   },
 
-  // Must redden: one row - section 17's "and the note for it says what was applied rather than
-  // naming a revision this gesture did not apply".
-  'apply-says-nothing': {
-    file: 'web/main.js',
-    edits: [[
-      '          say(stamped\n'
-      + '            ? `applied ${doc.name} · ${doc.rev.slice(7, 15)}${grade}`\n'
-      + '            : `applied ${written} values from ${doc.name}, which names part of a look rather than the whole of one${grade}`);',
-      '          void stamped; void written; void grade;',
-    ]],
-  },
-
-  // Four controls stood here and they are removed rather than re-anchored, because their subject
-  // is gone: there is no hidden working document and no chip offering it back, so each of them
-  // named a mechanism this build does not have. What each guaranteed is recorded in
-  // `docs/proof-tools.md` beside the section that drove them, because a control removed in
-  // silence is a guarantee removed in silence.
+  // Five controls stood here and they are removed rather than re-anchored. What each guaranteed
+  // is recorded in `docs/proof-tools.md` beside the section that drove them.
   //
   // `offer-ignores-take-hash`         - the offer joined on the take's content hash and not on
   //                                     its id, so a renamed id could not resurrect an edit cut
@@ -1000,6 +985,7 @@ const MUTATIONS = {
   // `resume-waits-for-every-list`     - a neighbouring listing that refused did not hide the
   //                                     offer, since only the projects listing is what it is
   //                                     made of.
+  // `apply-says-nothing`              - the note for an applied preset said what was applied.
 
   'project-load-keeps-renamed-take-id': {
     file: 'web/main.js',
@@ -1164,10 +1150,10 @@ const MUTATIONS = {
   'grab-zone-over-the-lanes': {
     file: 'web/index.html',
     edits: [
-      ['  .tcut { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--accent);\n'
+      ['  .tcut { position: absolute; top: 0; height: 2px; width: 1px; background: var(--dim);\n'
         + '    pointer-events: none; z-index: 4; }',
-      '  .tcut { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--accent);\n'
-        + '    pointer-events: auto; z-index: 4; }'],
+      '  .tcut { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--dim);\n'
+        + '    pointer-events: none; z-index: 4; }'],
       ['  .tcut::after { content: ""; position: absolute; top: 0; height: var(--ruler-h);\n'
         + '    pointer-events: auto; cursor: ew-resize; }',
       '  .tcut::after { content: ""; position: absolute; top: 0; bottom: 0;\n'
@@ -2595,6 +2581,9 @@ function inGroup(row, ...groups) {
 }
 
 const DRIVER_IDS = {
+  tPreviewRender: 'preview-check renders a range and reads the cached pixels during playback',
+  tPreviewAuto: 'preview-check starts idle rendering and interrupts it through this checkbox',
+  tPreviewClear: 'preview-check clears during a render and refuses late results',
   tAddClip: 'section 22 - opens the picker, chooses a take, and reads the clip that landed',
   tDeleteClip: 'section 22 - deletes the selected clip and undoes it',
   tMoveClip: 'section 22b - arms the move handles, drags them and reads where the clip went',
@@ -2731,6 +2720,7 @@ async function openEditor() {
   });
   const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1, acceptDownloads: true });
   await context.addInitScript(PICKER_STUB);
+  await context.addInitScript(() => localStorage.setItem('braindance.preview.auto', 'off'));
   await armDocumentWrites(context);
   const page = await context.newPage();
   const errors = [];

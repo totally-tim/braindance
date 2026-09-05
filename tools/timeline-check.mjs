@@ -512,6 +512,7 @@ const context = await browser.newContext({
   deviceScaleFactor: 1,
 });
 
+await context.addInitScript(() => localStorage.setItem('braindance.preview.auto', 'off'));
 const page = await context.newPage();
 const errors = [];
 page.on('pageerror', (err) => errors.push(String(err)));

@@ -79,6 +79,29 @@ of its 60 pre-roll frames at four clips of one take and again at eight, the `CLI
 asks that take for 496. What still caps is eight clips of one take each pre-rolling more than
 about 2.5 seconds, or a speed slow enough that one clip's window runs past 602 source frames.
 
+## Rendered previews
+
+Every number here is from the synthetic `fixture-1g` capture (8,160 frames at 30 fps) on an Apple
+M2 Max under headless bundled Chromium at a 1000 by 700 viewport, so a 542 by 305 preview, with
+idle rendering off and a page-cache state not controlled. The arms are interleaved
+old, new, new, old, old, new in fresh browser contexts, three per arm, medians reported. "Old" is
+the tree before the storage key was hashed, writes went relaxed and the coordinator stopped
+repainting; "new" is this tree.
+
+| what | old | new | method |
+| --- | --- | --- | --- |
+| Render range, 91 frames at 2 to 5 s, wall time | 9,795 ms | 1,986 ms | `previews.render()` after Clear, polled at 20 ms until 91 frames are ready; no warmup discarded, the hidden renderer boots inside the first arm's number |
+| the coordinator's tick, playhead parked, 2,969 frames cached | 0.137 ms | 0.041 ms | `tickMs / ticks` over a 5 s window of ~600 ticks, frames planted straight into the `entries` and `frames` stores |
+| `status()` of one edit, 2,000 stored frames | 196 to 551 ms | 56 to 76 ms | the key at 3,683 characters against 64, three rounds each, 4 KiB blobs; `put` and `read` unchanged at 42 to 57 ms under default durability |
+| `GET /preview/renderer` | 220 to 730 ms | 7 ms warm, 143 ms cold | six `curl` calls in a row against the running server, the first after restart; the memo key is every shipped file's path, size, mtime and ctime |
+
+The render time is mostly the fsync: a default-durability IndexedDB write costs 40 to 50 ms on
+this disk, and the old path paid it once for the frame and once more reading the total back. The
+tick is 0.8% of a 60 Hz frame before and 0.25% after, so the parked cost was small either way;
+what it bought is a band that rebuilds only when coverage or the view changes, which the proof
+watches through a `MutationObserver`. Not measured: the decode-stall path against a live seek at
+a resolution where PNG decode cannot keep 30 fps, and a real sensor.
+
 ## What a gizmo drag costs
 
 A pointer move through the clip handles arms a redraw and never starts one. `renderProgramFrame`
