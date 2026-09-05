@@ -3666,9 +3666,19 @@ if (!PROGRAM_OUT && progModeEl) {
     progSizeEl.value = `${programOutSize.w}x${programOutSize.h}`;
     sendProgramOut({ size: programOutSize });
   });
-  progNoteEl.textContent = `browser source: ${location.origin}/program  ·  `
-    + `webcam: ${location.origin}/camera.mjpg  ·  `
-    + `keyed webcam: ${location.origin}/key`;
+  const sourceLinks = [
+    ['browser source', '/program'],
+    ['webcam', '/camera.mjpg'],
+    ['keyed webcam', '/key'],
+  ].flatMap(([label, path], i) => {
+    const link = document.createElement('a');
+    link.href = new URL(path, location.href).href;
+    link.textContent = link.href;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    return [document.createTextNode(`${i ? '  ·  ' : ''}${label}: `), link];
+  });
+  progNoteEl.replaceChildren(...sourceLinks);
 }
 
 function connect() {

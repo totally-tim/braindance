@@ -915,6 +915,45 @@ try {
       await operator.goto(`http://127.0.0.1:${PORT}/record`);
       await operator.waitForTimeout(2500);
 
+      const sourceLinks = await operator.evaluate(() => {
+        const note = document.getElementById('progNote');
+        return {
+          text: note.textContent,
+          links: [...note.querySelectorAll('a')].map((link) => ({
+            text: link.textContent,
+            href: link.href,
+            target: link.target,
+            noopener: link.relList.contains('noopener'),
+          })),
+        };
+      });
+      const sourceUrls = ['/program', '/camera.mjpg', '/key']
+        .map((path) => `http://127.0.0.1:${PORT}${path}`);
+      const clickedSources = [];
+      if (sourceLinks.links.length === sourceUrls.length) {
+        await operator.evaluate(() => {
+          globalThis.__proofSourceClicks = [];
+          document.getElementById('progNote').addEventListener('click', (event) => {
+            const link = event.target.closest('a');
+            if (!link) return;
+            event.preventDefault();
+            globalThis.__proofSourceClicks.push(link.href);
+          });
+        });
+        for (let i = 0; i < sourceUrls.length; i++) {
+          await operator.locator('#progNote a').nth(i).click();
+        }
+        clickedSources.push(...await operator.evaluate('globalThis.__proofSourceClicks'));
+      }
+      ok('the operator note exposes all three source URLs as links that leave the controls open',
+        sourceLinks.text === `browser source: ${sourceUrls[0]}  ·  webcam: ${sourceUrls[1]}  ·  keyed webcam: ${sourceUrls[2]}`
+          && sourceLinks.links.length === sourceUrls.length
+          && sourceLinks.links.every((link, i) => link.text === sourceUrls[i]
+            && link.href === sourceUrls[i] && link.target === '_blank' && link.noopener)
+          && clickedSources.every((href, i) => href === sourceUrls[i])
+          && clickedSources.length === sourceUrls.length,
+        JSON.stringify({ ...sourceLinks, clickedSources }));
+
       // Deliberately not a size anything defaults to, so a buffer that merely stayed put cannot be
       // read as having followed.
       await operator.fill('#progSize', '1280x720');
