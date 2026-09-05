@@ -1164,10 +1164,10 @@ const MUTATIONS = {
   'grab-zone-over-the-lanes': {
     file: 'web/index.html',
     edits: [
-      ['  .tcut { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--accent);\n'
+      ['  .tcut { position: absolute; top: 0; height: 2px; width: 1px; background: var(--dim);\n'
         + '    pointer-events: none; z-index: 4; }',
-      '  .tcut { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--accent);\n'
-        + '    pointer-events: auto; z-index: 4; }'],
+      '  .tcut { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--dim);\n'
+        + '    pointer-events: none; z-index: 4; }'],
       ['  .tcut::after { content: ""; position: absolute; top: 0; height: var(--ruler-h);\n'
         + '    pointer-events: auto; cursor: ew-resize; }',
       '  .tcut::after { content: ""; position: absolute; top: 0; bottom: 0;\n'
