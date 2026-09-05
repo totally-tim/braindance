@@ -1,14 +1,5 @@
-/**
- * The document format's version, stamped by the page as it saves and by the server as it
- * writes, so there is one number rather than two that agree.
- *
- * A document from any other version is refused, naming the version it found, rather than
- * opened on a best guess: this build ships no conversion and no reader of a second shape.
- * Version 7 carries a `clips` array - each clip its own take, placement, retime curve and the
- * look values that write the cloud - beside the `look` block holding the ones that write the
- * post chain. Version 6 carried one take at the top and one undivided look under it.
- */
-export const PROJECT_VERSION = 7;
+// Version 8 adds a content-addressed audio clip and its modulation settings.
+export const PROJECT_VERSION = 8;
 
 /**
  * How many clips this build composites.

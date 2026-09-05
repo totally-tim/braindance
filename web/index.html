@@ -450,6 +450,8 @@
      surface they are always visible - the hidden attribute is not set. */
   body.editing #panelTabs { display: none; }
   body.editing #panelTabs:not([hidden]) { display: grid; }
+  body.editing #panelTabs { grid-template-columns: repeat(5, 1fr); }
+  body:not(.editing) #panelTabAudio { display: none; }
   .paneltab {
     min-width: 0;
     border: 0;
@@ -1248,6 +1250,40 @@
     border-radius: 50%; background: var(--paper-1); border: 1px solid var(--accent);
     cursor: grab; z-index: 5;
   }
+  .audio-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 10px; color: var(--ink); }
+  .audio-field { display: flex; align-items: center; gap: 8px; margin: 10px 0; flex-wrap: wrap; }
+  .audio-field input, .audio-field select { min-width: 0; width: 100%; background: var(--paper-1); color: var(--ink); border: 1px solid var(--line); padding: 5px; font: inherit; }
+  .audio-section { margin: 16px 0 10px; color: var(--ink); }
+  .audio-setting { display: grid; grid-template-columns: 1fr 60px; gap: 3px 8px; margin: 9px 0; }
+  .audio-setting input { grid-column: 1 / -1; grid-row: 2; width: 100%; }
+  .audio-setting output { text-align: right; }
+  .audio-note { color: var(--accent); overflow-wrap: anywhere; }
+  #audioMeter { flex: 1; min-width: 70px; }
+  .audio-spectrum { margin: 14px 0 10px; }
+  .audio-spectrum svg { width: 100%; height: 100px; display: block; background: var(--paper-1); border: 1px solid var(--line); }
+  .audio-spectrum polyline { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+  .audio-spectrum [data-spectrum=input] { stroke: var(--dim); opacity: .65; }
+  .audio-spectrum [data-spectrum=output] { stroke: var(--accent); }
+  .audio-spectrum-labels { display: flex; justify-content: space-between; font-size: 10px; margin: 4px 0; }
+  .audio-spectrum-labels .conditioned { color: var(--accent); }
+  .audio-result { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 5px; padding: 10px 0; border-block: 1px solid var(--line); }
+  .audio-result label { display: flex; flex-direction: column; gap: 4px; font-size: 10px; }
+  .audio-result output { font-size: 14px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .audio-result meter { grid-column: 1 / -1; width: 100%; }
+  .audio-advanced { margin: 14px 0; }
+  .audio-advanced summary { cursor: pointer; }
+  .audio-spectrum + #audioSettings { margin-top: 0; }
+  #audioEqBands { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  #audioEqBands .audio-setting { grid-template-columns: 1fr; gap: 4px; }
+  #audioEqBands .audio-setting output { grid-row: 3; text-align: left; }
+  #audioGroup meter::-webkit-meter-bar { background: var(--paper-1); border: 1px solid var(--line); }
+  #audioGroup meter::-webkit-meter-optimum-value { background: var(--accent); }
+  .audio-mapping summary { cursor: pointer; color: var(--ink); padding: 10px 0; }
+  .taudio { position: absolute; top: 2px; bottom: 2px; min-width: 2px; border: 1px solid var(--accent); background: var(--paper-2); color: var(--ink); overflow: hidden; cursor: grab; text-align: left; font: inherit; }
+  .taudio:focus-visible { outline: 2px solid var(--accent); }
+  .taudio svg { position: absolute; inset: 0; width: 100%; height: 100%; opacity: .4; pointer-events: none; }
+  .taudio span { position: relative; padding: 0 5px; pointer-events: none; }
+  #tAddAudio { font-size: 10px; padding: 0 4px; }
 </style>
 </head>
 <body>
@@ -1375,12 +1411,47 @@
       <button class="paneltab" id="panelTabFraming" type="button" role="tab" data-panel-tab="framing" aria-selected="false">Framing</button>
       <button class="paneltab" id="panelTabLook" type="button" role="tab" data-panel-tab="look" aria-selected="false">Effects</button>
       <button class="paneltab" id="panelTabRegion" type="button" role="tab" data-panel-tab="region" aria-selected="false">Region</button>
+      <button class="paneltab" id="panelTabAudio" type="button" role="tab" data-panel-tab="audio" aria-selected="false">Audio</button>
     </div>
 
   <!-- Everything below scrolls. Left at its old indentation on purpose: this is a box
        drawn around a block that did not otherwise change, and re-indenting a hundred
        and eighty lines to say so would bury the change that was actually made. -->
   <div id="panelBody">
+    <div class="group" id="audioGroup" data-panel-tab="audio" hidden>
+      <div class="audio-name" id="audioName">No audio</div>
+      <div class="btnrow">
+        <button type="button" id="audioImport">Import audio</button>
+        <button type="button" id="audioRemove" disabled>Remove</button>
+      </div>
+      <input type="file" id="audioFile" accept="audio/*,.wav,.mp3,.flac,.aiff,.m4a,.ogg" hidden>
+      <div id="audioControls" hidden>
+        <div class="audio-spectrum">
+          <div class="audio-spectrum-labels"><span>Input</span><span class="conditioned">After EQ</span></div>
+          <svg id="audioSpectrum" viewBox="0 0 300 100" preserveAspectRatio="none" role="img" aria-label="Audio frequency spectrum before and after modulation EQ">
+            <polyline data-spectrum="input"></polyline><polyline data-spectrum="output"></polyline>
+          </svg>
+          <div class="audio-spectrum-labels"><span>20 Hz</span><span>200</span><span>2k</span><span>20k</span></div>
+        </div>
+        <div id="audioSettings" aria-label="Modulation EQ"><div id="audioEqBands"></div></div>
+        <details class="audio-advanced"><summary>Signal response</summary><div id="audioAdvancedSettings"></div></details>
+        <label class="audio-field">Signal<meter id="audioMeter" min="0" max="1" value="0"></meter><output id="audioValue">0.000</output></label>
+        <div class="audio-result">
+          <label>Base<output id="audioBase">—</output></label>
+          <label>+ Audio<output id="audioAdded">—</output></label>
+          <label>Result<output id="audioResult">—</output></label>
+          <meter id="audioResultMeter" min="0" max="1" value="0" aria-label="Result within parameter range"></meter>
+        </div>
+        <label class="audio-field">Depth<input id="audioDepth" type="number" step="0.01"></label>
+        <details class="audio-mapping" id="audioMapping"><summary id="audioMappingTitle">Choose effect</summary>
+          <label class="audio-field">Clip<select id="audioOwner" aria-label="Audio destination clip"></select></label>
+          <label class="audio-field">Effect<select id="audioEffect" aria-label="Audio destination effect"></select></label>
+          <label class="audio-field">Parameter<select id="audioTarget" aria-label="Effect parameter"></select></label>
+        </details>
+        <label class="audio-field">Start (s)<input id="audioStart" type="number" min="0" max="86400" step="0.01"></label>
+      </div>
+      <div class="audio-note" id="audioNote" role="status"></div>
+    </div>
     <div class="group" id="lookPresetGroup" data-panel-tab="look" hidden>
       <label>Preset</label>
       <!-- The picker the design draws, and the reason it is not a `<select>` any more is

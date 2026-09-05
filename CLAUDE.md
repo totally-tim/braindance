@@ -166,6 +166,7 @@ exit code (rule 3).
 | `timeline-check.mjs` | seek equals playback | `--url`, a take of ≥12s |
 | `keyframe-check.mjs` | tracks, the retime curve, undo | `--url`, a take of ≥24s |
 | `export-check.mjs` | resolution, export, the file | `--url`, ffmpeg and ffprobe |
+| `audio-check.mjs` | audio import, EQ, mapping, undo, reload and exact exported samples | port 8196 free, ffmpeg and a GPU browser |
 | `editor-check.mjs` | the editor's controls exist, and pressing them changes something | `--url`, a take of ≥32s |
 | `library-check.mjs` | the library, the recorder, the routes | a free port span |
 | `boot-check.mjs` | after boot, every control shows the value the registry holds for the selected clip; the document door adopts a whole document or none; the undo stack is the session's and the file is the document's | port 8391 free |

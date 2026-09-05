@@ -2140,9 +2140,8 @@ const MUTATIONS = {
   'space-unbound': {
     file: 'web/main.js',
     edits: [[
-      '      if (timeline.playing || timeline.pendingPlay) pauseTransport();\n'
-      + '      else timeline.play().catch(showTimelineError);\n      return;',
-      '      return;',
+      '  if (e.repeat) return;\n  ui.play.click();',
+      '  if (e.repeat) return;',
     ]],
   },
 
@@ -2492,6 +2491,12 @@ const DRIVER_RULES = [
     what: 'a control in the effect rack sidebar',
     by: 'section 1 opens the effect rack, searches, adds every effect, and removes one',
     match: (row) => inGroup(row, '#effectRackPanel'),
+  },
+  {
+    key: 'audio',
+    what: 'an audio import, conditioning, or mapping control',
+    by: 'audio-check drives the file chooser, every conditioning setting, mapping, depth, placement, removal, and undo',
+    match: (row) => inGroup(row, '#audioGroup') || row.id === 'tAddAudio',
   },
   {
     key: 'paneltabs',
@@ -3102,8 +3107,8 @@ try {
   await page.waitForTimeout(50);
   const halationAdded = await page.evaluate(`(() => {
     const row = document.getElementById('halation.amount')?.closest('.row, .checkrow');
-    let stored = [];
-    try { stored = JSON.parse(localStorage.getItem('kinect.rackedEffects') ?? '[]'); } catch {}
+    const doc = globalThis.__kinect.library.serialiseProjectBody();
+    const stored = [...new Set([...(doc.look.effects ?? []), ...doc.clips.flatMap((clip) => clip.effects ?? [])])];
     return {
       hidden: row?.hidden ?? null,
       stored,
@@ -3151,8 +3156,8 @@ try {
     const k = globalThis.__kinect;
     const row = document.getElementById('halation.amount')?.closest('.row, .checkrow');
     const spec = k.params.spec('halation.amount');
-    let stored = [];
-    try { stored = JSON.parse(localStorage.getItem('kinect.rackedEffects') ?? '[]'); } catch {}
+    const doc = globalThis.__kinect.library.serialiseProjectBody();
+    const stored = [...new Set([...(doc.look.effects ?? []), ...doc.clips.flatMap((clip) => clip.effects ?? [])])];
     return {
       atDefault: k.params.get('halation.amount') === k.params.normalise('halation.amount', spec.default),
       keyed: k.keyframes.names().includes('halation.amount'),
@@ -3196,8 +3201,8 @@ try {
     const k = globalThis.__kinect;
     const row = document.getElementById('halation.amount')?.closest('.row, .checkrow');
     const spec = k.params.spec('halation.amount');
-    let stored = [];
-    try { stored = JSON.parse(localStorage.getItem('kinect.rackedEffects') ?? '[]'); } catch {}
+    const doc = globalThis.__kinect.library.serialiseProjectBody();
+    const stored = [...new Set([...(doc.look.effects ?? []), ...doc.clips.flatMap((clip) => clip.effects ?? [])])];
     return {
       atDefault: k.params.get('halation.amount') === k.params.normalise('halation.amount', spec.default),
       hidden: row?.hidden ?? null,
@@ -3236,8 +3241,8 @@ try {
   }
   const rackComplete = await page.evaluate(`(() => {
     const k = globalThis.__kinect;
-    let stored = [];
-    try { stored = JSON.parse(localStorage.getItem('kinect.rackedEffects') ?? '[]'); } catch {}
+    const doc = globalThis.__kinect.library.serialiseProjectBody();
+    const stored = [...new Set([...(doc.look.effects ?? []), ...doc.clips.flatMap((clip) => clip.effects ?? [])])];
     const unavailable = k.effectIds().filter((id) => k.effectParamNames(id).every((name) => {
       const row = document.getElementById(name)?.closest('.row, .checkrow');
       return !row || row.hidden;
@@ -3265,8 +3270,8 @@ try {
   if (headRemoveCount === 1) await headRemove.click();
   await settle();
   const headRemoved = await page.evaluate(`(() => {
-    let stored = [];
-    try { stored = JSON.parse(localStorage.getItem('kinect.rackedEffects') ?? '[]'); } catch {}
+    const doc = globalThis.__kinect.library.serialiseProjectBody();
+    const stored = [...new Set([...(doc.look.effects ?? []), ...doc.clips.flatMap((clip) => clip.effects ?? [])])];
     const row = document.getElementById('halation.amount')?.closest('.row, .checkrow');
     return { stored, hidden: row?.hidden ?? null };
   })()`);
@@ -3325,7 +3330,7 @@ try {
       // menu from a button that merely shares the nav row with one.
       groups: ['#appBar', '#panel', '#panelTabs', '#lookPresetGroup', '#cameraGroup', '#navRow',
         '#recordGroup', '#recLookGroup', '#sensorGroup', '#monitorGroup',
-        '#programOutGroup', '#presetPick', '#projectDialog', '#exportDialog', '#obsDialog',
+        '#programOutGroup', '#audioGroup', '#presetPick', '#projectDialog', '#exportDialog', '#obsDialog',
         '#renameDialog',
         '#effectRackPanel', '#panelDock', '.appmenu']
         .filter((g) => el.closest(g)),
@@ -3393,7 +3398,7 @@ try {
     'the strip is among what was swept', `${sweep.filter((r) => r.inTbar).map((r) => r.id).filter(Boolean).slice(0, 6).join(', ')}...`);
 
   // The census racks every installed effect so its generated controls exist for the sweep. That
-  // is local panel state, not project state, and leaving it behind changes every later claim about
+  // is explicit document state, and leaving it behind changes every later claim about
   // a fresh inspector. Remove through the real controls so the cleanup also proves that an idle
   // effect needs no destructive confirmation.
   let rackRemoves = 0;
@@ -3402,8 +3407,8 @@ try {
     rackRemoves++;
   }
   const rackClean = await page.evaluate(`(() => {
-    let stored = [];
-    try { stored = JSON.parse(localStorage.getItem('kinect.rackedEffects') ?? '[]'); } catch {}
+    const doc = globalThis.__kinect.library.serialiseProjectBody();
+    const stored = [...new Set([...(doc.look.effects ?? []), ...doc.clips.flatMap((clip) => clip.effects ?? [])])];
     return {
       stored,
       visible: globalThis.__kinect.effectIds().filter((id) =>
@@ -12393,6 +12398,7 @@ try {
       await page.locator('#tPreset').click();
       await page.waitForFunction("document.getElementById('tPresetList').hidden === false");
       await page.locator(`#tPresetList .pickeroption[data-name=${JSON.stringify(name)}]`).click();
+      await page.waitForFunction(() => !globalThis.__kinect.library.presetGestureRunning());
       await settle();
     };
     await page.evaluate(`(() => {

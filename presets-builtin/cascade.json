@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 8,
   "requires": [
     { "id": "ghost", "version": "1.0.0" },
     { "id": "contour", "version": "1.0.0" },

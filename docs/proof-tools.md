@@ -43,6 +43,7 @@ node tools/registry-check.mjs --url http://localhost:8080 # step 3: one registry
 node tools/timeline-check.mjs --url http://localhost:8080 --take fixture-1g # step 4: seek equals playback
 node tools/keyframe-check.mjs --url http://localhost:8080 --take fixture-1g # step 5: tracks, retime curve, undo
 node tools/export-check.mjs --url http://localhost:8080   # step 6: resolution, export, the file
+node tools/audio-check.mjs                              # audio import, modulation, persistence and a real audio/video export
 node tools/library-check.mjs                              # step 7: library, recorder, routes
 node tools/editor-check.mjs --url http://localhost:8080 --take fixture-1g # the editor's controls: that they exist, that pressing them changes something
 node tools/boot-check.mjs                                 # the post-boot state diff: every control shows the value the registry holds for the
@@ -89,6 +90,23 @@ node tools/jobs-check.mjs                                 # step 8: the queue, t
                                                           #   entry however many rows it writes
 node tools/module-check.mjs                               # the boundaries in web/: the import graph, what an import names, what crosses it
 ```
+
+`audio-check` stages its server and every writable store in a temporary directory. It uses a
+120-frame synthetic take and a generated tone by default. `--source PATH` reuses a capture,
+`--audio PATH` imports a real audio file, and `--shots DIRECTORY` saves the panel and an MP4
+preview outside the checkout. It checks the destination list, rendered frame changes, seek
+repeatability, undo, reload, and exact stereo PCM samples from a lossless export starting after
+the audio clip begins. Its `--mutate` controls are `signal-disconnected`, `mux-ignores-start`,
+`added-effect-hidden`, `space-keeps-control-focus`, and `undo-leaves-spectrum-empty`. They must
+fail the rendered modulation, exact exported samples, newly added destination, focused Space
+shortcut, and restored spectrum checks, respectively. Read the failed assertions; exit 2 means
+the run did not finish.
+
+`audio-check --queue` also sends an audio project through the real render worker and compares
+its exported samples. `editor-check` needs four captures with distinct hashes in the server's
+library: its chosen take must have at least 32 seconds, and the additional takes keep the
+asynchronous Add Clip checks from reusing an already cached source. Its disk check expects the
+tool and server to share the same application root and `exports/` directory.
 
 The two below need no server, and `registration-check` needs no sensor either — it runs on a
 corpus of `Registration::apply` inputs dumped by `grabber --dump-corpus`.

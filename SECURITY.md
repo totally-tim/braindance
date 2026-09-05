@@ -17,7 +17,8 @@ widen it, so widening is a decision somebody took rather than a default.
 
 **The origin rule is the second half, and it only speaks to browsers.** Mutating HTTP routes
 and the WebSocket upgrade require a same-origin `Origin` header, a matching method and a JSON
-content type — the three things a page you merely visit cannot produce together. A request
+content type, except the audio upload which requires `application/octet-stream`. Both content
+types require a browser preflight for a cross-origin request. A request
 carrying **no** `Origin` passes on purpose: every call across the capture-node link is a
 server-side `fetch`, and nothing in Node has an origin to declare.
 
@@ -60,6 +61,9 @@ Everything, to everyone who can route to the port:
   the name they left it under.
 - `PUT /projects/:name`, `/presets/:name`, `/deliverables/:name`: overwrite saved work.
 - `POST /jobs`: queue renders, without limit, on the disk your takes are being written to.
+- `POST /audio`: import an audio file through FFmpeg, limited to one concurrent upload,
+  64 MiB input, and ten minutes of decoded audio. The decoder can read its input pipe only.
+  `GET /audio/:hash` reads a stored normalized WAV after verifying its content hash.
 - The WebSocket: the live sensor feed, and the recorder's controls.
 - `GET /camera.mjpg`: **the colour camera, live, as an ordinary MJPEG stream.** This is the
   plainest thing on the list — no framing to decode and no client to write, just a URL that

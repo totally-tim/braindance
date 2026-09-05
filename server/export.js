@@ -6,6 +6,8 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, writeFile, stat, rm, rename } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { audioFilter } from './audio.js';
+import { AUDIO_RATE, checkAudioClip, readAudioWav } from '../web/audio-source.js';
 
 // Absolute rather than resolved off PATH: this is the encoder the export was measured against.
 const FFMPEG = process.env.FFMPEG ?? '/opt/homebrew/bin/ffmpeg';
@@ -120,13 +122,15 @@ async function artifactBytes(spec, artifact, frames) {
   return total;
 }
 
-function ffmpegArgs({ width, height, fps, codec, into }) {
+function ffmpegArgs({ width, height, fps, codec, into, audio = null }) {
   return [
     '-hide_banner', '-nostdin', '-loglevel', 'error',
     // Without it the container carries the encoder's version string and a creation time, so the
     // same frames would produce a different file every run.
     '-fflags', '+bitexact',
     '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${width}x${height}`, '-r', String(fps), '-i', '-',
+    ...(audio ? ['-i', audio.path, '-filter_complex', audio.filter, '-map', '0:v:0', '-map', '[audio]',
+      '-c:a', codec === 'h264' ? 'aac' : 'pcm_s16le'] : []),
     // readPixels reads the drawing buffer bottom-up, which is upside down to every video format.
     '-vf', 'vflip',
     ...CODECS[codec].args,
@@ -139,7 +143,7 @@ function ffmpegArgs({ width, height, fps, codec, into }) {
 // One export, from the begin message to the file. Everything is validated against what the
 // browser said it would send: ffmpeg's rawvideo demuxer reads a short frame as the head of
 // the next one and produces a file that plays and scrolls diagonally.
-export function handleExportSocket(ws, { outDir, log = console.log }) {
+export function handleExportSocket(ws, { outDir, audioStore = null, log = console.log }) {
   let job = null;
   let child = null;
   let received = 0;
@@ -191,6 +195,7 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
     job = {
       width, height, fps, frames, codec, frameBytes, output, outputDir, temp, scratchArtifact, href, name: msg.name, began: Date.now(),
       project: msg.project ?? null,
+      programStart: msg.programStart ?? null,
       captures: Array.isArray(msg.captures) ? msg.captures.slice() : null,
       renderer: msg.renderer ?? null,
     };
@@ -198,7 +203,24 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
     // The directory the target is in rather than the scratch directory - one level deeper for a
     // sequence, because the image2 muxer opens each frame by name and creates nothing.
     await mkdir(dirname(target), { recursive: true });
-    const args = ffmpegArgs({ width, height, fps, codec, into: target });
+    if (finished) { await rm(temp, { recursive: true, force: true }); return; }
+    const audioClip = checkAudioClip(msg.project?.audio);
+    let audio = null;
+    if (audioClip) {
+      if (codec === 'pngseq') throw new Error('PNG sequences cannot carry audio; select MP4 or MOV');
+      if (!audioStore) throw new Error('this server has no audio store');
+      if (!Number.isFinite(msg.programStart) || msg.programStart < 0 || msg.programStart > 86400
+        || frames === null) throw new Error('audio export needs a program start and frame count');
+      const wav = await audioStore.read(audioClip.hash);
+      if (finished) return;
+      const { duration } = readAudioWav(wav);
+      if (Math.abs(duration - audioClip.duration) > 0.5 / AUDIO_RATE) throw new Error('audio duration does not match its asset');
+      const audioPath = join(temp, 'audio-input.wav');
+      await writeFile(audioPath, wav, { flag: 'wx' });
+      if (finished) { await rm(temp, { recursive: true, force: true }); return; }
+      audio = { path: audioPath, filter: audioFilter(audioClip, msg.programStart, frames, fps) };
+    }
+    const args = ffmpegArgs({ width, height, fps, codec, into: target, audio });
     log(`[export] ${FFMPEG} ${args.join(' ')}`);
     child = spawn(FFMPEG, args, { stdio: ['pipe', 'ignore', 'pipe'] });
     child.stderr.on('data', (chunk) => stderr.push(chunk.toString('utf8')));
@@ -277,6 +299,7 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
     // once old jobs exist.
     const record = {
       project: job.project ?? null,
+      programStart: job.programStart,
       captures: job.captures ?? null,
       renderer: job.renderer ?? null,
       output: job.output,
@@ -295,6 +318,7 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
     // into the output.
     finished = true;
     try {
+      await rm(join(job.temp, 'audio-input.wav'), { force: true });
       await rename(job.temp, job.outputDir);
     } catch (err) {
       // And it comes back down if the rename is what failed: `fail` reads the flag as "already
@@ -336,7 +360,7 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
         throw new Error(`unknown export message ${Object.keys(msg).join(',')}`);
       }
     };
-    run().catch((err) => fail(String(err.message ?? err)));
+    return run().catch((err) => fail(String(err.message ?? err)));
   });
 
   ws.on('close', () => {

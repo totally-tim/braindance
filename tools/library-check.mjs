@@ -269,7 +269,7 @@ const MUTATIONS = {
   // link does not have.
   'writes-take-any-method': { file: 'server/index.js', edits: [
     ['    if (!reading && r.write) {', '    if (r.write) {'],
-    ['      if (!requireMutation(req, res, r.write.methods)) return true;',
+    ['      if (!requireMutation(req, res, r.write.methods, r.write.contentType)) return true;',
       '      /* mutation: whatever method arrived is fine */'],
   ] },
   'origin-unchecked': { file: 'server/http-guard.js', edits: [[
@@ -4347,6 +4347,7 @@ async function runChecks() {
       const built = path
         .replace(':id', id)
         .replace(':name', name)
+        .replace(':hash', '0'.repeat(64))
         .replace(':a-:b', '0-1')
         .replace(':n', '0');
       return built.includes(':') ? null : built;
@@ -4362,17 +4363,18 @@ async function runChecks() {
     for (const r of mutating) {
       swept.add(r.path);
       const method = r.methods[0];
+      const contentType = r.contentType;
       // Method: a GET that is otherwise perfectly formed.
-      if (!r.read && await status(r.path, { headers: { 'Content-Type': 'application/json' } }) !== 405) wrongMethod.push(r.path);
+      if (!r.read && await status(r.path, { headers: { 'Content-Type': contentType } }) !== 405) wrongMethod.push(r.path);
       // Content type: the right method, declaring text/plain.
       if (await status(r.path, { method, headers: { 'Content-Type': 'text/plain' }, body: '{}' }) !== 415) wrongType.push(r.path);
       // Origin: everything right except the page it claims to come from.
       if (await status(r.path, {
         method,
-        headers: { 'Content-Type': 'application/json', Origin: 'http://evil.invalid' },
+        headers: { 'Content-Type': contentType, Origin: 'http://evil.invalid' },
         body: '{}',
       }) !== 403) wrongOrigin.push(r.path);
-      if (GUARDED.has(await status(r.path, { method, headers: { 'Content-Type': 'application/json' }, body: '{}' }))) {
+      if (GUARDED.has(await status(r.path, { method, headers: { 'Content-Type': contentType }, body: '{}' }))) {
         refusedOutright.push(r.path);
       }
     }
@@ -4380,11 +4382,11 @@ async function runChecks() {
       `every route that only changes things refuses a GET (${writeOnly.length} of ${mutating.length} mutating routes)`,
       wrongMethod.join(' ') || 'all 405');
     check(wrongType.length === 0,
-      'every mutating route refuses a body that does not declare JSON', wrongType.join(' ') || 'all 415');
+      'every mutating route refuses a body with a simple content type', wrongType.join(' ') || 'all 415');
     check(wrongOrigin.length === 0,
       'every mutating route refuses a cross-origin caller', wrongOrigin.join(' ') || 'all 403');
     check(refusedOutright.length === 0,
-      'and the shape the node link uses - right method, JSON, no Origin header - is let through, which is what stops this being a guard that refuses everything',
+      'and the shape the node link uses - right method, declared content type, no Origin header - is let through, which is what stops this being a guard that refuses everything',
       refusedOutright.join(' ') || `${mutating.length} routes reached their handler`);
 
     // A refusal has to mean the route did not act, which a status code does not say on its own.

@@ -1,5 +1,5 @@
-// A route that changes something requires its method, a same-origin caller and a JSON
-// content type. The three together are what a page you merely visit cannot produce.
+// A route that changes something requires its method, a same-origin caller and a declared
+// content type that requires a browser preflight. The three together are what a page you merely visit cannot produce.
 
 export function originAllowed(req) {
   const origin = req.headers.origin;
@@ -54,7 +54,7 @@ export function sameOriginBrowser(req) {
   return site === 'same-origin' || site === 'none';
 }
 
-export function requireMutation(req, res, methods) {
+export function requireMutation(req, res, methods, contentType = 'application/json') {
   // Origin first, and before the body: a refused request should not stream megabytes in.
   if (!originAllowed(req)) {
     refuse(res, 403, `${req.headers.origin} is not this server, and this route changes something`);
@@ -65,8 +65,10 @@ export function requireMutation(req, res, methods) {
     refuse(res, 405, `${req.method} is not how this route is called: it changes something, so it takes ${methods.join(' or ')}`);
     return false;
   }
-  if (!JSON_TYPE.test(req.headers['content-type'] ?? '')) {
-    refuse(res, 415, 'this route changes something, so it takes a request declaring application/json');
+  const typeRule = contentType === 'application/octet-stream'
+    ? /^application\/octet-stream\s*(?:;|$)/i : JSON_TYPE;
+  if (!typeRule.test(req.headers['content-type'] ?? '')) {
+    refuse(res, 415, `this route changes something, so it takes a request declaring ${contentType}`);
     return false;
   }
   return true;

@@ -52,3 +52,6 @@ output
 # settings.local.json into it, a `git add -A` takes one machine's paths and
 # permissions along for the ride.
 .claude
+
+# Imported audio assets.
+audio/

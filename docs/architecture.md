@@ -385,6 +385,22 @@ time, so constant motion through index space is visibly variable motion through 
 
 ## Clips, and what a cut costs
 
+Audio is a separate program-time source. `web/audio-source.js` derives a 100 Hz control curve
+from normalized PCM, then answers arbitrary program positions without transport history.
+Stereo energy is measured per channel so opposite phases do not cancel. The same lookup feeds
+seeks, playback, and export. `web/audio-session.js` owns decoding and audible playback; it
+aligns the source to the transport and stops it when the transport pauses or waits for footage.
+The source lookup is also the boundary for future recorded MIDI or live-input curves; this
+build only imports audio files.
+
+The renderer applies the additive result after keyed base values, directly to the effect's
+runtime parameter. The document retains the base, source hash, conditioning, and mapping.
+`server/audio.js` imports bounded uploads through FFmpeg with only the pipe protocol allowed,
+stores normalized WAV files by content hash, and verifies those bytes before reads. The export
+server copies verified audio into its private render directory, trims by program time, and
+adds silence outside the audio clip. The export record includes the program start and source
+identity. Modulation EQ does not alter the soundtrack.
+
 A clip owns a source, a cloud, a retime curve, a `start` and a `length`. It covers
 `[start, start + length)` - half-open, so two clips abutting at a cut do not both draw on the
 frame the cut lands on, with the one exception that the instant an edit ends on belongs to

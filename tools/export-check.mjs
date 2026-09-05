@@ -2,7 +2,7 @@
 // is the frame the editor showed, that no wall clock reaches the render, and that
 // the file ffmpeg produced is the one that was asked for.
 
-import { readFileSync, readdirSync, existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, mkdtempSync, writeFileSync, rmSync, cpSync, mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
@@ -937,7 +937,8 @@ async function onFreshPage(what, work, attempts = 3) {
  * goes with the viewport, because the editor is letterboxed to the export aspect.
  */
 async function setStage(page, size) {
-  for (let attempt = 1; attempt <= 4; attempt++) {
+  // The timeline takes a proportion of the viewport, so its height must converge after resizing.
+  for (let attempt = 1; attempt <= 12; attempt++) {
     // Settled before the strip is measured, and the buffer read again after it lands: the lane
     // stack is built after the transport exists, so a strip measured before it has its rows grows
     // under the viewport that was just sized to it. That left the editor reading pixels at one
@@ -957,24 +958,18 @@ async function setStage(page, size) {
     });
     await page.evaluate(`globalThis.__kinect.setOutputSize?.(${JSON.stringify(`${size.width}x${size.height}`)})`);
     try {
-      await page.waitForFunction(
-        `(() => {
-          const gl = globalThis.__kinect.renderer.getContext();
-          return gl.drawingBufferWidth === ${size.width} && gl.drawingBufferHeight === ${size.height};
-        })()`,
-        null, { timeout: attempt === 1 ? 5000 : 10000 },
-      );
+      await page.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
       await page.evaluate('globalThis.__kinect.timeline.settled()').catch(() => {});
       const held = await page.evaluate(`(() => {
         const gl = globalThis.__kinect.renderer.getContext();
         return [gl.drawingBufferWidth, gl.drawingBufferHeight];
       })()`);
       if (held[0] === size.width && held[1] === size.height) return;
-      if (attempt === 4) {
+      if (attempt === 12) {
         throw new Error(`the stage settled at ${held.join('x')} rather than ${size.width}x${size.height}`);
       }
     } catch (err) {
-      if (attempt === 4) throw err;
+      if (attempt === 12) throw err;
     }
   }
 }
@@ -1673,6 +1668,7 @@ console.log('\n[7] a failed export leaves the previous file and its record exact
 // different module. So this imports it into a server of its own on an ephemeral port.
 {
   const outDir = join(REPO, 'exports');
+  mkdirSync(outDir, { recursive: true });
   const NAME = 'check-atomic';
   for (const f of readdirSync(outDir).filter((f) => f.startsWith(NAME))) {
     rmSync(join(outDir, f), { recursive: true, force: true });
@@ -1684,12 +1680,14 @@ console.log('\n[7] a failed export leaves the previous file and its record exact
   const frameOf = (n) => Buffer.alloc(FRAME_BYTES, 24 + n * 96);
 
   const scratch = mkdtempSync(join(tmpdir(), 'export-check-'));
+  for (const name of ['server', 'web']) cpSync(join(REPO, name), join(scratch, name), { recursive: true });
+  cpSync(join(REPO, 'package.json'), join(scratch, 'package.json'));
   const serverSource = mutation?.find((m) => m.file === 'server/export.js')?.body
     ?? readFileSync(join(REPO, 'server/export.js'), 'utf8');
   let copies = 0;
 
   const exportServer = async (ffmpeg) => {
-    const modPath = join(scratch, `export-${++copies}.mjs`);
+    const modPath = join(scratch, 'server', `export-${++copies}.mjs`);
     writeFileSync(modPath, serverSource);
     const had = Object.hasOwn(process.env, 'FFMPEG') ? process.env.FFMPEG : null;
     process.env.FFMPEG = ffmpeg;

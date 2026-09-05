@@ -11,6 +11,7 @@ import { WebSocketServer } from 'ws';
 import { MessageParser, encodeMessage, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, MAX_PAYLOAD_BYTES } from './protocol.js';
 import { openCapture, withCapture, captureIdFor, openCaptureCount, decimatePayload, cloudExtent } from './capture.js';
 import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
+import { AudioStore } from './audio.js';
 import {
   VALID_ID, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, downloadTake,
   downloadsInFlight, hashFile, markWriteCount, readMarkLog, readMarks, reconcile, remaining,
@@ -111,6 +112,7 @@ const captureAliases = new Map();
 
 // The node keeps its own preset library on disk: it may be shooting with nothing connected, where
 // a push-per-session scheme leaves a standalone node with an empty selector.
+const AUDIO = new AudioStore(resolve(flag('--audio', join(ROOT, 'audio'))));
 const PROJECTS = new DocumentStore(resolve(flag('--projects', join(ROOT, 'projects'))), 'project');
 // A second *read* root rather than files copied on first run: a builtin is always the current one,
 // a save over its name forks it, and removing the fork brings the shipped look back.
@@ -958,6 +960,7 @@ function serveRoutes(req, res) {
       // asks every one of them rather than the ones a reviewer thought of.
       live: Boolean(r.live),
       methods: r.write?.methods ?? [],
+      contentType: r.write?.contentType ?? 'application/json',
     })),
   });
 }
@@ -965,7 +968,7 @@ function serveRoutes(req, res) {
 // The route sweep read the stores either side of the drive, which a handler that writes and
 // restores inside one request defeats - a monotonic count is what a restore cannot undo.
 const serveWriteCounts = (req, res) => sendJson(res, {
-  projects: PROJECTS.writes, presets: PRESETS.writes, deliverables: DELIVERABLES.writes, marks: markWriteCount(), jobs: JOBS.writes,
+  projects: PROJECTS.writes, presets: PRESETS.writes, deliverables: DELIVERABLES.writes, marks: markWriteCount(), jobs: JOBS.writes, audio: AUDIO.writes,
 });
 
 // ---- the render queue
@@ -1130,6 +1133,15 @@ async function serveLocalTakes(req, res) {
 // changes something, and the dispatcher puts every one through `requireMutation` in one place. The
 // table is served at `/library/routes`, so a check can enumerate rather than name.
 const ROUTES = [
+  { path: '/audio', pattern: /^\/audio$/, write: { methods: ['POST'], contentType: 'application/octet-stream', run: async (req, res) => {
+    try { sendJson(res, await AUDIO.import(req)); }
+    catch (err) { sendJson(res, { error: err.message }, 400); }
+  } } },
+  { path: '/audio/:hash', pattern: /^\/audio\/([0-9a-f]{64})$/, read: async (req, res, [hash]) => {
+    const bytes = await AUDIO.read(`sha256:${hash}`);
+    res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': bytes.length, 'Cache-Control': 'private, max-age=31536000, immutable' });
+    res.end(req.method === 'HEAD' ? undefined : bytes);
+  } },
   // ---- a capture, read
   { path: '/capture/:id/hello', pattern: /^\/capture\/([^/]+)\/hello$/, read: serveHello },
   { path: '/capture/:id/index', pattern: /^\/capture\/([^/]+)\/index$/, read: serveIndex },
@@ -1355,7 +1367,7 @@ async function serveRoute(req, res, urlPath, query) {
     if (!reading && r.write) {
       // The one gate, applied here rather than inside ten handlers: a `write` reaches its handler
       // only through this line.
-      if (!requireMutation(req, res, r.write.methods)) return true;
+      if (!requireMutation(req, res, r.write.methods, r.write.contentType)) return true;
       await r.write.run(req, res, args, query);
       return true;
     }
@@ -1509,7 +1521,7 @@ httpServer.on('upgrade', (req, socket, head) => {
 exportWss.on('connection', (ws) => {
   console.log('[export] client connected');
   ws.on('error', (err) => console.error('[export] socket error:', err.message));
-  handleExportSocket(ws, { outDir: EXPORTS_DIR });
+  handleExportSocket(ws, { outDir: EXPORTS_DIR, audioStore: AUDIO });
 });
 
 let helloJson = null;

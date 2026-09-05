@@ -62,9 +62,9 @@ the levelled room in the normal view and the sensor's vertical in Sensor view. F
 orbit pivot with the camera, so a drag afterwards still turns about the same subject rather than
 about where you set off from.
 
-**A focused text field keeps the whole keyboard.** Gaining text focus also stops any flight keys
+**Space always toggles playback in the editor.** A focused text field keeps the other keys. Gaining text focus also stops any flight keys
 already held. Sliders, dropdowns and other non-text inputs
-keep the arrows, space, enter, home, end and the page keys, so a focused slider still
+keep the arrows, enter, home, end and the page keys, so a focused slider still
 nudges with the arrows while `Shift-W` still flies and `cmd-z` still undoes. Editor shortcuts take
 priority over dropdown letter type-ahead.
 
@@ -536,6 +536,33 @@ handed. That snap is the pulse the look wants and it is also what makes the time
 decodes forward from the last one, the way seeking to a keyframe does — so a long refresh is a
 long dissolve *and* a long pre-roll on every scrub.
 
+## Audio
+
+The Audio panel imports one file, up to 64 MiB and ten minutes. FFmpeg converts it to stereo
+48 kHz PCM. `--audio DIRECTORY` selects the asset store; the default is `audio/` under the
+application root. Projects refer to the normalized asset by its SHA-256 hash. Moving a project
+to another machine requires that asset as well as its captures. Missing or changed audio is
+refused before the project opens.
+
+Choose **Clip**, **Effect**, then **Parameter**. The effect list includes effects explicitly added
+to that clip, effects with changed values or keyframes, and the current audio mapping. Adding
+an effect makes it available immediately, even at its defaults. Project effects have a separate **Project**
+entry. Depth is signed and uses the parameter's units. The result is the base or keyed value
+plus depth times the signal, normalized to the parameter's range and step. The base and its
+keys remain editable and are never replaced by the signal.
+
+Low, Mid, and High split at 200 Hz and 2 kHz. Gain follows the EQ. Threshold and Ceiling map
+the root mean square level to 0–1; Attack and Release smooth rises and falls. The spectrum
+shows input and EQ output at the playhead, including while paused. These controls condition
+the modulation; playback and export use the original audio. **Start** or dragging the audio
+lane moves it in program seconds, independently of capture retiming.
+
+The project saves its audio settings and mapping, and Undo restores them. MP4, MOV, and
+lossless video exports include audio trimmed to the export range, with silence outside the
+audio clip. PNG sequences are refused while audio is present. This prototype has one audio
+clip and one scalar effect mapping. MIDI files, live MIDI, and microphone input are not
+implemented.
+
 ## The edit, and what comes out of it
 
 Two menus, because there are two questions and one of them used to answer both. **File >
@@ -949,7 +976,9 @@ Rows declared `under` another parameter are hidden while that master is at its a
 Removing one resets every value and deletes every track in one undoable edit, and it asks
 nothing first: **remove** in the picker and the cross that appears on a group's own header when
 you hover it are the same edit, and undo is what takes either of them back.
-The local rack preference is panel state, not project state. The generator refuses to boot
+Explicit additions belong to the clip, or to the project for post effects, and are saved with
+that look. Selecting another clip changes its effect rack. Space toggles playback even while
+an inspector control has focus; Enter still activates buttons and selectors. The generator refuses to boot
 if the rows it emitted are not the parameters that were declared.
 
 The bounds are authoring travel, not mathematical limits. Mixes, angles and positions keep their
@@ -1043,9 +1072,11 @@ validates, so `editor-check` section 12 drives the round trip in a browser, with
 
 Documents from before the readings are version 3 and will not open, and there is nothing to
 run: the one-shot conversion this repo used to ship was deleted once every document it could
-act on had already been converted. This build reads version 7 alone — a version 6 document
+act on had already been converted. This build reads version 8 alone. Version 8 adds audio
+sources, mappings, and explicit effect additions per look. Version 7 documents are refused;
+this prototype includes no migration. A version 6 document
 carried one take at the top and one undivided look under it rather than a `clips` array, and a
 version 5 document still spelled its parameters bare (`glyphTone` rather than `glyph.tone`) and
 carried no `requires` list, so both are refused the same way a version 3 or 4 one is, and there
-is no conversion for either: every document this project holds was re-authored at 7. A file from
+is no conversion for either. A file from
 any older version is refused, naming its own version, and stays refused.
