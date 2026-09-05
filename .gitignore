@@ -27,6 +27,9 @@ deliverables
 # The staged tree monitor-check builds and deletes. It only survives a run that
 # threw, which is exactly when it is worth looking at and never worth committing.
 .monitor-check
+# The staged tree vcam-check builds and removes. Keep a failed run available for
+# inspection without making its generated server and browser state committable.
+.vcam-check
 # And effect-check's, for the same reason plus one of its own: it is the only staged
 # tree in the suite that gets packages written into it, so a run that threw leaves
 # fifteen hostile fixtures and a probe effect on disk.

@@ -52,8 +52,11 @@ import {
 } from './post-chain.js';
 import {
   geometry, uniforms, material, cloud, level, levelAngles, transform, setAdditive,
-  setCloudProgram, CLIP_NEAR_DEFAULT, CLIP_FAR_DEFAULT, CROP_LIMIT, cropReach, croppedOut,
+  setCloudProgram, cropReach, croppedOut,
 } from './point-cloud.js';
+import {
+  CLIP_FAR_DEFAULT, CLIP_NEAR_DEFAULT, CROP_FACE_NAMES, CROP_LIMIT, FRAMING_DEFAULTS, FRAMING_NAMES,
+} from './crop-box.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { createCloudInstance, disposeCloudInstance, selectCloud } from './cloud-instance.js';
 import { cloudSpine } from './cloud-shader.js';
@@ -983,6 +986,30 @@ function refuseRegistryDisagreement() {
         `the composition parameter ${name} is scoped ${JSON.stringify(scope)}: a composition `
         + `value is stored under ${BLOCK_SCOPES.join(' or ')} or in a field of its own, and one `
         + 'under neither would be written nowhere and come back as its default',
+      );
+    }
+  }
+
+  // The framing group against `web/crop-box.js`, which is what the webcam page reads instead of
+  // this table. A name or a default that moved on one side only would come back as a key that
+  // keys the wrong thing, with nothing on the page saying so - so it refuses to boot here.
+  const framing = Object.keys(PARAMS).filter((name) => PARAMS[name].group === 'framing');
+  const extra = framing.filter((name) => !FRAMING_NAMES.includes(name));
+  const missing = FRAMING_NAMES.filter((name) => !framing.includes(name));
+  if (extra.length > 0 || missing.length > 0) {
+    throw new Error(
+      'the framing group and FRAMING_NAMES in web/crop-box.js disagree: '
+      + `${extra.length > 0 ? `the registry has ${extra.join(', ')} as well; ` : ''}`
+      + `${missing.length > 0 ? `crop-box names ${missing.join(', ')} and the registry does not; ` : ''}`
+      + 'the webcam page frames its picture off that list',
+    );
+  }
+  for (const name of FRAMING_NAMES) {
+    if (PARAMS[name].def !== FRAMING_DEFAULTS[name]) {
+      throw new Error(
+        `the framing parameter ${name} defaults to ${JSON.stringify(PARAMS[name].def)} here and `
+        + `${JSON.stringify(FRAMING_DEFAULTS[name])} in web/crop-box.js: a document that names `
+        + 'no value for it would be framed one way in the editor and another in the webcam page',
       );
     }
   }
@@ -3639,8 +3666,56 @@ if (!PROGRAM_OUT && progModeEl) {
     progSizeEl.value = `${programOutSize.w}x${programOutSize.h}`;
     sendProgramOut({ size: programOutSize });
   });
-  progNoteEl.textContent = `browser source: ${location.origin}/program  ·  `
-    + `webcam: ${location.origin}/camera.mjpg`;
+  const copyPaths = {
+    ready: 'M7 7h9v9H7zM4 13V4h9v3',
+    copied: 'M4 10l4 4 8-8',
+    unavailable: 'M5 5l10 10m0-10L5 15',
+  };
+  const sourceRows = [
+    ['browser source', '/program'],
+    ['webcam', '/camera.mjpg'],
+    ['keyed webcam', '/key'],
+  ].map(([label, path]) => {
+    const row = document.createElement('div');
+    row.className = 'prog-source';
+    const sourceLabel = document.createElement('span');
+    sourceLabel.className = 'prog-source-label';
+    sourceLabel.textContent = `${label}:`;
+    const link = document.createElement('a');
+    link.href = new URL(path, location.href).href;
+    link.textContent = link.href;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.setAttribute('aria-live', 'polite');
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    icon.setAttribute('viewBox', '0 0 20 20');
+    icon.setAttribute('aria-hidden', 'true');
+    const iconPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    icon.appendChild(iconPath);
+    copy.appendChild(icon);
+    const showCopyState = (state) => {
+      const message = state === 'ready' ? `Copy ${label} link`
+        : state === 'copied' ? `${label} link copied`
+          : `${label} link copy unavailable`;
+      copy.dataset.state = state;
+      copy.setAttribute('aria-label', message);
+      copy.title = message;
+      iconPath.setAttribute('d', copyPaths[state]);
+    };
+    let resetCopyState = null;
+    showCopyState('ready');
+    copy.addEventListener('click', async () => {
+      const copied = await writeClipboard(link.href);
+      showCopyState(copied ? 'copied' : 'unavailable');
+      clearTimeout(resetCopyState);
+      resetCopyState = setTimeout(() => showCopyState('ready'), 1200);
+    });
+    row.append(sourceLabel, link, copy);
+    return row;
+  });
+  progNoteEl.replaceChildren(...sourceRows);
 }
 
 function connect() {
@@ -3653,6 +3728,7 @@ function connect() {
     setStatus();
     // Asked for rather than waited for: OBS reconnects a browser source on its own schedule.
     if (PROGRAM_OUT) ws.send(JSON.stringify({ programOut: { hello: true } }));
+    else sendProgramOutState();
   };
 
   ws.onmessage = (event) => {
@@ -9855,7 +9931,10 @@ function resetWorldRotation() {
 ui.camLevelReset.addEventListener('click', () => { resetWorldRotation(); });
 
 ui.cropReset.addEventListener('click', () => {
-  params.reset(['left', 'right', 'bottom', 'top', 'crop']);
+  // The lateral four and the switch. The depth pair is deliberately left alone: near and far are
+  // also the range every reading is graded against, so reverting them would move the colour.
+  const lateral = CROP_FACE_NAMES.filter((name) => name !== 'near' && name !== 'far');
+  params.reset([...lateral, 'crop']);
   requestRepaint();
   history.commit();
 });
@@ -10331,8 +10410,10 @@ const shell = shellElements({
   obsCustomSize: 'obsCustomSize',
   obsBrowserUrl: 'obsBrowserUrl',
   obsWebcamUrl: 'obsWebcamUrl',
+  obsKeyUrl: 'obsKeyUrl',
   obsCopyBrowser: 'obsCopyBrowser',
   obsCopyWebcam: 'obsCopyWebcam',
+  obsCopyKey: 'obsCopyKey',
   obsOpen: 'obsOpen',
   obsStatus: 'obsStatus',
   obsStatusText: 'obsStatusText',
@@ -10540,11 +10621,16 @@ async function refreshObsStatus() {
   try {
     const state = await (await fetch('/record/state')).json();
     const webcam = state?.webcam ?? {};
-    const n = (webcam.subscribers ?? []).length;
+    const key = state?.key ?? {};
+    // Both doors counted, because the dot is about whether anything is reading this machine and
+    // an OBS pulling only the keyed source is reading it.
+    const n = (webcam.subscribers ?? []).length + (key.subscribers ?? []).length;
     shell.obsStatus.classList.toggle('live', n > 0);
-    // A server with no colour camera is a third state and not a quiet kind of idle.
-    shell.obsStatusText.textContent = webcam.unavailable
-      ? webcam.unavailable
+    // A server with no colour camera is a third state and not a quiet kind of idle. Both doors
+    // fail on the same fact, so whichever of them says so is the reason.
+    const unavailable = webcam.unavailable ?? key.unavailable;
+    shell.obsStatusText.textContent = unavailable
+      ? unavailable
       : (n === 0
         ? 'idle - nothing is reading'
         : `streaming to ${n} ${n === 1 ? 'source' : 'sources'}`);
@@ -10574,6 +10660,7 @@ shell.obsDialog.addEventListener('close', stopObsStatusPoll);
 function paintObsDialog() {
   shell.obsBrowserUrl.value = new URL('/program', location.href).href;
   shell.obsWebcamUrl.value = new URL('/camera.mjpg', location.href).href;
+  shell.obsKeyUrl.value = new URL('/key', location.href).href;
   for (const option of shell.obsResolution.querySelectorAll('option[data-current]')) option.remove();
   if (![...shell.obsResolution.options].some((option) => option.value === progSizeEl.value)) {
     const option = document.createElement('option');
@@ -10619,19 +10706,36 @@ function sayObs(message) {
   shell.obsStatusText.textContent = message;
 }
 
-async function copyObsValue(input) {
+async function writeClipboard(value, fallbackInput = null) {
   try {
-    await navigator.clipboard.writeText(input.value);
-    sayObs('copied');
+    await navigator.clipboard.writeText(value);
+    return true;
   } catch {
-    input.select();
-    const copied = document.execCommand('copy');
-    sayObs(copied ? 'copied' : 'copy unavailable');
+    const input = fallbackInput ?? document.createElement('textarea');
+    const temporary = !fallbackInput;
+    if (temporary) {
+      input.value = value;
+      input.readOnly = true;
+      input.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+      document.body.appendChild(input);
+    }
+    let copied = false;
+    try {
+      input.select();
+      copied = document.execCommand('copy');
+    } catch { /* reported by the button or dialog that asked */ }
+    if (temporary) input.remove();
+    return copied;
   }
+}
+
+async function copyObsValue(input) {
+  sayObs(await writeClipboard(input.value, input) ? 'copied' : 'copy unavailable');
 }
 
 shell.obsCopyBrowser.addEventListener('click', () => copyObsValue(shell.obsBrowserUrl));
 shell.obsCopyWebcam.addEventListener('click', () => copyObsValue(shell.obsWebcamUrl));
+shell.obsCopyKey.addEventListener('click', () => copyObsValue(shell.obsKeyUrl));
 shell.obsOpen.addEventListener('click', () => {
   globalThis.open(shell.obsBrowserUrl.value, '_blank', 'noopener');
   sayObs('source opened');

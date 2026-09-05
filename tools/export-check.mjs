@@ -257,11 +257,11 @@ const MUTATIONS = {
     '  return 1.0 - smoothstep(0.0, max(1e-4, regionSoft * bufferHeight / 1080.0), sd);',
   ]] },
   // The lateral crop planes stop being metres in the room and become a fraction of the frame.
+  // Dividing the point by the scale is the same test as multiplying every face by it, and the
+  // faces are not reachable from here: they are uniforms the shared box reads.
   'crop-in-pixels': { file: 'web/cloud-shader.js', edits: [[
-    '  if (cropOn == 1.0 && (pos.x < cropL || pos.x > cropR || pos.y < cropB || pos.y > cropT)) {',
-    '  float cropScale = bufferHeight / 1080.0;\n'
-    + '  if (cropOn == 1.0 && (pos.x < cropL * cropScale || pos.x > cropR * cropScale\n'
-    + '   || pos.y < cropB * cropScale || pos.y > cropT * cropScale)) {',
+    '  if (outsideLateral(pos.xy)) {',
+    '  if (outsideLateral(pos.xy / (bufferHeight / 1080.0))) {',
   ]] },
   // The faint pass answers to the button alone, so a crop box left on puts the cut points into
   // the exported file.

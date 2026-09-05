@@ -42,6 +42,7 @@ Everything, to everyone who can route to the port:
 | the WebSocket | the live sensor feed and the recorder's controls |
 | the `/export` WebSocket | starts an ffmpeg process on the server for each render |
 | `GET /camera.mjpg` | the colour camera, live, as an MJPEG stream; opening it starts the encode |
+| `GET /key`, and the WebSocket `{key: true}` behind it | the colour camera keyed by depth, and the depth of every colour pixel — a floor plan of the room; opening it starts both encodes |
 
 The origin rule covers `/camera.mjpg` as it covers the mutating routes, and it buys only that
 a browser declaring a foreign origin is refused. An `<img>` tag, curl, ffmpeg, VLC and another

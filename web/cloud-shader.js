@@ -8,6 +8,8 @@
 // `web/point-cloud.js`, or three.js never writes it and the shader reads zero.
 // `test/cloud-shader.test.mjs` asks that of the assembled text rather than of this file.
 
+import { CROP_BOX_GLSL } from './crop-box.js';
+
 // Each entry frozen as well as the list, because two callers share one object and a segment
 // trimmed in place would move the look of one and the verdict of the other.
 const frozen = (entries) => Object.freeze(entries.map((e) => Object.freeze(e)));
@@ -120,7 +122,13 @@ vec3 unproject(vec2 pixel, float z) {
     -z
   );
 }
-
+` },
+    // The crop box's two tests, spliced from `web/crop-box.js` rather than written here, so the
+    // shader and the plan inset cannot come apart about which side of a face a point is on.
+    { text: CROP_BOX_GLSL },
+    // The blank line between them and `main` belongs to neither, so it is a segment of its own.
+    { text: '\n' },
+    { text: /* glsl */ `\
 void main() {
   ivec2 px = ivec2(position.xy);
 
@@ -224,7 +232,7 @@ void main() {
   // here, the lateral four are positions in the room and are not known until below. So
   // outsideCrop accumulates rather than being decided once. The early return is what keeps the
   // box free when nobody is looking at it - only a viewer with it on screen pays.
-  bool outsideCrop = cropOn == 1.0 && (z < nearClip || z > farClip);
+  bool outsideCrop = outsideDepthPair(z);
   if (outsideCrop && cropOutside <= 0.0) {
     gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
     gl_PointSize = 0.0;
@@ -236,7 +244,7 @@ void main() {
   // The other four faces of the same box, after the unprojection because a lateral plane is a
   // position in the room where the depth clip is a property of the sample. Metres, so a face
   // stays where it was put whatever the output size is. Tested on the undisplaced position.
-  if (cropOn == 1.0 && (pos.x < cropL || pos.x > cropR || pos.y < cropB || pos.y > cropT)) {
+  if (outsideLateral(pos.xy)) {
     if (cropOutside <= 0.0) {
       gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
       gl_PointSize = 0.0;

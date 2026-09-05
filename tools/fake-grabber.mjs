@@ -4,14 +4,18 @@
 //
 //   tools/fake-grabber.mjs --source captures/sample.knct --fps 60 --frames 40
 //   tools/fake-grabber.mjs --die-after 12      # exits, so the server respawns it
+//   tools/fake-grabber.mjs --hd --key          # type 3 and the keyed depth beside it
 
 import { appendFileSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { MessageParser, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, encodeMessage } from '../server/protocol.js';
+import { MessageParser, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, TYPE_KEY, encodeMessage } from '../server/protocol.js';
 // Read from where the band that reads it lives rather than copied: a second producer with its own
 // literal would go on stamping last year's generation into every take the suite plants.
 import { CAPTURE_FORMAT } from '../web/format.js';
+// The quantisation the page at /key inverts, so the fixture is built through the shipped one
+// rather than through a second copy of the arithmetic.
+import { encodeKeyPayload, quantiseDepthMm } from '../web/key-stream.js';
 
 const argv = process.argv.slice(2);
 
@@ -27,6 +31,7 @@ const ARGUMENTS = {
   '--tag': { value: true },
   '--emit-log': { value: true },
   '--hd': { value: false },
+  '--key': { value: false },
   '--no-color': { value: false },
   '--no-low-light': { value: false },
   '--pipeline': { value: true, ignored: true },
@@ -80,11 +85,19 @@ const EMIT_LOG = flag('--emit-log', '');
 // 84.1 degrees where the registered frustum sees 70.6, so an implementation that cheats by scaling
 // type 2 matches almost the whole picture and still cannot produce the margin.
 const HD = given('--hd');
+// The keyed depth output. Needs `--hd`, because `key on` implies the colour encode and the colour
+// this pairs with is the type 3 frame.
+const KEY = given('--key');
 const COLOR = !given('--no-color');
 const LOW_LIGHT = !given('--no-low-light');
 // 0.12 is wide enough to survive 4:2:0 chroma subsampling and JPEG ringing at the boundary, and
 // narrow enough that the middle is still most of the picture.
 const HD_MARGIN = 0.12;
+
+if (KEY && !HD) {
+  process.stderr.write('[fake-grabber] --key needs --hd: the keyed output pairs depth with the colour camera frame\n');
+  process.exit(1);
+}
 
 const parser = new MessageParser();
 const frames = [];
@@ -125,6 +138,41 @@ if (HD) {
     + `${margin}px magenta left margin and cyan right\n`);
 }
 
+// What the grabber would clip at, so the fixture quantises against the range a real one would send.
+// The sample's hello carries no `maxDepth`, and 9 metres is `native/grabber.cpp`'s own default.
+const RANGE_M = Number(sourceHello.maxDepth ?? 9);
+const KEY_INTRINSICS = { fx: 1081.37, fy: 1081.37, cx: 959.5, cy: 539.5, rangeM: RANGE_M };
+
+let keyFrame = null;
+if (KEY) {
+  const margin = Math.round(1920 * HD_MARGIN);
+  // A depth picture with something at every distance the page has to tell apart: two margins that
+  // land either side of a wall, a subject in front of it, and a hole that is no reading at all.
+  const grey = Buffer.alloc(1920 * 1080);
+  const put = (x0, y0, w, h, value) => {
+    for (let y = y0; y < y0 + h; y++) grey.fill(value, y * 1920 + x0, y * 1920 + x0 + w);
+  };
+  put(0, 0, 1920, 1080, quantiseDepthMm(3000, RANGE_M));
+  put(0, 0, margin, 1080, quantiseDepthMm(1000, RANGE_M));
+  put(1920 - margin, 0, margin, 1080, quantiseDepthMm(4000, RANGE_M));
+  put(760, 340, 400, 400, quantiseDepthMm(1500, RANGE_M));
+  put(940, 520, 40, 40, 0);
+  try {
+    // The mjpeg encoder has no greyscale profile, so it writes yuvj444p from a gray input and the
+    // luma comes back exactly - measured at q:v 2 on this fixture, every flat region byte for byte.
+    keyFrame = execFileSync('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-y',
+      '-f', 'rawvideo', '-pix_fmt', 'gray', '-s', '1920x1080', '-i', 'pipe:0',
+      '-pix_fmt', 'gray', '-frames:v', '1', '-q:v', '2', '-f', 'mjpeg', 'pipe:1',
+    ], { input: grey, maxBuffer: 64 * 1024 * 1024 });
+  } catch (err) {
+    process.stderr.write(`[fake-grabber] cannot build the key fixture frame: ${err.message}\n`);
+    process.exit(1);
+  }
+  process.stderr.write(`[fake-grabber] key fixture ready: ${keyFrame.length} bytes over ${RANGE_M}m, `
+    + `margins at 1.0m and 4.0m, a 3.0m wall, a 400x400 subject at 1.5m and a 40x40 hole\n`);
+}
+
 // `handleFrame` only reaches `pumpColorDecode` when a frame declares `colorBytes > 0`, so the
 // frames decide whether the colour path runs at all. Both edits are needed or nothing parses -
 // `server/capture.js` refuses a frame whose two declared lengths do not describe it. After the HD
@@ -142,6 +190,7 @@ if (!COLOR) {
     + `${frames[0].length} bytes each\n`);
 }
 let hdOn = false;
+let keyOn = false;
 
 // One command per line on stdin. `low-light` is accepted and ignored because there is no device
 // here to apply it to, and refusing it would reject a command the server legitimately sends.
@@ -166,6 +215,20 @@ process.stdin.on('data', (chunk) => {
       }
       hdOn = line === 'hd-color on';
       process.stderr.write(`[fake-grabber] hd colour ${hdOn ? 'on' : 'off'}\n`);
+    }
+    if (line === 'key on' || line === 'key off') {
+      // The same two refusals `hd-color` makes, for the same reason: the keyed output is the colour
+      // camera's own depth, so a grabber with no colour has nothing to key.
+      if (!COLOR) {
+        process.stderr.write('[fake-grabber] refusing key: colour is off on this grabber\n');
+        continue;
+      }
+      if (!KEY) {
+        process.stderr.write('[fake-grabber] refusing key: started without --key\n');
+        continue;
+      }
+      keyOn = line === 'key on';
+      process.stderr.write(`[fake-grabber] key ${keyOn ? 'on' : 'off'}\n`);
     }
   }
 });
@@ -222,9 +285,25 @@ const encodeHd = () => {
   return encodeMessage(TYPE_COLOR, payload);
 };
 
+const encodeKey = () => {
+  const payload = Buffer.from(encodeKeyPayload({
+    ts: origin + Math.round((n * 1000) / FPS),
+    colourTs: origin + Math.round((n * 1000) / FPS),
+    ...KEY_INTRINSICS,
+    jpeg: keyFrame,
+  }));
+  note(TYPE_KEY, payload, keyFrame);
+  return encodeMessage(TYPE_KEY, payload);
+};
+
 const emit = () => {
   const parts = [encode()];
-  if (hdOn && hdFrame) parts.push(encodeHd());
+  // `key on` implies the colour encode, the way the real grabber's does: type 3 flows whenever
+  // type 4 does, whether or not `hd-color` asked for it separately.
+  if ((hdOn || keyOn) && hdFrame) parts.push(encodeHd());
+  // After the colour it belongs to, because the server pairs a type 4 with the colour frame it is
+  // holding when the type 4 lands - and both carry the same stamp.
+  if (keyOn && keyFrame) parts.push(encodeKey());
   process.stdout.write(parts.length === 1 ? parts[0] : Buffer.concat(parts));
 };
 

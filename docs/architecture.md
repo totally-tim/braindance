@@ -55,6 +55,7 @@ they are what a page you merely visit cannot produce.
 | `server/jobs.js` | the render queue: jobs on disk, claimed by workers, one at a time |
 | `server/export.js` | raw RGBA frames off a WebSocket, straight into ffmpeg's stdin |
 | `server/webcam.js` | the colour camera's own 1920x1080 picture, as MJPEG for OBS |
+| `server/key-stream.js` | the keyed colour camera: each depth picture out with the colour frame it belongs to |
 | `server/protocol.js` | the wire format, and the `.knct` decoder specification |
 
 `fs.readFileSync` throws `ERR_FS_FILE_TOO_LARGE` above 2 GiB, so everything reading a capture
@@ -71,6 +72,7 @@ writes the bytes and `server/library.js` streams a whole file through a hash.
 | `/library` | `web/library.html` | every take this machine holds or can pull down off the node |
 | `/projects` | `web/projects.html` | the landing page: every edit, newest write first |
 | `/program` | `web/index.html` | the program output, which OBS opens as a browser source |
+| `/key` | `web/key.html` | the colour camera with the room cut away on depth, which OBS opens as a browser source |
 
 **The recorder** waits for the sensor's hello, then streams frames to disk in the wire's own
 framing, so a capture holds the type 1 and type 2 messages as the grabber framed them. The one edit
@@ -401,7 +403,23 @@ type 2  frame  [u32 depthBytes][u32 colorBytes][u64 timestampMs]
                [JPEG of the registered 512x424 colour image]
 type 3  colour [u64 timestampMs][JPEG of the native 1920x1080 colour image]
                Live only, and only while something is subscribed.
+type 4  key    [u64 timestampMs][u64 colourTs][f32 fx][f32 fy][f32 cx][f32 cy][f32 rangeM]
+               [greyscale JPEG 1920x1080: depth per colour pixel, 0 = no reading,
+                else metres = v / 255 * rangeM]
+               Live only, and only while a /key page is attached. Asking for it
+               turns the colour on with it.
 ```
+
+A pending encoder job holds an immutable colour image with its depth. Replacing pending
+work drops the whole job. A held colour frame keeps its original identity when depth
+advances; the server sends a pair only when the declared colour identity matches the
+encoded webcam image. The key scale is capped at 65.535 metres, the capture's u16 limit.
+The live header has no backward reader; the grabber and server must run the same build.
+
+The operator registry owns output framing and advertises its full state whenever its
+socket connects. The server relays it without maintaining another registry. The keyed
+page clears to transparent on an outage, disconnection, failed decode, or one second
+without a new colour identity. Clearing also invalidates any decode still in progress.
 
 Everything is little-endian, one message after another to EOF, and `MAX_PAYLOAD_BYTES` is
 8,388,608: a longer declared payload means the stream has desynced. A short final payload is a take
@@ -428,8 +446,14 @@ whether the colour camera was run long-exposure.
 once per process, so the wire's value is when the grabber came up and would date a session's takes
 alike. `stampHello` replaces it, so a take's hello carries when that take began.
 
-**Type 3 never reaches a file.** The recorder drops the colour message, because a third message
-type would move every take's content hash, the key the library joins two machines on.
+**Types 3 and 4 are live-only, so "byte-identical" means identical to the type 1 and 2
+subsequence.** Both are dropped at the recorder, because a third message type in the file would
+move every take's content hash, which is the key the library joins two machines on. The
+intrinsics ride the key message rather than the hello for the same reason: no take can use them,
+so no take carries them. `web/key-stream.js` is the one spelling of the quantisation and of the
+pair the server pushes to a key client over the WebSocket, and a socket is a monitor or a key
+client, never both, which is what keeps the binary channel free of a discriminator.
+`vcam-check --mutate hd-reaches-recorder` keeps that true.
 
 Measured on a sensor capture, and which take is not recorded: 434,176 bytes of depth plus a
 49-59KB JPEG, 486KB per frame. At 30fps that is 14.6MB/s per browser, right at the practical

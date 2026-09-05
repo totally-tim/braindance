@@ -11,13 +11,9 @@ import * as THREE from 'three';
 import { DEPTH_H, DEPTH_W, POINTS } from './format.js';
 import { scene, PROGRAM_FOV } from './scene.js';
 import { projectionScaleForVerticalFov } from './lens.js';
-
-// The depth pair's defaults, named once because three things have to agree about them: the two
-// uniforms in the table below, the registry entries that overwrite them at boot, and
-// `duotoneSpan`, whose default is the width of the range they describe. The uniforms carried a
-// different pair once, and the registry won at boot, so the shader's neighbours read as a lie.
-export const CLIP_NEAR_DEFAULT = 0.05;
-export const CLIP_FAR_DEFAULT = 6;
+import {
+  CLIP_FAR_DEFAULT, CLIP_NEAR_DEFAULT, CROP_LIMIT, outsideCropBox,
+} from './crop-box.js';
 
 // The selected cloud as seven live bindings, read from `web/main.js` for the rest of the
 // program's life and repointed by the select below. Two have an entry in
@@ -321,12 +317,10 @@ export function setAdditive(on) {
 }
 
 /**
- * How far out the four lateral crop planes reach, in metres. It has to clear everything the
- * sensor can see at the furthest depth the near/far sliders allow. The widest sample is the
- * frame corner furthest from the principal point, so the half-extent at depth z is
+ * How far out the four lateral crop planes have to reach for this lens, in metres. The widest
+ * sample is the frame corner furthest from the principal point, so the half-extent at depth z is
  * `max(c, N - c) / f * z` - an off-centre principal point reaches further on one side.
  */
-export const CROP_LIMIT = 7;
 export const cropReach = (maxDepth = 9.5) => {
   const { x: fx, y: fy } = uniforms.focal.value;
   const { x: cx, y: cy } = uniforms.center.value;
@@ -338,14 +332,20 @@ export const cropReach = (maxDepth = 9.5) => {
 };
 
 /**
- * Whether a sensor-space sample is on the wrong side of the crop box. The plan inset in
- * `web/main.js` asks this rather than spelling the six comparisons out again, because a second
- * spelling is a second place for the next face to be forgotten. Sensor metres and before the
+ * Whether a sensor-space sample is on the wrong side of the crop box, reading the faces the
+ * shader is drawing with. The plan inset in `web/main.js` asks this rather than spelling the six
+ * comparisons out again; `outsideCropBox` is where they are spelled. Sensor metres and before the
  * levelling rotation, matching the shader; `depth` is positive metres from the sensor.
  */
 export function croppedOut(x, y, depth) {
-  if (uniforms.cropOn.value !== 1) return false;
-  if (depth < uniforms.nearClip.value || depth > uniforms.farClip.value) return true;
-  return x < uniforms.cropL.value || x > uniforms.cropR.value
-    || y < uniforms.cropB.value || y > uniforms.cropT.value;
+  return outsideCropBox({
+    crop: uniforms.cropOn.value === 1,
+    near: uniforms.nearClip.value,
+    far: uniforms.farClip.value,
+    left: uniforms.cropL.value,
+    right: uniforms.cropR.value,
+    bottom: uniforms.cropB.value,
+    top: uniforms.cropT.value,
+    // The predicate reads the shader's convention, where the camera looks down -z.
+  }, { x, y, z: -depth });
 }

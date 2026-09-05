@@ -593,9 +593,38 @@ one-sided "it changed" row passes on any change at all.
   so the cloud is a reflection of the room.
 - **`plan-x-not-mirrored`** — the sign is fixed in the shader and the top-down keeps the old one.
 
+## `hd-encoder-check`
+
+The native pairing under encoder backlog, the key range, held colour and RGBX. No sensor, no
+libfreenect2 build: the tool extracts the `HdEncoder` class out of `native/grabber.cpp` with the
+output sink in `test/fixtures/hd-encoder.cpp`, links the installed TurboJPEG and reads both
+identities and decoded pixels. Proves encoder correctness, not sensor throughput.
+
+```
+node tools/hd-encoder-check.mjs
+```
+
+| needs | |
+| --- | --- |
+| toolchain | a C++ compiler and TurboJPEG headers and library; without them it exits 2 naming what is missing |
+| fixture | none: the sink blocks the first colour write while the producer submits the next |
+
+The sink's gate is the whole of the backlog claim: colour 2 is submitted while colour 1's write is
+held, so a build that borrows the newest colour for the depth already waiting misses on identity
+and on decoded pixels alike. Exit 2 means it did not finish; a mutation with zero failed assertions
+is NOT CAUGHT even though it exits 1.
+
+- **`pair-borrows-newer-colour`** — the depth takes the newest colour while its own is still
+  encoding, so the backlog identity and decoded-pixel rows are what fail.
+- **`key-range-unbounded`** — the key scale stops being capped at 65.535 metres, and the bounded
+  range and empty out-of-range rows fail.
+- **`rgbx-read-as-bgrx`** — the packed format is read BGRX, so the red/blue row swaps.
+- **`held-colour-gets-depth-time`** — a held colour is stamped with the depth frame's time, and
+  the slow-colour identity row fails.
+
 ## `vcam-check`
 
-The webcam output serves the colour camera, and the take never learns about it.
+The OBS output serves the colour camera and the keyed one, and the take never learns about either.
 
 ```
 node tools/vcam-check.mjs
@@ -605,13 +634,15 @@ node tools/vcam-check.mjs
 | --- | --- |
 | port | 8361 free; `--port` moves it |
 | fixture | `captures/sample.knct`, which `tools/fake-grabber.mjs --hd` streams; without it the tool exits 2 naming the path |
-| browser | a GPU browser for section 5; `--no-browser` drops it |
+| browser | a GPU browser for sections 5 and 9; `--no-browser` drops them and says so |
 | binaries | ffmpeg, which builds and decodes the fixture |
-| network | a non-internal IPv4 for section 6, or it exits 2 as unproven |
+| network | a non-internal IPv4 for sections 6 and 7, or it exits 2 as unproven |
 
 The discriminator is geometric rather than perceptual: the colour camera sees 84.1 degrees where
 the registered frustum sees 70.6, and the fixture plants a magenta left margin and a cyan right one
-in the difference, which no upscale can invent.
+in the difference, which no upscale can invent. The keyed page cuts that same frame by the crop box
+against a live depth in colour-camera space, and sections 7, 8 and 9 hold the key's wire, its bytes
+and its picture the way sections 1 to 6 hold the webcam's.
 
 - **`pose-skips-the-registry`** — the camera pose in a socket patch bypasses the registry, so four
   finite numbers are drawn as a rotation.
@@ -625,6 +656,48 @@ in the difference, which no upscale can invent.
   message type and its content hash moves.
 - **`refusal-ignores-webcam`** — the refusal loses its webcam clause, so a take starts while a
   full-rate MJPEG pull competes with the depth packets.
+- **`key-runs-unasked`** — the key encode runs before anybody asks, on the thread the colour
+  camera already holds, and section 7's first row asks while no client exists.
+- **`key-never-asks`** — the socket attaches and is acknowledged, but the demand edge never
+  reaches the grabber, so the writer, pair and drawing preconditions all fail.
+- **`unavailable-key-costs-the-take`** — a key subscription on a link that never delivers vanishes
+  from the refusal, and a depth-only recording is its falsifier through the recording route.
+- **`depth-only-take-gets-live-data`** — a live message lands in a take that was asked for depth
+  alone, and the file census row in section 7 is the catch.
+- **`key-recovery-is-not-announced`** — the source recovery row in section 9 never fires.
+- **`key-outage-keeps-picture`** — the clear on outage is gone, so the last framebuffer stays up
+  where it should be transparent.
+- **`key-decode-survives-outage`** — an obsolete decode is allowed to finish, and the late-decode
+  transparency row in section 9 fails.
+- **`operator-reconnect-keeps-old-framing`** — the operator socket stops advertising on connect,
+  so a reconnect or reload keeps the framing it opened with.
+- **`pair-serves-stale-depth`** — the depth stamp is one frame behind the colour it is paired with,
+  the one-frame silhouette lag at the wire seam, and only section 7's pair-stamp row sees it.
+- **`key-linger-never-fires`** — the last client goes away and the key stream stays wanted
+  forever; held on `KeyStream.detach` rather than the shared `OnDemand` class, so the webcam
+  linger rows stay a control.
+- **`key-upscales-grid`** — the depth the page receives is the registered grid rescaled to 1080p,
+  so the outer field the discriminator is planted in is gone and the page rows that read it fail.
+- **`key-reencodes-in-flight`** — the served depth JPEG is re-encoded at the same size and values,
+  so every geometric row passes and only the writer-log comparison fails.
+- **`key-reaches-recorder`** — a type 4 lands in the recorder, and section 3's existing row is
+  what permits only hello and type 2 frames in a take.
+- **`refusal-ignores-key`** — the remote key stream vanishes from the refusal table, and the loopback
+  row stays green, which is what separates this from the webcam's.
+- **`key-writes-opaque`** — an opaque clear turns every rejected pixel black; the mask is still
+  right, so only the page's transparency probes catch it.
+- **`key-ignores-crop-faces`** — the picture stops reading the switch and all six faces, and the
+  rows drive the faces one at a time so the default box containing the fixture cannot save it.
+- **`key-tests-four-faces`** — only the four lateral faces keep their test, so the near and far
+  rows carry the missing depth pair while the lateral cut stays green.
+- **`key-tests-after-levelling`** — the crop test runs after a levelling rotation instead of in the
+  sensor's axes, and section 9's bit-identity row after a 14-degree tilt catches it.
+- **`zero-depth-is-nearest`** — a missing reading is treated as the near face rather than as no
+  geometry, and the zero-depth hole row is the only one that fails.
+
+The keyed runtime arms also drive an unavailable non-loopback subscription through the recording
+route and inspect the depth-only file it writes; the browser arms reconnect and reload the operator,
+switch colour off and on, and release a deliberately delayed decode after the outage.
 
 ## `guard-check`
 

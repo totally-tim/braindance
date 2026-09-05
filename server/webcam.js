@@ -1,12 +1,10 @@
 // The colour camera's own 1920x1080 picture, served as MJPEG so OBS can open it as a source
 // URL. A type 2 frame carries the registered colour instead; nothing here decodes or crops.
 
+import { OnDemand } from './on-demand.js';
+
 // Appears in the response header and between every part, and the two have to agree.
 const BOUNDARY = 'braindanceframe';
-
-// How long the colour stream stays up after the last subscriber leaves. OBS retries a dead
-// source hard, and without the linger every reconnect toggles the grabber's encoder.
-const LINGER_MS = 6000;
 
 // Drop-to-latest. MJPEG has no divisor or stride to negotiate, so this is the webcam's only
 // backpressure control - a queue would push back through the grabber's pipe and cost the take.
@@ -16,12 +14,10 @@ export class Webcam {
   // `request` asks the grabber to start or stop encoding. Called only on a change, and
   // re-called by `reassert` after a restart, because a new grabber's encoder is off.
   constructor({ request }) {
-    this.request = request;
     this.subscribers = new Set();
     this.latest = null;
     this.latestAt = 0;
-    this.wanted = false;
-    this.lingerTimer = null;
+    this.demand = new OnDemand({ request, count: () => this.subscribers.size });
     // Why the picture is not available, or null when it is; served to whoever asked. It asks
     // whether there is a colour camera, never whether a frame has arrived - the grabber encodes
     // only while subscribed, so refusing on "no frame yet" deadlocks the first subscriber.
@@ -45,7 +41,7 @@ export class Webcam {
         went = true;
       }
     }
-    if (went) this.#settle();
+    if (went) this.demand.settle();
   }
 
   get count() {
@@ -82,10 +78,8 @@ export class Webcam {
     this.unavailable = null;
   }
 
-  // Re-ask the grabber for what the subscribers already wanted: a restarted grabber has its
-  // encoder off and has never heard of a subscriber that attached to the old one.
   reassert() {
-    if (this.wanted) this.request(true);
+    this.demand.reassert();
   }
 
   // The MJPEG route. The origin rule belongs to the dispatcher, which asks it of every route
@@ -110,38 +104,14 @@ export class Webcam {
     const drop = () => {
       if (!this.subscribers.delete(sub)) return;
       console.log(`[webcam] subscriber gone (${this.subscribers.size} left)`);
-      this.#settle();
+      this.demand.settle();
     };
     res.on('close', drop);
     res.on('error', drop);
 
-    this.#settle();
+    this.demand.settle();
     // The frame in hand rather than the next one, so a source connecting between frames paints now.
     if (this.latest) this.#push(sub);
-  }
-
-  /** Turn the grabber's encoder on or off to match what is attached, with the linger. */
-  #settle() {
-    const want = this.subscribers.size > 0;
-    if (want) {
-      if (this.lingerTimer) {
-        clearTimeout(this.lingerTimer);
-        this.lingerTimer = null;
-      }
-      if (!this.wanted) {
-        this.wanted = true;
-        this.request(true);
-      }
-      return;
-    }
-    if (!this.wanted || this.lingerTimer) return;
-    this.lingerTimer = setTimeout(() => {
-      this.lingerTimer = null;
-      // Re-checked: a subscriber may have arrived while this timer was pending.
-      if (this.subscribers.size > 0) return;
-      this.wanted = false;
-      this.request(false);
-    }, LINGER_MS);
   }
 
   #push(sub) {

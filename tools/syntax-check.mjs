@@ -22,6 +22,13 @@ const MUTATIONS = {
     edits: [['export const TYPE_COLOR = 3;', 'export const TYPE_COLOR = 4;']],
   },
 
+  'key-levels-drift': {
+    file: 'web/key-stream.js',
+    edits: [['export const KEY_DEPTH_LEVELS = 255;', 'export const KEY_DEPTH_LEVELS = 254;']],
+    fails: 'and the two declarations of the keyed output\'s depth quantisation disagreeing, which '
+      + 'puts every subject at the wrong distance in a picture that still looks like one',
+  },
+
   'shell-id-renamed': {
     file: 'web/index.html',
     edits: [['id="menuCameraReset"', 'id="menuCameraResetRenamed"']],
@@ -505,6 +512,23 @@ const withoutStringBodies = (src) => {
     } else {
       console.log(`  grid/   ${grid.map(({ fromJs }) => fromJs[1]).join('x')} in both languages`);
     }
+
+    // The grabber quantises the keyed output's depth into a byte and the page at /key inverts it,
+    // so the level count is a third declaration in C++. Drift is every subject at the wrong
+    // distance in a picture that still looks like a picture, which is a fault nobody sees.
+    const levelsJs = sourceWithMutation('web/key-stream.js')
+      ?.match(/^export const KEY_DEPTH_LEVELS = (\d+);/m);
+    const levelsCpp = grabber.match(/^static const uint32_t KEY_DEPTH_LEVELS = (\d+);/m);
+    if (!levelsJs || !levelsCpp) {
+      fail(`KEY_DEPTH_LEVELS is not declared where this looked: ${levelsJs ? '' : 'web/key-stream.js '}${levelsCpp ? '' : 'native/grabber.cpp'}`.trim()
+        + ' - one of the two declarations moved, and an undeclared constant cannot be compared with anything');
+    } else if (levelsJs[1] !== levelsCpp[1]) {
+      fail(`KEY_DEPTH_LEVELS is ${levelsJs[1]} in web/key-stream.js and ${levelsCpp[1]} in native/grabber.cpp - `
+        + 'the grabber would quantise against one scale and the keyed page invert it against another, '
+        + 'so every reading comes back at the wrong distance');
+    } else {
+      console.log(`  key/    KEY_DEPTH_LEVELS is ${levelsJs[1]} in both languages`);
+    }
   }
 }
 
@@ -569,7 +593,18 @@ const declaredMutations = new Map();
   const isChunk = (file) => /^effects-builtin\/[^/]+\/[^/]+\.glsl$/.test(file);
   const buildsTheProgram = (file) => isSpine(file) || file === ASSEMBLER || isChunk(file);
 
-  const moduleOf = (source) => import(`data:text/javascript;base64,${Buffer.from(source, 'utf8').toString('base64')}`);
+  // A data: URL carries no base to resolve a relative import against, so every `./x.js` a spine
+  // or the assembler names is rewritten to the file URL it points at before the text is handed to
+  // the loader. Only the specifiers move; the source under test is otherwise the staged text. An
+  // import reached this way is read off disk, so a mutation staged against one would not be seen.
+  const moduleOf = (source, file) => {
+    const base = pathToFileURL(join(ROOT, file));
+    const absolute = source.replace(
+      /(^\s*(?:import|export)\b[^;'"]*?\bfrom\s*)'(\.[^']*)'/gm,
+      (_, head, spec) => `${head}'${new URL(spec, base).href}'`,
+    );
+    return import(`data:text/javascript;base64,${Buffer.from(absolute, 'utf8').toString('base64')}`);
+  };
   // A string replacement, not a pattern one: `String.replace` reads `$&` out of a replacement.
   const swap = (body, from, to) => body.replace(from, () => to);
 
@@ -596,9 +631,9 @@ const declaredMutations = new Map();
   const assembleStaged = async (staged = {}) => {
     const spines = {};
     for (const [name, source] of Object.entries(spineSources)) {
-      spines[name] = (await moduleOf(staged.spines?.[name] ?? source))[SPINE_EXPORT[name]];
+      spines[name] = (await moduleOf(staged.spines?.[name] ?? source, SPINES[name]))[SPINE_EXPORT[name]];
     }
-    const { assembleShaders } = await moduleOf(staged.assembler ?? assemblerSource);
+    const { assembleShaders } = await moduleOf(staged.assembler ?? assemblerSource, ASSEMBLER);
     const packages = basePackages.map((p) => ({ ...p, chunks: { ...p.chunks } }));
     if (staged.chunk) {
       const [, id, name] = staged.chunk.file.split('/');
