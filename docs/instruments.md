@@ -72,6 +72,18 @@ not a control. And its ffmpeg fallback means an ffmpeg that failed to run prints
 so what discriminates a real catch is the *pair*: NOT CAUGHT against the old row, `caught, as
 required` against the new one.
 
+### Equal timestamps do not prove the same images were paired
+
+A deterministic encoder test blocks the first colour write, then submits the next colour
+before releasing it. The former independent slots emitted colour 2 before depth 1.
+`hd-encoder-check` also decodes distinct colours and depths: an implementation that merely
+changes their timestamps still fails the image assertion. Held colour is a separate arm,
+because its timestamp must remain older than the next depth frame's timestamp.
+
+The browser check waits for a frame after the new crop state arrives; a frame counted
+before that arrival can still show the old crop. Its decode gate decides whether to
+hold at entry, because deciding after an `await` can hold only half of a pair.
+
 ### A defect that moves a word rather than removing it, and two rows that asked whether it was there
 
 `library-check`'s colour-toggle-during-the-backoff section asserts that the *next* genuine

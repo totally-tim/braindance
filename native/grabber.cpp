@@ -10,7 +10,7 @@
 //                    [JPEG of the registered 512x424 colour image]
 //   type 3 (colour): [u64 timestampMs][JPEG of the native 1920x1080 colour image]
 //                    Only while the server has asked for it - see `hd-color` below.
-//   type 4 (key)   : [u64 timestampMs][f32 fx][f32 fy][f32 cx][f32 cy][f32 rangeM]
+//   type 4 (key)   : [u64 timestampMs][u64 colourTs][f32 fx][f32 fy][f32 cx][f32 cy][f32 rangeM]
 //                    [greyscale JPEG of the 1920x1080 depth mapped into the colour frame,
 //                    0 = no reading, level n = n/KEY_DEPTH_LEVELS * rangeM metres]
 //                    Only while the server has asked for it - see `key` below.
@@ -24,6 +24,7 @@
 #include <cmath>
 #include <string>
 #include <vector>
+#include <memory>
 #include <chrono>
 #include <atomic>
 #include <condition_variable>
@@ -146,22 +147,7 @@ static uint64_t now_us() {
   return (uint64_t)duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
-/**
- * The live outputs' producer: one thread draining two drop-to-latest slots off the frame
- * loop, the colour camera's own 1920x1080 picture and the depth mapped into that same frame.
- *
- * Type 2 carries the *registered* colour, which wears the depth camera's frustum and is
- * punched through with holes wherever the depth solve returned nothing - a texture for a
- * point cloud rather than a picture of a room, so a webcam has to start from the native
- * frame. Its own thread because the encode is 5.50ms against a 7.1ms serial loop, and it
- * copies rather than borrows because the `Frame` belongs to libfreenect2's listener and is
- * released when the next colour frame arrives. A frame arriving while the encoder is busy
- * overwrites the pending one, since a queue would grow latency on a live output.
- *
- * The key slot is the same bargain for `bigdepth`: quantised to KEY_DEPTH_LEVELS and encoded
- * as a greyscale JPEG. Colour drains first when both are pending, because a key arriving
- * without the picture it mattes is nothing.
- */
+// One pending job owns its colour and depth together; overwriting it drops the whole pair.
 class HdEncoder {
 public:
   explicit HdEncoder(int quality) : quality_(quality) {}
@@ -185,7 +171,7 @@ public:
   // The fixed half of every type 4 header, and the range its quantiser reads back as full
   // scale. Set before start(), so the encoder thread never reads it mid-write.
   void setKeyHeader(float fx, float fy, float cx, float cy, float rangeM) {
-    keyFx_ = fx; keyFy_ = fy; keyCx_ = cx; keyCy_ = cy; keyRangeM_ = rangeM;
+    keyFx_ = fx; keyFy_ = fy; keyCx_ = cx; keyCy_ = cy; keyRangeM_ = std::fmin(rangeM, 65.535f);
   }
 
   bool enabled() const { return enabled_.load(std::memory_order_relaxed); }
@@ -200,26 +186,38 @@ public:
   uint64_t keyEncodeUs() const { return keyEncodeUs_.load(std::memory_order_relaxed); }
   uint64_t keyDropped() const { return keyDropped_.load(std::memory_order_relaxed); }
 
-  /** Called on the frame loop, and the only thing it costs is the copy. */
-  void submitColour(const uint8_t *bgrx, size_t bytes, uint64_t ts) {
+  // Copy a new colour once; pending depth keeps an immutable reference to that exact image.
+  void submitColour(const uint8_t *pixels, size_t bytes, uint64_t ts, int format = TJPF_BGRX) {
     {
       std::lock_guard<std::mutex> lock(m_);
-      if (hasColour_) dropped_.fetch_add(1, std::memory_order_relaxed);
-      colour_.assign(bgrx, bgrx + bytes);
-      colourTs_ = ts;
-      hasColour_ = true;
+      if (!pixels || bytes != (size_t)CW * CH * 4 || (format != TJPF_BGRX && format != TJPF_RGBX)) {
+        latestColour_.reset();
+        pendingColour_.reset();
+        pendingColourIsNew_ = false;
+        depth_.clear();
+        return;
+      }
+      if (pendingColourIsNew_) dropped_.fetch_add(1, std::memory_order_relaxed);
+      if (!depth_.empty()) keyDropped_.fetch_add(1, std::memory_order_relaxed);
+      latestColour_ = std::make_shared<Colour>();
+      latestColour_->pixels.assign(pixels, pixels + bytes);
+      latestColour_->ts = ts;
+      latestColour_->format = format;
+      pendingColour_ = latestColour_;
+      pendingColourIsNew_ = true;
+      depth_.clear();
     }
     cv_.notify_one();
   }
 
-  /** The same, for the float millimetres Registration::apply left in bigdepth. */
   void submitDepth(const float *rows, size_t floats, uint64_t ts) {
     {
       std::lock_guard<std::mutex> lock(m_);
-      if (hasDepth_) keyDropped_.fetch_add(1, std::memory_order_relaxed);
+      if (!latestColour_ || !rows || floats != (size_t)CW * CH) return;
+      if (!depth_.empty()) keyDropped_.fetch_add(1, std::memory_order_relaxed);
+      pendingColour_ = latestColour_;
       depth_.assign(rows, rows + floats);
       depthTs_ = ts;
-      hasDepth_ = true;
     }
     cv_.notify_one();
   }
@@ -236,7 +234,8 @@ private:
       if (keyJpeg) tjDestroy(keyJpeg);
       return;
     }
-    std::vector<uint8_t> colourWork, grey, payload;
+    std::vector<uint8_t> grey, payload;
+    std::shared_ptr<Colour> encodedColour;
     std::vector<float> depthWork;
     unsigned char *colourBuf = nullptr;
     unsigned char *keyBuf = nullptr;
@@ -249,27 +248,27 @@ private:
 
     for (;;) {
       uint64_t ts;
-      bool isColour;
+      std::shared_ptr<Colour> colourWork;
+      depthWork.clear();
       {
         std::unique_lock<std::mutex> lock(m_);
-        cv_.wait(lock, [this] { return hasColour_ || hasDepth_ || stop_; });
+        cv_.wait(lock, [this] { return pendingColour_ || stop_; });
         if (stop_) break;
-        isColour = hasColour_;
-        if (isColour) {
-          colourWork.swap(colour_);
-          ts = colourTs_;
-          hasColour_ = false;
-        } else {
-          depthWork.swap(depth_);
-          ts = depthTs_;
-          hasDepth_ = false;
-        }
+        colourWork.swap(pendingColour_);
+        pendingColourIsNew_ = false;
+        depthWork.swap(depth_);
+        ts = depthTs_;
       }
 
-      const bool alive = isColour
-        ? encodeColour(colourJpeg, colourWork, ts, payload, &colourBuf, &colourSize)
-        : encodeKey(keyJpeg, depthWork, ts, grey, payload, &keyBuf, &keySize);
-      if (!alive) break;
+      if (encodedColour != colourWork) {
+        const uint64_t before = sent();
+        if (!encodeColour(colourJpeg, colourWork->pixels, colourWork->ts, colourWork->format,
+                          payload, &colourBuf, &colourSize)) break;
+        if (sent() == before) continue;
+        encodedColour = colourWork;
+      }
+      if (!depthWork.empty()
+          && !encodeKey(keyJpeg, depthWork, ts, colourWork->ts, grey, payload, &keyBuf, &keySize)) break;
     }
 
     if (colourBuf) tjFree(colourBuf);
@@ -279,10 +278,10 @@ private:
   }
 
   /** Encodes and writes one type 3 message. False means stdout is gone. */
-  bool encodeColour(tjhandle jpeg, const std::vector<uint8_t> &bgrx, uint64_t ts,
+  bool encodeColour(tjhandle jpeg, const std::vector<uint8_t> &pixels, uint64_t ts, int format,
                     std::vector<uint8_t> &payload, unsigned char **buf, unsigned long *size) {
     const uint64_t t0 = now_us();
-    if (tjCompress2(jpeg, bgrx.data(), CW, 0, CH, TJPF_BGRX, buf, size,
+    if (tjCompress2(jpeg, pixels.data(), CW, 0, CH, format, buf, size,
                     TJSAMP_420, quality_, TJFLAG_FASTDCT) != 0) {
       std::fprintf(stderr, "[grabber] hd colour encode failed: %s\n", tjGetErrorStr());
       return true;
@@ -298,7 +297,7 @@ private:
   }
 
   /** Encodes and writes one type 4 message. False means stdout is gone. */
-  bool encodeKey(tjhandle jpeg, const std::vector<float> &mm, uint64_t ts,
+  bool encodeKey(tjhandle jpeg, const std::vector<float> &mm, uint64_t ts, uint64_t colourTs,
                  std::vector<uint8_t> &grey, std::vector<uint8_t> &payload,
                  unsigned char **buf, unsigned long *size) {
     const uint64_t t0 = now_us();
@@ -310,9 +309,10 @@ private:
     }
     keyEncodeUs_.fetch_add(now_us() - t0, std::memory_order_relaxed);
 
-    payload.resize(28 + (size_t)*size);
+    payload.resize(36 + (size_t)*size);
     uint8_t *p = payload.data();
     std::memcpy(p, &ts, 8);         p += 8;
+    std::memcpy(p, &colourTs, 8);   p += 8;
     std::memcpy(p, &keyFx_, 4);     p += 4;
     std::memcpy(p, &keyFy_, 4);     p += 4;
     std::memcpy(p, &keyCx_, 4);     p += 4;
@@ -348,12 +348,15 @@ private:
   std::thread thread_;
   std::mutex m_;
   std::condition_variable cv_;
-  std::vector<uint8_t> colour_;
+  struct Colour {
+    std::vector<uint8_t> pixels;
+    uint64_t ts;
+    int format;
+  };
+  std::shared_ptr<Colour> latestColour_, pendingColour_;
+  bool pendingColourIsNew_ = false;
   std::vector<float> depth_;
-  uint64_t colourTs_ = 0;
   uint64_t depthTs_ = 0;
-  bool hasColour_ = false;
-  bool hasDepth_ = false;
   bool stop_ = false;
   float keyFx_ = 0.0f, keyFy_ = 0.0f, keyCx_ = 0.0f, keyCy_ = 0.0f, keyRangeM_ = 0.0f;
   std::atomic<bool> enabled_{false};
@@ -799,34 +802,28 @@ int main(int argc, char **argv) {
     libfreenect2::Frame *depth = depthFrames[libfreenect2::Frame::Depth];
     libfreenect2::Frame *rgb = haveColor ? colorFrames[libfreenect2::Frame::Color] : nullptr;
 
-    // One stamp for both live outputs, so a key and the colour frame it mattes carry the
-    // same time.
+    // Depth keeps its own time when low light reuses an older colour frame.
     const uint64_t iterTs = now_ms();
 
-    // The webcam's picture, handed off before registration because nothing it needs happens
-    // downstream. Only on a new colour frame, or a stationary webcam would be billed for 30fps
-    // of identical JPEGs. And above the bad-depth refusal, because the two frames fail
-    // independently: below it, a healthy colour frame was lost to a failed depth readback.
-    // A key needs it too, so asking for one turns this on.
+    // Copy only new colour frames, including when the depth readback below fails.
+    const bool hdColourValid = rgb && rgb->data && rgb->status == 0
+      && (int)rgb->width == CW && (int)rgb->height == CH && rgb->bytes_per_pixel == 4
+      && (rgb->format == libfreenect2::Frame::BGRX || rgb->format == libfreenect2::Frame::RGBX);
+    if (!hdColourValid) hdEncoder.submitColour(nullptr, 0, iterTs);
     uint64_t tHdStart = now_us();
     uint64_t tHdDone = tHdStart;
     if (newColor && rgb && (hdEncoder.enabled() || hdEncoder.keyEnabled())) {
-      // Checked rather than assumed: a build whose JPEG decoder produced RGBX would hand the
-      // webcam a picture with red and blue swapped, which looks like a grading choice.
-      if (rgb->format != libfreenect2::Frame::BGRX) {
+      if (!hdColourValid) {
         if (!hdFormatWarned) {
-          std::fprintf(stderr, "[grabber] hd colour off: the colour decoder produced format %d, not BGRX\n",
-                       (int)rgb->format);
-          hdFormatWarned = true;
-        }
-      } else if ((int)rgb->width != CW || (int)rgb->height != CH) {
-        if (!hdFormatWarned) {
-          std::fprintf(stderr, "[grabber] hd colour and key off: the colour frame is %dx%d, not %dx%d\n",
-                       (int)rgb->width, (int)rgb->height, CW, CH);
+          std::fprintf(stderr, "[grabber] hd colour and key off: unsupported colour frame "
+                       "(%dx%d, %d bytes per pixel, format %d, status %d)\n",
+                       (int)rgb->width, (int)rgb->height, (int)rgb->bytes_per_pixel,
+                       (int)rgb->format, (int)rgb->status);
           hdFormatWarned = true;
         }
       } else {
-        hdEncoder.submitColour((const uint8_t *)rgb->data, (size_t)CW * CH * 4, iterTs);
+        hdEncoder.submitColour((const uint8_t *)rgb->data, (size_t)CW * CH * 4, iterTs,
+          rgb->format == libfreenect2::Frame::RGBX ? TJPF_RGBX : TJPF_BGRX);
       }
       tHdDone = now_us();
     }
@@ -879,8 +876,7 @@ int main(int argc, char **argv) {
       registration.apply(rgb, depth, &undistorted, &registered, true, &bigdepth, colorDepthMap.data());
       // apply() returns having touched nothing unless the colour frame is exactly 1920x1080x4,
       // so a key taken past that check would carry the previous frame's depth as this one's.
-      if (hdEncoder.keyEnabled() && (int)rgb->width == CW && (int)rgb->height == CH
-          && rgb->bytes_per_pixel == 4) {
+      if (hdEncoder.keyEnabled() && hdColourValid) {
         tKeyStart = now_us();
         // Past the scatter guard row - see the bigdepth declaration for why there is one.
         hdEncoder.submitDepth((const float *)bigdepth.data + CW, (size_t)CW * CH, iterTs);

@@ -20,7 +20,7 @@
 // depth `width * height` u16 millimetres row-major with 0 meaning no reading; `colorBytes`
 // may be zero, and the JPEG is the registered colour, sharing the grid pixel for pixel.
 //
-// Type 4 is `[u64 stampMs][f32 fx][f32 fy][f32 cx][f32 cy][f32 rangeM][jpeg]`, the colour camera's
+// Type 4 is `[u64 stampMs][u64 colourTs][f32 fx][f32 fy][f32 cx][f32 cy][f32 rangeM][jpeg]`, the colour camera's
 // own depth at 1920x1080 as a greyscale JPEG, so the four intrinsics are the colour camera's and
 // not the depth camera's. A pixel of 0 is no reading; anything else is `v / 255 * rangeM` metres,
 // which `web/key-stream.js` is the one implementation of at both ends.

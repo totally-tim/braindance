@@ -42,7 +42,7 @@ export class KeyStream {
   // The clients the take is paying for, on the webcam's rule: a pair leaving the machine is
   // backpressure the grabber feels, and one staying on it is not.
   subscribersCostingTheTake() {
-    return this.describe().filter((c) => !c.loopback);
+    return this.unavailable ? [] : this.describe().filter((c) => !c.loopback);
   }
 
   attach(ws, loopback) {
@@ -51,6 +51,7 @@ export class KeyStream {
     if (this.clients.has(ws)) return;
     this.clients.set(ws, { loopback, behind: 0, lastColourTs: null });
     this.demand.settle();
+    this.#sendStatus(ws);
     console.log(`[key] client attached (${this.clients.size} total, ${loopback ? 'loopback' : 'remote'})`);
   }
 
@@ -63,7 +64,7 @@ export class KeyStream {
   /** One type 4 payload off the wire, paired with the colour frame the webcam is holding. */
   offer(payload) {
     this.#reap();
-    if (this.clients.size === 0) return;
+    if (this.clients.size === 0 || this.unavailable) return;
     const colour = this.webcam.latest;
     if (!colour) {
       this.withoutColour++;
@@ -76,6 +77,11 @@ export class KeyStream {
       key = decodeKeyPayload(payload);
     } catch (err) {
       console.error(`[key] ${err.message}`);
+      return;
+    }
+
+    if (key.colourTs !== colourTs) {
+      this.withoutColour++;
       return;
     }
 
@@ -112,11 +118,20 @@ export class KeyStream {
     // The colour frames restart with the grabber that sends them, and their stamps restart with it
     // too. A `lastColourTs` carried across that seam could match a new frame and elide it, leaving
     // the page keying live depth against a picture from before the outage.
-    for (const c of this.clients.values()) c.lastColourTs = null;
+    for (const [ws, c] of this.clients) {
+      c.lastColourTs = null;
+      this.#sendStatus(ws);
+    }
   }
 
   setAvailable() {
     this.unavailable = null;
+    for (const ws of this.clients.keys()) this.#sendStatus(ws);
+  }
+
+  #sendStatus(ws) {
+    if (ws.readyState !== ws.OPEN) return;
+    ws.send(JSON.stringify({ key: { available: this.unavailable === null, unavailable: this.unavailable } }));
   }
 
   reassert() {

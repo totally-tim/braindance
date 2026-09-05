@@ -3674,6 +3674,7 @@ function connect() {
     setStatus();
     // Asked for rather than waited for: OBS reconnects a browser source on its own schedule.
     if (PROGRAM_OUT) ws.send(JSON.stringify({ programOut: { hello: true } }));
+    else sendProgramOutState();
   };
 
   ws.onmessage = (event) => {

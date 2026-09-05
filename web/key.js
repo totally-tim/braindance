@@ -8,7 +8,7 @@
 import * as THREE from 'three';
 import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 import { CROP_FACE_NAMES, FRAMING_DEFAULTS } from './crop-box.js';
-import { decodePair } from './key-stream.js';
+import { KeyFrames } from './key-frames.js';
 import { KEY_FRAGMENT, KEY_VERTEX } from './key-shader.js';
 
 const OUT_W = 1920;
@@ -107,16 +107,6 @@ function readFaces(values) {
   writeFaces();
 }
 
-let frames = 0;
-let errors = 0;
-let lastDepthTs = 0;
-let lastColourTs = 0;
-
-let heldColour = null;
-let heldDepth = null;
-let pending = null;
-let decoding = false;
-
 /** Null rather than a throw, so one torn picture does not take its sibling's decode with it. */
 const bitmapOf = async (bytes) => {
   try {
@@ -131,23 +121,12 @@ const bitmapOf = async (bytes) => {
 };
 
 function draw(pair, colour, depth) {
-  // Closed after the render and not before: the upload is issued by the draw, so a bitmap freed
-  // here would be freed while the texture still points at it.
-  const spent = [];
-
   if (colour) {
-    spent.push(heldColour);
-    heldColour = colour;
     colourTex.image = colour;
     colourTex.needsUpdate = true;
-    lastColourTs = pair.colourTs;
   }
-  spent.push(heldDepth);
-  heldDepth = depth;
   depthTex.image = depth;
   depthTex.needsUpdate = true;
-  lastDepthTs = pair.depthTs;
-
   uniforms.imageSize.value.set(depth.width, depth.height);
   uniforms.fx.value = pair.fx;
   uniforms.fy.value = pair.fy;
@@ -157,63 +136,36 @@ function draw(pair, colour, depth) {
 
   renderer.setRenderTarget(null);
   quad.render(renderer);
-  frames++;
-
-  for (const bitmap of spent) bitmap?.close();
 }
 
-async function pump() {
-  if (decoding || !pending) return;
-  decoding = true;
-  const pair = pending;
-  pending = null;
-  try {
-    const [colour, depth] = await Promise.all([
-      pair.colour ? bitmapOf(pair.colour) : null,
-      bitmapOf(pair.depth),
-    ]);
-    // A pair with no depth picture has nothing to key by, so there is no frame to draw at all.
-    if (!depth) {
-      colour?.close();
-      errors++;
-    } else if (heldColour || colour) {
-      draw(pair, colour, depth);
-    } else {
-      // The first pairs of a socket can arrive before any colour has: there is a silhouette but
-      // no picture to put inside it, and a frame drawn now would be a black one.
-      depth.close();
-    }
-  } finally {
-    decoding = false;
-    if (pending) pump();
-  }
-}
-
-function takePair(buffer) {
-  let pair;
-  try {
-    pair = decodePair(new Uint8Array(buffer));
-  } catch {
-    errors++;
-    return;
-  }
-  // Drop to latest, carrying the colour across: the server elides colour bytes a socket already
-  // holds, so a dropped pair that carried them would leave the newer depth with no picture and the
-  // page a colour behind for as long as the load lasted.
-  if (pending?.colour && !pair.colour) pair.colour = pending.colour;
-  pending = pair;
-  pump();
-}
+const stream = new KeyFrames({
+  decode: bitmapOf,
+  draw,
+  clear: () => {
+    renderer.setRenderTarget(null);
+    renderer.clear();
+  },
+});
 
 let attached = false;
+let available = false;
 
 function readText(text) {
   let msg;
   try {
     msg = JSON.parse(text);
   } catch {
-    errors++;
+    stream.errors++;
+    stream.reset();
     return;
+  }
+  if (typeof msg?.key?.available === 'boolean') {
+    available = msg.key.available;
+    if (!available) stream.reset();
+  }
+  if ((msg?.status && msg.status !== 'live') || msg?.camera?.color === false) {
+    available = false;
+    stream.reset();
   }
   if (msg?.key?.attached === true) {
     attached = true;
@@ -240,11 +192,13 @@ function connect() {
     }
     // Until the server has answered, this socket is still a monitor and the binary channel is
     // carrying depth frames, which are not pairs and would decode into nonsense.
-    if (attached) takePair(event.data);
+    if (attached && available) stream.offer(new Uint8Array(event.data));
   };
 
   ws.onclose = () => {
     attached = false;
+    available = false;
+    stream.reset();
     setTimeout(connect, 1000);
   };
 
@@ -257,9 +211,9 @@ connect();
 // taken at boot answers for the run rather than for the moment it was taken.
 globalThis.__key = {
   faces: () => ({ ...faces }),
-  get frames() { return frames; },
+  get frames() { return stream.frames; },
   get size() { return { w: canvas.width, h: canvas.height }; },
-  get lastDepthTs() { return lastDepthTs; },
-  get lastColourTs() { return lastColourTs; },
-  get errors() { return errors; },
+  get lastDepthTs() { return stream.lastDepthTs; },
+  get lastColourTs() { return stream.lastColourTs; },
+  get errors() { return stream.errors; },
 };

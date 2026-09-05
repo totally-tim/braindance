@@ -288,6 +288,7 @@ const encodeHd = () => {
 const encodeKey = () => {
   const payload = Buffer.from(encodeKeyPayload({
     ts: origin + Math.round((n * 1000) / FPS),
+    colourTs: origin + Math.round((n * 1000) / FPS),
     ...KEY_INTRINSICS,
     jpeg: keyFrame,
   }));

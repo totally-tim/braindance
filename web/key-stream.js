@@ -10,8 +10,8 @@
 // for the encoder it writes, and syntax-check's key/ row holds the two together.
 export const KEY_DEPTH_LEVELS = 255;
 
-// [u64 ts][f32 fx][f32 fy][f32 cx][f32 cy][f32 rangeM], then the JPEG.
-export const KEY_HEADER_BYTES = 28;
+// [u64 ts][u64 colourTs][f32 fx][f32 fy][f32 cx][f32 cy][f32 rangeM], then the JPEG.
+export const KEY_HEADER_BYTES = 36;
 
 // [u64 depthTs][u64 colourTs][f32 fx][f32 fy][f32 cx][f32 cy][f32 rangeM][u32 colourBytes]
 // [u32 depthBytes], then the colour JPEG and the depth JPEG.
@@ -38,33 +38,43 @@ export function dequantiseDepth(v, rangeM) {
   return v === 0 ? 0 : (v / KEY_DEPTH_LEVELS) * rangeM;
 }
 
-export function encodeKeyPayload({ ts, fx, fy, cx, cy, rangeM, jpeg }) {
+export function encodeKeyPayload({ ts, colourTs, fx, fy, cx, cy, rangeM, jpeg }) {
   const out = new Uint8Array(KEY_HEADER_BYTES + jpeg.length);
   const dv = view(out);
   dv.setBigUint64(0, BigInt(ts), true);
-  dv.setFloat32(8, fx, true);
-  dv.setFloat32(12, fy, true);
-  dv.setFloat32(16, cx, true);
-  dv.setFloat32(20, cy, true);
-  dv.setFloat32(24, rangeM, true);
+  dv.setBigUint64(8, BigInt(colourTs), true);
+  dv.setFloat32(16, fx, true);
+  dv.setFloat32(20, fy, true);
+  dv.setFloat32(24, cx, true);
+  dv.setFloat32(28, cy, true);
+  dv.setFloat32(32, rangeM, true);
   out.set(jpeg, KEY_HEADER_BYTES);
   return out;
 }
 
+const validHeader = (h) => Number.isSafeInteger(h.depthTs) && h.depthTs >= 0
+  && Number.isSafeInteger(h.colourTs) && h.colourTs >= 0
+  && Number.isFinite(h.fx) && h.fx > 0 && Number.isFinite(h.fy) && h.fy > 0
+  && Number.isFinite(h.cx) && Number.isFinite(h.cy)
+  && Number.isFinite(h.rangeM) && h.rangeM > 0;
+
 export function decodeKeyPayload(bytes) {
-  if (bytes.length < KEY_HEADER_BYTES) {
-    throw new Error(`a key payload carries a ${KEY_HEADER_BYTES}-byte header and this one is ${bytes.length} bytes long`);
+  if (bytes.length <= KEY_HEADER_BYTES) {
+    throw new Error(`a key payload carries a ${KEY_HEADER_BYTES}-byte header and a JPEG; this one is ${bytes.length} bytes long`);
   }
   const dv = view(bytes);
-  return {
+  const key = {
     ts: Number(dv.getBigUint64(0, true)),
-    fx: dv.getFloat32(8, true),
-    fy: dv.getFloat32(12, true),
-    cx: dv.getFloat32(16, true),
-    cy: dv.getFloat32(20, true),
-    rangeM: dv.getFloat32(24, true),
+    colourTs: Number(dv.getBigUint64(8, true)),
+    fx: dv.getFloat32(16, true),
+    fy: dv.getFloat32(20, true),
+    cx: dv.getFloat32(24, true),
+    cy: dv.getFloat32(28, true),
+    rangeM: dv.getFloat32(32, true),
     jpeg: bytes.subarray(KEY_HEADER_BYTES),
   };
+  if (!validHeader({ ...key, depthTs: key.ts })) throw new Error('invalid key header');
+  return key;
 }
 
 /** `colour` may be null, which is how a socket that already holds this `colourTs` is sent nothing. */
@@ -94,11 +104,11 @@ export function decodePair(bytes) {
   const colourBytes = dv.getUint32(36, true);
   const depthBytes = dv.getUint32(40, true);
   const want = PAIR_HEADER_BYTES + colourBytes + depthBytes;
-  if (bytes.length < want) {
+  if (bytes.length !== want || depthBytes === 0) {
     throw new Error(`a key pair declares ${colourBytes} colour and ${depthBytes} depth bytes, `
       + `so it needs ${want} bytes, and this one is ${bytes.length} bytes long`);
   }
-  return {
+  const pair = {
     depthTs: Number(dv.getBigUint64(0, true)),
     colourTs: Number(dv.getBigUint64(8, true)),
     fx: dv.getFloat32(16, true),
@@ -111,4 +121,6 @@ export function decodePair(bytes) {
     colour: colourBytes ? bytes.subarray(PAIR_HEADER_BYTES, PAIR_HEADER_BYTES + colourBytes) : null,
     depth: bytes.subarray(PAIR_HEADER_BYTES + colourBytes, want),
   };
+  if (!validHeader(pair)) throw new Error('invalid key pair header');
+  return pair;
 }

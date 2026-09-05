@@ -194,14 +194,51 @@ const MUTATIONS = {
   'key-never-asks': {
     file: 'server/key-stream.js',
     edits: [[
-      '    this.clients.set(ws, { loopback, behind: 0, lastColourTs: null });\n'
-      + '    this.demand.settle();\n'
-      + '    console.log(`[key] client attached (${this.clients.size} total, ${loopback ? \'loopback\' : \'remote\'})`);',
-      '    this.clients.set(ws, { loopback, behind: 0, lastColourTs: null });\n'
-      + '    console.log(`[key] client attached (${this.clients.size} total, ${loopback ? \'loopback\' : \'remote\'})`);',
+      '    this.demand.settle();\n    this.#sendStatus(ws);',
+      '    this.#sendStatus(ws);',
     ]],
-    fails: 'the section 7 writer and pair rows, section 8\'s pair precondition, and section 9\'s '
-      + 'drawing precondition; the run still reaches its verdict',
+    fails: 'the section 7 writer and pair rows, section 8 pair precondition, and section 9 drawing precondition',
+  },
+
+  'unavailable-key-costs-the-take': {
+    file: 'server/key-stream.js',
+    edits: [[
+      'return this.unavailable ? [] : this.describe().filter((c) => !c.loopback);',
+      'return this.describe().filter((c) => !c.loopback);',
+    ]],
+    fails: 'the unavailable remote subscription and depth-only recording rows in section 7',
+  },
+
+  'depth-only-take-gets-live-data': {
+    file: 'server/index.js',
+    edits: [['    recorder.write(msg.raw);',
+      '    recorder.write(camera.color ? msg.raw : Buffer.concat([msg.raw,\n'
+      + '      Buffer.from([0x54, 0x43, 0x4e, 0x4b, 4, 0, 0, 0, 1, 0, 0, 0, 0])]));']],
+    fails: 'the depth-only file census row in section 7',
+  },
+
+  'key-recovery-is-not-announced': {
+    file: 'server/key-stream.js',
+    edits: [['    for (const ws of this.clients.keys()) this.#sendStatus(ws);', '']],
+    fails: 'the source recovery row in section 9',
+  },
+
+  'key-outage-keeps-picture': {
+    file: 'web/key-frames.js',
+    edits: [['    this.clear();', '    // The mutation leaves the last framebuffer visible.']],
+    fails: 'the outage clear and late-decode transparency rows in section 9',
+  },
+
+  'key-decode-survives-outage': {
+    file: 'web/key-frames.js',
+    edits: [['    this.generation++;', '    // The mutation lets an obsolete decode finish.']],
+    fails: 'the late-decode transparency row in section 9',
+  },
+
+  'operator-reconnect-keeps-old-framing': {
+    file: 'web/main.js',
+    edits: [['    else sendProgramOutState();', '    // The mutation advertises only on request.']],
+    fails: 'the socket reconnect and operator reload rows in section 9',
   },
 
   // A stale depth stamp behind the colour it is paired with reproduces the one-frame silhouette
@@ -1074,6 +1111,32 @@ try {
         `status ${refused.status}: ${String(refused.body?.error ?? '').slice(0, 100)}`);
       // A failed refusal starts a take, so clean it up before the next server regardless of verdict.
       await post('/record/stop').catch(() => {});
+      let depthOnlyHello = false;
+      remote.socket.on('message', (bytes, binary) => {
+        if (binary) return;
+        try { const h = JSON.parse(bytes.toString()); if (h.serial && h.color === false) depthOnlyHello = true; }
+        catch { /* binary and malformed input are counted by subscribeKey */ }
+      });
+      remote.socket.send(JSON.stringify({ camera: { color: false } }));
+      await waitFor(() => depthOnlyHello, 25000, 'the depth-only grabber to handshake');
+      const unavailable = (await api('/record/state')).body;
+      ok('an unavailable remote key stays attached without charging the take',
+        unavailable.key.available === false && unavailable.key.subscribers.some((c) => !c.loopback)
+        && !unavailable.monitors.costingTheTake.some((c) => c.kind === 'key'));
+      const started = await post('/record/start');
+      ok('a depth-only take starts with that remote key still attached', started.status === 200,
+        `status ${started.status}: ${JSON.stringify(started.body)}`);
+      if (started.status === 200) {
+        await waitFor(async () => (await api('/record/state')).body.frames > 5, 8000, 'depth-only recorded frames');
+        await post('/record/stop');
+        const file = join(WORK, 'takes', `${started.body.takeId}.knct`);
+        const records = new MessageParser().push(readFileSync(file));
+        const frames = records.filter((m) => m.type === TYPE_FRAME);
+        ok('the resulting take contains depth-only frames and no live-only messages',
+          frames.length > 5 && frames.every((m) => m.payload.readUInt32LE(4) === 0)
+          && records.every((m) => m.type === TYPE_HELLO || m.type === TYPE_FRAME),
+          `${frames.length} depth frames, types ${[...new Set(records.map((m) => m.type))]}`);
+      }
       await remote.stop();
       await stopAll();
     }
@@ -1148,6 +1211,12 @@ try {
         args: ['--use-gl=angle', '--use-angle=default', '--enable-unsafe-swiftshader'],
       });
       const operator = await browser.newPage({ viewport: { width: 900, height: 600 } });
+      await operator.addInitScript(() => {
+        const Socket = WebSocket;
+        globalThis.WebSocket = class extends Socket {
+          constructor(...args) { super(...args); globalThis.__proofSocket = this; }
+        };
+      });
       await operator.goto(`http://127.0.0.1:${PORT}/record`);
       await operator.waitForFunction(() => Boolean(globalThis.__kinect?.params));
 
@@ -1156,6 +1225,17 @@ try {
       const page = await browser.newPage({ viewport: { width: 900, height: 600 } });
       const pageErrors = [];
       page.on('pageerror', (err) => pageErrors.push(err.message));
+      await page.addInitScript(() => {
+        const decode = createImageBitmap;
+        globalThis.__heldKeyBitmaps = [];
+        globalThis.__holdKeyDecode = false;
+        globalThis.createImageBitmap = async (...args) => {
+          const hold = globalThis.__holdKeyDecode;
+          const bitmap = await decode(...args);
+          if (!hold) return bitmap;
+          return new Promise((resolve) => globalThis.__heldKeyBitmaps.push(() => resolve(bitmap)));
+        };
+      });
       await page.goto(`http://127.0.0.1:${PORT}/key`);
       await page.waitForFunction(() => Boolean(globalThis.__key));
       const drew = await page.waitForFunction(() => globalThis.__key.frames > 5, null, { timeout: 10000 })
@@ -1165,7 +1245,6 @@ try {
 
       if (drew) {
         const setFaces = async (values) => {
-          const beforeFrames = await page.evaluate('__key.frames');
           await operator.evaluate((next) => {
             for (const [name, value] of Object.entries(next)) globalThis.__kinect.params.set(name, value);
           }, values);
@@ -1176,6 +1255,7 @@ try {
             const got = globalThis.__key.faces();
             return Object.entries(want).every(([name, value]) => got[name] === value);
           }, watched);
+          const beforeFrames = await page.evaluate('__key.frames');
           await page.waitForFunction((n) => globalThis.__key.frames > n, beforeFrames);
         };
         const shot = async () => {
@@ -1234,6 +1314,48 @@ try {
         ok('and the page reports no decode error or browser error',
           (await page.evaluate('__key.errors')) === 0 && pageErrors.length === 0,
           `decode ${await page.evaluate('__key.errors')}, page ${pageErrors.slice(0, 2).join(' | ')}`);
+
+        await setFaces({ far: 2, bottom: -7, top: 7, tilt: 0 });
+        await operator.evaluate(() => {
+          globalThis.__proofSocket.close();
+          globalThis.__kinect.params.set('far', 4);
+        });
+        const resynced = await page.waitForFunction(() => __key.faces().far === 4, null, { timeout: 5000 })
+          .then(() => true, () => false);
+        ok('socket reconnect advertises a framing change made while disconnected', resynced,
+          `key far ${await page.evaluate('__key.faces().far')}, operator far 4`);
+        await operator.reload();
+        await operator.waitForFunction(() => Boolean(globalThis.__kinect?.params));
+        const ownerFar = await operator.evaluate('__kinect.params.get("far")');
+        const reloaded = await page.waitForFunction((far) => __key.faces().far === far, ownerFar, { timeout: 5000 })
+          .then(() => true, () => false);
+        ok('operator reload replaces the keyed framing with the operator registry', reloaded,
+          `key far ${await page.evaluate('__key.faces().far')}, operator far ${ownerFar}`);
+
+        await setFaces({ far: 2 });
+        await page.evaluate(() => { globalThis.__holdKeyDecode = true; });
+        await page.waitForFunction(() => __heldKeyBitmaps.length >= 2);
+        await operator.locator('#colorCam').click();
+        await page.waitForFunction(() => __key.lastColourTs === null, null, { timeout: 3000 });
+        const empty = (rgba) => { for (let i = 3; i < rgba.length; i += 4) if (rgba[i] !== 0) return false; return true; };
+        const framesAtOutage = await page.evaluate('__key.frames');
+        const outage = await shot();
+        ok('colour off clears every pixel of the keyed output to transparent', empty(outage.rgba));
+        await page.evaluate(() => {
+          globalThis.__holdKeyDecode = false;
+          globalThis.__heldKeyBitmaps.splice(0).forEach((release) => release());
+        });
+        await page.waitForTimeout(150);
+        const afterDecode = await shot();
+        ok('an old decode finishing after the outage cannot repaint the person', empty(afterDecode.rgba)
+          && (await page.evaluate('__key.frames')) === framesAtOutage);
+        const beforeRecovery = await page.evaluate('__key.frames');
+        await operator.locator('#colorCam').click();
+        const recovered = await page.waitForFunction((n) => __key.frames > n + 2, beforeRecovery, { timeout: 25000 })
+          .then(() => true, () => false);
+        const recovery = await shot();
+        ok('colour returning restores the keyed picture on the same page', recovered
+          && rgbaAt(recovery.rgba, 100, 100)[3] === 255 && rgbaAt(recovery.rgba, 1820, 100)[3] === 0);
       }
 
       await browser.close();

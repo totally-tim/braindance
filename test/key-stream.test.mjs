@@ -56,11 +56,12 @@ const jpegLike = (n, seed) => Uint8Array.from({ length: n }, (_, i) => (i * 31 +
 
 test('a key payload round-trips byte for byte, and the JPEG comes back without a copy', () => {
   const jpeg = jpegLike(600, 7);
-  const bytes = encodeKeyPayload({ ts: 1750000123456, ...INTRINSICS, jpeg });
+  const bytes = encodeKeyPayload({ ts: 1750000123456, colourTs: 1750000123423, ...INTRINSICS, jpeg });
   assert.equal(bytes.length, KEY_HEADER_BYTES + jpeg.length);
 
   const got = decodeKeyPayload(bytes);
   assert.equal(got.ts, 1750000123456);
+  assert.equal(got.colourTs, 1750000123423);
   assert.equal(got.fx, f32(1081.37));
   assert.equal(got.fy, f32(1081.37));
   assert.equal(got.cx, 959.5);
@@ -74,7 +75,7 @@ test('a key payload round-trips byte for byte, and the JPEG comes back without a
 
 test('a payload read out of the middle of a larger buffer decodes as itself', () => {
   const jpeg = jpegLike(120, 3);
-  const bytes = encodeKeyPayload({ ts: 42, ...INTRINSICS, jpeg });
+  const bytes = encodeKeyPayload({ ts: 42, colourTs: 41, ...INTRINSICS, jpeg });
   // What the server actually hands the decoder: a Buffer whose bytes start partway into a pool.
   const pooled = Buffer.allocUnsafe(bytes.length + 300);
   pooled.set(bytes, 300);
@@ -129,22 +130,25 @@ test('a pair out of the middle of a larger buffer decodes as itself', () => {
 
 // Each refusal with the buffer one byte short and the same buffer whole, because a decoder that
 // threw on everything would pass the first half of every one of these on its own.
-test('a key payload shorter than its header is refused, and a whole one is not', () => {
-  const whole = encodeKeyPayload({ ts: 1, ...INTRINSICS, jpeg: new Uint8Array(0) });
-  assert.equal(whole.length, KEY_HEADER_BYTES);
-  assert.throws(() => decodeKeyPayload(whole.subarray(0, KEY_HEADER_BYTES - 1)), {
-    message: `a key payload carries a ${KEY_HEADER_BYTES}-byte header and this one is ${KEY_HEADER_BYTES - 1} bytes long`,
-  });
-  assert.equal(decodeKeyPayload(whole).jpeg.length, 0);
+test('key and pair decoders require a complete header and nonempty depth', () => {
+  const key = encodeKeyPayload({ ts: 1, colourTs: 1, ...INTRINSICS, jpeg: new Uint8Array([7]) });
+  assert.throws(() => decodeKeyPayload(key.subarray(0, KEY_HEADER_BYTES - 1)), /header/);
+  assert.throws(() => decodeKeyPayload(key.subarray(0, KEY_HEADER_BYTES)), /JPEG/);
+  assert.equal(decodeKeyPayload(key).jpeg.length, 1);
+  const pair = encodePair({ depthTs: 1, colourTs: 1, ...INTRINSICS, colour: null, depth: new Uint8Array([7]) });
+  assert.throws(() => decodePair(pair.subarray(0, PAIR_HEADER_BYTES - 1)), /header/);
+  const empty = encodePair({ depthTs: 1, colourTs: 1, ...INTRINSICS, colour: null, depth: new Uint8Array(0) });
+  assert.throws(() => decodePair(empty), /declares/);
+  assert.equal(decodePair(pair).depth.length, 1);
 });
 
-test('a pair shorter than its header is refused, and a whole one is not', () => {
-  const whole = encodePair({ depthTs: 1, colourTs: 1, ...INTRINSICS, colour: null, depth: new Uint8Array(0) });
-  assert.equal(whole.length, PAIR_HEADER_BYTES);
-  assert.throws(() => decodePair(whole.subarray(0, PAIR_HEADER_BYTES - 1)), {
-    message: `a key pair carries a ${PAIR_HEADER_BYTES}-byte header and this one is ${PAIR_HEADER_BYTES - 1} bytes long`,
-  });
-  assert.equal(decodePair(whole).depth.length, 0);
+test('nonfinite intrinsics and unsafe identities are refused at both live decoders', () => {
+  for (const patch of [{ fx: NaN }, { fy: 0 }, { cx: Infinity }, { rangeM: NaN }, { colourTs: Number.MAX_SAFE_INTEGER + 1 }]) {
+    const key = encodeKeyPayload({ ts: 1, colourTs: 1, ...INTRINSICS, ...patch, jpeg: new Uint8Array([7]) });
+    assert.throws(() => decodeKeyPayload(key), /invalid key header/);
+    const pair = encodePair({ depthTs: 1, colourTs: 1, ...INTRINSICS, ...patch, depth: new Uint8Array([7]) });
+    assert.throws(() => decodePair(pair), /invalid key pair header/);
+  }
 });
 
 test('a pair cut short of what its own lengths declare is refused, naming both', () => {
