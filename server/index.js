@@ -23,6 +23,7 @@ import { gradeSpine } from '../web/grade-shader.js';
 import { moshSpine } from '../web/mosh-shader.js';
 import { Recorder } from './recorder.js';
 import { JobStore } from './jobs.js';
+import { renderVersion } from './render-version.js';
 import { Webcam } from './webcam.js';
 import { requireMutation, originAllowed, sameOriginBrowser } from './http-guard.js';
 
@@ -1130,6 +1131,9 @@ async function serveLocalTakes(req, res) {
 // changes something, and the dispatcher puts every one through `requireMutation` in one place. The
 // table is served at `/library/routes`, so a check can enumerate rather than name.
 const ROUTES = [
+  { path: '/preview/renderer', pattern: /^\/preview\/renderer$/, read: async (req, res) => {
+    sendJson(res, { version: await renderVersion(WEB_DIR, THREE_DIR) });
+  } },
   // ---- a capture, read
   { path: '/capture/:id/hello', pattern: /^\/capture\/([^/]+)\/hello$/, read: serveHello },
   { path: '/capture/:id/index', pattern: /^\/capture\/([^/]+)\/index$/, read: serveIndex },

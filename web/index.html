@@ -70,6 +70,30 @@
      boundary is invisible - which makes it a guide nobody can use. An outline rather
      than a border because it must not enter the layout the letterbox just computed. */
   #stage { outline: 1px solid rgba(120, 220, 210, 0.28); }
+  #previewStage { position: fixed; pointer-events: none; z-index: 1; }
+  #previewStage[hidden] { display: none; }
+  .preview-renderer { position: fixed; left: -10000px; top: 0; width: 1px; height: 1px;
+    border: 0; pointer-events: none; }
+  #tPreviewReadout { display: flex; align-items: center; gap: 6px; width: 100%;
+    font-size: 11px; color: var(--dim); white-space: nowrap; }
+  #tPreviewPercent { margin-left: auto; font-size: 10px; font-variant-numeric: tabular-nums; color: var(--accent); }
+  #tPreviewReadout[data-state="rendering"] #tPreviewPercent,
+  #tPreviewReadout[data-state="error"] #tPreviewPercent,
+  #tPreviewReadout[data-state="full"] #tPreviewPercent { color: var(--warn); }
+  #tPreviewPlayback[hidden] { display: none; }
+  .preview-settings-heading { display: flex; justify-content: space-between; gap: 16px;
+    padding: 6px 12px; color: var(--dim); font-size: 11px; }
+  #tPreviewView { color: var(--faint); }
+  #tPreviewStatus { display: block; padding: 4px 12px 6px; max-width: 300px;
+    color: var(--faint); font-size: 10px; overflow-wrap: anywhere; }
+  #tPreviewStatus[data-state="error"] { color: var(--warn); }
+  #tPreviewPlayback { color: var(--accent); font-size: 10px; }
+  #tPreviewCoverage { position: absolute; left: 0; right: 0; bottom: 1px; height: 8px; overflow: hidden;
+    pointer-events: none; z-index: 3; }
+  #tPreviewCoverage i { position: absolute; height: 100%; min-width: 1px; background: var(--accent); }
+  #tPreviewCoverage i.pending { background: repeating-linear-gradient(135deg,
+    var(--line-2) 0 1px, var(--paper-2) 1px 4px); }
+  #tPreviewCoverage i.rendering { min-width: 3px; background: var(--warn); }
 
   /* Two boxes rather than one scrolling box, and the split is what makes the way out
      of this surface reachable. The panel fills the window's height and its content is
@@ -362,6 +386,7 @@
   body:not(.editing) #menuExport,
   body:not(.editing) #menuTopView,
   body:not(.editing) #menuLookImport,
+  body:not(.editing) #tPreviewSettings,
   body:not(.editing) #menuLookExport { display: none; }
   /* Hide separators that end up orphaned after the items above are hidden. The Output
      menu keeps only OBS, so its separator goes; the File menu keeps only Rename project
@@ -1272,6 +1297,14 @@
           <div class="menu-separator"></div>
           <button class="menu-command" id="menuLookImport" type="button" role="menuitem"><span>Import Look</span><kbd></kbd></button>
           <button class="menu-command" id="menuLookExport" type="button" role="menuitem"><span>Export Look</span><kbd></kbd></button>
+          <div id="tPreviewSettings" role="group" aria-label="Previews">
+            <div class="menu-separator"></div>
+            <div class="preview-settings-heading">Previews <span id="tPreviewView">Camera path</span></div>
+            <button class="menu-command" id="tPreviewRender" type="button" role="menuitem">Render range</button>
+            <button class="menu-command" id="tPreviewAuto" type="button" role="menuitemcheckbox" aria-checked="true">Render while idle</button>
+            <button class="menu-command" id="tPreviewClear" type="button" role="menuitem">Clear previews</button>
+            <output id="tPreviewStatus" aria-live="polite">Loading previews</output>
+          </div>
           <div class="menu-separator"></div>
           <button class="menu-command" id="menuState" type="button" role="menuitemcheckbox" aria-checked="false"><span>Stats for nerds</span><kbd></kbd></button>
         </div>
@@ -1500,6 +1533,7 @@
         <div class="tclock"><small>playback</small><output id="tProgram">00:00.000</output></div>
         <div class="tclock derived"><small>source</small><output id="tSource">00:00.000</output></div>
       </div>
+      <span id="tPreviewPlayback" hidden>Cached</span>
       <button class="tmark" id="tMark" type="button" aria-label="Mark here">
         <svg width="10" height="12" viewBox="0 0 10 12" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path d="M1 1l8 0 0 7-4 3-4-3z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" fill="none"/>
@@ -1579,13 +1613,16 @@
          out of the rebuild's reach by construction rather than by remembering. -->
     <div class="tlanes">
       <div class="tcol rail" id="tRail">
-        <div class="trow ruler"></div>
+        <div class="trow ruler">
+          <div id="tPreviewReadout">Previews <output id="tPreviewPercent">—</output></div>
+        </div>
         <div class="tstack" id="tRailLanes"></div>
       </div>
       <div class="tcol beds" id="tBeds">
         <div class="trow ruler tbed" id="tBed">
           <div class="truler" id="tRuler"></div>
           <div class="tmarks" id="tMarks"></div>
+          <div id="tPreviewCoverage" role="img" aria-label="No rendered previews"></div>
         </div>
         <div class="tstack" id="tLanes"></div>
         <!-- What the export will not include, drawn rather than left to be inferred
@@ -1604,7 +1641,7 @@
          and the playhead. It carries the same 96px rail offset as the lanes so its
          coordinates line up with theirs by construction rather than by arithmetic. -->
     <div class="tmini">
-      <span>timeline</span>
+      <div></div>
       <div class="tminibed" id="tMini">
         <div class="tminirange" id="tMiniRange"></div>
         <div class="tminimarks" id="tMiniMarks"></div>

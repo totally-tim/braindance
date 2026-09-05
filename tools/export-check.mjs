@@ -898,6 +898,7 @@ async function openPage(viewport, source = mutatedBody, html = null) {
     viewport: { width: viewport.width, height: viewport.height + TIMELINE_H_GUESS },
     deviceScaleFactor: 1,
   });
+  await context.addInitScript(() => localStorage.setItem('braindance.preview.auto', 'off'));
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (err) => { errors.push(String(err)); pageErrors.push(String(err)); });
