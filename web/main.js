@@ -3666,19 +3666,56 @@ if (!PROGRAM_OUT && progModeEl) {
     progSizeEl.value = `${programOutSize.w}x${programOutSize.h}`;
     sendProgramOut({ size: programOutSize });
   });
-  const sourceLinks = [
+  const copyPaths = {
+    ready: 'M7 7h9v9H7zM4 13V4h9v3',
+    copied: 'M4 10l4 4 8-8',
+    unavailable: 'M5 5l10 10m0-10L5 15',
+  };
+  const sourceRows = [
     ['browser source', '/program'],
     ['webcam', '/camera.mjpg'],
     ['keyed webcam', '/key'],
-  ].flatMap(([label, path], i) => {
+  ].map(([label, path]) => {
+    const row = document.createElement('div');
+    row.className = 'prog-source';
+    const sourceLabel = document.createElement('span');
+    sourceLabel.className = 'prog-source-label';
+    sourceLabel.textContent = `${label}:`;
     const link = document.createElement('a');
     link.href = new URL(path, location.href).href;
     link.textContent = link.href;
     link.target = '_blank';
     link.rel = 'noopener';
-    return [document.createTextNode(`${i ? '  ·  ' : ''}${label}: `), link];
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.setAttribute('aria-live', 'polite');
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    icon.setAttribute('viewBox', '0 0 20 20');
+    icon.setAttribute('aria-hidden', 'true');
+    const iconPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    icon.appendChild(iconPath);
+    copy.appendChild(icon);
+    const showCopyState = (state) => {
+      const message = state === 'ready' ? `Copy ${label} link`
+        : state === 'copied' ? `${label} link copied`
+          : `${label} link copy unavailable`;
+      copy.dataset.state = state;
+      copy.setAttribute('aria-label', message);
+      copy.title = message;
+      iconPath.setAttribute('d', copyPaths[state]);
+    };
+    let resetCopyState = null;
+    showCopyState('ready');
+    copy.addEventListener('click', async () => {
+      const copied = await writeClipboard(link.href);
+      showCopyState(copied ? 'copied' : 'unavailable');
+      clearTimeout(resetCopyState);
+      resetCopyState = setTimeout(() => showCopyState('ready'), 1200);
+    });
+    row.append(sourceLabel, link, copy);
+    return row;
   });
-  progNoteEl.replaceChildren(...sourceLinks);
+  progNoteEl.replaceChildren(...sourceRows);
 }
 
 function connect() {
@@ -10669,15 +10706,31 @@ function sayObs(message) {
   shell.obsStatusText.textContent = message;
 }
 
-async function copyObsValue(input) {
+async function writeClipboard(value, fallbackInput = null) {
   try {
-    await navigator.clipboard.writeText(input.value);
-    sayObs('copied');
+    await navigator.clipboard.writeText(value);
+    return true;
   } catch {
-    input.select();
-    const copied = document.execCommand('copy');
-    sayObs(copied ? 'copied' : 'copy unavailable');
+    const input = fallbackInput ?? document.createElement('textarea');
+    const temporary = !fallbackInput;
+    if (temporary) {
+      input.value = value;
+      input.readOnly = true;
+      input.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+      document.body.appendChild(input);
+    }
+    let copied = false;
+    try {
+      input.select();
+      copied = document.execCommand('copy');
+    } catch { /* reported by the button or dialog that asked */ }
+    if (temporary) input.remove();
+    return copied;
   }
+}
+
+async function copyObsValue(input) {
+  sayObs(await writeClipboard(input.value, input) ? 'copied' : 'copy unavailable');
 }
 
 shell.obsCopyBrowser.addEventListener('click', () => copyObsValue(shell.obsBrowserUrl));

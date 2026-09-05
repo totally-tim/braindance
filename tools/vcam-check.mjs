@@ -918,7 +918,8 @@ try {
       const sourceLinks = await operator.evaluate(() => {
         const note = document.getElementById('progNote');
         return {
-          text: note.textContent,
+          hasDot: note.textContent.includes('·'),
+          labels: [...note.querySelectorAll('.prog-source-label')].map((label) => label.textContent),
           links: [...note.querySelectorAll('a')].map((link) => ({
             text: link.textContent,
             href: link.href,
@@ -946,13 +947,64 @@ try {
         clickedSources.push(...await operator.evaluate('globalThis.__proofSourceClicks'));
       }
       ok('the operator note exposes all three source URLs as links that leave the controls open',
-        sourceLinks.text === `browser source: ${sourceUrls[0]}  ·  webcam: ${sourceUrls[1]}  ·  keyed webcam: ${sourceUrls[2]}`
+        !sourceLinks.hasDot
+          && sourceLinks.labels.join('|') === 'browser source:|webcam:|keyed webcam:'
           && sourceLinks.links.length === sourceUrls.length
           && sourceLinks.links.every((link, i) => link.text === sourceUrls[i]
             && link.href === sourceUrls[i] && link.target === '_blank' && link.noopener)
           && clickedSources.every((href, i) => href === sourceUrls[i])
           && clickedSources.length === sourceUrls.length,
         JSON.stringify({ ...sourceLinks, clickedSources }));
+
+      const sourceCopyButtons = await operator.evaluate(() => (
+        [...document.querySelectorAll('#progNote button')].map((button) => ({
+          text: button.textContent,
+          label: button.getAttribute('aria-label'),
+          after: button.previousElementSibling?.tagName ?? null,
+          icon: button.querySelector('svg')?.outerHTML ?? null,
+          path: button.querySelector('path')?.getAttribute('d') ?? null,
+          left: button.getBoundingClientRect().left,
+          width: button.getBoundingClientRect().width,
+          height: button.getBoundingClientRect().height,
+        }))
+      ));
+      const copiedSources = [];
+      if (sourceCopyButtons.length === sourceUrls.length) {
+        await operator.evaluate(() => {
+          globalThis.__proofSourceCopies = [];
+          Object.defineProperty(navigator, 'clipboard', {
+            configurable: true,
+            value: {
+              writeText: async (value) => { globalThis.__proofSourceCopies.push(value); },
+            },
+          });
+        });
+        for (let i = 0; i < sourceUrls.length; i++) {
+          await operator.locator('#progNote button').nth(i).click();
+        }
+        copiedSources.push(...await operator.evaluate('globalThis.__proofSourceCopies'));
+      }
+      const sourceCopyFeedback = await operator.evaluate(() => (
+        [...document.querySelectorAll('#progNote button')].map((button) => ({
+          state: button.dataset.state,
+          label: button.getAttribute('aria-label'),
+          path: button.querySelector('path')?.getAttribute('d') ?? null,
+        }))
+      ));
+      const copyLefts = sourceCopyButtons.map((button) => button.left);
+      ok('an aligned icon button after each source link copies that exact URL without leaving the operator page',
+        sourceCopyButtons.length === sourceUrls.length
+          && sourceCopyButtons.every((button, i) => button.text === '' && button.icon
+            && button.label === `Copy ${['browser source', 'webcam', 'keyed webcam'][i]} link`
+            && button.after === 'A' && button.width <= 24 && button.height <= 24)
+          && Math.max(...copyLefts) - Math.min(...copyLefts) <= 0.5
+          && copiedSources.every((href, i) => href === sourceUrls[i])
+          && copiedSources.length === sourceUrls.length
+          && sourceCopyFeedback.every((feedback, i) => feedback.state === 'copied'
+            && feedback.label === `${['browser source', 'webcam', 'keyed webcam'][i]} link copied`
+            && feedback.path !== sourceCopyButtons[i].path)
+          && operator.url() === `http://127.0.0.1:${PORT}/record`,
+        JSON.stringify({ sourceCopyButtons, copiedSources, sourceCopyFeedback }));
 
       // Deliberately not a size anything defaults to, so a buffer that merely stayed put cannot be
       // read as having followed.
