@@ -971,23 +971,8 @@ const MUTATIONS = {
     ]],
   },
 
-  // Must redden: one row - section 17's "and the note for it says what was applied rather than
-  // naming a revision this gesture did not apply".
-  'apply-says-nothing': {
-    file: 'web/main.js',
-    edits: [[
-      '          say(stamped\n'
-      + '            ? `applied ${doc.name} · ${doc.rev.slice(7, 15)}${grade}`\n'
-      + '            : `applied ${written} values from ${doc.name}, which names part of a look rather than the whole of one${grade}`);',
-      '          void stamped; void written; void grade;',
-    ]],
-  },
-
-  // Four controls stood here and they are removed rather than re-anchored, because their subject
-  // is gone: there is no hidden working document and no chip offering it back, so each of them
-  // named a mechanism this build does not have. What each guaranteed is recorded in
-  // `docs/proof-tools.md` beside the section that drove them, because a control removed in
-  // silence is a guarantee removed in silence.
+  // Five controls stood here and they are removed rather than re-anchored. What each guaranteed
+  // is recorded in `docs/proof-tools.md` beside the section that drove them.
   //
   // `offer-ignores-take-hash`         - the offer joined on the take's content hash and not on
   //                                     its id, so a renamed id could not resurrect an edit cut
@@ -1000,6 +985,7 @@ const MUTATIONS = {
   // `resume-waits-for-every-list`     - a neighbouring listing that refused did not hide the
   //                                     offer, since only the projects listing is what it is
   //                                     made of.
+  // `apply-says-nothing`              - the note for an applied preset said what was applied.
 
   'project-load-keeps-renamed-take-id': {
     file: 'web/main.js',

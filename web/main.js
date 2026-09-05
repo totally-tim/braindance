@@ -8222,15 +8222,6 @@ function choosePicker(picker, name, { close = false } = {}) {
             showPickerChoice(picker, appliedPreset()?.name ?? '');
             return;
           }
-          const { stamped, written, shared } = result;
-          // The shared half is named rather than left to be discovered: it lands on the project
-          // and every other clip is seen through it.
-          const grade = shared
-            ? ` · ${shared} post value${shared === 1 ? '' : 's'} landed on the project, so every clip moved with it`
-            : '';
-          say(stamped
-            ? `applied ${doc.name} · ${doc.rev.slice(7, 15)}${grade}`
-            : `applied ${written} values from ${doc.name}, which names part of a look rather than the whole of one${grade}`);
         } catch (err) {
           showPickerChoice(picker, appliedPreset()?.name ?? '');
           showTimelineError(err);
@@ -8248,7 +8239,6 @@ function choosePicker(picker, name, { close = false } = {}) {
       params.reset(lookNames.filter((name) => PARAMS[name].scope === 'project'));
       withClip(target, () => params.reset(lookNames.filter((name) => PARAMS[name].scope === 'clip')));
       history.commit();
-      say('reset to defaults');
     }
   }
 }
@@ -8707,7 +8697,6 @@ async function addClipFromTake(id, start) {
   history.commit();
   await timeline.seek(Math.min(held, timeline.duration));
   if (wasPlaying && gen === transportGen) await timeline.play();
-  say(`clip ${clip.id} of ${id} at ${clip.start.toFixed(2)}s`);
   return clip;
 }
 
@@ -8833,8 +8822,7 @@ function applyEasePreset(name) {
 
 for (const btn of ui.ease.querySelectorAll('button[data-ease]')) {
   btn.addEventListener('click', () => {
-    const owner = selection?.owner ?? '';
-    if (applyEasePreset(btn.dataset.ease)) say(`${btn.dataset.ease} ease on ${owner}`);
+    applyEasePreset(btn.dataset.ease);
   });
 }
 
@@ -8880,11 +8868,7 @@ function changePointCount(delta) {
 
 for (const [button, delta] of [[ui.addPoint, 1], [ui.dropPoint, -1]]) {
   button.addEventListener('click', () => {
-    const owner = selection?.owner ?? '';
-    if (!changePointCount(delta)) return;
-    const { keys, i } = selectionEaseState();
-    say(`${delta > 0 ? 'added' : 'removed'} an ease control point on ${owner}: `
-      + `${keys[i].easeOut.length} out, ${keys[i].easeIn.length} in`);
+    changePointCount(delta);
   });
 }
 
@@ -10091,9 +10075,6 @@ if (ui.cropFit) {
       }
       requestRepaint();
       history.commit();
-      say(`box fitted to ${fitted.frames} frames: `
-        + `${fitted.left.toFixed(2)} to ${fitted.right.toFixed(2)} across, `
-        + `${fitted.bottom.toFixed(2)} to ${fitted.top.toFixed(2)} up`);
     } catch (err) {
       say(`the crop box could not be fitted to this take: ${err.message}`);
     } finally {
@@ -10294,8 +10275,6 @@ ui.presetSave.addEventListener('click', () => withPresetSubset(
       history.commit();
     }
     await refreshPresets();
-    say(`saved ${saved.name} · ${saved.rev.slice(7, 15)}`
-      + (whole ? '' : ` · ${picked.names.length} of ${presetValueNames().length} values`));
   },
 ));
 
@@ -10307,7 +10286,6 @@ ui.presetExport.addEventListener('click', () => withPresetSubset(
   },
   async (picked) => {
     exportPresetFile(picked.name, presetFromCurrentLook(picked.names));
-    say(`exported ${picked.name}.braindance-preset.json`);
   },
 ));
 
@@ -10323,9 +10301,6 @@ ui.presetFile.addEventListener('change', () => {
       const saved = await importPresetFile(file);
       await refreshPresets();
       showPickerChoice(pickers.find((p) => p.trigger === ui.preset), appliedPreset()?.name ?? '');
-      if (saved.applied) {
-        say(`imported ${saved.name} · ${saved.rev.slice(7, 15)}`);
-      }
     } catch (err) {
       showTimelineError(err);
     }
@@ -10397,7 +10372,6 @@ async function mintProjectFrom(ids) {
   // From the document, the way a load starts: the clips this mint just laid down are what the
   // file says, so there is nothing behind them to undo back to.
   history.begin();
-  say(`new project ${saved.name}`);
 }
 
 /**
@@ -10416,7 +10390,6 @@ async function duplicateProject() {
   projectDiverged = false;
   if (ui.diverged) ui.diverged.title = '';
   paintDiverged();
-  say(`working in ${saved.name}`);
 }
 
 /**
@@ -10440,7 +10413,6 @@ async function renameProjectTo(to) {
   openedProjectRev = saved.rev;
   showProjectInUrl(saved.name);
   paintProjectCommands();
-  say(`renamed to ${saved.name}`);
 }
 
 /** The two File items that need a document, on a page that may be holding none. */
@@ -10463,7 +10435,6 @@ ui.deliverable?.addEventListener('change', async () => {
     if (doc.error) throw new Error(doc.error);
     applyDeliverable(doc.body);
     showAdoptedDeliverable(name);
-    say(`deliverable ${name}`);
   } catch (err) {
     ui.deliverable.value = ui.deliverable.dataset.adopted ?? '';
     showTimelineError(err);
@@ -10478,7 +10449,6 @@ ui.deliverableNew?.addEventListener('click', async () => {
     await saveDeliverable(name, activeDeliverable);
     await refreshDeliverables();
     showAdoptedDeliverable(name);
-    say(`saved deliverable ${name}`);
   } catch (err) {
     showTimelineError(err);
   }
@@ -10981,7 +10951,6 @@ async function loadProjectNamed(name, offered = null) {
   openedProjectRev = doc.rev ?? null;
   lastSavedAt = null;
   paintProjectCommands();
-  say(`opened ${name}`);
   if (first) await finishEditor();
   return doc;
 }
