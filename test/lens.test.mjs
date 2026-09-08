@@ -4,7 +4,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { verticalFovForFocalLength, focalLengthForVerticalFov } from '../web/lens.js';
+import * as THREE from 'three';
+import { verticalFovForFocalLength, focalLengthForVerticalFov, projectionScaleForVerticalFov } from '../web/lens.js';
 
 const ASPECTS = [['16:9', 16 / 9], ['2.39:1', 2.39], ['4:3', 4 / 3], ['1:1', 1], ['65:24', 65 / 24]];
 const LENSES = [8, 14, 18.3, 22.745, 24, 35, 50, 85, 135, 200, 300];
@@ -116,4 +117,14 @@ test('nothing outside the band is coerced into a number that looks like a lens',
   }
   // A negative length is a negative angle rather than its positive twin, so a sign error shows.
   assert.ok(verticalFovForFocalLength(-35, 16 / 9) < 0);
+});
+
+test('the projection scale is what a perspective camera writes at projectionMatrix[1][1]', () => {
+  for (const fov of [4.049, 26.26, 50, 60.3, 105.95]) {
+    const camera = new THREE.PerspectiveCamera(fov, 16 / 9, 0.05, 60);
+    near(projectionScaleForVerticalFov(fov), camera.projectionMatrix.elements[5], 1e-12, `${fov} degrees`);
+  }
+  // Twice the scale is half the tangent: the lens rows in export-check lean on this being exact.
+  const twice = (2 * Math.atan(Math.tan((50 * Math.PI) / 360) / 2) * 180) / Math.PI;
+  near(projectionScaleForVerticalFov(twice) / projectionScaleForVerticalFov(50), 2, 1e-12, 'a 2x lens');
 });

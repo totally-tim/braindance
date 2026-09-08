@@ -88,6 +88,31 @@ test('the door names what it refuses, one rule at a time', () => {
   }
 });
 
+test('a chunk may not redeclare a local the spine holds in the same scope', () => {
+  const edit = (prefix) => brokenBy('glyph', (c) => { c.chunks['size.vert.glsl'] = prefix + c.chunks['size.vert.glsl']; });
+  // The two the vertex spine computes just above the size slot: a package written against a
+  // build without them compiled then and links against nothing now.
+  for (const name of ['zoom', 'k']) {
+    const refusal = edit(`  float ${name} = 1.0;\n`);
+    assert.match(refusal ?? '', new RegExp(`"${name}" is declared twice`), `a chunk redeclaring ${name} got through`);
+    assert.match(refusal, /size\.vert\.glsl/, 'the refusal does not name the chunk that declares it');
+  }
+  // A nested block may shadow, which the shipped ripple does with dist, so a block is not a refusal.
+  assert.equal(edit('  { float zoom = 1.0; }\n'), null);
+  // A name that is only the chunk's own, declared once, is what every shipped chunk does.
+  assert.equal(edit('  float lensed = zoom;\n'), null);
+});
+
+test('a chunk may not carry a preprocessor directive, which could declare past the scope walk', () => {
+  const edit = (prefix) => brokenBy('glyph', (c) => { c.chunks['size.vert.glsl'] = prefix + c.chunks['size.vert.glsl']; });
+  // The macro reaches the compiler as `float zoom` beside the spine's own, and no text scan expands it.
+  assert.match(edit('#define OLD_LOCAL float zoom = 1.0;\n  OLD_LOCAL\n') ?? '', /preprocessor directive/);
+  assert.match(edit('  #define ONE 1.0\n') ?? '', /preprocessor directive/);
+  assert.match(edit('#ifdef GL_ES\n#endif\n') ?? '', /preprocessor directive/);
+  // A hash inside a comment is text, not a directive.
+  assert.equal(edit('  // #define is not allowed here\n'), null);
+});
+
 test('a manifest field that is a list is refused when it is not one', () => {
   const fields = [['thermal', 'chunks'], ['rain', 'varyings'], ['rain', 'panelGroups'], ['rain', 'hostDriven']];
   for (const [id, field] of fields) {

@@ -33,4 +33,9 @@ function focalLengthForVerticalFov(fovDeg, aspect) {
   return halfHeight / Math.tan((fovDeg * Math.PI) / 360);
 }
 
-export { verticalFovForFocalLength, focalLengthForVerticalFov };
+/** Returns the perspective projection's vertical scale for an angle in degrees. */
+function projectionScaleForVerticalFov(fovDeg) {
+  return 1 / Math.tan((fovDeg * Math.PI) / 360);
+}
+
+export { verticalFovForFocalLength, focalLengthForVerticalFov, projectionScaleForVerticalFov };

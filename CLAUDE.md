@@ -113,7 +113,7 @@ Read the assertion count, never the exit code.
 | `monitor-check.mjs` | the monitor's decimation, the take it must not touch, the picture | port 8341 free |
 | `sensor-view-check.mjs` | the intrinsics a take was shot with, against a build assuming them | `--url`, plus port 8131 |
 | `level-check.mjs` | levelling: the room turns and every surface keeps its meaning | port 8377 free |
-| `vcam-check.mjs` | the output to OBS, and the take it must not touch | port 8361 free |
+| `vcam-check.mjs` | the output to OBS: the colour camera, the keyed webcam and its page, and the take neither may touch | port 8361 free |
 | `guard-check.mjs` | the socket's origin rule, the bind, the rebinding rule | port 8321 free |
 | `jobs-check.mjs` | the queue, the pin, a real render, a job this build cannot read | ports 8231 and 8232, a GPU browser, ffprobe |
 | `effect-check.mjs` | installing an effect: revisions, the door, the hotload, park and restore | port 8281 free, a GPU browser |
@@ -121,6 +121,7 @@ Read the assertion count, never the exit code.
 | `module-check.mjs` | the boundaries in `web/`: the import graph, what crosses it | nothing |
 | `preview-check.mjs` | rendered previews, camera identity, cancellation, and live fallback | `--url`, a take of at least 9s, a GPU browser |
 | `syntax-check.mjs` | every shipped file parses, the cross-language constants agree, the citations resolve, every tool is named here | nothing |
+| `hd-encoder-check.mjs` | native pairing under encoder backlog, held colour, key range and RGBX | a C++ compiler and TurboJPEG |
 | `cpp-check.mjs` | both C++ files parse and typecheck, in all four pipeline configurations | a C++ compiler and turbojpeg's headers |
 | `vendor-check.mjs` | `third_party` is upstream v0.2.1 plus declared edits | nothing |
 | `registration-check.mjs` | our registration equals upstream's, bit for bit | a corpus from `grabber --dump-corpus` |
@@ -206,8 +207,9 @@ decode.
 - **Cite a function by name, never by line.** `syntax-check` walks every `docs/` page and `web/`
   module the prose and the source cite, and fails one that does not resolve. A citation is checked
   for resolving, never for being right.
-- **`pointSize` is pixels at 1080p**, and so is every screen-space term beside it. The shaders in
-  `web/cloud-shader.js` read `bufferHeight / 1080.0`.
+- **`pointSize` is pixels at 1080p through the camera's 50-degree boot lens.** Keep that reference
+  in `lensReference` in `web/cloud-shader.js`; `export-check` holds the lens scaling. Every
+  screen-space term uses `bufferHeight / 1080.0` for output size.
 - **The glyph field's legibility band is 8 to 16 pixels of whichever reading is smaller** — the
   drawn framebuffer sprite, or that sprite back in reference pixels. The vertex stage writes
   `outsideCrop ? 0.0 : gl_PointSize / max(k, 1.0)` into `vLegiblePx`, so a point outside the crop

@@ -274,6 +274,16 @@ and says which way it ran out past either end, though the angle itself is never 
 `verticalFovForFocalLength` and `focalLengthForVerticalFov` in
 [`web/lens.js`](../web/lens.js) are the conversion.
 
+Point sizes use the camera's 50-degree boot lens as their reference. A longer lens magnifies
+the splats with the scene, preserving surface brightness while the points stay within their
+size bounds. `lensReference` in [`web/cloud-shader.js`](../web/cloud-shader.js) sets the reference;
+sensor view receives the same correction through the take's intrinsics.
+
+The one-pixel floor and ordinary points' 64-pixel ceiling still limit the sprites. Their onset
+depends on point size, depth and output size. Bloom, vignette and the glyph legibility band
+also remain screen-space effects, so brightness can still change and dust can become characters
+through a longer lens. Existing shots at other lenses change appearance.
+
 ## The edit, and what comes out of it
 
 **Clips are the rows at the head of the lane stack**, one box each from where a clip starts to

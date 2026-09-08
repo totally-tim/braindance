@@ -8,6 +8,8 @@
 // `web/point-cloud.js`, or three.js never writes it and the shader reads zero.
 // `test/cloud-shader.test.mjs` asks that of the assembled text rather than of this file.
 
+import { CROP_BOX_GLSL } from './crop-box.js';
+
 // Each entry frozen as well as the list, because two callers share one object and a segment
 // trimmed in place would move the look of one and the verdict of the other.
 const frozen = (entries) => Object.freeze(entries.map((e) => Object.freeze(e)));
@@ -27,6 +29,8 @@ uniform float bufferHeight;
 // value, so it is not a registry parameter. Written once at boot out of
 // ALIASED_POINT_SIZE_RANGE, since the range is a property of the context and not of the window.
 uniform float pointCeiling;
+// projectionMatrix[1][1] of the 50-degree lens every look is graded through.
+uniform float lensReference;
 uniform float pointSize, nearClip, farClip, time, edgeTol;
 uniform float cropL, cropR, cropB, cropT, cropOn, cropOutside;
 uniform float noise, noiseScale, noiseSpeed;
@@ -118,7 +122,13 @@ vec3 unproject(vec2 pixel, float z) {
     -z
   );
 }
-
+` },
+    // The crop box's two tests, spliced from `web/crop-box.js` rather than written here, so the
+    // shader and the plan inset cannot come apart about which side of a face a point is on.
+    { text: CROP_BOX_GLSL },
+    // The blank line between them and `main` belongs to neither, so it is a segment of its own.
+    { text: '\n' },
+    { text: /* glsl */ `\
 void main() {
   ivec2 px = ivec2(position.xy);
 
@@ -222,7 +232,7 @@ void main() {
   // here, the lateral four are positions in the room and are not known until below. So
   // outsideCrop accumulates rather than being decided once. The early return is what keeps the
   // box free when nobody is looking at it - only a viewer with it on screen pays.
-  bool outsideCrop = cropOn == 1.0 && (z < nearClip || z > farClip);
+  bool outsideCrop = outsideDepthPair(z);
   if (outsideCrop && cropOutside <= 0.0) {
     gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
     gl_PointSize = 0.0;
@@ -234,7 +244,7 @@ void main() {
   // The other four faces of the same box, after the unprojection because a lateral plane is a
   // position in the room where the depth clip is a property of the sample. Metres, so a face
   // stays where it was put whatever the output size is. Tested on the undisplaced position.
-  if (cropOn == 1.0 && (pos.x < cropL || pos.x > cropR || pos.y < cropB || pos.y > cropT)) {
+  if (outsideLateral(pos.xy)) {
     if (cropOutside <= 0.0) {
       gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
       gl_PointSize = 0.0;
@@ -315,26 +325,25 @@ void main() {
   // with the drawing buffer, and this is the dominant one. The clamp stays in framebuffer
   // pixels deliberately: it is a bound on what the hardware can draw, not a look value.
   float k = bufferHeight / 1080.0;
-  // How big one lattice cell is on screen at this distance, in the reference pixels vSize is
-  // carried in, derived from the projection because the fov is part of the camera pose and
-  // keyframes. max(0.15, -mv.z) is written out again below rather than hoisted into the clamp:
-  // that clamp's exact text is what export-check's pointsize-absolute anchors on.
+  // Magnify points with the scene; their reference size stays fixed for energy normalisation.
+  float zoom = projectionMatrix[1][1] / lensReference;
+  // Keep cellPx in the same reference as vSize, so lattice compensation does not undo the zoom.
   float dist = max(0.15, -mv.z);
-  float cellPx = latticeCell * projectionMatrix[1][1] * 540.0 / dist;
+  float cellPx = latticeCell * lensReference * 540.0 / dist;
 ` },
     // How big the sprite is drawn - a replacement, since an effect growing the sprite has to
     // stand where the clamp stood. The fallback is that clamp exactly as it was written.
     {
       slot: 'v.pointSize',
       fallback: /* glsl */ `\
-  gl_PointSize = clamp(pointSize * k / max(0.15, -mv.z), 1.0, 64.0);
+  gl_PointSize = clamp(pointSize * zoom * k / max(0.15, -mv.z), 1.0, 64.0);
 `,
     },
     { text: /* glsl */ `\
   // Carried in reference pixels rather than framebuffer ones, because the fragment shader
   // normalises additive energy against area and the same look must not sum brighter at twice
-  // the resolution.
-  vSize = gl_PointSize / k;
+  // the resolution or dimmer through a longer lens.
+  vSize = gl_PointSize / (k * zoom);
 
 ` },
     // What a displacement does to a splat's additive energy, cancelled where the view distance

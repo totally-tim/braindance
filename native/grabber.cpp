@@ -10,6 +10,10 @@
 //                    [JPEG of the registered 512x424 colour image]
 //   type 3 (colour): [u64 timestampMs][JPEG of the native 1920x1080 colour image]
 //                    Only while the server has asked for it - see `hd-color` below.
+//   type 4 (key)   : [u64 timestampMs][u64 colourTs][f32 fx][f32 fy][f32 cx][f32 cy][f32 rangeM]
+//                    [greyscale JPEG of the 1920x1080 depth mapped into the colour frame,
+//                    0 = no reading, level n = n/KEY_DEPTH_LEVELS * rangeM metres]
+//                    Only while the server has asked for it - see `key` below.
 
 #include <cstdio>
 #include <cstdlib>
@@ -20,6 +24,7 @@
 #include <cmath>
 #include <string>
 #include <vector>
+#include <memory>
 #include <chrono>
 #include <atomic>
 #include <condition_variable>
@@ -42,6 +47,16 @@ static const uint32_t MAGIC = 0x4B4E4354; // 'KNCT'
 static const uint32_t TYPE_HELLO = 1;
 static const uint32_t TYPE_FRAME = 2;
 static const uint32_t TYPE_COLOR = 3;
+static const uint32_t TYPE_KEY = 4;
+
+// The levels a type 4 key carries a reading on: 0 means no reading, so a depth inside the
+// range quantises into 1..255 and reads back as level/255 * rangeM metres. Unavoidably a
+// second spelling of a JavaScript number, since the browser cannot import a C++ constant.
+static const uint32_t KEY_DEPTH_LEVELS = 255;
+
+// Fixed rather than following --quality: the key is read as numbers rather than looked at,
+// so the setting that trades detail for bytes on a picture does not apply to it.
+static const int KEY_JPEG_QUALITY = 90;
 
 static const int CW = 1920;
 static const int CH = 1080;
@@ -107,7 +122,7 @@ static bool write_file(const std::string &path, const void *const *parts,
   return ok;
 }
 
-// stdout has two writers - the frame loop and the colour encoder thread - and a message is a
+// stdout has two writers - the frame loop and the encoder thread - and a message is a
 // header plus a payload as two `write_all` calls over a pipe that partial-writes at 64KB.
 // Without this lock the two interleave and the parser reads a desync.
 static std::mutex g_writeMutex;
@@ -132,18 +147,7 @@ static uint64_t now_us() {
   return (uint64_t)duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
-/**
- * The webcam output's producer: the colour camera's own 1920x1080 picture, encoded off the
- * frame loop.
- *
- * Type 2 carries the *registered* colour, which wears the depth camera's frustum and is
- * punched through with holes wherever the depth solve returned nothing - a texture for a
- * point cloud rather than a picture of a room, so a webcam has to start from the native
- * frame. Its own thread because the encode is 5.50ms against a 7.1ms serial loop, and it
- * copies rather than borrows because the `Frame` belongs to libfreenect2's listener and is
- * released when the next colour frame arrives. A frame arriving while the encoder is busy
- * overwrites the pending one, since a queue would grow latency on a live output.
- */
+// One pending job owns its colour and depth together; overwriting it drops the whole pair.
 class HdEncoder {
 public:
   explicit HdEncoder(int quality) : quality_(quality) {}
@@ -164,80 +168,205 @@ public:
     if (thread_.joinable()) thread_.join();
   }
 
+  // The fixed half of every type 4 header, and the range its quantiser reads back as full
+  // scale. Set before start(), so the encoder thread never reads it mid-write.
+  void setKeyHeader(float fx, float fy, float cx, float cy, float rangeM) {
+    keyFx_ = fx; keyFy_ = fy; keyCx_ = cx; keyCy_ = cy; keyRangeM_ = std::fmin(rangeM, 65.535f);
+  }
+
   bool enabled() const { return enabled_.load(std::memory_order_relaxed); }
   void setEnabled(bool on) { enabled_.store(on, std::memory_order_relaxed); }
   uint64_t sent() const { return sent_.load(std::memory_order_relaxed); }
   uint64_t encodeUs() const { return encodeUs_.load(std::memory_order_relaxed); }
   uint64_t dropped() const { return dropped_.load(std::memory_order_relaxed); }
 
-  /** Called on the frame loop, and the only thing it costs is the copy. */
-  void submit(const uint8_t *bgrx, size_t bytes, uint64_t ts) {
+  bool keyEnabled() const { return keyEnabled_.load(std::memory_order_relaxed); }
+  void setKeyEnabled(bool on) { keyEnabled_.store(on, std::memory_order_relaxed); }
+  uint64_t keySent() const { return keySent_.load(std::memory_order_relaxed); }
+  uint64_t keyEncodeUs() const { return keyEncodeUs_.load(std::memory_order_relaxed); }
+  uint64_t keyDropped() const { return keyDropped_.load(std::memory_order_relaxed); }
+
+  // Copy a new colour once; pending depth keeps an immutable reference to that exact image.
+  void submitColour(const uint8_t *pixels, size_t bytes, uint64_t ts, int format = TJPF_BGRX) {
     {
       std::lock_guard<std::mutex> lock(m_);
-      if (hasPending_) dropped_.fetch_add(1, std::memory_order_relaxed);
-      pending_.assign(bgrx, bgrx + bytes);
-      pendingTs_ = ts;
-      hasPending_ = true;
+      if (!pixels || bytes != (size_t)CW * CH * 4 || (format != TJPF_BGRX && format != TJPF_RGBX)) {
+        latestColour_.reset();
+        pendingColour_.reset();
+        pendingColourIsNew_ = false;
+        depth_.clear();
+        return;
+      }
+      if (pendingColourIsNew_) dropped_.fetch_add(1, std::memory_order_relaxed);
+      if (!depth_.empty()) keyDropped_.fetch_add(1, std::memory_order_relaxed);
+      latestColour_ = std::make_shared<Colour>();
+      latestColour_->pixels.assign(pixels, pixels + bytes);
+      latestColour_->ts = ts;
+      latestColour_->format = format;
+      pendingColour_ = latestColour_;
+      pendingColourIsNew_ = true;
+      depth_.clear();
+    }
+    cv_.notify_one();
+  }
+
+  void submitDepth(const float *rows, size_t floats, uint64_t ts) {
+    {
+      std::lock_guard<std::mutex> lock(m_);
+      if (!latestColour_ || !rows || floats != (size_t)CW * CH) return;
+      if (!depth_.empty()) keyDropped_.fetch_add(1, std::memory_order_relaxed);
+      pendingColour_ = latestColour_;
+      depth_.assign(rows, rows + floats);
+      depthTs_ = ts;
     }
     cv_.notify_one();
   }
 
 private:
   void run() {
-    tjhandle jpeg = tjInitCompress();
-    if (!jpeg) {
-      std::fprintf(stderr, "[grabber] cannot start the hd colour encoder: %s\n", tjGetErrorStr());
+    // TurboJPEG keeps one reusable destination allocation per compressor; alternating two
+    // buffers through one handle frees the first while its pointer is still live.
+    tjhandle colourJpeg = tjInitCompress();
+    tjhandle keyJpeg = tjInitCompress();
+    if (!colourJpeg || !keyJpeg) {
+      std::fprintf(stderr, "[grabber] cannot start the hd encoder: %s\n", tjGetErrorStr());
+      if (colourJpeg) tjDestroy(colourJpeg);
+      if (keyJpeg) tjDestroy(keyJpeg);
       return;
     }
-    std::vector<uint8_t> work;
-    std::vector<uint8_t> payload;
-    unsigned char *buf = nullptr;
+    std::vector<uint8_t> grey, payload;
+    std::shared_ptr<Colour> encodedColour;
+    std::vector<float> depthWork;
+    unsigned char *colourBuf = nullptr;
+    unsigned char *keyBuf = nullptr;
     // Never reset between encodes: TurboJPEG reads it as the capacity of the buffer it
     // allocated last time, and zeroing it claims a zero-length buffer the encode runs off.
-    unsigned long size = 0;
+    // A pair per slot, because each size is the capacity of the buffer beside it, and one
+    // shared between two allocations describes whichever encode ran last.
+    unsigned long colourSize = 0;
+    unsigned long keySize = 0;
 
     for (;;) {
       uint64_t ts;
+      std::shared_ptr<Colour> colourWork;
+      depthWork.clear();
       {
         std::unique_lock<std::mutex> lock(m_);
-        cv_.wait(lock, [this] { return hasPending_ || stop_; });
+        cv_.wait(lock, [this] { return pendingColour_ || stop_; });
         if (stop_) break;
-        work.swap(pending_);
-        ts = pendingTs_;
-        hasPending_ = false;
+        colourWork.swap(pendingColour_);
+        pendingColourIsNew_ = false;
+        depthWork.swap(depth_);
+        ts = depthTs_;
       }
 
-      uint64_t t0 = now_us();
-      if (tjCompress2(jpeg, work.data(), CW, 0, CH, TJPF_BGRX, &buf, &size,
-                      TJSAMP_420, quality_, TJFLAG_FASTDCT) != 0) {
-        std::fprintf(stderr, "[grabber] hd colour encode failed: %s\n", tjGetErrorStr());
-        continue;
+      if (encodedColour != colourWork) {
+        const uint64_t before = sent();
+        if (!encodeColour(colourJpeg, colourWork->pixels, colourWork->ts, colourWork->format,
+                          payload, &colourBuf, &colourSize)) break;
+        if (sent() == before) continue;
+        encodedColour = colourWork;
       }
-      encodeUs_.fetch_add(now_us() - t0, std::memory_order_relaxed);
-
-      payload.resize(8 + (size_t)size);
-      std::memcpy(payload.data(), &ts, 8);
-      std::memcpy(payload.data() + 8, buf, (size_t)size);
-      if (!write_message(STDOUT_FILENO, TYPE_COLOR, payload.data(), (uint32_t)payload.size())) break;
-      sent_.fetch_add(1, std::memory_order_relaxed);
+      if (!depthWork.empty()
+          && !encodeKey(keyJpeg, depthWork, ts, colourWork->ts, grey, payload, &keyBuf, &keySize)) break;
     }
 
-    if (buf) tjFree(buf);
-    tjDestroy(jpeg);
+    if (colourBuf) tjFree(colourBuf);
+    if (keyBuf) tjFree(keyBuf);
+    tjDestroy(colourJpeg);
+    tjDestroy(keyJpeg);
+  }
+
+  /** Encodes and writes one type 3 message. False means stdout is gone. */
+  bool encodeColour(tjhandle jpeg, const std::vector<uint8_t> &pixels, uint64_t ts, int format,
+                    std::vector<uint8_t> &payload, unsigned char **buf, unsigned long *size) {
+    const uint64_t t0 = now_us();
+    if (tjCompress2(jpeg, pixels.data(), CW, 0, CH, format, buf, size,
+                    TJSAMP_420, quality_, TJFLAG_FASTDCT) != 0) {
+      std::fprintf(stderr, "[grabber] hd colour encode failed: %s\n", tjGetErrorStr());
+      return true;
+    }
+    encodeUs_.fetch_add(now_us() - t0, std::memory_order_relaxed);
+
+    payload.resize(8 + (size_t)*size);
+    std::memcpy(payload.data(), &ts, 8);
+    std::memcpy(payload.data() + 8, *buf, (size_t)*size);
+    if (!write_message(STDOUT_FILENO, TYPE_COLOR, payload.data(), (uint32_t)payload.size())) return false;
+    sent_.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+
+  /** Encodes and writes one type 4 message. False means stdout is gone. */
+  bool encodeKey(tjhandle jpeg, const std::vector<float> &mm, uint64_t ts, uint64_t colourTs,
+                 std::vector<uint8_t> &grey, std::vector<uint8_t> &payload,
+                 unsigned char **buf, unsigned long *size) {
+    const uint64_t t0 = now_us();
+    quantise(mm, grey);
+    if (tjCompress2(jpeg, grey.data(), CW, 0, CH, TJPF_GRAY, buf, size,
+                    TJSAMP_GRAY, KEY_JPEG_QUALITY, TJFLAG_FASTDCT) != 0) {
+      std::fprintf(stderr, "[grabber] key depth encode failed: %s\n", tjGetErrorStr());
+      return true;
+    }
+    keyEncodeUs_.fetch_add(now_us() - t0, std::memory_order_relaxed);
+
+    payload.resize(36 + (size_t)*size);
+    uint8_t *p = payload.data();
+    std::memcpy(p, &ts, 8);         p += 8;
+    std::memcpy(p, &colourTs, 8);   p += 8;
+    std::memcpy(p, &keyFx_, 4);     p += 4;
+    std::memcpy(p, &keyFy_, 4);     p += 4;
+    std::memcpy(p, &keyCx_, 4);     p += 4;
+    std::memcpy(p, &keyCy_, 4);     p += 4;
+    std::memcpy(p, &keyRangeM_, 4); p += 4;
+    std::memcpy(p, *buf, (size_t)*size);
+    if (!write_message(STDOUT_FILENO, TYPE_KEY, payload.data(), (uint32_t)payload.size())) return false;
+    keySent_.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+
+  /**
+   * Float millimetres into KEY_DEPTH_LEVELS levels of grey, with 0 reserved for no reading.
+   * bigdepth is +inf wherever nothing scattered, so the range test rejects rather than lets a
+   * value wrap, and a reading inside the range floors at 1 rather than 0 - the difference
+   * between a surface close to the sensor and empty space. The JPEG is lossy: measured on a
+   * flat field, level 1 survives an accurate IDCT and is read as 0 by a fast one.
+   */
+  void quantise(const std::vector<float> &mm, std::vector<uint8_t> &grey) const {
+    const float fullScaleMm = keyRangeM_ * 1000.0f;
+    grey.resize((size_t)CW * CH);
+    for (size_t i = 0; i < grey.size(); i++) {
+      const float v = mm[i];
+      if (!(v > 0.0f) || !std::isfinite(v) || v > fullScaleMm) { grey[i] = 0; continue; }
+      long level = std::lround((double)KEY_DEPTH_LEVELS * (double)v / (double)fullScaleMm);
+      if (level < 1) level = 1;
+      if (level > (long)KEY_DEPTH_LEVELS) level = (long)KEY_DEPTH_LEVELS;
+      grey[i] = (uint8_t)level;
+    }
   }
 
   const int quality_;
   std::thread thread_;
   std::mutex m_;
   std::condition_variable cv_;
-  std::vector<uint8_t> pending_;
-  uint64_t pendingTs_ = 0;
-  bool hasPending_ = false;
+  struct Colour {
+    std::vector<uint8_t> pixels;
+    uint64_t ts;
+    int format;
+  };
+  std::shared_ptr<Colour> latestColour_, pendingColour_;
+  bool pendingColourIsNew_ = false;
+  std::vector<float> depth_;
+  uint64_t depthTs_ = 0;
   bool stop_ = false;
+  float keyFx_ = 0.0f, keyFy_ = 0.0f, keyCx_ = 0.0f, keyCy_ = 0.0f, keyRangeM_ = 0.0f;
   std::atomic<bool> enabled_{false};
   std::atomic<uint64_t> sent_{0};
   std::atomic<uint64_t> encodeUs_{0};
   std::atomic<uint64_t> dropped_{0};
+  std::atomic<bool> keyEnabled_{false};
+  std::atomic<uint64_t> keySent_{0};
+  std::atomic<uint64_t> keyEncodeUs_{0};
+  std::atomic<uint64_t> keyDropped_{0};
 };
 
 // Low light on lets the sensor lengthen integration until the image is exposed, which drops
@@ -275,6 +404,15 @@ static void pollCommands(libfreenect2::Freenect2Device *dev, std::string &pendin
       } else if (hd) {
         hd->setEnabled(on);
         std::fprintf(stderr, "[grabber] hd colour %s\n", on ? "on" : "off");
+      }
+    } else if (line == "key on" || line == "key off") {
+      // A key is the depth mapped into the colour camera's frame, so it needs that camera.
+      const bool on = line == "key on";
+      if (!wantColor && on) {
+        std::fprintf(stderr, "[grabber] refusing key: this grabber was started with --no-color\n");
+      } else if (hd) {
+        hd->setKeyEnabled(on);
+        std::fprintf(stderr, "[grabber] key %s\n", on ? "on" : "off");
       }
     } else if (!line.empty()) {
       std::fprintf(stderr, "[grabber] unknown command: %s\n", line.c_str());
@@ -385,14 +523,17 @@ int main(int argc, char **argv) {
         "  the time spent blocked waiting for the next depth frame, which is the\n"
         "  headroom left over. One CSV row per frame, all of them written to\n"
         "  stderr at exit so the reporting stays out of the loop being measured.\n"
-        "  hd_copy_us is the webcam's share: the 1080p encode itself runs on\n"
-        "  another thread and is summarised separately, so what lands on the loop\n"
-        "  is the copy that hands the frame over and nothing else.\n"
+        "  hd_copy_us is the webcam's share and key_copy_us the key's: both\n"
+        "  encodes run on another thread and are summarised separately, so what\n"
+        "  lands on the loop is the copy that hands each frame over, nothing else.\n"
         "\n"
-        "  On stdin, one command per line: 'low-light on|off' and\n"
-        "  'hd-color on|off'. The second starts and stops the type 3 colour\n"
-        "  stream the webcam output reads, and it is off until asked because a\n"
-        "  1080p JPEG is roughly 215KB a frame of pipe nobody is reading.\n"
+        "  On stdin, one command per line: 'low-light on|off', 'hd-color on|off'\n"
+        "  and 'key on|off'. The second starts and stops the type 3 colour stream\n"
+        "  the webcam output reads; the third starts and stops the type 4 key, the\n"
+        "  depth mapped into that same 1920x1080 frame, and turns the colour stream\n"
+        "  on with it because a key without its picture mattes nothing. Both are\n"
+        "  off until asked, because a 1080p JPEG is roughly 215KB a frame of pipe\n"
+        "  nobody is reading.\n"
         "\n"
         "  --min-depth/--max-depth clip on the GPU before the frame is built, so\n"
         "  they decide what exists at all - the viewer's own clip only hides what\n"
@@ -412,7 +553,9 @@ int main(int argc, char **argv) {
         "  exits after --dump-count (default 24) of them.\n"
         "\n"
         "stdin commands, newline terminated, applied live:\n"
-        "  low-light on|off\n",
+        "  low-light on|off\n"
+        "  hd-color on|off\n"
+        "  key on|off\n",
         pipelineName.c_str());
       return 0;
     }
@@ -599,6 +742,9 @@ int main(int argc, char **argv) {
   // variable costs nothing, and starting one on demand puts its startup inside the latency of
   // the first webcam frame.
   HdEncoder hdEncoder(jpegQuality);
+  // The key is in the colour camera's frame, so it carries that camera's intrinsics rather
+  // than the depth camera's the hello reports. Set before the thread exists.
+  hdEncoder.setKeyHeader(cp.fx, cp.fy, cp.cx, cp.cy, maxDepth);
   if (wantColor) hdEncoder.start();
 
   std::vector<uint8_t> depthOut(DEPTH_PIXELS * sizeof(uint16_t));
@@ -622,7 +768,7 @@ int main(int argc, char **argv) {
   // I/O cannot land inside the loop it is measuring.
   struct ProfRecord {
     uint64_t arrival;
-    uint32_t newColor, wait, acq, reg, conv, enc, asm_, write, jpegBytes, hdCopy;
+    uint32_t newColor, wait, acq, reg, conv, enc, asm_, write, jpegBytes, hdCopy, keyCopy;
   };
   std::vector<ProfRecord> prof;
   if (profile) prof.reserve(1 << 17); // ~an hour at 30fps, so no realloc mid-loop
@@ -656,29 +802,28 @@ int main(int argc, char **argv) {
     libfreenect2::Frame *depth = depthFrames[libfreenect2::Frame::Depth];
     libfreenect2::Frame *rgb = haveColor ? colorFrames[libfreenect2::Frame::Color] : nullptr;
 
-    // The webcam's picture, handed off before registration because nothing it needs happens
-    // downstream. Only on a new colour frame, or a stationary webcam would be billed for 30fps
-    // of identical JPEGs. And above the bad-depth refusal, because the two frames fail
-    // independently: below it, a healthy colour frame was lost to a failed depth readback.
+    // Depth keeps its own time when low light reuses an older colour frame.
+    const uint64_t iterTs = now_ms();
+
+    // Copy only new colour frames, including when the depth readback below fails.
+    const bool hdColourValid = rgb && rgb->data && rgb->status == 0
+      && (int)rgb->width == CW && (int)rgb->height == CH && rgb->bytes_per_pixel == 4
+      && (rgb->format == libfreenect2::Frame::BGRX || rgb->format == libfreenect2::Frame::RGBX);
+    if (!hdColourValid) hdEncoder.submitColour(nullptr, 0, iterTs);
     uint64_t tHdStart = now_us();
     uint64_t tHdDone = tHdStart;
-    if (newColor && rgb && hdEncoder.enabled()) {
-      // Checked rather than assumed: a build whose JPEG decoder produced RGBX would hand the
-      // webcam a picture with red and blue swapped, which looks like a grading choice.
-      if (rgb->format != libfreenect2::Frame::BGRX) {
+    if (newColor && rgb && (hdEncoder.enabled() || hdEncoder.keyEnabled())) {
+      if (!hdColourValid) {
         if (!hdFormatWarned) {
-          std::fprintf(stderr, "[grabber] hd colour off: the colour decoder produced format %d, not BGRX\n",
-                       (int)rgb->format);
-          hdFormatWarned = true;
-        }
-      } else if ((int)rgb->width != CW || (int)rgb->height != CH) {
-        if (!hdFormatWarned) {
-          std::fprintf(stderr, "[grabber] hd colour off: the colour frame is %dx%d, not %dx%d\n",
-                       (int)rgb->width, (int)rgb->height, CW, CH);
+          std::fprintf(stderr, "[grabber] hd colour and key off: unsupported colour frame "
+                       "(%dx%d, %d bytes per pixel, format %d, status %d)\n",
+                       (int)rgb->width, (int)rgb->height, (int)rgb->bytes_per_pixel,
+                       (int)rgb->format, (int)rgb->status);
           hdFormatWarned = true;
         }
       } else {
-        hdEncoder.submit((const uint8_t *)rgb->data, (size_t)CW * CH * 4, now_ms());
+        hdEncoder.submitColour((const uint8_t *)rgb->data, (size_t)CW * CH * 4, iterTs,
+          rgb->format == libfreenect2::Frame::RGBX ? TJPF_RGBX : TJPF_BGRX);
       }
       tHdDone = now_us();
     }
@@ -722,10 +867,21 @@ int main(int argc, char **argv) {
     }
 
     const float *depthSrc;
+    // Zero unless the key copy below runs, so the subtraction out of `reg` is a no-op on the
+    // frames that skip it rather than an underflow.
+    uint64_t tKeyStart = 0, tKeyDone = 0;
     if (rgb) {
       // The scratch buffers are passed in rather than left to apply(), which otherwise
       // new/deletes an 8.3MB filter map and an 868KB offset map on every frame.
       registration.apply(rgb, depth, &undistorted, &registered, true, &bigdepth, colorDepthMap.data());
+      // apply() returns having touched nothing unless the colour frame is exactly 1920x1080x4,
+      // so a key taken past that check would carry the previous frame's depth as this one's.
+      if (hdEncoder.keyEnabled() && hdColourValid) {
+        tKeyStart = now_us();
+        // Past the scatter guard row - see the bigdepth declaration for why there is one.
+        hdEncoder.submitDepth((const float *)bigdepth.data + CW, (size_t)CW * CH, iterTs);
+        tKeyDone = now_us();
+      }
       depthSrc = (const float *)undistorted.data;
     } else {
       // Same undistortion the colour path applies, so geometry does not shift between the
@@ -782,7 +938,10 @@ int main(int argc, char **argv) {
       // rather than left to inflate `acq` and be attributed to the wrong stage.
       r.acq       = (uint32_t)((tAcquired - tArrived) - (tHdDone - tHdStart));
       r.hdCopy    = (uint32_t)(tHdDone - tHdStart);
-      r.reg       = (uint32_t)(tRegistered - tAcquired);
+      // The key's copy happens inside the registration span, subtracted back out for the
+      // same reason `acq` sheds the webcam's.
+      r.reg       = (uint32_t)((tRegistered - tAcquired) - (tKeyDone - tKeyStart));
+      r.keyCopy   = (uint32_t)(tKeyDone - tKeyStart);
       r.conv      = (uint32_t)(tConverted - tRegistered);
       r.enc       = (uint32_t)(tEncoded - tConverted);
       r.asm_      = (uint32_t)(tAssembled - tEncoded);
@@ -805,21 +964,26 @@ int main(int argc, char **argv) {
   if (haveColor) colorListener.release(colorFrames);
 
   if (profile) {
-    std::fprintf(stderr, "[prof] n,arrival_us,newColor,wait_us,acq_us,reg_us,conv_us,enc_us,asm_us,write_us,jpeg_bytes,hd_copy_us\n");
+    std::fprintf(stderr, "[prof] n,arrival_us,newColor,wait_us,acq_us,reg_us,conv_us,enc_us,asm_us,write_us,jpeg_bytes,hd_copy_us,key_copy_us\n");
     for (size_t i = 0; i < prof.size(); i++) {
       const ProfRecord &r = prof[i];
-      std::fprintf(stderr, "[prof] %zu,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
+      std::fprintf(stderr, "[prof] %zu,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
                    i, (unsigned long long)r.arrival,
                    r.newColor, r.wait, r.acq, r.reg, r.conv, r.enc, r.asm_, r.write, r.jpegBytes,
-                   r.hdCopy);
+                   r.hdCopy, r.keyCopy);
     }
     std::fflush(stderr);
   }
 
-  if (wantColor && hdEncoder.sent() > 0) {
-    std::fprintf(stderr, "[grabber] hd colour: %llu sent, %llu dropped busy, %.2f ms mean encode\n",
+  // Each mean is guarded on its own slot: a run that carried colour and no key would
+  // otherwise divide by zero and report the key's cost as nan.
+  if (wantColor && (hdEncoder.sent() > 0 || hdEncoder.keySent() > 0)) {
+    std::fprintf(stderr, "[grabber] hd colour: %llu sent, %llu dropped busy, %.2f ms mean encode; "
+                 "key depth: %llu sent, %llu dropped busy, %.2f ms mean quantise+encode\n",
                  (unsigned long long)hdEncoder.sent(), (unsigned long long)hdEncoder.dropped(),
-                 (double)hdEncoder.encodeUs() / (double)hdEncoder.sent() / 1000.0);
+                 hdEncoder.sent() ? (double)hdEncoder.encodeUs() / (double)hdEncoder.sent() / 1000.0 : 0.0,
+                 (unsigned long long)hdEncoder.keySent(), (unsigned long long)hdEncoder.keyDropped(),
+                 hdEncoder.keySent() ? (double)hdEncoder.keyEncodeUs() / (double)hdEncoder.keySent() / 1000.0 : 0.0);
   }
 
   if (jpegBuf) tjFree(jpegBuf);

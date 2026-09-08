@@ -284,6 +284,37 @@ No shipped row moves with `BLOOM_LEVELS`, so the level count has no picture cont
 tools build their earlier arm by serving `git show <rev>:web/main.js` into a second page load, so
 a look-affecting change here is argued from the rows it moves and never from a re-baseline.
 
+### Lens scaling and brightness
+
+`export-check` compares a cropped 50-degree frame with a 26.25-degree frame reduced by two at
+1728x1080 and program time 4s. Each arm reads one image per lens after an accurate seek on warm
+pages, with no additional warmup discarded; bloom, trails and vignette are off. The recorded
+luminance ratios are:
+
+| fixture and arm | lens scaling | comparison |
+| --- | --- | --- |
+| synthetic `sample`, `lens-points` | 1.0049 | 0.6270 on `194ae972` |
+| synthetic `sample`, `lens-splat` | 1.0017 | 0.4019 on `194ae972`; 0.4883 with `vsize-lensed` |
+| synthetic `sample`, `lens-glyph` | 1.0022 | 0.9758 with `glyph-base-lens-absolute` |
+| recorded `2026-08-12-take1`, `lens-points` | 1.0037 | 0.9149 on `194ae972` |
+| recorded `2026-08-12-take1`, `lens-splat` | 1.0004 | 0.5459 on `194ae972` |
+
+The synthetic runs retain ten fixture failures and the recorded runs retain the crop-culling
+failure. `lens-absolute` fails the two ordinary-point rows; `vsize-lensed` fails only the additive
+row; `glyph-base-lens-absolute` fails only the glyph row. `splat-large`, with one accurate frame
+at 960x600 and 1920x1200 on warm synthetic pages, reads a coarse difference of 0.287/255 and a
+brightness ratio of 1.0001, against 17.567 and 0.6267 with `vsize-framebuffer`.
+
+The wider recorded-take sweep uses six looks, lenses 8/16/22.7446/50/90/300mm and exact
+1920x1080 and 3840x2160 buffers at 4s. Three interleaved `194ae972`/fix repeats after one discarded
+warmup per build and lens, with warm page caches, retain 432 reads of a center square scaled
+with magnification.
+All 36 boot-lens frame pairs are byte-identical. At 1080p, additive points at `pointSize` 40 read
+32.837/255 at the boot lens and 32.625 at 50mm, against 12.081 on `194ae972` at 50mm. At 4K,
+90mm reads 23.857 against 32.826 at the boot lens as point-size clamping enters. Blackwall also
+retains a large brightness change: particle coverage with bloom, trails and vignette off is the
+claim. These measurements use recorded footage, with no live sensor.
+
 ### `cascade` cannot hold its brightness, and the parameter is why
 
 Method: fifteen pinned program positions of `captures/sample.knct` over 0 to 0.9933 s at 640x360,
@@ -391,6 +422,7 @@ them. Its time is not measured; see [Not measured](#not-measured).
 | the whole serial half | 7.1 ms against a 33 ms budget | the same runs |
 | hoisting `Registration::apply`'s 9.2 MB of per-call allocation | 0.30 ms of 5.71 ms | the offline A/B harness on the real loop, where 33 ms and a JPEG encode sit between calls. Its p50 baseline is that harness's and not `--profile`'s |
 | the HD colour encoder | 5.50 ms mean | 90 native 1920x1080 frames over a six-second subscription at q80, TJSAMP_420 and FASTDCT, no encoder warmup discarded, the grabber delivering 180 depth frames at 30.0 fps with zero encoder-busy drops. It runs on its own thread |
+| the `/key` encode, quantise plus greyscale JPEG of the 1920x1080 depth | 6.5 ms mean, about 12 ms a frame with the colour encode on the same thread against a 33 ms budget | 60 keys on an M2 Max at -O2, on the thread the colour encode already runs; the loop's own share is the copy, p50 0.16 ms over 360 calls with 40 warmup discarded. The capture node has not been measured and is the number that decides. Level 1, the smallest reading, survives an accurate inverse DCT and reads back as 0 through a fast one on a flat field at quality 90, so the lowest step of the range can decode as no reading |
 | compressing the wire | zstd 1.75x on depth per frame; a u16 temporal delta plus zstd 2.75x on depth and 2.30x overall, 117 Mbit/s down to 51 | a fixed 40-45 s window with a 6 s warmup discarded; sample count not recorded. 434 KB of the 486 KB frame is uncompressed depth, and colour compresses at 1.00x, being already JPEG. Estimate was 35-45 Mbit/s |
 | `/record/state` against `/library/all` | 1.2 ms against 145 ms | interleaved A/B, 20 pairs against a 200-take library, indexes warm and sidecars written, first eight pairs discarded as page cache settling and the steady-state figures taken from the last twelve, the linked pair on one machine so the listing includes its node round trip. `describeTake` reads a marks sidecar per take, so the listing's cost is per take |
 | the first listing over 200 unindexed takes | 7m30s cold, 2.4s warm | `cachedIndex` scans each file once and writes a `.idx` beside it; a second server over the same directory warms off those sidecars |

@@ -21,6 +21,17 @@ commitment. Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 - **macOS on Apple Silicon, or Debian / Raspberry Pi OS** for a capture node.
 - **ffmpeg** for video out, expected at `/opt/homebrew/bin/ffmpeg`. Set `FFMPEG=` to override.
 
+
+## Linux Specific step you might need before install
+
+libfreenect2 comes with a udev rule you need to access the Kinect via usb. Move move it to the right place and refresh rules.
+```bash
+sudo cp third_party/libfreenect2/platform/linux/udev/90-kinect2.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+
 ## Quickstart
 
 ```bash
@@ -28,6 +39,14 @@ npm install
 npm run build:native      # one-time; needs the packages listed under Building the native side
 npm start                 # opens the menu on http://localhost:8080
 ```
+
+If your gpu has issues with your JPEG decoding, you might need to disable VAAPI entirely via an environment variable.
+```bash
+npm install
+npm run build:native
+LIBVA_DRIVER_NAME=none npm start   # 
+```
+
 
 Skip the native build if you have no sensor.
 
@@ -192,14 +211,17 @@ Two outputs, both listed with copy buttons under **Output → OBS**:
 | --- | --- | --- |
 | the viewport | browser source on `/program` | this renderer at a fixed size, no chrome |
 | the webcam | browser source on `/camera.mjpg` | the colour camera's own 1920x1080 frame |
+| the keyed webcam | browser source on `/key` | the same frame with everything outside the crop box cut away, alpha to OBS |
 
 Add a *Browser Source*, paste the URL, set *Width* and *Height*. The webcam is always
 1920x1080. The viewport is whatever you set in the panel, and has two modes: *program camera*
 frames the keyed camera, *mirror* follows what the operator is orbiting. OBS's own virtual
 camera publishes either one to Zoom or Meet.
 
-Turning the colour camera off restarts the grabber and drops a live webcam mid-call.
-`/camera.mjpg` serves the camera to anything that can reach the port, so read
+The keyed webcam cuts the frame by the crop box in sensor metres, and the depth behind the
+cut is the same floor plan the cloud draws, so it is a hole in the picture, not a body
+matte. Turning the colour camera off restarts the grabber and drops a live webcam mid-call.
+`/camera.mjpg` and `/key` serve the camera to anything that can reach the port, so read
 [SECURITY.md](SECURITY.md) before passing `--host 0.0.0.0`.
 
 ## Building the native side

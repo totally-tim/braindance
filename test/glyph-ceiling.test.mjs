@@ -68,8 +68,8 @@ test('the shader carries this exact ceiling, so the number above is not a second
   const src = readFileSync(new URL('../effects-builtin/glyph/size.vert.glsl', import.meta.url), 'utf8');
   const clamp = `min(${GLYPH_CEILING_REF}.0 * k, pointCeiling)`;
   assert.ok(src.includes(clamp), `the glyph branch does not clamp to ${clamp}`);
-  assert.ok(src.includes(`gl_PointSize = clamp(mix(base, cellPx * k, glyph), 1.0, ${clamp});`),
+  assert.ok(src.includes(`gl_PointSize = clamp(mix(base, cellPx * k * zoom, glyph), 1.0, ${clamp});`),
     'the reference ceiling is not on the glyph branch');
-  assert.ok(src.includes('gl_PointSize = clamp(pointSize * k / max(0.15, -mv.z), 1.0, 64.0);'),
+  assert.ok(src.includes('gl_PointSize = clamp(pointSize * zoom * k / max(0.15, -mv.z), 1.0, 64.0);'),
     'the fallback branch no longer carries the statement export-check anchors on');
 });

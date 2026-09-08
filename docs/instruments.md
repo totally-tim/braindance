@@ -17,6 +17,15 @@ body as a column of its own, and the row now fails any served part whose hash is
 emit log, over a floor requiring the log to be non-empty. When the two ends of a comparison share
 no quantity, make the writer produce one.
 
+A pairing that only agrees on timestamps is not a pairing the check has seen: the deterministic
+encoder test blocks the first colour write and submits the next colour before releasing it, and a
+build that merely re-stamps timestamps passes every timestamp row. `hd-encoder-check` decodes
+distinct colours and depths so the image assertion is what fails, and held colour is a separate
+arm, because its timestamp must stay older than the next depth frame's. The `/key` browser check
+waits for a frame after the new crop state arrives, because a frame counted before that arrival
+still shows the old crop, and its decode gate decides whether to hold at entry, because deciding
+after an `await` can hold only half of a pair.
+
 ## Mutation-test the instrument
 
 Break the thing under test on purpose and read which rows fire. Before believing a mutation was
@@ -144,6 +153,8 @@ is the normal state.
   damping before comparing frames and hit-test the region a comparison covers.
 - A tool holding its own copy of a layout constant fails looking exactly like a product regression;
   ask the page for the number and read the drawing buffer back until it is the size you asked for.
+- Wait for the take to open and resize events to run before accepting that size. `export-check`
+  records the settled buffer and refuses every frame read after it moves, including cross-build pages.
 - Writing `.value` by hand stops meaning what it says the moment a control's scale changes, and it
   fails in the passing direction, so check the quantity that came out against the one that went in.
 - `camera.project()` answers in canvas coordinates and `page.mouse` takes viewport ones; they are
