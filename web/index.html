@@ -70,6 +70,21 @@
      boundary is invisible - which makes it a guide nobody can use. An outline rather
      than a border because it must not enter the layout the letterbox just computed. */
   #stage { outline: 1px solid rgba(120, 220, 210, 0.28); }
+  #previewStage { position: fixed; pointer-events: none; z-index: 1; }
+  #previewStage[hidden] { display: none; }
+  .preview-renderer { position: fixed; left: -10000px; top: 0; width: 1px; height: 1px;
+    border: 0; pointer-events: none; }
+  .preview-settings-heading { display: flex; justify-content: space-between; gap: 16px;
+    padding: 6px 12px; color: var(--dim); font-size: 11px; }
+  #tPreviewView { color: var(--faint); }
+  #tPreviewStatus { display: block; padding: 4px 12px 6px; max-width: 300px;
+    color: var(--faint); font-size: 10px; overflow-wrap: anywhere; }
+  #tPreviewStatus[data-state="error"] { color: var(--warn); }
+  #tPreviewCoverage { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; overflow: hidden;
+    pointer-events: none; z-index: 3; }
+  #tPreviewCoverage i { position: absolute; height: 100%; min-width: 1px; background: var(--dim); }
+  #tPreviewCoverage i.pending { height: 1px; bottom: 0; background: var(--line-2); }
+  #tPreviewCoverage i.rendering { min-width: 2px; background: var(--dim); }
 
   /* Two boxes rather than one scrolling box, and the split is what makes the way out
      of this surface reachable. The panel fills the window's height and its content is
@@ -385,6 +400,7 @@
   body:not(.editing) #menuExport,
   body:not(.editing) #menuTopView,
   body:not(.editing) #menuLookImport,
+  body:not(.editing) #tPreviewSettings,
   body:not(.editing) #menuLookExport { display: none; }
   /* Hide separators that end up orphaned after the items above are hidden. The Output
      menu keeps only OBS, so its separator goes; the File menu keeps only Rename project
@@ -1087,7 +1103,8 @@
     --tminiwin-min: 10px; min-width: var(--tminiwin-min);
     border: 1px solid var(--line-3); background: rgba(120, 220, 210, 0.10);
     cursor: grab; }
-  .tbed { position: relative; cursor: pointer; touch-action: none; user-select: none; }
+  .tbed { position: relative; cursor: pointer; touch-action: none; user-select: none;
+    border-top: 1px solid var(--line-2); }
   .truler { position: absolute; inset: 0; }
   .ttick { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line-2); }
   .ttick label { position: absolute; top: 3px; left: 5px; font-size: 11px; color: var(--faint);
@@ -1140,9 +1157,8 @@
     pointer-events: none; z-index: 1; }
 
   /* In/out markers. They live on the same coordinate as the playhead and can be
-     dragged to set the clip range. A triangle points inward so the two do not
-     collide when they are close. */
-  .tcut { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--accent);
+     dragged to set the clip range. Subtle markers at the top of the ruler only. */
+  .tcut { position: absolute; top: 0; height: 2px; width: 1px; background: var(--dim);
     pointer-events: none; z-index: 4; }
   /* The grab zone, which is not the line: a 1px target is a control you have to aim at. The
      ruler row only, so the lanes below keep their own presses. Each side reaches *inward*
@@ -1152,10 +1168,10 @@
     pointer-events: auto; cursor: ew-resize; }
   .tcut-in::after { left: -4px; width: 16px; }
   .tcut-out::after { left: -12px; width: 16px; }
-  .tcut::before { content: ""; position: absolute; top: 0; left: -5px;
-    border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 7px solid var(--accent); }
-  .tcut.tcut-out::before { left: -4px; border-left: 4px solid var(--accent); border-right: 4px solid transparent; border-top: 0; border-bottom: 7px solid var(--accent); top: calc(var(--ruler-h) - 7px); }
-  .tcut.tcut-in::before { left: -4px; border-left: 4px solid transparent; border-right: 4px solid var(--accent); border-top: 0; border-bottom: 7px solid var(--accent); top: calc(var(--ruler-h) - 7px); }
+  .tcut::before { content: ""; position: absolute; top: 0; left: -3px;
+    border-left: 3px solid transparent; border-right: 3px solid transparent; border-top: 5px solid var(--dim); }
+  .tcut.tcut-out::before { left: -3px; border-left: 3px solid var(--dim); border-right: 3px solid transparent; }
+  .tcut.tcut-in::before { left: -3px; border-left: 3px solid transparent; border-right: 3px solid var(--dim); }
 
   /* ── keyframe lanes ────────────────────────────────────────────────────────
      A lane draws the curve it is a lane for, because ease handles need something
@@ -1295,6 +1311,14 @@
           <div class="menu-separator"></div>
           <button class="menu-command" id="menuLookImport" type="button" role="menuitem"><span>Import Look</span><kbd></kbd></button>
           <button class="menu-command" id="menuLookExport" type="button" role="menuitem"><span>Export Look</span><kbd></kbd></button>
+          <div id="tPreviewSettings" role="group" aria-label="Previews">
+            <div class="menu-separator"></div>
+            <div class="preview-settings-heading">Previews <span id="tPreviewView">Camera path</span></div>
+            <button class="menu-command" id="tPreviewRender" type="button" role="menuitem">Render range</button>
+            <button class="menu-command" id="tPreviewAuto" type="button" role="menuitemcheckbox" aria-checked="true">Render while idle</button>
+            <button class="menu-command" id="tPreviewClear" type="button" role="menuitem">Clear previews</button>
+            <output id="tPreviewStatus" aria-live="polite">Loading previews</output>
+          </div>
           <div class="menu-separator"></div>
           <button class="menu-command" id="menuState" type="button" role="menuitemcheckbox" aria-checked="false"><span>Stats for nerds</span><kbd></kbd></button>
         </div>
@@ -1609,6 +1633,7 @@
         <div class="trow ruler tbed" id="tBed">
           <div class="truler" id="tRuler"></div>
           <div class="tmarks" id="tMarks"></div>
+          <div id="tPreviewCoverage" role="img" aria-label="No rendered previews"></div>
         </div>
         <div class="tstack" id="tLanes"></div>
         <!-- What the export will not include, drawn rather than left to be inferred
@@ -1627,7 +1652,7 @@
          and the playhead. It carries the same 96px rail offset as the lanes so its
          coordinates line up with theirs by construction rather than by arithmetic. -->
     <div class="tmini">
-      <span>timeline</span>
+      <div></div>
       <div class="tminibed" id="tMini">
         <div class="tminirange" id="tMiniRange"></div>
         <div class="tminimarks" id="tMiniMarks"></div>

@@ -106,6 +106,10 @@ so an arm reading it records a release while a descriptor leaks, 0 against a rea
 reports `readdirSync('/dev/fd').length` beside it and the arm asserts on that. Ask the same of any
 count a proof tool reads back from the thing under test.
 
+A preview canvas can report `hidden` while an inline display style keeps it visible over the
+live renderer. Read actual page visibility after pause and resize, and compare its bounds with
+the live stage; `preview-check` falsifies both readings.
+
 ## Re-run the baseline in the failure's conditions
 
 Before believing a proof tool caught your change, run the unmodified tree in the conditions the

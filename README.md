@@ -171,6 +171,13 @@ Nearly every slider has a keyframe button, so a clip can dissolve from depth int
 under the playhead. `depth ÷`, `every Nth` and `render %` are view settings, not part of the
 frame, so they are neither saved with the clip nor exported.
 
+**View → Previews** renders the in/out range for cached playback. It follows
+the authored camera path, or the current free-camera view when you leave that camera still.
+**Render while idle** starts after you stop interacting; **Render range** waits for playback to
+stop, then starts. The band under the time ruler marks ready frames, and the readiness beside the
+settings counts them. Changing the edit or viewpoint returns to live rendering until matching
+previews are ready.
+
 ### 5. Export a video
 
 Aspect ratio and frame rate belong to the project: set them under **Project settings** in the

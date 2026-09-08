@@ -64,6 +64,7 @@ import { gradeSpine } from './grade-shader.js';
 import { moshSpine } from './mosh-shader.js';
 import { moshFramesBack, moshRefreshes } from './mosh-pass.js';
 import { assembleShaders } from './shader-assembly.js';
+import { createPreviews } from './previews.js';
 
 const revSignature = (effects) => effects.map((e) => `${e.id} ${e.rev}`).join('\n');
 
@@ -168,6 +169,13 @@ let shaderPrograms = assembleShaders(SPINES, effectPackages);
 
 // Which of the two surfaces this page is, decided by the path.
 const EDITING = location.pathname === '/edit';
+const PREVIEW_RENDERER = EDITING && window.parent !== window
+  && new URLSearchParams(location.search).get('preview-renderer') === '1';
+let previews = null;
+let previewBootError = null;
+const previewBrowserBuild = EDITING
+  ? await (navigator.userAgentData?.getHighEntropyValues(['fullVersionList', 'platformVersion']).catch(() => null) ?? null)
+  : null;
 
 /**
  * True when OBS has opened this page as a browser source: no controls and no take of its own.
@@ -416,6 +424,7 @@ function setDeliverableSize(text) {
 // Which camera the viewport draws. Navigation is off under the program camera.
 function setViewCamera(cam) {
   stopLookDrag();
+  previews?.changed();
   useViewCamera(cam);
   if (gizmo) gizmo.camera = cam;
   renderPass.camera = cam;
@@ -3383,7 +3392,7 @@ let framesSeen = 0;
 let lastFpsAt = performance.now();
 let fps = 0;
 
-// Viewport fps: how fast `renderProgramFrame` runs, live or recorded.
+// Viewport fps counts both live renders and displayed previews.
 let viewportRenders = 0;
 let lastViewportFpsAt = performance.now();
 let viewportFps = 0;
@@ -4235,18 +4244,23 @@ function enterClip(clip, t) {
 // Where an export takes its bytes. One position, since the readback shares the task.
 let frameSink = null;
 
-// One image at one program position. Both transports drive exactly this call.
-function renderProgramFrame(t) {
-  counters.renders++;
+function noteViewportFrame() {
   viewportRenders++;
-  // The overlay is still a scene, so an export and a chrome-off look take its handles out.
-  if (gizmoHelper) gizmoHelper.visible = gizmoShown();
   const now = performance.now();
   if (now - lastViewportFpsAt >= 1000) {
     viewportFps = (viewportRenders * 1000) / (now - lastViewportFpsAt);
     viewportRenders = 0;
     lastViewportFpsAt = now;
   }
+}
+
+// One image at one program position. Both transports drive exactly this call.
+function renderProgramFrame(t) {
+  previews?.hide();
+  counters.renders++;
+  noteViewportFrame();
+  // The overlay is still a scene, so an export and a chrome-off look take its handles out.
+  if (gizmoHelper) gizmoHelper.visible = gizmoShown();
   chromeStale = true;
   evaluating = true;
   try {
@@ -4393,6 +4407,7 @@ function advanceFly() {
 
 // Auto-orbit gets the program delta, so the same orbit renders the same at any speed.
 function advanceNavigation(t) {
+  if (PREVIEW_RENDERER) return;
   advanceFly();
   controls.update(Math.max(0, t - lastNavTime));
   lastNavTime = t;
@@ -4817,6 +4832,7 @@ class TimelineTransport {
     this.working = false;
     this.faults = 0;
     this.looping = false;
+    this.previewed = false;
   }
 
   get programSec() { return this.frame / this.outputFps; }
@@ -5095,12 +5111,16 @@ class TimelineTransport {
     // enters on rather than from here - which is the same door a cut under playback goes through.
     resetAccumulators();
     advanceNavigation(t);
-    for (let k = start; k <= target; k++) renderProgramFrame(k / this.outputFps);
+    for (let k = start; k <= target; k++) {
+      renderProgramFrame(k / this.outputFps);
+      if (options.checkpoint) await options.checkpoint();
+    }
 
     this.lastCostMs = performance.now() - began;
     this.overtaken = 0;
     this.frame = target;
     this.drafted = false;
+    this.previewed = false;
     this.lastSeek = {
       target, start, frames: length, plan,
       clamped: asked > target,
@@ -5152,7 +5172,7 @@ class TimelineTransport {
       borrowed = BYPASSED_SET;
       try {
         // The reset is what lets a drag go backwards.
-        if (!standing) resetAccumulators();
+        if (!standing || this.previewed) resetAccumulators();
         advanceNavigation(t);
         renderProgramFrame(t);
         drawChrome();
@@ -5166,6 +5186,7 @@ class TimelineTransport {
     counters.drafts++;
     this.frame = target;
     this.drafted = true;
+    this.previewed = false;
     this.paint();
     return this.lastCostMs;
   }
@@ -5179,7 +5200,7 @@ class TimelineTransport {
     counters.navigationRedraws++;
     const target = this.frameAt(programSec);
     const t = target / this.outputFps;
-    if (this.drafted || valueAtProgram('trails', t) > 0 || moshLiveAt(t)
+    if (this.previewed || this.drafted || valueAtProgram('trails', t) > 0 || moshLiveAt(t)
         || target !== this.frame || !this.standingAt(t)) {
       return this.seekNow(t);
     }
@@ -5207,6 +5228,29 @@ class TimelineTransport {
     if (next > this.lastFrame) return false;
     const t = next / this.outputFps;
     if (t > this.clipOutSec + 1e-9) return false;
+    const navigating = this.playing && !exporting && !PREVIEW_RENDERER;
+    if (navigating) {
+      advanceNavigation(t);
+      if (previews?.show(next)) {
+        noteViewportFrame();
+        evaluating = true;
+        try { evaluateTracks(t); } finally { evaluating = false; }
+        this.frame = next;
+        this.previewed = true;
+        chromeStale = true;
+        drawChrome();
+        return true;
+      }
+      if (this.previewed) {
+        const gen = this.playGen;
+        // A frame the cache holds but has not decoded yet is a stall, like a source frame in flight.
+        if (previews.pending(next)) return false;
+        this.seek(t).then(() => {
+          if (this.playing && gen === this.playGen) this.nextDueMs = performance.now() + 1000 / this.outputFps;
+        }).catch(showTimelineError);
+        return false;
+      }
+    }
     for (const clip of clipsActiveAt(t)) {
       const want = clip.sourceFrameAt(t) + 1;
       // A clip that has not entered yet walks from where it enters rather than from a cursor
@@ -5224,7 +5268,7 @@ class TimelineTransport {
       }
       if (!clip.source.resident(clip.source.applied + 1, want)) return false;
     }
-    advanceNavigation(t);
+    if (!navigating) advanceNavigation(t);
     renderProgramFrame(t);
     this.frame = next;
     return true;
@@ -5271,7 +5315,16 @@ class TimelineTransport {
    * otherwise the warm stalls on bytes at exactly the cut it exists to smooth.
    */
   prefetch() {
-    const { spans: wanted } = this.planPrefetch();
+    let wanted;
+    if (this.previewed) {
+      previews?.prefetch(this.frame + 1);
+      const end = this.frameAt(this.clipOutSec);
+      const ahead = Math.min(end, this.frame + PREFETCH_FRAMES);
+      const missing = previews?.firstMissing(this.frame + 1, ahead);
+      const target = missing ?? (ahead === end ? (this.looping ? this.frameAt(this.clipInSec) : end) : null);
+      if (target === null) return null;
+      wanted = this.planSeek(target / this.outputFps).spans;
+    } else wanted = this.planPrefetch().spans;
     this.askFor(wanted);
     const waits = [];
     for (const span of wanted) {
@@ -5367,6 +5420,8 @@ class TimelineTransport {
       if (this.programSec < this.clipInSec || this.programSec > this.clipOutSec) {
         await this.seek(this.clipInSec);
       }
+      const warming = previews?.warm(this.frame + 1);
+      if (warming) await warming;
     } finally {
       this.pendingPlay = false;
     }
@@ -5382,6 +5437,7 @@ class TimelineTransport {
   pause() {
     this.playGen += 1;
     this.playing = false;
+    if (this.previewed && !this.working) this.seek(this.programSec).catch(showTimelineError);
     this.paint();
   }
 
@@ -5503,6 +5559,156 @@ const rendererClass = () => {
   const dbg = gl.getExtension('WEBGL_debug_renderer_info');
   return dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
 };
+
+function previewPose(camera) {
+  return {
+    position: camera.position.toArray(), quaternion: camera.quaternion.toArray(),
+    fov: camera.fov, near: camera.near, far: camera.far,
+  };
+}
+
+function previewRendererIdentity() {
+  const gl = renderer.getContext();
+  return JSON.stringify({ gpu: rendererClass(), webgl: gl.getParameter(gl.VERSION),
+    shader: gl.getParameter(gl.SHADING_LANGUAGE_VERSION), browser: navigator.userAgent,
+    platformVersion: previewBrowserBuild?.platformVersion ?? null,
+    versions: [...(previewBrowserBuild?.fullVersionList ?? [])].sort((a, b) => a.brand.localeCompare(b.brand)),
+  });
+}
+
+function previewView() {
+  const gl = renderer.getContext();
+  return {
+    camera: viewCamera === freeCamera
+      ? { kind: 'free', pose: previewPose(freeCamera) }
+      : { kind: 'program', pose: projectLook.tracks.get('camera')?.keys.length ? null : previewPose(programCamera) },
+    width: gl.drawingBufferWidth,
+    height: gl.drawingBufferHeight,
+    cropOutside: clips.map((clip) => withClip(clip, () => uniforms.cropOutside.value)),
+    effects: effectSignature,
+  };
+}
+
+function setupPreviews() {
+  previews = createPreviews({
+    stage: renderer.domElement,
+    closeMenu: closeApplicationMenus,
+    pause: pauseTransport,
+    settle: () => timeline.idle(),
+    report: say,
+    describe: () => (timeline && takeOpened && clips.length > 0 ? {
+      project: serialiseProjectBody(), ...previewView(), renderer: previewRendererIdentity(),
+    } : null),
+    viewStamp: () => JSON.stringify(previewView()),
+    state: () => (timeline ? {
+      frame: timeline.frame, fps: timeline.outputFps, duration: timeline.duration,
+      viewStart: view.startSec, viewEnd: view.endSec,
+      from: timeline.frameAt(timeline.clipInSec), to: timeline.frameAt(timeline.clipOutSec),
+      playing: timeline.playing || timeline.pendingPlay,
+      busy: timeline.working || repaintBusy || draftBusy || presetGesture,
+      moving: orbiting || orbitSettling || flying() || lookDrag !== null || scrubbing,
+      blocked: exporting || gizmoMode !== null || cropDrag !== null || nodeDrag !== null
+        || (viewCamera === freeCamera && controls.autoRotate) || missingEffects().length > 0,
+    } : null),
+  });
+}
+
+let previewRender = null;
+
+/** The hidden renderer accepts the same document door as an export worker. */
+async function preparePreview(snapshot) {
+  if (!PREVIEW_RENDERER) throw new Error('Preview rendering needs its own renderer.');
+  snapshot = structuredClone(snapshot);
+  exporting = false;
+  previewRender = null;
+  await pollEffects();
+  if (effectSignature !== snapshot.effects || previewRendererIdentity() !== snapshot.renderer) {
+    throw new Error('The preview renderer does not match the editor. Reload the editor.');
+  }
+  const version = await (await fetch('/preview/renderer', { cache: 'no-store' })).json();
+  if (version.version !== snapshot.version) throw new Error('The renderer changed. Reload the editor before rendering previews.');
+  await loadProjectNamed('preview', snapshot.project);
+  await timeline.idle();
+  if (missingEffects().length) throw new Error('Install the missing effects before rendering previews.');
+  exporting = true;
+  repaintWanted = false;
+  writeClipRange({ in: 0, out: null }, timeline.duration);
+  chromeOn = false;
+  placeChrome();
+  outputSize = { w: snapshot.width, h: snapshot.height };
+  resize();
+  const camera = snapshot.camera.kind === 'free' ? freeCamera : programCamera;
+  if (snapshot.camera.pose) {
+    const pose = snapshot.camera.pose;
+    camera.position.fromArray(pose.position);
+    camera.quaternion.fromArray(pose.quaternion);
+    camera.fov = pose.fov;
+    camera.near = pose.near;
+    camera.far = pose.far;
+    camera.updateProjectionMatrix();
+  }
+  setViewCamera(camera);
+  controls.enabled = false;
+  clips.forEach((clip, at) => withClip(clip, () => { uniforms.cropOutside.value = snapshot.cropOutside[at]; }));
+  const gl = renderer.getContext();
+  if (gl.drawingBufferWidth !== snapshot.width || gl.drawingBufferHeight !== snapshot.height) {
+    throw new Error('The preview renderer could not allocate the requested image size.');
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = snapshot.width;
+  canvas.height = snapshot.height;
+  const context = canvas.getContext('2d', { alpha: false });
+  previewRender = {
+    last: -1, pixels: new Uint8Array(snapshot.width * snapshot.height * 4),
+    image: context.createImageData(snapshot.width, snapshot.height), canvas, context,
+  };
+}
+
+/** Read back only the requested frame; preceding frames rebuild the effect history. */
+async function renderPreviewFrame(frame, checkpoint) {
+  const run = previewRender;
+  if (!PREVIEW_RENDERER || !run || !Number.isSafeInteger(frame) || frame < 0 || frame > timeline.lastFrame) {
+    throw new Error('The preview frame is outside the prepared edit.');
+  }
+  const t = frame / timeline.outputFps;
+  frameSink = { t, pixels: run.pixels, hits: 0 };
+  try {
+    if (run.last >= 0 && run.last === frame - 1) await timeline.runTo(frame);
+    else {
+      const seek = await timeline.seek(t, { checkpoint });
+      if (seek.capped || !seek.plan.surfaceCovered || !seek.plan.trailsCovered || !seek.plan.moshCovered) {
+        throw new Error('This preview could not rebuild the complete effect history.');
+      }
+    }
+    if (frameSink.hits !== 1) throw new Error(`Preview frame ${frame} reached the image sink ${frameSink.hits} times.`);
+    await checkpoint();
+    run.last = frame;
+    const rowBytes = run.canvas.width * 4;
+    for (let row = 0; row < run.canvas.height; row++) {
+      const start = (run.canvas.height - row - 1) * rowBytes;
+      run.image.data.set(run.pixels.subarray(start, start + rowBytes), row * rowBytes);
+    }
+    run.context.putImageData(run.image, 0, 0);
+    const plans = Object.fromEntries(clips.map((clip) => [clip.id, withClip(clip, () => {
+      const depth = depthCurr.image.data;
+      const sample = new Uint16Array(Math.ceil(DEPTH_H / PLAN_STRIDE) * Math.ceil(DEPTH_W / PLAN_STRIDE));
+      let at = 0;
+      for (let row = 0; row < DEPTH_H; row += PLAN_STRIDE) {
+        for (let col = 0; col < DEPTH_W; col += PLAN_STRIDE) sample[at++] = depth[row * DEPTH_W + col];
+      }
+      return sample;
+    })]));
+    const blob = await new Promise((resolve, reject) => run.canvas.toBlob(
+      (image) => image ? resolve(image) : reject(new Error('The preview image could not be encoded.')), 'image/png',
+    ));
+    return { blob, plans };
+  } catch (err) {
+    run.last = -1;
+    throw err;
+  } finally {
+    frameSink = null;
+  }
+}
 
 /** A `WIDTHxHEIGHT` string as a pair, with 0 for whichever half is not a size. */
 function parseSize(text) {
@@ -6151,6 +6357,7 @@ async function pumpRepaint() {
 
 /** Rebuilds the image and the readouts at wherever the playhead is parked. */
 function requestRepaint() {
+  previews?.changed();
   if (!timeline || timeline.playing || scrubbing || orbiting || exporting) return;
   repaintWanted = true;
   repaintAskedAt = counters.renders;
@@ -7353,6 +7560,7 @@ function paintLanes() {
 
 /** A lane appeared, moved or went away. */
 function lanesChanged() {
+  previews?.changed();
   rebuildLanes();
   paintLanes();
   groupRevealChanged();
@@ -7360,6 +7568,7 @@ function lanesChanged() {
 
 /** A key or a handle moved and the set of them did not. The cheap half of the pair. */
 function lanesMoved() {
+  previews?.changed();
   counters.laneRepositions++;
   if (!repositionLanes()) {
     counters.laneFallbacks++;
@@ -8089,15 +8298,6 @@ function choosePicker(picker, name, { close = false } = {}) {
             showPickerChoice(picker, appliedPreset()?.name ?? '');
             return;
           }
-          const { stamped, written, shared } = result;
-          // The shared half is named rather than left to be discovered: it lands on the project
-          // and every other clip is seen through it.
-          const grade = shared
-            ? ` · ${shared} post value${shared === 1 ? '' : 's'} landed on the project, so every clip moved with it`
-            : '';
-          say(stamped
-            ? `applied ${doc.name} · ${doc.rev.slice(7, 15)}${grade}`
-            : `applied ${written} values from ${doc.name}, which names part of a look rather than the whole of one${grade}`);
         } catch (err) {
           showPickerChoice(picker, appliedPreset()?.name ?? '');
           showTimelineError(err);
@@ -8115,7 +8315,6 @@ function choosePicker(picker, name, { close = false } = {}) {
       params.reset(lookNames.filter((name) => PARAMS[name].scope === 'project'));
       withClip(target, () => params.reset(lookNames.filter((name) => PARAMS[name].scope === 'clip')));
       history.commit();
-      say('reset to defaults');
     }
   }
 }
@@ -8574,7 +8773,6 @@ async function addClipFromTake(id, start) {
   history.commit();
   await timeline.seek(Math.min(held, timeline.duration));
   if (wasPlaying && gen === transportGen) await timeline.play();
-  say(`clip ${clip.id} of ${id} at ${clip.start.toFixed(2)}s`);
   return clip;
 }
 
@@ -8700,8 +8898,7 @@ function applyEasePreset(name) {
 
 for (const btn of ui.ease.querySelectorAll('button[data-ease]')) {
   btn.addEventListener('click', () => {
-    const owner = selection?.owner ?? '';
-    if (applyEasePreset(btn.dataset.ease)) say(`${btn.dataset.ease} ease on ${owner}`);
+    applyEasePreset(btn.dataset.ease);
   });
 }
 
@@ -8747,11 +8944,7 @@ function changePointCount(delta) {
 
 for (const [button, delta] of [[ui.addPoint, 1], [ui.dropPoint, -1]]) {
   button.addEventListener('click', () => {
-    const owner = selection?.owner ?? '';
-    if (!changePointCount(delta)) return;
-    const { keys, i } = selectionEaseState();
-    say(`${delta > 0 ? 'added' : 'removed'} an ease control point on ${owner}: `
-      + `${keys[i].easeOut.length} out, ${keys[i].easeIn.length} in`);
+    changePointCount(delta);
   });
 }
 
@@ -8917,7 +9110,7 @@ let chromeStale = false;
 
 const cropBoxLive = () => showCropBox && clipGestureLive();
 
-// How faintly a cut point draws, and the one function allowed to write the uniform.
+// How faintly a cut point draws while its crop handles are shown.
 const CROP_FAINT = 0.14;
 function syncCropOutside() {
   if (clips.length === 0) {
@@ -9033,6 +9226,8 @@ function drawBeads(points, project) {
 /** The point cloud from above, straight off the depth texture's own array. */
 function drawPlanCloud(rect) {
   const depth = depthCurr.image.data;
+  const previewDepth = previews?.plan(selectedClip?.id);
+  let previewPoint = 0;
   const fx = uniforms.focal.value.x;
   const fy = uniforms.focal.value.y;
   const cx = uniforms.center.value.x;
@@ -9045,7 +9240,8 @@ function drawPlanCloud(rect) {
   for (let row = 0; row < DEPTH_H; row += PLAN_STRIDE) {
     for (let col = 0; col < DEPTH_W; col += PLAN_STRIDE) {
       // Reuse the depth picker's forward map so the plan and pivot cannot drift apart.
-      const z = sensorPoint(planVec, depth[row * DEPTH_W + col], col, row, fx, fy, cx, cy);
+      const mm = previewDepth ? previewDepth[previewPoint++] : depth[row * DEPTH_W + col];
+      const z = sensorPoint(planVec, mm, col, row, fx, fy, cx, cy);
       if (z === 0) continue;
       // All four lateral faces, so the plan does not draw points the renderer discards.
       if (croppedOut(planVec.x, planVec.y, z)) continue;
@@ -9694,6 +9890,7 @@ addEventListener('pointerdown', (e) => {
     || e.target !== renderer.domElement) return;
   if (nodeDrag || cropDrag) return;
   if (viewCamera !== freeCamera || !controls.enabled) return;
+  if (timeline?.previewed) return;
   const view = viewUnder(e.clientX, e.clientY);
   if (!view || view.plan) return;
   const hit = hitAfterOrbitSettles(() => pickDepth({
@@ -9957,9 +10154,6 @@ if (ui.cropFit) {
       }
       requestRepaint();
       history.commit();
-      say(`box fitted to ${fitted.frames} frames: `
-        + `${fitted.left.toFixed(2)} to ${fitted.right.toFixed(2)} across, `
-        + `${fitted.bottom.toFixed(2)} to ${fitted.top.toFixed(2)} up`);
     } catch (err) {
       say(`the crop box could not be fitted to this take: ${err.message}`);
     } finally {
@@ -10160,8 +10354,6 @@ ui.presetSave.addEventListener('click', () => withPresetSubset(
       history.commit();
     }
     await refreshPresets();
-    say(`saved ${saved.name} · ${saved.rev.slice(7, 15)}`
-      + (whole ? '' : ` · ${picked.names.length} of ${presetValueNames().length} values`));
   },
 ));
 
@@ -10173,7 +10365,6 @@ ui.presetExport.addEventListener('click', () => withPresetSubset(
   },
   async (picked) => {
     exportPresetFile(picked.name, presetFromCurrentLook(picked.names));
-    say(`exported ${picked.name}.braindance-preset.json`);
   },
 ));
 
@@ -10189,9 +10380,6 @@ ui.presetFile.addEventListener('change', () => {
       const saved = await importPresetFile(file);
       await refreshPresets();
       showPickerChoice(pickers.find((p) => p.trigger === ui.preset), appliedPreset()?.name ?? '');
-      if (saved.applied) {
-        say(`imported ${saved.name} · ${saved.rev.slice(7, 15)}`);
-      }
     } catch (err) {
       showTimelineError(err);
     }
@@ -10263,7 +10451,6 @@ async function mintProjectFrom(ids) {
   // From the document, the way a load starts: the clips this mint just laid down are what the
   // file says, so there is nothing behind them to undo back to.
   history.begin();
-  say(`new project ${saved.name}`);
 }
 
 /**
@@ -10282,7 +10469,6 @@ async function duplicateProject() {
   projectDiverged = false;
   if (ui.diverged) ui.diverged.title = '';
   paintDiverged();
-  say(`working in ${saved.name}`);
 }
 
 /**
@@ -10306,7 +10492,6 @@ async function renameProjectTo(to) {
   openedProjectRev = saved.rev;
   showProjectInUrl(saved.name);
   paintProjectCommands();
-  say(`renamed to ${saved.name}`);
 }
 
 /** The two File items that need a document, on a page that may be holding none. */
@@ -10329,7 +10514,6 @@ ui.deliverable?.addEventListener('change', async () => {
     if (doc.error) throw new Error(doc.error);
     applyDeliverable(doc.body);
     showAdoptedDeliverable(name);
-    say(`deliverable ${name}`);
   } catch (err) {
     ui.deliverable.value = ui.deliverable.dataset.adopted ?? '';
     showTimelineError(err);
@@ -10344,7 +10528,6 @@ ui.deliverableNew?.addEventListener('click', async () => {
     await saveDeliverable(name, activeDeliverable);
     await refreshDeliverables();
     showAdoptedDeliverable(name);
-    say(`saved deliverable ${name}`);
   } catch (err) {
     showTimelineError(err);
   }
@@ -10872,7 +11055,6 @@ async function loadProjectNamed(name, offered = null) {
   openedProjectRev = doc.rev ?? null;
   lastSavedAt = null;
   paintProjectCommands();
-  say(`opened ${name}`);
   if (first) await finishEditor();
   return doc;
 }
@@ -11119,8 +11301,9 @@ async function finishEditor() {
   // The take's first accurate frame. A repaint, because the playhead may have moved by now.
   await timeline.repaintHere();
   // With the playhead parked `tick` returns at once, so this is what continues a drag.
-  renderer.setAnimationLoop(() => { timeline.tick(); pumpParkedDraft(); });
+  if (!PREVIEW_RENDERER) renderer.setAnimationLoop(() => { previews?.tick(); timeline.tick(); pumpParkedDraft(); });
   takeOpened = true;
+  if (!PREVIEW_RENDERER && !previews) setupPreviews();
 }
 
 /** `/edit?take=` : a new project holding one clip of this take. */
@@ -11246,6 +11429,7 @@ if (EDITING && !REQUESTED_TAKE && !REQUESTED_PROJECT && !REQUESTED_NEW) {
   const door = editorDoor();
   door.open()
     .catch((err) => {
+      previewBootError = err.message;
       sensorLabel = `cannot open ${door.what}`;
       setStatus();
       showTimelineError(new Error(`${door.what}: ${err.message}`));
@@ -11291,6 +11475,17 @@ if (EDITING && !REQUESTED_TAKE && !REQUESTED_PROJECT && !REQUESTED_NEW) {
 
 // Handles for profiling and for poking at the scene from the console.
 globalThis.__kinect = {
+  previews: {
+    state: () => previews?.inspect() ?? null,
+    render: () => previews?.renderRange(),
+    clear: () => previews?.clear(),
+  },
+  previewRenderer: PREVIEW_RENDERER ? {
+    ready: () => takeOpened,
+    error: () => previewBootError,
+    prepare: preparePreview,
+    frame: renderPreviewFrame,
+  } : null,
   renderer, composer, scene, freeCamera, programCamera,
   bloom, afterimage, mosh, grade, resetAccumulators, renderProgramFrame,
 

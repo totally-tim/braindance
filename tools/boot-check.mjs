@@ -458,6 +458,7 @@ async function main() {
     args: ['--disable-features=LocalNetworkAccessChecks'],
   });
   const context = await browser.newContext({ viewport: { width: 1400, height: 900 }, deviceScaleFactor: 1 });
+  await context.addInitScript(() => localStorage.setItem('braindance.preview.auto', 'off'));
 
   // The count of requests the pages actually made, kept independently of the delivery: a guard
   // reading the same term the selection computed cannot see the failure of that selection.

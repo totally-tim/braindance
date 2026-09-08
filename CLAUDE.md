@@ -119,6 +119,7 @@ Read the assertion count, never the exit code.
 | `effect-check.mjs` | installing an effect: revisions, the door, the hotload, park and restore | port 8281 free, a GPU browser |
 | `effect-conformance-check.mjs` | every installed effect draws nothing at all when it is off | `--url`, a GPU browser |
 | `module-check.mjs` | the boundaries in `web/`: the import graph, what crosses it | nothing |
+| `preview-check.mjs` | rendered previews, camera identity, cancellation, and live fallback | `--url`, a take of at least 9s, a GPU browser |
 | `syntax-check.mjs` | every shipped file parses, the cross-language constants agree, the citations resolve, every tool is named here | nothing |
 | `hd-encoder-check.mjs` | native pairing under encoder backlog, held colour, key range and RGBX | a C++ compiler and TurboJPEG |
 | `cpp-check.mjs` | both C++ files parse and typecheck, in all four pipeline configurations | a C++ compiler and turbojpeg's headers |
