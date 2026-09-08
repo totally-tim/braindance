@@ -215,6 +215,10 @@ const READY_IN_RANGE = `(() => {
     status: document.querySelector('#tPreviewStatus').textContent };
 })()`;
 const readiness = () => page.evaluate(READY_IN_RANGE);
+// Both the count the store holds and the count the page has painted, so a row that measures the
+// band is not reading it mid-repaint.
+const painted = (ready, also = 'true') =>
+  `(() => { const r = ${READY_IN_RANGE}; return ${also} && r.ready === ${ready} && r.status.startsWith('${ready}/'); })()`;
 
 // Rows red on this tree whatever a mutation does. Empty is the correct state: an entry here is a
 // row to fix, not a tolerance to keep, and a mutation may not claim a catch on one.
@@ -259,7 +263,7 @@ async function checkCoverage() {
     const duration = __kinect.timeline.transport().duration;
     __kinect.editor.view.set(1 / duration, 5 / duration);
   });
-  check(await waitFor(`${READY_IN_RANGE}.ready === ${2 * FPS + 1}`),
+  check(await waitFor(painted(2 * FPS + 1)),
     'the rendered range is ready before the coverage rows read the band');
   const positions = () => page.evaluate(() => {
     const box = (el) => el?.getBoundingClientRect().toJSON() ?? null;
@@ -276,7 +280,7 @@ async function checkCoverage() {
   await page.mouse.click(p.three, p.bed.bottom - 4);
   await waitFor(() => __kinect.timeline.transport().frame === 90);
   await page.evaluate(() => __kinect.timeline.settled());
-  check(await waitFor(`__kinect.previews.state().loaded && ${READY_IN_RANGE}.ready === ${2 * FPS + 1}`),
+  check(await waitFor(painted(2 * FPS + 1, '__kinect.previews.state().loaded')),
     'the band settles after a ruler scrub');
   p = await positions();
   const frameWidth = (p.three - p.two) / 30;
@@ -295,7 +299,7 @@ async function checkCoverage() {
     for (let frame = 90; frame < 100; frame++) await disk.remove(__kinect.previews.state().signature, frame);
     await disk.close();
   });
-  check(await waitFor(`!__kinect.previews.state().ready.includes(90) && ${READY_IN_RANGE}.ready === ${2 * FPS + 1 - 10}`),
+  check(await waitFor(painted(2 * FPS + 1 - 10, '!__kinect.previews.state().ready.includes(90)')),
     'removing ten stored frames lowers the reported readiness');
   p = await positions();
   const gap = p.three + (p.three - p.two) * .15;
