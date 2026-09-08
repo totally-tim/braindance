@@ -21,6 +21,17 @@ commitment. Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 - **macOS on Apple Silicon, or Debian / Raspberry Pi OS** for a capture node.
 - **ffmpeg** for video out, expected at `/opt/homebrew/bin/ffmpeg`. Set `FFMPEG=` to override.
 
+
+## Linux Specific step you might need before install
+
+libfreenect2 comes with a udev rule you need to access the Kinect via usb. Move move it to the right place and refresh rules.
+```bash
+sudo cp third_party/libfreenect2/platform/linux/udev/90-kinect2.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+
 ## Quickstart
 
 ```bash
@@ -28,6 +39,14 @@ npm install
 npm run build:native      # one-time; needs the packages listed under Building the native side
 npm start                 # opens the menu on http://localhost:8080
 ```
+
+If your gpu has issues with your JPEG decoding, you might need to disable VAAPI entirely via an environment variable.
+```bash
+npm install
+npm run build:native
+LIBVA_DRIVER_NAME=none npm start   # 
+```
+
 
 Skip the native build if you have no sensor.
 
