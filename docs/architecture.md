@@ -334,7 +334,8 @@ kilobytes-long key would be copied into every stored row and both indexes. The r
 identity includes the reported GPU, WebGL version, and browser build. The code revision comes
 from `GET /preview/renderer`, which hashes the shipped web files and Three.js renderer files;
 `renderVersion` in `server/render-version.js` keeps the last digest and re-reads contents only
-when a stat walk finds a size or mtime changed. Every write transaction asks for relaxed
+when a stat walk finds a size, mtime or ctime changed; ctime is in the key because a copy that
+preserves mtime cannot preserve it. Every write transaction asks for relaxed
 durability, because a preview is a cache the renderer can remake and the fsync a document store
 needs cost more than the render.
 Animated values are normalized to their tracks when computing identity, so evaluating the next

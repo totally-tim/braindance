@@ -16,7 +16,7 @@ const OUT = resolvePath(argv.includes('--out') ? argv[argv.indexOf('--out') + 1]
 const URL = process.env.SWEEP_URL ?? 'http://localhost:8080';
 const TAKE = process.env.SWEEP_TAKE ?? 'fixture-1g';
 const CRASH = 'Execution context was destroyed';
-const TOOLS = ['library', 'timeline', 'keyframe', 'export'];
+const TOOLS = ['library', 'timeline', 'keyframe', 'export', 'preview'];
 
 mkdirSync(OUT, { recursive: true });
 // Removed up front so the artifact cannot outlive the thing it describes: absent means running,

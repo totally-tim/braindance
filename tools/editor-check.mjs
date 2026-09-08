@@ -971,7 +971,20 @@ const MUTATIONS = {
     ]],
   },
 
-  // Five controls stood here and they are removed rather than re-anchored. What each guaranteed
+  // Must redden: section 17's "and applying part of a look claims no revision, because this
+  // gesture did not apply one". The note that used to carry this is gone, so the guarantee is
+  // read off the clip's stamp instead, and this is the control for that reading.
+  'part-apply-stamps-a-revision': {
+    file: 'web/main.js',
+    edits: [[
+      '  if (stamped && target) target.appliedPreset = { name: doc.name, rev: doc.rev };',
+      '  if (target) target.appliedPreset = { name: doc.name, rev: doc.rev };',
+    ]],
+    mustFail: 'and applying part of a look claims no revision, because this gesture did not apply one',
+    fails: 'and applying part of a look claims no revision, because this gesture did not apply one',
+  },
+
+  // Four controls stood here and they are removed rather than re-anchored. What each guaranteed
   // is recorded in `docs/proof-tools.md` beside the section that drove them.
   //
   // `offer-ignores-take-hash`         - the offer joined on the take's content hash and not on
@@ -985,7 +998,6 @@ const MUTATIONS = {
   // `resume-waits-for-every-list`     - a neighbouring listing that refused did not hide the
   //                                     offer, since only the projects listing is what it is
   //                                     made of.
-  // `apply-says-nothing`              - the note for an applied preset said what was applied.
 
   'project-load-keeps-renamed-take-id': {
     file: 'web/main.js',
@@ -4278,7 +4290,13 @@ try {
       const el = document.getElementById(id);
       if (!el) return null;
       const r = el.getBoundingClientRect();
-      return { w: r.width, h: r.height, x: r.x, y: r.y };
+      // The visible mark and the grab zone are both pseudo-elements, so the element's own box is
+      // 1x2 and says nothing about whether a person can see or hit this marker.
+      const after = getComputedStyle(el, '::after'), before = getComputedStyle(el, '::before');
+      const px = (v) => parseFloat(v) || 0;
+      return { w: r.width, h: r.height, x: r.x, y: r.y,
+        grabW: px(after.width), grabH: px(after.height),
+        markH: px(before.borderTopWidth) + px(before.height) };
     };
     return { in: box('tIn'), out: box('tOut') };
   })()`);
@@ -4286,9 +4304,11 @@ try {
   check(boxes.in !== null && boxes.out !== null,
     'both markers are in the document at all - this is the row that was missing',
     `in ${boxes.in ? 'present' : 'ABSENT'}, out ${boxes.out ? 'present' : 'ABSENT'}`);
-  check(Boolean(boxes.in && boxes.in.h > 10 && boxes.out && boxes.out.h > 10),
-    'and both have a real box rather than a collapsed one',
-    boxes.in ? `${boxes.in.w}x${boxes.in.h} and ${boxes.out.w}x${boxes.out.h}` : 'n/a');
+  check(Boolean(boxes.in && boxes.in.grabH > 10 && boxes.in.markH > 0
+    && boxes.out && boxes.out.grabH > 10 && boxes.out.markH > 0),
+  'and both have a real box rather than a collapsed one',
+  boxes.in ? `in grab ${boxes.in.grabW}x${boxes.in.grabH} mark ${boxes.in.markH}; `
+    + `out grab ${boxes.out.grabW}x${boxes.out.grabH} mark ${boxes.out.markH}` : 'n/a');
 
   // Probed by what is under the pointer rather than by the box: the drawn line is 1px and the
   // grab zone is a pseudo-element, so a box measurement reports the wrong number in the
@@ -4366,7 +4386,7 @@ try {
   await page.evaluate(`__kinect.keyframes.setTracks({ bloom: [{ t: 1, value: 0.2 }, { t: 6, value: 0.9 }] })`);
   await settle();
   const afterLanes = await markersPresent();
-  check(afterLanes.in !== null && afterLanes.out !== null && afterLanes.out.h > 10,
+  check(afterLanes.in !== null && afterLanes.out !== null && afterLanes.out.grabH > 10,
     'and both markers survive a lane being built, which is when they used to disappear',
     `${(await keyedLanes()).length} keyed lanes, in ${afterLanes.in ? 'present' : 'GONE'}, out ${afterLanes.out ? 'present' : 'GONE'}`);
   check(near((await range()).out ?? -1, afterDrag.out ?? -1, 1e-6),
@@ -7095,7 +7115,8 @@ try {
     await page.evaluate("globalThis.__kinect.params.reset(globalThis.__kinect.params.names('look'))");
     await settle();
     await importFile(edited);
-    await page.waitForFunction("document.getElementById('tNote').textContent.startsWith('imported')", null, { timeout: 15000 });
+    await page.waitForFunction("globalThis.__kinect.params.get('bloom') === 0.6"
+      + " && !globalThis.__kinect.library.presetGestureRunning()", null, { timeout: 15000 }).catch(() => {});
     await settle();
     const back = await page.evaluate("(() => { const k = globalThis.__kinect; return JSON.stringify({ bloom: k.params.get('bloom'), grain: k.params.get('grain.amount'), blackwall: k.params.get('blackwall.amount'), stamp: k.library.appliedPreset() }); })()");
     const landed = JSON.parse(back);
@@ -7145,13 +7166,12 @@ try {
     // Back in through the file input, which is where the format meets the document this dialog
     // just authored: a build whose reading boxes move one at a time writes four of the five
     // weights, and `refusePresetBody` refuses exactly that file.
-    const noteBeforeImport = (await text('#tNote')) ?? '';
     await importFile(partFile);
-    await page.waitForFunction(`document.getElementById('tNote').textContent !== ${JSON.stringify(noteBeforeImport)}`,
+    await page.waitForFunction('!globalThis.__kinect.library.presetGestureRunning()',
       null, { timeout: 15000 }).catch(() => {});
     await settle();
     const importNote = (await text('#tNote')) ?? '';
-    check(importNote.startsWith('imported'),
+    check(!/refus|could not|cannot|invalid|unreadable/i.test(importNote),
       'and the format accepts the document this dialog authored, which is the file rule reading back what the control wrote',
       `"${importNote}"`);
     const afterPart = await page.evaluate("(() => { const k = globalThis.__kinect; return JSON.stringify({ stamp: k.library.appliedPreset(), grain: k.params.get('grain.amount') }); })()");
@@ -7170,14 +7190,18 @@ try {
     })()`);
     check(wroteName === NAME_PART, 'the picker holds the preset name that was written to it',
       `wrote ${JSON.stringify(NAME_PART)}, the control reads ${JSON.stringify(wroteName)}`);
+    const stampBeforePart = await page.evaluate('globalThis.__kinect.library.appliedPreset()');
     await applyByChoosing(NAME_PART);
-    await page.waitForFunction("document.getElementById('tNote').textContent.startsWith('applied')", null, { timeout: 15000 })
+    await page.waitForFunction('!globalThis.__kinect.library.presetGestureRunning()', null, { timeout: 15000 })
       .catch(() => {});
     await settle();
-    const partNote = await text('#tNote');
-    check(partNote.startsWith('applied') && !/·\s*[0-9a-f]{8}\s*$/.test(partNote) && partNote.includes(NAME_PART),
-      'and the note for it says what was applied rather than naming a revision this gesture did not apply',
-      `"${partNote}"`);
+    const stampAfterPart = await page.evaluate('globalThis.__kinect.library.appliedPreset()');
+    const partLanded = await page.evaluate("globalThis.__kinect.params.get('grain.amount')");
+    check(partLanded !== null && stampAfterPart?.name !== NAME_PART
+      && JSON.stringify(stampAfterPart ?? null) === JSON.stringify(stampBeforePart ?? null),
+    'and applying part of a look claims no revision, because this gesture did not apply one',
+    `stamp ${JSON.stringify(stampBeforePart ?? null)} -> ${JSON.stringify(stampAfterPart ?? null)}, `
+    + `applying ${JSON.stringify(NAME_PART)}`);
 
     const stampBeforeSave = await page.evaluate('globalThis.__kinect.library.appliedPreset()');
     await openPicker('tPresetSave');
@@ -7186,8 +7210,7 @@ try {
     await page.click('#pp-readDepth');
     const savedTicks = await page.evaluate(ticksNow);
     await page.evaluate("document.getElementById('ppGo').click()");
-    await page.waitForFunction(
-      `document.getElementById('tNote').textContent.startsWith('saved ${NAME_SAVED_PART}')`,
+    await page.waitForFunction('!globalThis.__kinect.library.presetGestureRunning()',
       null, { timeout: 15000 }).catch(() => {});
     await settle();
     const savedDoc = await (await fetch(`${URL_BASE}/presets/${encodeURIComponent(NAME_SAVED_PART)}`)).json();
@@ -7295,8 +7318,7 @@ try {
         `${putsSeen} PUT reached the network, note "${await text('#tNote')}"`);
 
       releasePut();
-      await page.waitForFunction(
-        `document.getElementById('tNote').textContent.startsWith('saved ${NAME_RACE}')`,
+      await page.waitForFunction('!globalThis.__kinect.library.presetGestureRunning()',
         null, { timeout: 15000 }).catch(() => {});
       await settle();
       const done = await page.evaluate(`(() => ({
@@ -7308,7 +7330,7 @@ try {
         focus: document.activeElement ? document.activeElement.id || document.activeElement.tagName : null,
         stamp: globalThis.__kinect.library.appliedPreset(),
       }))()`);
-      check(done.note.startsWith(`saved ${NAME_RACE}`) && done.stamp?.name === NAME_RACE,
+      check(done.stamp?.name === NAME_RACE,
         'the write the guard let through finishes and stamps the clip, so the guard refuses a second gesture rather than the first',
         `"${done.note}" with the stamp naming ${JSON.stringify(done.stamp?.name)}`);
       check(!done.save && !done.exported && !done.imported && done.gesture === false,
@@ -12640,9 +12662,8 @@ try {
       await waitForRequest(() => importRequests, 'the held preset import');
       await clickClip(otherClip);
       releaseImport();
-      await page.waitForFunction((name) => !__kinect.library.presetGestureRunning()
-        && document.getElementById('tNote').textContent.startsWith(`imported ${name}`),
-      importTargetName, { timeout: 15000 });
+      await page.waitForFunction(() => !__kinect.library.presetGestureRunning(),
+        null, { timeout: 15000 }).catch(() => {});
       await settle();
       const afterImport = await page.evaluate(({ targetId, otherId }) => {
         const body = __kinect.library.serialiseProjectBody();
@@ -12682,9 +12703,8 @@ try {
       await waitForRequest(() => saveRequests, 'the held whole-look save');
       await clickClip(otherClip);
       releaseSave();
-      await page.waitForFunction((name) => !__kinect.library.presetGestureRunning()
-        && document.getElementById('tNote').textContent.startsWith(`saved ${name}`),
-      saveTargetName, { timeout: 15000 });
+      await page.waitForFunction(() => !__kinect.library.presetGestureRunning(),
+        null, { timeout: 15000 }).catch(() => {});
       await settle();
       const afterSave = await page.evaluate(({ targetId, otherId }) => {
         const body = __kinect.library.serialiseProjectBody();

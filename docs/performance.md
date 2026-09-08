@@ -85,8 +85,17 @@ Every number here is from the synthetic `fixture-1g` capture (8,160 frames at 30
 M2 Max under headless bundled Chromium at a 1000 by 700 viewport, so a 542 by 305 preview, with
 idle rendering off and a page-cache state not controlled. The arms are interleaved
 old, new, new, old, old, new in fresh browser contexts, three per arm, medians reported. "Old" is
-the tree before the storage key was hashed, writes went relaxed and the coordinator stopped
-repainting; "new" is this tree.
+`06a1755`, the commit before the storage key was hashed, writes went relaxed and the coordinator
+stopped repainting; "new" is this tree. Name that commit when re-running: a squash merge is the
+one thing that would delete the only tree these numbers can be reproduced against.
+
+**Read these as indicative rather than screened.** No health number was read per run and no run
+was discarded for contention, which this repo asks for everywhere else, so a contended arm cannot
+be told from a real one here. Two rows carry a known bias on top of that: the hidden renderer
+boots inside the first arm's number in row 1 and the stated order puts that boot in an *old* run,
+so the gap is overstated by one renderer boot; and row 4 is a warm/cold sequence rather than an
+interleaved A/B, so its old arm is not comparable to its new one. Re-run row 1 and row 4 properly
+before either number is quoted as a result.
 
 | what | old | new | method |
 | --- | --- | --- | --- |

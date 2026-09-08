@@ -166,11 +166,11 @@ the last press, key, wheel or drag; a pointer moving across the page does not co
 camera movement, editing, and hiding the tab interrupt the work.
 Changing the idle preference leaves a manual render running. Starting a manual render during
 playback first waits for the editor to stop and restore its live frame.
-The band under the time ruler follows its zoom and pan. Solid teal marks completed frames,
-hatching marks unrendered frames in the playback range, and amber marks the frame being rendered.
-The percentage beside the ruler is the ready share of the playback range. **Cached** beside the
-transport means playback is showing a preview. A frame still decoding holds playback for a
-frame. A missing frame renders live, with effect history rebuilt before playback continues.
+The band under the time ruler follows its zoom and pan. It is two pixels tall: a solid bar marks
+completed frames, and a thinner line marks unrendered frames in the playback range. The status
+line under the **Previews** settings counts the ready frames against the playback range, so
+readiness is visible while that menu is open rather than on the ruler. A frame still decoding
+holds playback for a frame. A missing frame renders live, with effect history rebuilt before playback continues.
 Playback fetches source frames ahead of a known cache boundary; rebuilding the effect history
 still costs a live seek. An unreadable preview falls back to live rendering and can be rebuilt
 while idle.
@@ -186,7 +186,8 @@ currently covers the whole edit, even when a change affects only one clip.
 renderer. The renderer also releases its resources after 30 seconds without work. Other editor
 tabs update their coverage when frames are cleared or evicted. Encoded images, depth samples,
 and estimated metadata share a 2 GiB budget; decoded images have a 96 MiB limit per editor.
-The browser's physical storage overhead is additional. Older frames are evicted first.
+The browser's physical storage overhead is additional. The least recently used frames are
+evicted first, so a frame played a moment ago outlives an older one nothing has read.
 A range that fills the cache stops rendering and reports its partial coverage. Browser storage
 may impose a smaller limit or be unavailable; the menu and the editor's status line report the
 error and playback remains live. Previews are disposable: they are absent from project files, and export always renders

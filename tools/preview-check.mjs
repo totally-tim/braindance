@@ -204,6 +204,22 @@ const read = () => page.evaluate(() => {
   return { ...p, frame: t.frame, playing: t.playing, previewed: t.previewed,
     counters: { ...__kinect.timeline.counters }, status: document.querySelector('#tPreviewStatus').textContent };
 });
+// Readiness as the status line reports it, beside the range it must be scoped to. The band's
+// percentage moved into `#tPreviewStatus`; `ready` here is counted over the playback range only,
+// so a build reporting readiness over the whole take fails rather than reading high.
+const READY_IN_RANGE = `(() => {
+  const t = __kinect.timeline.transport();
+  const from = t.frameAt(t.clipInSec), to = t.frameAt(t.clipOutSec);
+  return { from, to, fps: t.outputFps, total: to - from + 1,
+    ready: __kinect.previews.state().ready.filter((n) => n >= from && n <= to).length,
+    status: document.querySelector('#tPreviewStatus').textContent };
+})()`;
+const readiness = () => page.evaluate(READY_IN_RANGE);
+
+// Rows red on this tree whatever a mutation does. Empty is the correct state: an entry here is a
+// row to fix, not a tolerance to keep, and a mutation may not claim a catch on one.
+const STANDING_RED = new Map();
+
 async function waitFor(predicate, timeout = 30000) {
   try { await page.waitForFunction(predicate, null, { timeout }); return true; }
   catch { return false; }
@@ -238,36 +254,40 @@ async function renderRange() {
 
 async function checkCoverage() {
   await range(1, 5);
+  const FPS = (await readiness()).fps;
   await page.evaluate(() => {
     const duration = __kinect.timeline.transport().duration;
     __kinect.editor.view.set(1 / duration, 5 / duration);
   });
-  await waitFor(() => document.querySelector('#tPreviewPercent')?.textContent === '50%');
+  check(await waitFor(`${READY_IN_RANGE}.ready === ${2 * FPS + 1}`),
+    'the rendered range is ready before the coverage rows read the band');
   const positions = () => page.evaluate(() => {
     const box = (el) => el?.getBoundingClientRect().toJSON() ?? null;
     const tick = (sec) => [...document.querySelectorAll('#tRuler .ttick')]
       .find((el) => parseFloat(el.textContent) === sec)?.getBoundingClientRect().left ?? null;
     return { bed: box(document.querySelector('#tBed')), coverage: box(document.querySelector('#tPreviewCoverage')),
       bars: [...document.querySelectorAll('#tPreviewCoverage .ready')].map(box),
-      two: tick(2), three: tick(3), four: tick(4), head: box(document.querySelector('#tPlayhead')),
-      percent: document.querySelector('#tPreviewPercent')?.textContent };
+      two: tick(2), three: tick(3), four: tick(4), head: box(document.querySelector('#tPlayhead')) };
   });
   let p = await positions();
-  check(p.coverage.height >= 6 && p.coverage.top >= p.bed.top && p.coverage.bottom <= p.bed.bottom
+  check(p.coverage.height >= 2 && p.coverage.top >= p.bed.top && p.coverage.bottom <= p.bed.bottom
     && Math.abs(p.coverage.left - p.bed.left) < 1 && Math.abs(p.coverage.width - p.bed.width) < 1,
   'preview coverage sits directly under the time ruler', JSON.stringify({ bed: p.bed, coverage: p.coverage }));
   await page.mouse.click(p.three, p.bed.bottom - 4);
   await waitFor(() => __kinect.timeline.transport().frame === 90);
   await page.evaluate(() => __kinect.timeline.settled());
-  await waitFor(() => __kinect.previews.state().loaded
-    && document.querySelector('#tPreviewPercent')?.textContent === '50%');
+  check(await waitFor(`__kinect.previews.state().loaded && ${READY_IN_RANGE}.ready === ${2 * FPS + 1}`),
+    'the band settles after a ruler scrub');
   p = await positions();
   const frameWidth = (p.three - p.two) / 30;
   check(p.bars.length === 1 && Math.abs(p.bars[0].left - p.two) < 1
     && Math.abs(p.bars[0].right - p.four - frameWidth) < 1 && Math.abs(p.head.left - p.three) < 1,
   'preview coverage follows the zoomed ruler and playhead', JSON.stringify(p));
   check((await read()).frame === 90, 'the preview band preserves ruler scrubbing');
-  check(p.percent === '50%', 'the ruler shows readiness for the selected playback range');
+  const whole = await readiness();
+  check(whole.status === `${whole.ready}/${whole.total} frames ready`
+    && whole.total === 4 * whole.fps + 1 && whole.ready === 2 * whole.fps + 1,
+  'the status line shows readiness for the selected playback range', JSON.stringify(whole));
 
   await page.evaluate(async () => {
     const { PreviewStore } = await import('/preview-cache.js');
@@ -275,12 +295,14 @@ async function checkCoverage() {
     for (let frame = 90; frame < 100; frame++) await disk.remove(__kinect.previews.state().signature, frame);
     await disk.close();
   });
-  await waitFor(() => !__kinect.previews.state().ready.includes(90)
-    && document.querySelector('#tPreviewPercent')?.textContent === '42%');
+  check(await waitFor(`!__kinect.previews.state().ready.includes(90) && ${READY_IN_RANGE}.ready === ${2 * FPS + 1 - 10}`),
+    'removing ten stored frames lowers the reported readiness');
   p = await positions();
   const gap = p.three + (p.three - p.two) * .15;
+  const gapped = await readiness();
   check(p.bars.length === 2 && !p.bars.some((bar) => bar.left <= gap && bar.right > gap)
-    && p.percent === '42%', 'preview coverage leaves missing frames visibly unrendered', JSON.stringify(p));
+    && gapped.ready === 2 * gapped.fps + 1 - 10,
+  'preview coverage leaves missing frames visibly unrendered', JSON.stringify({ ...p, ...gapped }));
   await page.evaluate(() => {
     const duration = __kinect.timeline.transport().duration;
     __kinect.editor.view.set(2.5 / duration, 6.5 / duration);
@@ -316,11 +338,17 @@ async function pixelsAt(frame) {
     const box = [rect.x, rect.y, rect.w, rect.h].map((n) => Math.round(n * scale));
     window.__previewInsetBox = box;
     window.__previewInsetReference = chrome.getContext('2d').getImageData(...box).data;
-    return { width: gl.drawingBufferWidth, height: gl.drawingBufferHeight };
+    let lo = 255, hi = 0;
+    for (let i = 0; i < pixels.length; i++) {
+      if (i % 4 === 3) continue;
+      if (pixels[i] < lo) lo = pixels[i];
+      if (pixels[i] > hi) hi = pixels[i];
+    }
+    return { width: gl.drawingBufferWidth, height: gl.drawingBufferHeight, spread: hi - lo };
   }, frame);
 }
 async function compareCached(frame, label, tolerance = 0) {
-  await pixelsAt(frame);
+  const reference = await pixelsAt(frame);
   await page.evaluate(async (frame) => {
     const t = __kinect.timeline.transport();
     await t.seek((frame - 1) / t.outputFps);
@@ -339,9 +367,15 @@ async function compareCached(frame, label, tolerance = 0) {
       const delta = Math.abs(actual[i] - expected[i]);
       max = Math.max(max, delta); sum += delta; if (delta) changed++;
     }
-    return { cached: true, max, mean: sum / (actual.length * .75), changed };
+    return { cached: true, max, mean: sum / (actual.length * .75), changed,
+      width: canvas.width, height: canvas.height };
   });
-  check(difference.cached && difference.max <= tolerance, label, JSON.stringify(difference));
+  // The equality is only worth something against a reference that drew something: two blank
+  // frames agree on every byte, so the reference's own contrast is the floor under every row here.
+  check(difference.cached && difference.max <= tolerance
+    && difference.width === reference.width && difference.height === reference.height
+    && reference.spread >= 24,
+  label, JSON.stringify({ ...difference, reference }));
   const placement = await page.evaluate(() => {
     const canvas = document.querySelector('#previewStage');
     const actual = canvas.getBoundingClientRect(), expected = document.querySelector('#stage').getBoundingClientRect();
@@ -407,11 +441,18 @@ try {
   await range(2, 4);
   const started = await read();
   await page.locator('#tPlay').click();
+  // Sampled while still playing: pausing at the out-point restores a live frame through a seek,
+  // and the renders that costs would swamp the ones this row is about.
+  const sampled = await waitFor(() => __kinect.timeline.transport().playing && __kinect.timeline.transport().frame >= 90);
+  const mid = await read();
   const finished = await waitFor(() => !__kinect.timeline.transport().playing && __kinect.timeline.transport().frame === 120, 10000);
   await page.evaluate(() => __kinect.timeline.settled());
   p = await read();
-  check(finished && p.shown - started.shown === 60,
-    'cached playback replaces foreground rendering', `${p.shown - started.shown} cached frames; ${p.counters.renders - started.counters.renders} foreground renders including pause restoration`);
+  check(finished && sampled && p.shown - started.shown === 60
+    && mid.counters.renders - started.counters.renders <= 2,
+  'cached playback replaces foreground rendering',
+  `${p.shown - started.shown} cached frames; ${mid.counters.renders - started.counters.renders} foreground renders while playing, `
+  + `${p.counters.renders - started.counters.renders} including pause restoration`);
   await page.evaluate(() => __kinect.timeline.settled());
   check(!await page.locator('#previewStage').isVisible(), 'pausing removes the cached image from the visible page');
   check(p.memoryBytes <= p.memoryLimit && p.storageBytes <= p.storageLimit, 'both preview caches stay within their byte limits');
@@ -538,8 +579,9 @@ try {
   p = await read();
   check(p.rendering || p.rendered > drifted.rendered, 'a pointer drifting across the page does not postpone idle rendering',
     `rendering ${p.rendering}; rendered ${drifted.rendered}->${p.rendered}`);
-  check(await waitFor(() => __kinect.previews.state().rendered > 71, 15000),
-    'a settled free camera starts rendering while idle');
+  check(await waitFor(`__kinect.previews.state().view === 'free'`
+    + ` && __kinect.previews.state().rendered > ${drifted.rendered}`, 15000),
+  'a settled free camera starts rendering while idle');
   await setAutomatic(false);
   const stopped = (await read()).rendered;
   await page.waitForTimeout(500);
@@ -547,14 +589,24 @@ try {
   check(!p.rendering && p.rendered <= stopped + 1, 'turning off idle rendering interrupts the active render');
   await previewCommand('#tPreviewRender');
   check(await waitFor(() => __kinect.previews.state().rendering, 3000), 'manual rendering works with idle rendering off');
+  // A manual render that simply finished is not one that was interrupted, and `rendering` cannot
+  // tell those apart on a range the idle pass has already mostly filled. The interruption count
+  // can, and it is the property these three rows are about.
+  const heldManual = (await read()).interruptions;
   await setAutomatic(true);
   await page.waitForTimeout(100);
-  check((await read()).rendering, 'enabling idle rendering preserves a manual render');
+  p = await read();
+  check(p.interruptions === heldManual, 'enabling idle rendering preserves a manual render',
+    `interruptions ${heldManual} -> ${p.interruptions}`);
   await setAutomatic(false);
-  check((await read()).rendering, 'disabling idle rendering preserves a manual render');
+  p = await read();
+  check(p.interruptions === heldManual, 'disabling idle rendering preserves a manual render',
+    `interruptions ${heldManual} -> ${p.interruptions}`);
   await page.mouse.move(990, 20);
   await page.waitForTimeout(100);
-  check((await read()).rendering, 'moving the pointer preserves a manual render');
+  p = await read();
+  check(p.interruptions === heldManual, 'moving the pointer preserves a manual render',
+    `interruptions ${heldManual} -> ${p.interruptions}`);
   await previewCommand('#tPreviewRender');
   await page.waitForTimeout(150);
   check(!(await read()).rendering, 'Stop rendering interrupts the manual render');
@@ -866,8 +918,22 @@ if (MUTATE) check(served > 0, 'the browser actually loaded the mutation', `${ser
 writeFileSync(join(TMP, 'result.json'), JSON.stringify({ assertions, failures, failed, mutation: MUTATE, served }, null, 2));
 console.log(`\n[preview] ${assertions} assertions, ${failures} failed`);
 console.log(`[preview] evidence ${TMP}`);
+const standingFired = failed.filter((label) => STANDING_RED.has(label));
+for (const label of [...STANDING_RED.keys()].filter((label) => !failed.includes(label))) {
+  console.log(`[preview] declared standing red is GREEN on this run: "${label}"`);
+  console.log(`           declared because ${STANDING_RED.get(label)} - take the entry out rather `
+    + 'than leaving a row nothing is standing for');
+}
 if (MUTATE) {
-  const caught = failed.includes(MUTATIONS[MUTATE].fails);
+  const declared = MUTATIONS[MUTATE].fails;
+  if (standingFired.length) {
+    console.log(`[preview] ${standingFired.length} of those ${failures} are red on this tree either way, `
+      + 'so they are not this mutation being caught:');
+    for (const label of standingFired) console.log(`           ${label}`);
+  }
+  // A row that is red anyway cannot evidence a catch, so declaring one is a failed run.
+  const caught = failed.includes(declared) && !STANDING_RED.has(declared);
+  if (STANDING_RED.has(declared)) console.log(`[preview] "${declared}" is standing red, so it cannot show a catch`);
   console.log(`[preview] ${caught ? 'CAUGHT for the declared reason' : 'NOT CAUGHT for the declared reason'}`);
   process.exitCode = caught && served > 0 ? 0 : 1;
 } else process.exitCode = failures ? 1 : 0;

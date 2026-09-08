@@ -27,7 +27,7 @@ Per tool, read from the source:
 | `index-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no 2 GiB fixture, a stale anchor, a crash |
 | `registry-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: a stale anchor, a crash, no browser |
 | `timeline-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `DID NOT RUN`: a take under 12s |
-| `preview-check` | pass, or a **catch** | a failed assertion, a crash, or a miss | not used |
+| `preview-check` | pass, or a **catch** | a failed assertion, a crash, or a miss | an unknown `--mutate` name |
 | `keyframe-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or the page stopped answering | `DID NOT RUN`: a take under 24s |
 | `export-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or a crash (it has no crash handler) | not used |
 | `editor-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a take under 32s, a stale anchor |
@@ -250,8 +250,8 @@ profiles. Their foreground checks must not compete with a second renderer; `prev
 drives that renderer and its idle preference explicitly.
 
 The coverage rows compare the visible band against ruler ticks and the playhead while zooming
-and panning. They remove stored frames to expose a gap, check the readiness percentage, and
-scrub through the band. The preview controls must belong to View, with no popup on the timeline.
+and panning. They remove stored frames to expose a gap, check the readiness the status line
+reports against the playback range, and scrub through the band. The preview controls must belong to View, with no popup on the timeline.
 A parked timeline is watched through a `MutationObserver` on the band for one second and must
 rebuild nothing. The storage key must be a 64-character digest. A pointer moved across the
 page for 3.5 seconds must not postpone idle rendering. The decode-stall row slows
@@ -437,6 +437,20 @@ anchors on:
 
 - **`reveal-ignores-tracks`** — the reveal walks the clips and not their tracks, so a keyed
   parameter stays hidden.
+- **`part-apply-stamps-a-revision`** — applying part of a look stamps the clip with a revision
+  the gesture did not apply, which the note used to carry and the clip's stamp now does.
+
+**Controls removed with their subject.** A control taken out in silence is a guarantee taken out
+in silence, so each is recorded here with what it held. These are not runnable: the bullet form
+above is reserved for controls a table still declares.
+
+| removed control | what it guaranteed |
+| --- | --- |
+| `offer-ignores-take-hash` | the offer joined on the take's content hash rather than its id, so a renamed id could not resurrect an edit cut on different footage |
+| `resume-fetches-the-moving-name` | pressing the chip restored the document that had been offered rather than re-reading the name the auto-save moves under it |
+| `resume-restores-without-keeping` | a restore that could not be written back threw rather than leaving the screen and the file disagreeing |
+| `resume-waits-for-every-list` | a neighbouring listing that refused did not hide the offer |
+| `apply-says-nothing` | the note for an applied preset said what was applied; the note is gone, and `part-apply-stamps-a-revision` above controls the guarantee it carried |
 
 **Known reds.**
 

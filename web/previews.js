@@ -110,14 +110,21 @@ export function createPreviews({ describe, viewStamp, state, pause, settle, stag
   }
   observeStore();
 
-  fetch('/preview/renderer', { cache: 'no-store' }).then(async (response) => {
-    const body = await response.json();
-    if (!response.ok || !/^[a-f0-9]{64}$/.test(body.version)) {
-      throw new Error('The renderer version could not be read.');
-    }
-    version = body.version;
-    dirty = true;
-  }).catch(fail);
+  // Retried rather than fetched once: without a version nothing can be keyed, and a server
+  // restart during boot would otherwise disable previews for the life of the tab.
+  let versionLoad = null;
+  function loadVersion() {
+    if (version || versionLoad || closed) return;
+    versionLoad = fetch('/preview/renderer', { cache: 'no-store' }).then(async (response) => {
+      const body = await response.json();
+      if (!response.ok || !/^[a-f0-9]{64}$/.test(body.version)) {
+        throw new Error('The renderer version could not be read.');
+      }
+      version = body.version;
+      dirty = true;
+    }).catch(fail).finally(() => { versionLoad = null; });
+  }
+  loadVersion();
 
   function syncStorage() {
     if (!storageDirty || storageSync) return;
@@ -147,6 +154,17 @@ export function createPreviews({ describe, viewStamp, state, pause, settle, stag
   function hide() {
     canvas.hidden = true;
     shownPlans = null;
+  }
+
+  // A wedged renderer would otherwise hold `task` forever, and `advance` refuses to start while
+  // one is set, so a run that stops answering has to end itself.
+  const FRAME_TIMEOUT_MS = 60000;
+  function withTimeout(promise, message) {
+    let timer = null;
+    return Promise.race([
+      promise,
+      new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error(message)), FRAME_TIMEOUT_MS); }),
+    ]).finally(() => clearTimeout(timer));
   }
 
   function cancel() {
@@ -280,7 +298,10 @@ export function createPreviews({ describe, viewStamp, state, pause, settle, stag
           throw new Error('The cached image has the wrong dimensions.');
         }
         if (!images.put(frame, image, row.plans)) {
-          throw new Error('The preview exceeds the decoded image budget. Reduce render % or the viewport size.');
+          // The stored frame is good and this browser cannot hold it decoded, so every frame at
+          // this size will fail the same way. Removing it would only have it rendered again.
+          fail(new Error('A preview is too large to decode here. Reduce render % or the viewport size.'));
+          return;
         }
       } catch (problem) {
         if (mine !== generation || closed) return;
@@ -396,7 +417,8 @@ export function createPreviews({ describe, viewStamp, state, pause, settle, stag
           if (available.has(frame)) continue;
           run.frame = frame;
           paint();
-          const result = structuredClone(await api.frame(frame, () => checkpoint(run)));
+          const result = structuredClone(await withTimeout(api.frame(frame, () => checkpoint(run)),
+            'The preview renderer stopped answering.'));
           await checkpoint(run);
           const saved = await store.put(run.signature, frame, result.blob, result.plans, run.epoch);
           if (run.generation !== generation || closed) { storageDirty = true; return; }
@@ -494,6 +516,7 @@ export function createPreviews({ describe, viewStamp, state, pause, settle, stag
     reported = null;
     full = false;
     manual = true;
+    loadVersion();
     manualWaiting = true;
     const request = ++manualRequest;
     await settle();
@@ -514,6 +537,7 @@ export function createPreviews({ describe, viewStamp, state, pause, settle, stag
     warning = null;
     faulted = false;
     releaseWorker = true;
+    loadVersion();
     lastActivity = performance.now();
     await store.clear();
     loaded = false;
