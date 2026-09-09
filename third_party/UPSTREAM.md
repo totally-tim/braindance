@@ -1,7 +1,7 @@
 # libfreenect2, vendored
 
 `libfreenect2/` is upstream's source at **v0.2.1**
-(`fd64c5d9b214df6f6a55b4419357e51083f15d93`), committed in full, plus the three
+(`fd64c5d9b214df6f6a55b4419357e51083f15d93`), committed in full, plus the five
 local edits below. `node tools/vendor-check.mjs` proves that offline.
 
 ## Why the tree is committed
@@ -15,9 +15,12 @@ longer vouch for.
 
 ## What we changed
 
-Three files. Each carries a notice of modification in its header, as Apache-2.0
+Five files. Each carries a notice of modification in its header, as Apache-2.0
 section 4(b) requires, and `vendor-check` pins the notice with the content, so
 stripping it fails the check.
+
+**This fork needs `-DENABLE_CXX11=ON`**, because the colour decoder edit declares a
+scoped enum. `tools/build-native.mjs` passes it on both presets.
 
 ### `src/registration.cpp`: thread the occlusion filter
 
@@ -101,20 +104,51 @@ problem, grep the startup log: `failed to enable power states U1!` is harmless a
 `vendor/prefix` predates the edit runs a grabber without it, and only `npm run build:native`
 fixes that.
 
+### `include/libfreenect2/packet_pipeline.h` and `src/packet_pipeline.cpp`: name the colour decoder
+
+Upstream picks the colour decoder inside `getDefaultRgbPacketProcessor` and gives the
+caller no say in it. On Linux it takes VAAPI first and substitutes TurboJPEG only when
+VAAPI fails to *initialise*. An AMD RX 9070 XT on Mesa 26 (gfx1201) initialises VAAPI,
+decodes about 150 frames, then loses the amdgpu context and takes the grabber down with
+`SIGABRT`. Initialisation is the wrong moment to judge a decoder that dies later, and
+there is nothing to route around it with.
+
+The header declares `enum class ColorDecoder`. Each enumerator is gated on the same
+`LIBFREENECT2_WITH_*_SUPPORT` macro that gates the processor behind it, so a decoder that
+can be named is a decoder that can be constructed. `defaultColorDecoder()` reads the
+build's own pick, and every pipeline class gains one constructor overload taking a
+`ColorDecoder`. An overload rather than a default argument, which would bake today's
+default into every caller's object file, and a scoped enum so it cannot promote to `int`
+and bind to `OpenCLPacketPipeline(const int deviceId)`.
+
+`src/packet_pipeline.cpp` replaces `getDefaultRgbPacketProcessor` with
+`defaultColorDecoder` and `createRgbPacketProcessor`. The default order is VideoToolbox,
+TurboJPEG, TegraJPEG, VAAPI — software decode ahead of any hardware decoder that can lose
+a device context — so on a build carrying TurboJPEG the hardware decoders are reached only
+by asking for them. **Nothing substitutes.** A decoder that fails to start, or that fails
+on a frame, stops delivering colour, because a stream that changes decoder under the
+operator hides the fault it should be reporting.
+
+The scoped enum is what makes `-DENABLE_CXX11=ON` a requirement of this fork. The grabber
+picks a decoder with `--color-decoder` and defaults from `defaultColorDecoder()`, so one
+build cannot disagree with itself about which decoder it will use.
+
 ## How the proof works
 
 `third_party/libfreenect2.manifest` records the git blob hash of all 140 files
 as upstream published them. `tools/vendor-check.mjs` asserts five things:
 
-1. Every upstream file is present and unchanged except the three declared above.
+1. Every upstream file is present and unchanged except the five declared above.
 2. The set that differs is exactly the declared set, in both directions.
 3. Each declared file matches the exact content that was reviewed. Differing from
    upstream is not enough, because a reverted fix with its comment left in place
    still differs.
 4. No file exists that upstream did not ship.
 5. The harness oracle beside the tree is upstream's own `registration.cpp` byte for
-   byte, and the library at `vendor/prefix` carries `LIBFREENECT2_REG_THREADS`, so
-   a stale prefix cannot pass as a build of this tree.
+   byte, and the library at `vendor/prefix` carries both `LIBFREENECT2_REG_THREADS`
+   and `defaultColorDecoder`'s mangled symbol, so a stale prefix cannot pass as a
+   build of this tree. The macOS edit leaves no symbol behind and cannot be pinned
+   this way.
 
 Six controls. Each must be caught, and the failed-assertion count is what to read.
 Note that this tool exits 0 on a caught mutation.

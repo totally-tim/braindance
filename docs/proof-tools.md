@@ -1028,8 +1028,8 @@ name.
 
 ## `cpp-check`
 
-Both C++ files parse and typecheck, in all four combinations of the two macros `native/grabber.cpp`
-branches on.
+Both C++ files parse and typecheck, in eight configurations of the pipeline and colour-decoder
+macros `native/grabber.cpp` branches on.
 
 ```
 node tools/cpp-check.mjs
@@ -1043,14 +1043,27 @@ node tools/cpp-check.mjs
 It parses and typechecks; it does not link and it does not run, so a call to a function present in
 the headers and absent from the library is as green here as a correct one. What it closes is that
 `native/grabber.cpp` — the only writer of the one artifact in this program that cannot be shot
-again — had no compile gate.
+again — has a compile gate over every branch, including the ones this machine never builds.
+
+Four arms carry a pipeline macro combination and no decoder macro, so they also compile the empty
+enum. Four more each carry a colour decoder beside a pipeline: a Linux desktop, this Mac, a Jetson
+and a plain Linux box. Every decoder macro has an arm defining it and an arm without it, so both
+sides of each decoder `#ifdef` are compiled somewhere. A probe beside the arms compiles one
+translation unit naming all four enumerators, twice: a build with no decoder macro must refuse it
+and name each of the four as missing, and a build with all four on must accept it, which is what
+stops the refusal passing for a typo or a bad include path. Together they hold that an enumerator
+exists only where its decoder does, which no arm can test on its own.
 
 - **`grabber-syntax-error`** — a token-level break in the grabber.
 - **`grabber-type-error`** — a wrong argument type, which is the row saying this is a semantic
   pass and not a tokeniser.
-- **`opencl-branch-broken`** — a break inside the OpenCL `#ifdef` arm.
+- **`opencl-branch-broken`** — a break inside the OpenCL `#ifdef` arm. It reddens 3 of the 8
+  grabber rows.
 - **`opengl-branch-broken`** — a break inside the Pi's arm, which is why the matrix exists: a gate
-  parsing one configuration reports this green. It reddens 2 of the 4 grabber rows.
+  parsing one configuration reports this green. It reddens 4 of the 8 grabber rows.
+- **`vaapi-branch-broken`** — a break inside the grabber's VAAPI arm, which no build on this
+  machine compiles, so it says the decoder configurations are parsed rather than listed. It
+  reddens 1 of the 8 grabber rows and leaves the probe alone.
 - **`harness-syntax-error`** — a break in `native/harness/reg-runner.cpp`.
 
 ## `vendor-check`

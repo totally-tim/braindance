@@ -46,6 +46,7 @@ rides inside the `--grabber` string.
 
 | Flag | Default | What it does |
 | --- | --- | --- |
+| `--color-decoder NAME` | the grabber's own pick | What turns the colour camera's JPEG packets into images: `videotoolbox`, `turbojpeg`, `tegrajpeg` or `vaapi`. |
 | `--quality N` | `80` | JPEG quality, 1 to 100, for the colour stream. |
 | `--log LEVEL` | `warning` | `none`, `error`, `warning`, `info` or `debug`. `debug` adds libfreenect2's per-packet USB diagnostics. |
 | `--min-depth M` | `0.05` | Nearest depth in metres that reaches a frame. |
@@ -54,8 +55,16 @@ rides inside the `--grabber` string.
 | `--profile` | off | One CSV row per frame on stderr at exit, timing the serial half of the frame loop. |
 | `--dump-corpus DIR` | none | Writes registration inputs for the comparison corpus. |
 | `--dump-count N` | `24` | How many frames that dump holds. |
-| `--help` | | Prints the usage, the pipelines this build offers and the stdin commands, then exits. |
+| `--help` | | Prints the usage, the pipelines and colour decoders this build offers and the stdin commands, then exits. |
 | `--dump-every N` | `10` | Dumps every Nth frame. |
+
+**Only the decoders this libfreenect2 was built with can be named.** `--help` lists them, and the
+grabber resolves the name before it touches the device: a name no build has exits 2, and a name
+this build was not compiled with exits 1. Nothing substitutes, so a decoder that fails to start,
+or that fails on a frame, stops delivering colour rather than handing the work to another decoder.
+The default order is `videotoolbox`, `turbojpeg`, `tegrajpeg`, `vaapi`, which puts software decode
+ahead of a hardware decoder that can lose its device context mid-stream and end the grabber. On a
+build carrying TurboJPEG, `tegrajpeg` and `vaapi` are reached only by asking for them.
 
 **`--min-depth` and `--max-depth` decide what exists.** They clip on the GPU before a frame is
 built, so a point outside them is never recorded. The viewer's own `near` and `far` only hide

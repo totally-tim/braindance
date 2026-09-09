@@ -33,13 +33,19 @@ make a condition of redistribution. Upstream publishes no `NOTICE` file of its
 own, so there is no upstream NOTICE text to carry forward — the attribution
 above comes from the file headers and `depends/LICENSES.txt`.
 
-Two files are modified. Each carries a notice of the change in its header, as
+Five files are modified. Each carries a notice of the change in its header, as
 Apache-2.0 §4(b) requires, and `third_party/UPSTREAM.md` explains what changed
 and why:
 
 - `src/depth_packet_stream_parser.cpp` — accept depth frames missing only the
   unused 10th sub-image.
 - `src/registration.cpp` — thread the occlusion filter, banded by linear index.
+- `src/libfreenect2.cpp` — let the two USB link setup calls fail without failing
+  the open, on macOS only.
+- `include/libfreenect2/packet_pipeline.h` — declare `ColorDecoder`,
+  `defaultColorDecoder` and a decoder overload per pipeline.
+- `src/packet_pipeline.cpp` — pick the colour decoder by name, prefer software
+  decode, and never substitute.
 
 Those notices sit inside content that `tools/vendor-check.mjs` pins by blob hash,
 so removing one fails the check rather than going unnoticed. Nothing else in the
@@ -122,9 +128,11 @@ the browser at `/vendor/three/`, so a deployment does redistribute it.
   The IJG terms require an acknowledgment, so, as clause (2) asks:
   **this software is based in part on the work of the Independent JPEG Group.**
 
-  libfreenect2 uses it to decode the sensor's colour stream and
-  `native/grabber.cpp` uses it to re-encode the registered frame. Installed as a
-  system package (`brew install jpeg-turbo`, or `libturbojpeg0-dev`).
+  libfreenect2 decodes the sensor's colour stream with it wherever
+  `--color-decoder` names `turbojpeg`, which is the default on a build without
+  VideoToolbox, and `native/grabber.cpp` uses it to re-encode the registered
+  frame on every build. Installed as a system package (`brew install
+  jpeg-turbo`, or `libturbojpeg0-dev`).
 - **OpenCL** — the depth solve runs through OpenCL on macOS. No OpenCL
   implementation is redistributed; the build links the platform's ICD loader
   (Apple's OpenCL framework here) and the headers come from the vendored
