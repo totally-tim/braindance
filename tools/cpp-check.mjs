@@ -1,8 +1,12 @@
 #!/usr/bin/env node
-// Parses and typechecks the two C++ files this repo ships, in all four combinations of the
-// two macros grabber.cpp branches on. No sensor, no prefix, no link step: a call to a
-// function present in the headers and absent from the library is as green here as a correct
-// one. Exit 1 means a claim failed; exit 2 means the harness did not run.
+// Parses and typechecks the two C++ files this repo ships, in eight configurations of the
+// macros grabber.cpp branches on: the four combinations of the two pipeline macros, and four
+// more carrying a colour decoder each, so every decoder branch and every decoder refusal
+// branch is compiled somewhere. A probe beside them compiles a translation unit naming all
+// four enumerators, and holds that an enumerator exists only where its decoder does. No
+// sensor, no prefix, no link step: a call to a function present in the headers and absent
+// from the library is as green here as a correct one. Exit 1 means a claim failed; exit 2
+// means the harness did not run.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -31,8 +35,8 @@ const MUTATIONS = {
   'opencl-branch-broken': {
     file: 'native/grabber.cpp',
     edits: [[
-      '    pipeline = new libfreenect2::OpenCLPacketPipeline();',
-      '    pipeline = new libfreenect2::OpenCLPacketPipelineThatDoesNotExist();',
+      '    pipeline = new libfreenect2::OpenCLPacketPipeline(-1, colorDecoder);',
+      '    pipeline = new libfreenect2::OpenCLPacketPipelineThatDoesNotExist(-1, colorDecoder);',
     ]],
   },
 
@@ -40,12 +44,25 @@ const MUTATIONS = {
   'opengl-branch-broken': {
     file: 'native/grabber.cpp',
     edits: [[
-      '    pipeline = new libfreenect2::OpenGLPacketPipeline();',
-      '    pipeline = new libfreenect2::OpenGLPacketPipelineThatDoesNotExist();',
+      '    pipeline = new libfreenect2::OpenGLPacketPipeline(0, false, colorDecoder);',
+      '    pipeline = new libfreenect2::OpenGLPacketPipelineThatDoesNotExist(0, false, colorDecoder);',
     ]],
     fails: 'a break inside the Pi\'s `#ifdef` arm, which is the control the matrix exists for: a '
-      + 'gate parsing one configuration reports this green. Reddens 2 of the 4 grabber rows, '
+      + 'gate parsing one configuration reports this green. Reddens 4 of the 8 grabber rows, '
       + 'not all of them - read the rows',
+  },
+
+  // The decoder counterpart: an arm nothing on this Mac compiles, so it says the decoder
+  // configurations are parsed rather than listed.
+  'vaapi-branch-broken': {
+    file: 'native/grabber.cpp',
+    edits: [[
+      '    colorDecoder = libfreenect2::ColorDecoder::VAAPI;',
+      '    colorDecoder = libfreenect2::ColorDecoder::VAAPIThatDoesNotExist;',
+    ]],
+    fails: 'a break inside the grabber\'s VAAPI `#ifdef` arm, which no build on this machine '
+      + 'compiles. Reddens 1 of the 8 grabber rows, the vaapi one, and leaves the enum probe '
+      + 'alone because the probe is generated rather than staged - read the rows',
   },
 
   'harness-syntax-error': {
@@ -164,20 +181,72 @@ if (parse(canary, []).ok) {
 }
 console.log(`  ok   ${CXX} rejects a planted syntax error, so this run can mean something`);
 
-// The two macros grabber.cpp branches on. `cpu only` is what a CPU-only libfreenect2 gives you.
+// Every arm below names an enumerator only inside the `#ifdef` that gates it, so all of them
+// stay green if someone un-gates the enum and every decoder exists everywhere. This asks the
+// question directly: a translation unit naming all four, compiled against a build with no
+// decoder at all, has to be rejected, and each missing enumerator has to be named in the
+// rejection so a typo or a bad include path cannot pass for the catch. The arm with all four
+// decoders on is what proves the file is otherwise correct, so the refusal is about the gating.
+const DECODERS = ['VideoToolbox', 'TurboJPEG', 'TegraJPEG', 'VAAPI'];
+{
+  const probe = join(TMP, 'enum-gating-probe.cpp');
+  writeFileSync(probe, '#include <libfreenect2/packet_pipeline.h>\n'
+    + 'int main() {\n  libfreenect2::ColorDecoder every[] = {\n'
+    + DECODERS.map((d) => `    libfreenect2::ColorDecoder::${d},\n`).join('')
+    + '  };\n  (void)every;\n  return 0;\n}\n');
+
+  const zero = join(TMP, 'inc-probe-zero');
+  writeConfig(zero, []);
+  const negative = parse(probe, [zero, VENDOR_INCLUDE]);
+  const unnamed = DECODERS.filter((d) => !negative.out.includes(d));
+  check(!negative.ok && unnamed.length === 0,
+    'a translation unit naming all four decoders is refused by a build with none of them,'
+    + ` naming each one missing${unnamed.length ? ` - unnamed: ${unnamed.join(', ')}` : ''}`);
+  if (negative.ok) {
+    console.log('       it compiled, so every enumerator exists whatever the build supports');
+  }
+
+  const all = join(TMP, 'inc-probe-all');
+  writeConfig(all, ['LIBFREENECT2_WITH_VT_SUPPORT', 'LIBFREENECT2_WITH_TURBOJPEG_SUPPORT',
+    'LIBFREENECT2_WITH_TEGRAJPEG_SUPPORT', 'LIBFREENECT2_WITH_VAAPI_SUPPORT']);
+  const positive = parse(probe, [all, VENDOR_INCLUDE]);
+  check(positive.ok, 'the same unit compiles against a build with all four decoders on,'
+    + ' so the refusal above is the gating and not a broken probe');
+  if (!positive.ok) {
+    console.log(positive.out.split('\n').slice(0, 12).map((l) => `       ${l}`).join('\n'));
+  }
+}
+
+// The pipeline macros grabber.cpp branches on, then one arm per colour decoder. `cpu only` is
+// what a CPU-only libfreenect2 gives you, and it also compiles the empty enum. Every decoder
+// has an arm defining it and an arm without it, so both sides of each decoder `#ifdef` parse.
 const ARMS = [
   ['cpu only', []],
   ['opengl', ['LIBFREENECT2_WITH_OPENGL_SUPPORT']],
   ['opencl', ['LIBFREENECT2_WITH_OPENCL_SUPPORT']],
   ['opengl+opencl', ['LIBFREENECT2_WITH_OPENGL_SUPPORT', 'LIBFREENECT2_WITH_OPENCL_SUPPORT']],
+  // A Linux desktop.
+  ['vaapi+turbojpeg, opengl', ['LIBFREENECT2_WITH_OPENGL_SUPPORT',
+    'LIBFREENECT2_WITH_VAAPI_SUPPORT', 'LIBFREENECT2_WITH_TURBOJPEG_SUPPORT']],
+  // This Mac.
+  ['videotoolbox+turbojpeg, opencl', ['LIBFREENECT2_WITH_OPENCL_SUPPORT',
+    'LIBFREENECT2_WITH_VT_SUPPORT', 'LIBFREENECT2_WITH_TURBOJPEG_SUPPORT']],
+  // A Jetson.
+  ['tegrajpeg+turbojpeg, opengl', ['LIBFREENECT2_WITH_OPENGL_SUPPORT',
+    'LIBFREENECT2_WITH_TEGRAJPEG_SUPPORT', 'LIBFREENECT2_WITH_TURBOJPEG_SUPPORT']],
+  // A plain Linux box.
+  ['turbojpeg, cpu only', ['LIBFREENECT2_WITH_TURBOJPEG_SUPPORT']],
 ];
 
 const GRABBER = staged('native/grabber.cpp');
 const RUNNER = staged('native/harness/reg-runner.cpp');
 
-console.log('\nnative/grabber.cpp, per pipeline configuration');
-for (const [label, features] of ARMS) {
-  const dir = join(TMP, `inc-${label.replace(/[^a-z]/g, '')}`);
+console.log('\nnative/grabber.cpp, per pipeline and colour-decoder configuration');
+for (const [i, [label, features]] of ARMS.entries()) {
+  // The index is what keeps two labels apart: stripping everything but lowercase letters maps
+  // several of them onto one directory, and the second config would overwrite the first, so an
+  // arm would report on macros it was not given.
+  const dir = join(TMP, `inc-${i}-${label.replace(/[^a-z]/g, '')}`);
   writeConfig(dir, features);
   const r = parse(GRABBER, [dir, VENDOR_INCLUDE, TURBOJPEG]);
   check(r.ok, `grabber.cpp parses and typechecks with ${label}`);

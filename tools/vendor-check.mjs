@@ -13,7 +13,8 @@ const MANIFEST = join(ROOT, 'third_party', 'libfreenect2.manifest');
 
 // Each entry pins the blob hash our patched file must have, because "differs from
 // upstream" is not "contains our change". `marker` is a string the edit leaves in the
-// compiled library; only the registration edit has one.
+// compiled library, which is what catches a stale vendor/prefix; an edit whose change
+// leaves no symbol or literal behind cannot have one.
 const DECLARED_EDITS = new Map([
   ['src/depth_packet_stream_parser.cpp', {
     why: 'accept depth frames missing only the unused 10th sub-image',
