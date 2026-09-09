@@ -30,6 +30,20 @@ const DECLARED_EDITS = new Map([
     ours: 'a89572d9bed79becdea8c61e398803c536b1b6ee',
     marker: null,
   }],
+  ['include/libfreenect2/packet_pipeline.h', {
+    why: 'declare ColorDecoder, defaultColorDecoder and a decoder overload per pipeline',
+    ours: '108d9590548f51f97d1afe102c95ac073f06e68c',
+    marker: null,
+  }],
+  ['src/packet_pipeline.cpp', {
+    why: 'pick the colour decoder by name, prefer software decode, and never substitute',
+    ours: '2ddc89986f7c1235611de3b7344dbe55e4bd8bbe',
+    // The mangled name of the one symbol this edit exports. Unlike the macOS edit, which leaves
+    // no symbol behind and so cannot be pinned, this proves vendor/prefix was rebuilt from our
+    // source rather than left stale. Mach-O prefixes another underscore, so the substring holds
+    // on both platforms.
+    marker: '_ZN12libfreenect219defaultColorDecoderEv',
+  }],
 ]);
 
 const blobHash = (buf) =>
@@ -55,8 +69,11 @@ function parseManifest() {
 }
 
 const MUTATIONS = {
+  // Anchored on a file no declared edit touches, so what it proves is assertion 2's
+  // "undeclared change" arm. Planted in a declared file it would still redden, but through the
+  // hash comparison instead, and the control would no longer test what it is named for.
   'undeclared-edit': (tree) => {
-    const f = join(tree, 'src', 'packet_pipeline.cpp');
+    const f = join(tree, 'src', 'frame_listener_impl.cpp');
     writeFileSync(f, readFileSync(f, 'utf8') + '\n// not upstream\n');
   },
   'revert-local-edit': (tree) => {

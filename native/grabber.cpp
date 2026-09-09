@@ -446,6 +446,26 @@ static bool read_metres(const char *text, float *out) {
   return true;
 }
 
+// The flag spelling of each colour decoder, gated the way libfreenect2 gates the enumerator, so
+// a decoder this build cannot construct cannot be named here either.
+static const char *decoder_flag_value(libfreenect2::ColorDecoder decoder) {
+  switch (decoder) {
+#ifdef LIBFREENECT2_WITH_VT_SUPPORT
+  case libfreenect2::ColorDecoder::VideoToolbox: return "videotoolbox";
+#endif
+#ifdef LIBFREENECT2_WITH_TURBOJPEG_SUPPORT
+  case libfreenect2::ColorDecoder::TurboJPEG:    return "turbojpeg";
+#endif
+#ifdef LIBFREENECT2_WITH_TEGRAJPEG_SUPPORT
+  case libfreenect2::ColorDecoder::TegraJPEG:    return "tegrajpeg";
+#endif
+#ifdef LIBFREENECT2_WITH_VAAPI_SUPPORT
+  case libfreenect2::ColorDecoder::VAAPI:        return "vaapi";
+#endif
+  }
+  return "";
+}
+
 int main(int argc, char **argv) {
   int jpegQuality = 80;
   bool wantColor = true;
@@ -459,6 +479,9 @@ int main(int argc, char **argv) {
 #else
   std::string pipelineName = "cpu";
 #endif
+  // Defaulted from libfreenect2 rather than from a second copy of its precedence here, so one
+  // build cannot disagree with itself about which decoder it will use.
+  std::string colorDecoderName = decoder_flag_value(libfreenect2::defaultColorDecoder());
   std::string logLevel = "warning";
   bool profile = false;
   // libfreenect2 clips depth on the GPU before we ever see it, and its 0.5-4.5 defaults are
@@ -489,6 +512,7 @@ int main(int argc, char **argv) {
     std::string a = argv[i];
     if (a == "--no-color") wantColor = false;
     else if (a == "--pipeline" && i + 1 < argc) pipelineName = argv[++i];
+    else if (a == "--color-decoder" && i + 1 < argc) colorDecoderName = argv[++i];
     else if (a == "--quality" && i + 1 < argc) jpegQuality = std::atoi(qualityRaw = argv[++i]);
     else if (a == "--log" && i + 1 < argc) logLevel = argv[++i];
     else if (a == "--min-depth" && i + 1 < argc) minDepthRaw = argv[++i];
@@ -500,9 +524,9 @@ int main(int argc, char **argv) {
     else if (a == "--dump-every" && i + 1 < argc) dumpEvery = std::atoi(dumpEveryRaw = argv[++i]);
     else if (a == "--help") {
       std::fprintf(stderr,
-        "usage: grabber [--pipeline gl|cl|cpu] [--no-color] [--quality 1-100]\n"
-        "               [--log none|error|warning|info|debug] [--profile]\n"
-        "               [--min-depth m] [--max-depth m] [--no-low-light]\n"
+        "usage: grabber [--pipeline gl|cl|cpu] [--color-decoder NAME] [--no-color]\n"
+        "               [--quality 1-100] [--log none|error|warning|info|debug]\n"
+        "               [--profile] [--min-depth m] [--max-depth m] [--no-low-light]\n"
         "\n"
         "  --pipeline picks the depth processor. Only the ones this libfreenect2\n"
         "  was built with are available: this build offers"
@@ -513,6 +537,28 @@ int main(int argc, char **argv) {
         " cl"
 #endif
         " cpu, and defaults to %s.\n"
+        "\n"
+        "  --color-decoder picks what turns the colour camera's JPEG packets into\n"
+        "  images, and the same rule applies. This build offers:\n"
+        "   "
+#ifdef LIBFREENECT2_WITH_VT_SUPPORT
+        " videotoolbox"
+#endif
+#ifdef LIBFREENECT2_WITH_TURBOJPEG_SUPPORT
+        " turbojpeg"
+#endif
+#ifdef LIBFREENECT2_WITH_TEGRAJPEG_SUPPORT
+        " tegrajpeg"
+#endif
+#ifdef LIBFREENECT2_WITH_VAAPI_SUPPORT
+        " vaapi"
+#endif
+        "\n"
+        "  and defaults to %s. Nothing substitutes: a decoder that fails to\n"
+        "  start, or that fails on a frame, stops delivering colour rather than\n"
+        "  handing the work to another decoder. vaapi decodes on the GPU and can\n"
+        "  lose its device context mid-stream, which ends the process, so it is\n"
+        "  reached only by asking for it.\n"
         "\n"
         "  --log debug surfaces libfreenect2's per-packet USB diagnostics,\n"
         "  including 'not all subsequences received' - the dropped-isochronous-\n"
@@ -556,7 +602,7 @@ int main(int argc, char **argv) {
         "  low-light on|off\n"
         "  hd-color on|off\n"
         "  key on|off\n",
-        pipelineName.c_str());
+        pipelineName.c_str(), colorDecoderName.c_str());
       return 0;
     }
     // Nothing falls through this loop. A misspelling, a value eaten by a shell, or a flag left
@@ -606,6 +652,45 @@ int main(int argc, char **argv) {
     return 2;
   }
 
+  // Resolved before the device is touched: a decoder this build cannot use is not worth probing
+  // USB to discover. A name no build has is a typo, so 2 - nothing was attempted, matching the
+  // three above. A name this build was not compiled with is 1: the request was understood and
+  // refused, matching --pipeline on a build without that processor.
+  libfreenect2::ColorDecoder colorDecoder = libfreenect2::defaultColorDecoder();
+  if (colorDecoderName == "videotoolbox") {
+#ifdef LIBFREENECT2_WITH_VT_SUPPORT
+    colorDecoder = libfreenect2::ColorDecoder::VideoToolbox;
+#else
+    std::fprintf(stderr, "[grabber] this libfreenect2 was built without VideoToolbox support\n");
+    return 1;
+#endif
+  } else if (colorDecoderName == "turbojpeg") {
+#ifdef LIBFREENECT2_WITH_TURBOJPEG_SUPPORT
+    colorDecoder = libfreenect2::ColorDecoder::TurboJPEG;
+#else
+    std::fprintf(stderr, "[grabber] this libfreenect2 was built without TurboJPEG support\n");
+    return 1;
+#endif
+  } else if (colorDecoderName == "tegrajpeg") {
+#ifdef LIBFREENECT2_WITH_TEGRAJPEG_SUPPORT
+    colorDecoder = libfreenect2::ColorDecoder::TegraJPEG;
+#else
+    std::fprintf(stderr, "[grabber] this libfreenect2 was built without TegraJPEG support\n");
+    return 1;
+#endif
+  } else if (colorDecoderName == "vaapi") {
+#ifdef LIBFREENECT2_WITH_VAAPI_SUPPORT
+    colorDecoder = libfreenect2::ColorDecoder::VAAPI;
+#else
+    std::fprintf(stderr, "[grabber] this libfreenect2 was built without VAAPI support\n");
+    return 1;
+#endif
+  } else {
+    std::fprintf(stderr, "[grabber] unknown colour decoder '%s' (want videotoolbox, turbojpeg, "
+                 "tegrajpeg or vaapi)\n", colorDecoderName.c_str());
+    return 2;
+  }
+
   // Debug is genuinely noisy - one line per incomplete depth frame - so it stays opt-in.
   libfreenect2::Logger::Level level = libfreenect2::Logger::Warning;
   if (logLevel == "none") level = libfreenect2::Logger::None;
@@ -627,18 +712,20 @@ int main(int argc, char **argv) {
 
   libfreenect2::PacketPipeline *pipeline = nullptr;
   if (pipelineName == "cpu") {
-    pipeline = new libfreenect2::CpuPacketPipeline();
+    pipeline = new libfreenect2::CpuPacketPipeline(colorDecoder);
   } else if (pipelineName == "gl") {
 #ifdef LIBFREENECT2_WITH_OPENGL_SUPPORT
     // The GL processor opens its own window, so a Wayland or X session has to be reachable.
-    pipeline = new libfreenect2::OpenGLPacketPipeline();
+    // 0 and false are OpenGLPacketPipeline's own defaults, named because the decoder follows them.
+    pipeline = new libfreenect2::OpenGLPacketPipeline(0, false, colorDecoder);
 #else
     std::fprintf(stderr, "[grabber] this libfreenect2 was built without OpenGL support\n");
     return 1;
 #endif
   } else if (pipelineName == "cl") {
 #ifdef LIBFREENECT2_WITH_OPENCL_SUPPORT
-    pipeline = new libfreenect2::OpenCLPacketPipeline();
+    // -1 is OpenCLPacketPipeline's own default device, named because the decoder follows it.
+    pipeline = new libfreenect2::OpenCLPacketPipeline(-1, colorDecoder);
 #else
     std::fprintf(stderr, "[grabber] this libfreenect2 was built without OpenCL support\n");
     return 1;
@@ -718,10 +805,12 @@ int main(int argc, char **argv) {
   int helloLen = std::snprintf(hello, sizeof(hello),
     "{\"format\":%u,\"serial\":\"%s\",\"firmware\":\"%s\",\"width\":%d,\"height\":%d,"
     "\"fx\":%.6f,\"fy\":%.6f,\"cx\":%.6f,\"cy\":%.6f,\"color\":%s,"
-    "\"minDepth\":%.3f,\"maxDepth\":%.3f,\"lowLight\":%s,\"startedAt\":%lld}",
+    "\"minDepth\":%.3f,\"maxDepth\":%.3f,\"lowLight\":%s,\"decoder\":\"%s\","
+    "\"startedAt\":%lld}",
     CAPTURE_FORMAT, serial.c_str(), dev->getFirmwareVersion().c_str(), DW, DH,
     ir.fx, ir.fy, ir.cx, ir.cy, wantColor ? "true" : "false",
-    minDepth, maxDepth, (wantColor && lowLight) ? "true" : "false", startedAt);
+    minDepth, maxDepth, (wantColor && lowLight) ? "true" : "false",
+    colorDecoderName.c_str(), startedAt);
   // snprintf truncates silently, and a truncated hello is not JSON - every take recorded
   // afterwards would carry a sensor record nothing can parse. The serial and the firmware are
   // device strings, so the length is not something this file can reason about once.
@@ -731,8 +820,8 @@ int main(int argc, char **argv) {
     return 1;
   }
   if (!write_message(STDOUT_FILENO, TYPE_HELLO, hello, (uint32_t)helloLen)) return 1;
-  std::fprintf(stderr, "[grabber] streaming %s (fx=%.2f fy=%.2f cx=%.2f cy=%.2f)\n",
-               serial.c_str(), ir.fx, ir.fy, ir.cx, ir.cy);
+  std::fprintf(stderr, "[grabber] streaming %s (fx=%.2f fy=%.2f cx=%.2f cy=%.2f, %s colour decode)\n",
+               serial.c_str(), ir.fx, ir.fy, ir.cx, ir.cy, colorDecoderName.c_str());
 
   tjhandle jpegCompressor = wantColor ? tjInitCompress() : nullptr;
   unsigned char *jpegBuf = nullptr;

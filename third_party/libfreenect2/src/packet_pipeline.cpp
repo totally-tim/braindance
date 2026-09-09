@@ -24,6 +24,18 @@
  * either License.
  */
 
+/*
+ * NOTICE OF MODIFICATION. This file is not upstream libfreenect2. It was
+ * changed by Tim Kraus on 2026-09-09, on top of upstream v0.2.1, for the
+ * Braindance project: the colour decoder became a caller's choice.
+ * getDefaultRgbPacketProcessor is replaced by defaultColorDecoder and
+ * createRgbPacketProcessor, every pipeline gained a constructor taking a
+ * decoder, the default prefers software decode over a hardware decoder that
+ * can lose its device context, and the runtime substitution of TurboJPEG for a
+ * failed VAAPI or Tegra decoder is gone. Every altered region below is marked
+ * "LOCAL EDIT"; third_party/UPSTREAM.md carries the reasoning.
+ */
+
 /** @file packet_pipeline.cpp Packet pipeline implementation. */
 
 #include <libfreenect2/packet_pipeline.h>
@@ -36,29 +48,50 @@
 namespace libfreenect2
 {
 
-static RgbPacketProcessor *getDefaultRgbPacketProcessor()
+// LOCAL EDIT: the build's own pick, named so a caller can read it and so the grabber does not
+// keep a second copy of this order. VideoToolbox first, because it is the decoder Apple ships a
+// path for and nothing has been reported against it. Then TurboJPEG, which decodes on the CPU
+// and so cannot lose a device context mid-stream. The hardware decoders that can are last, and
+// on any build carrying TurboJPEG they are reached only by asking for them.
+ColorDecoder defaultColorDecoder()
 {
 #if defined(LIBFREENECT2_WITH_VT_SUPPORT)
-  return new VTRgbPacketProcessor();
-#elif defined(LIBFREENECT2_WITH_VAAPI_SUPPORT)
-  RgbPacketProcessor *vaapi = new VaapiRgbPacketProcessor();
-  if (vaapi->good())
-    return vaapi;
-  else
-    delete vaapi;
-  return new TurboJpegRgbPacketProcessor();
-#elif defined(LIBFREENECT2_WITH_TEGRAJPEG_SUPPORT)
-  RgbPacketProcessor *tegra = new TegraJpegRgbPacketProcessor();
-  if (tegra->good())
-    return tegra;
-  else
-    delete tegra;
-  return new TurboJpegRgbPacketProcessor();
+  return ColorDecoder::VideoToolbox;
 #elif defined(LIBFREENECT2_WITH_TURBOJPEG_SUPPORT)
-  return new TurboJpegRgbPacketProcessor();
+  return ColorDecoder::TurboJPEG;
+#elif defined(LIBFREENECT2_WITH_TEGRAJPEG_SUPPORT)
+  return ColorDecoder::TegraJPEG;
+#elif defined(LIBFREENECT2_WITH_VAAPI_SUPPORT)
+  return ColorDecoder::VAAPI;
 #else
   #error No jpeg decoder is enabled
 #endif
+}
+
+// LOCAL EDIT: one case per enumerator, each gated the way its enumerator is, so a decoder this
+// build cannot construct cannot be named. Nothing tests good() and nothing substitutes: a
+// hardware decoder that starts and later loses its context is a fault to report, and both the
+// failed start and the failed frame already log for themselves.
+static RgbPacketProcessor *createRgbPacketProcessor(ColorDecoder decoder)
+{
+  switch (decoder)
+  {
+#ifdef LIBFREENECT2_WITH_VT_SUPPORT
+  case ColorDecoder::VideoToolbox: return new VTRgbPacketProcessor();
+#endif
+#ifdef LIBFREENECT2_WITH_TURBOJPEG_SUPPORT
+  case ColorDecoder::TurboJPEG:    return new TurboJpegRgbPacketProcessor();
+#endif
+#ifdef LIBFREENECT2_WITH_TEGRAJPEG_SUPPORT
+  case ColorDecoder::TegraJPEG:    return new TegraJpegRgbPacketProcessor();
+#endif
+#ifdef LIBFREENECT2_WITH_VAAPI_SUPPORT
+  case ColorDecoder::VAAPI:        return new VaapiRgbPacketProcessor();
+#endif
+  }
+  // Unreachable: defaultColorDecoder's #error means every build has at least one enumerator, and
+  // every enumerator has a case above. Present for -Wreturn-type.
+  return NULL;
 }
 
 class PacketPipelineComponents
@@ -130,7 +163,13 @@ DepthPacketProcessor *PacketPipeline::getDepthPacketProcessor() const
 
 CpuPacketPipeline::CpuPacketPipeline()
 {
-  comp_->initialize(getDefaultRgbPacketProcessor(), new CpuDepthPacketProcessor());
+  comp_->initialize(createRgbPacketProcessor(defaultColorDecoder()), new CpuDepthPacketProcessor());
+}
+
+// LOCAL EDIT: the same pipeline, with the decoder named by the caller.
+CpuPacketPipeline::CpuPacketPipeline(ColorDecoder decoder)
+{
+  comp_->initialize(createRgbPacketProcessor(decoder), new CpuDepthPacketProcessor());
 }
 
 CpuPacketPipeline::~CpuPacketPipeline() { }
@@ -138,7 +177,13 @@ CpuPacketPipeline::~CpuPacketPipeline() { }
 #ifdef LIBFREENECT2_WITH_OPENGL_SUPPORT
 OpenGLPacketPipeline::OpenGLPacketPipeline(void *parent_opengl_context, bool debug) : parent_opengl_context_(parent_opengl_context), debug_(debug)
 {
-  comp_->initialize(getDefaultRgbPacketProcessor(), new OpenGLDepthPacketProcessor(parent_opengl_context_, debug_));
+  comp_->initialize(createRgbPacketProcessor(defaultColorDecoder()), new OpenGLDepthPacketProcessor(parent_opengl_context_, debug_));
+}
+
+// LOCAL EDIT: the same pipeline, with the decoder named by the caller.
+OpenGLPacketPipeline::OpenGLPacketPipeline(void *parent_opengl_context, bool debug, ColorDecoder decoder) : parent_opengl_context_(parent_opengl_context), debug_(debug)
+{
+  comp_->initialize(createRgbPacketProcessor(decoder), new OpenGLDepthPacketProcessor(parent_opengl_context_, debug_));
 }
 
 OpenGLPacketPipeline::~OpenGLPacketPipeline() { }
@@ -148,7 +193,13 @@ OpenGLPacketPipeline::~OpenGLPacketPipeline() { }
 #ifdef LIBFREENECT2_WITH_OPENCL_SUPPORT
 OpenCLPacketPipeline::OpenCLPacketPipeline(const int deviceId) : deviceId(deviceId)
 {
-  comp_->initialize(getDefaultRgbPacketProcessor(), new OpenCLDepthPacketProcessor(deviceId));
+  comp_->initialize(createRgbPacketProcessor(defaultColorDecoder()), new OpenCLDepthPacketProcessor(deviceId));
+}
+
+// LOCAL EDIT: the same pipeline, with the decoder named by the caller.
+OpenCLPacketPipeline::OpenCLPacketPipeline(const int deviceId, ColorDecoder decoder) : deviceId(deviceId)
+{
+  comp_->initialize(createRgbPacketProcessor(decoder), new OpenCLDepthPacketProcessor(deviceId));
 }
 
 OpenCLPacketPipeline::~OpenCLPacketPipeline() { }
@@ -156,7 +207,13 @@ OpenCLPacketPipeline::~OpenCLPacketPipeline() { }
 
 OpenCLKdePacketPipeline::OpenCLKdePacketPipeline(const int deviceId) : deviceId(deviceId)
 {
-  comp_->initialize(getDefaultRgbPacketProcessor(), new OpenCLKdeDepthPacketProcessor(deviceId));
+  comp_->initialize(createRgbPacketProcessor(defaultColorDecoder()), new OpenCLKdeDepthPacketProcessor(deviceId));
+}
+
+// LOCAL EDIT: the same pipeline, with the decoder named by the caller.
+OpenCLKdePacketPipeline::OpenCLKdePacketPipeline(const int deviceId, ColorDecoder decoder) : deviceId(deviceId)
+{
+  comp_->initialize(createRgbPacketProcessor(decoder), new OpenCLKdeDepthPacketProcessor(deviceId));
 }
 
 OpenCLKdePacketPipeline::~OpenCLKdePacketPipeline() { }
@@ -165,14 +222,26 @@ OpenCLKdePacketPipeline::~OpenCLKdePacketPipeline() { }
 #ifdef LIBFREENECT2_WITH_CUDA_SUPPORT
 CudaPacketPipeline::CudaPacketPipeline(const int deviceId) : deviceId(deviceId)
 {
-  comp_->initialize(getDefaultRgbPacketProcessor(), new CudaDepthPacketProcessor(deviceId));
+  comp_->initialize(createRgbPacketProcessor(defaultColorDecoder()), new CudaDepthPacketProcessor(deviceId));
+}
+
+// LOCAL EDIT: the same pipeline, with the decoder named by the caller.
+CudaPacketPipeline::CudaPacketPipeline(const int deviceId, ColorDecoder decoder) : deviceId(deviceId)
+{
+  comp_->initialize(createRgbPacketProcessor(decoder), new CudaDepthPacketProcessor(deviceId));
 }
 
 CudaKdePacketPipeline::~CudaKdePacketPipeline() { }
 
 CudaKdePacketPipeline::CudaKdePacketPipeline(const int deviceId) : deviceId(deviceId)
 {
-  comp_->initialize(getDefaultRgbPacketProcessor(), new CudaKdeDepthPacketProcessor(deviceId));
+  comp_->initialize(createRgbPacketProcessor(defaultColorDecoder()), new CudaKdeDepthPacketProcessor(deviceId));
+}
+
+// LOCAL EDIT: the same pipeline, with the decoder named by the caller.
+CudaKdePacketPipeline::CudaKdePacketPipeline(const int deviceId, ColorDecoder decoder) : deviceId(deviceId)
+{
+  comp_->initialize(createRgbPacketProcessor(decoder), new CudaKdeDepthPacketProcessor(deviceId));
 }
 
 CudaPacketPipeline::~CudaPacketPipeline() { }
