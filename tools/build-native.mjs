@@ -152,5 +152,20 @@ if (!offers || !offers.split(/\s+/).includes(backend)) {
   console.error(`the library configured without it and fell back to cpu, which runs at roughly half rate: ${missing}`);
   process.exit(1);
 }
+// The colour decoders, read the same way and for the same reason. The default is checked against
+// the offered set rather than printed, because `decoder_flag_value` answers "" for an enumerator
+// it has no case for - so a decoder added to libfreenect2's enum and not to the grabber's spelling
+// table would leave the grabber defaulting to a name no arm accepts, and every run would exit 2.
+const usage = `${probe.stderr}${probe.stdout}`;
+const decoders = /This build offers:\s*\n\s*([a-z ]+)/.exec(usage)?.[1]?.trim();
+const defaultDecoder = /This build offers:[\s\S]*?and defaults to ([a-z]+)\./.exec(usage)?.[1];
+console.log(`[build-native] and colour decoders: ${decoders ?? 'unknown'} (default ${defaultDecoder ?? 'unknown'})`);
+if (!decoders || !defaultDecoder || !decoders.split(/\s+/).includes(defaultDecoder)) {
+  console.error(`[build-native] FAILED - this build offers colour decoders ${decoders ? `'${decoders}'` : 'this script could not read'}`
+    + ` and defaults to ${defaultDecoder ? `'${defaultDecoder}'` : 'a name this script could not read'},`
+    + ' which is not one of them - the grabber would refuse its own default');
+  process.exit(1);
+}
+
 console.log(`[build-native] OK - ${GRABBER}`);
 console.log('[build-native] node tools/vendor-check.mjs proves the tree is upstream v0.2.1 plus the declared edits');
