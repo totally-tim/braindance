@@ -33,12 +33,12 @@ const DECLARED_EDITS = new Map([
   }],
   ['include/libfreenect2/packet_pipeline.h', {
     why: 'declare ColorDecoder, defaultColorDecoder and a decoder overload per pipeline',
-    ours: '108d9590548f51f97d1afe102c95ac073f06e68c',
+    ours: 'a27d0a8ee8180502ee11479eac662b1e3a22b810',
     marker: null,
   }],
   ['src/packet_pipeline.cpp', {
     why: 'pick the colour decoder by name, prefer software decode, and never substitute',
-    ours: '2ddc89986f7c1235611de3b7344dbe55e4bd8bbe',
+    ours: 'ba72ce1235d27e0b74d70546ac47435d33d0913e',
     // The mangled name of the one symbol this edit exports. Unlike the macOS edit, which leaves
     // no symbol behind and so cannot be pinned, this proves vendor/prefix was rebuilt from our
     // source rather than left stale. Mach-O prefixes another underscore, so the substring holds

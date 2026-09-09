@@ -60,8 +60,11 @@ rides inside the `--grabber` string.
 
 **Only the decoders this libfreenect2 was built with can be named.** `--help` lists them, and the
 grabber resolves the name before it touches the device: a name no build has exits 2, and a name
-this build was not compiled with exits 1. Nothing substitutes, so a decoder that fails to start,
-or that fails on a frame, stops delivering colour rather than handing the work to another decoder.
+this build was not compiled with exits 1. Nothing substitutes, and the two kinds fail differently.
+`vaapi` and `tegrajpeg` hold a device: one that fails to start is refused before the sensor opens,
+naming the decoder, and one that loses its context mid-stream stops delivering colour for the rest
+of the run. `videotoolbox` and `turbojpeg` hold nothing, drop the frame they could not read and
+carry on with the next.
 The default order is `videotoolbox`, `turbojpeg`, `tegrajpeg`, `vaapi`, which puts software decode
 ahead of a hardware decoder that can lose its device context mid-stream and end the grabber. On a
 build carrying TurboJPEG, `tegrajpeg` and `vaapi` are reached only by asking for them.

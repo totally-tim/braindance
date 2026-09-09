@@ -125,11 +125,20 @@ and bind to `OpenCLPacketPipeline(const int deviceId)`.
 `defaultColorDecoder` and `createRgbPacketProcessor`. The default order is VideoToolbox,
 TurboJPEG, TegraJPEG, VAAPI — software decode ahead of any hardware decoder that can lose
 a device context — so on a build carrying TurboJPEG the hardware decoders are reached only
-by asking for them. **Nothing substitutes.** A decoder that fails to start, or that fails
-on a frame, stops delivering colour, because a stream that changes decoder under the
+by asking for them. **Nothing substitutes**, because a stream that changes decoder under the
 operator hides the fault it should be reporting.
 
-The scoped enum is what makes `-DENABLE_CXX11=ON` a requirement of this fork. The grabber
+The two kinds fail differently. VAAPI and TegraJPEG hold a device, and one that fails to
+start hands out no buffers at all, so every colour transfer reaches the parser with a null
+buffer and logs — hundreds of lines a second — while depth streams on and the sensor reads
+healthy. Upstream never met that case because it substituted TurboJPEG at exactly that
+point. `PacketPipeline::colorDecoderStarted` reports the initialise result without naming
+`RgbPacketProcessor`, whose declaration is not installed, and the grabber refuses on it
+before opening the sensor. VideoToolbox and TurboJPEG hold no device, drop the frame they
+could not read and carry on.
+
+The scoped enum is what makes `-DENABLE_CXX11=ON` a requirement of this fork; the flag was
+already set for the threading backend, so no build changes. The grabber
 picks a decoder with `--color-decoder` and defaults from `defaultColorDecoder()`, so one
 build cannot disagree with itself about which decoder it will use.
 

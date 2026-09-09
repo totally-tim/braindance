@@ -554,11 +554,12 @@ int main(int argc, char **argv) {
         " vaapi"
 #endif
         "\n"
-        "  and defaults to %s. Nothing substitutes: a decoder that fails to\n"
-        "  start, or that fails on a frame, stops delivering colour rather than\n"
-        "  handing the work to another decoder. vaapi decodes on the GPU and can\n"
-        "  lose its device context mid-stream, which ends the process, so it is\n"
-        "  reached only by asking for it.\n"
+        "  and defaults to %s. Nothing substitutes. vaapi and tegrajpeg hold a\n"
+        "  device: one that fails to start is refused here, and one that loses\n"
+        "  its context mid-stream stops delivering colour for the rest of the\n"
+        "  run. videotoolbox and turbojpeg hold nothing, drop the frame they\n"
+        "  could not read and carry on. vaapi can take the whole process down\n"
+        "  with its GPU context, so it is reached only by asking for it.\n"
         "\n"
         "  --log debug surfaces libfreenect2's per-packet USB diagnostics,\n"
         "  including 'not all subsequences received' - the dropped-isochronous-\n"
@@ -732,6 +733,18 @@ int main(int argc, char **argv) {
 #endif
   } else {
     std::fprintf(stderr, "[grabber] unknown pipeline '%s' (want gl, cl or cpu)\n", pipelineName.c_str());
+    return 1;
+  }
+
+  // Refused here rather than left to run, because nothing substitutes any more. A device decoder
+  // that failed to start hands out no buffers, so every colour transfer would log an error - a few
+  // hundred lines a second - while depth streamed on and the hello still said colour was on. The
+  // software decoders hold no device and always report started, so this only ever fires on one the
+  // operator asked for by name.
+  if (wantColor && !pipeline->colorDecoderStarted()) {
+    std::fprintf(stderr, "[grabber] the %s colour decoder did not start - its own error is above. "
+                 "Ask for a different --color-decoder, or --no-color to shoot depth alone\n",
+                 colorDecoderName.c_str());
     return 1;
   }
 

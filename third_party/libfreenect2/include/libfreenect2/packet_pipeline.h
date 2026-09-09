@@ -62,9 +62,15 @@ class PacketPipelineComponents;
 /** Which decoder turns the colour camera's JPEG packets into images.
  *
  * An enumerator exists only where this build can construct that decoder, so a value naming a
- * decoder is always a decoder the pipeline will use. Nothing substitutes: a decoder that fails
- * to start, or that fails on a frame, leaves good() false and delivers no more colour rather
- * than quietly handing the work to another decoder.
+ * decoder is always a decoder the pipeline will use. Nothing substitutes.
+ *
+ * The two kinds fail differently, and the difference is the whole reason to pick one. VAAPI and
+ * TegraJPEG hold a device: one that fails to start, or that loses its context mid-stream, leaves
+ * good() false and delivers no more colour at all. VideoToolbox and TurboJPEG hold nothing, drop
+ * the frame they could not read, and carry on with the next one.
+ *
+ * Ask colorDecoderStarted() after constructing a pipeline. A device decoder that did not start
+ * would otherwise take every frame's buffer allocation down with it.
  */
 enum class ColorDecoder
 {
@@ -102,6 +108,10 @@ public:
 
   virtual RgbPacketProcessor *getRgbPacketProcessor() const;
   virtual DepthPacketProcessor *getDepthPacketProcessor() const;
+
+  // LOCAL EDIT: whether the colour decoder came up, asked without naming RgbPacketProcessor -
+  // its declaration is not installed, so a caller outside this library cannot reach good().
+  virtual bool colorDecoderStarted() const;
 protected:
   PacketPipelineComponents *comp_;
 };

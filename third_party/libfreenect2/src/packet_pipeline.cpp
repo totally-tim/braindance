@@ -161,6 +161,15 @@ DepthPacketProcessor *PacketPipeline::getDepthPacketProcessor() const
   return comp_->depth_processor_;
 }
 
+// LOCAL EDIT: read once after construction, this is the decoder's initialise result. A device
+// decoder that failed to start returns no allocator, so every RGB transfer arrives with a NULL
+// buffer and the parser logs one error per transfer - hundreds a second - while depth streams on
+// and the sensor looks healthy. Upstream never saw that because it substituted TurboJPEG here.
+bool PacketPipeline::colorDecoderStarted() const
+{
+  return comp_->rgb_processor_->good();
+}
+
 CpuPacketPipeline::CpuPacketPipeline()
 {
   comp_->initialize(createRgbPacketProcessor(defaultColorDecoder()), new CpuDepthPacketProcessor());
