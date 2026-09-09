@@ -466,6 +466,26 @@ static const char *decoder_flag_value(libfreenect2::ColorDecoder decoder) {
   return "";
 }
 
+// The decoders this build carries, each leading with a space, in libfreenect2's own precedence
+// order. `--help` and the refusal of an unknown name both print this, so the grabber cannot
+// offer one set and name another.
+static std::string offered_decoders() {
+  std::string names;
+#ifdef LIBFREENECT2_WITH_VT_SUPPORT
+  names += " videotoolbox";
+#endif
+#ifdef LIBFREENECT2_WITH_TURBOJPEG_SUPPORT
+  names += " turbojpeg";
+#endif
+#ifdef LIBFREENECT2_WITH_TEGRAJPEG_SUPPORT
+  names += " tegrajpeg";
+#endif
+#ifdef LIBFREENECT2_WITH_VAAPI_SUPPORT
+  names += " vaapi";
+#endif
+  return names;
+}
+
 int main(int argc, char **argv) {
   int jpegQuality = 80;
   bool wantColor = true;
@@ -482,6 +502,7 @@ int main(int argc, char **argv) {
   // Defaulted from libfreenect2 rather than from a second copy of its precedence here, so one
   // build cannot disagree with itself about which decoder it will use.
   std::string colorDecoderName = decoder_flag_value(libfreenect2::defaultColorDecoder());
+  bool checkOnly = false;
   std::string logLevel = "warning";
   bool profile = false;
   // libfreenect2 clips depth on the GPU before we ever see it, and its 0.5-4.5 defaults are
@@ -513,6 +534,7 @@ int main(int argc, char **argv) {
     if (a == "--no-color") wantColor = false;
     else if (a == "--pipeline" && i + 1 < argc) pipelineName = argv[++i];
     else if (a == "--color-decoder" && i + 1 < argc) colorDecoderName = argv[++i];
+    else if (a == "--check") checkOnly = true;
     else if (a == "--quality" && i + 1 < argc) jpegQuality = std::atoi(qualityRaw = argv[++i]);
     else if (a == "--log" && i + 1 < argc) logLevel = argv[++i];
     else if (a == "--min-depth" && i + 1 < argc) minDepthRaw = argv[++i];
@@ -524,7 +546,7 @@ int main(int argc, char **argv) {
     else if (a == "--dump-every" && i + 1 < argc) dumpEvery = std::atoi(dumpEveryRaw = argv[++i]);
     else if (a == "--help") {
       std::fprintf(stderr,
-        "usage: grabber [--pipeline gl|cl|cpu] [--color-decoder NAME] [--no-color]\n"
+        "usage: grabber [--pipeline gl|cl|cpu] [--color-decoder NAME] [--no-color] [--check]\n"
         "               [--quality 1-100] [--log none|error|warning|info|debug]\n"
         "               [--profile] [--min-depth m] [--max-depth m] [--no-low-light]\n"
         "\n"
@@ -540,26 +562,25 @@ int main(int argc, char **argv) {
         "\n"
         "  --color-decoder picks what turns the colour camera's JPEG packets into\n"
         "  images, and the same rule applies. This build offers:\n"
-        "   "
-#ifdef LIBFREENECT2_WITH_VT_SUPPORT
-        " videotoolbox"
-#endif
-#ifdef LIBFREENECT2_WITH_TURBOJPEG_SUPPORT
-        " turbojpeg"
-#endif
-#ifdef LIBFREENECT2_WITH_TEGRAJPEG_SUPPORT
-        " tegrajpeg"
-#endif
-#ifdef LIBFREENECT2_WITH_VAAPI_SUPPORT
-        " vaapi"
-#endif
+        "   %s\n"
+        "  and defaults to %s. Nothing substitutes.\n"
         "\n"
-        "  and defaults to %s. Nothing substitutes. vaapi and tegrajpeg hold a\n"
-        "  device: one that fails to start is refused here, and one that loses\n"
-        "  its context mid-stream stops delivering colour for the rest of the\n"
-        "  run. videotoolbox and turbojpeg hold nothing, drop the frame they\n"
-        "  could not read and carry on. vaapi can take the whole process down\n"
-        "  with its GPU context, so it is reached only by asking for it.\n"
+        "  vaapi and tegrajpeg hold a device and report its health. One that\n"
+        "  fails to start is refused here, and one that loses its context\n"
+        "  mid-stream stops delivering colour for the rest of the run. vaapi\n"
+        "  can take the whole process down with its GPU context, so it is\n"
+        "  reached only by asking for it.\n"
+        "\n"
+        "  videotoolbox and turbojpeg report nothing, so neither is refused\n"
+        "  here. A turbojpeg that cannot open its decompressor logs once and\n"
+        "  then delivers nothing, which shows as a colour count of zero. A\n"
+        "  videotoolbox that cannot decode logs nothing and delivers the frame\n"
+        "  anyway with no pixel buffer, which registration reads as a null\n"
+        "  pointer.\n"
+        "\n"
+        "  --check resolves every argument, prints what it settled on and exits\n"
+        "  0 without opening a bus, a device or a window. A refusal it reports is\n"
+        "  a refusal a real run would reach.\n"
         "\n"
         "  --log debug surfaces libfreenect2's per-packet USB diagnostics,\n"
         "  including 'not all subsequences received' - the dropped-isochronous-\n"
@@ -603,7 +624,7 @@ int main(int argc, char **argv) {
         "  low-light on|off\n"
         "  hd-color on|off\n"
         "  key on|off\n",
-        pipelineName.c_str(), colorDecoderName.c_str());
+        pipelineName.c_str(), offered_decoders().c_str(), colorDecoderName.c_str());
       return 0;
     }
     // Nothing falls through this loop. A misspelling, a value eaten by a shell, or a flag left
@@ -687,9 +708,29 @@ int main(int argc, char **argv) {
     return 1;
 #endif
   } else {
-    std::fprintf(stderr, "[grabber] unknown colour decoder '%s' (want videotoolbox, turbojpeg, "
-                 "tegrajpeg or vaapi)\n", colorDecoderName.c_str());
+    std::fprintf(stderr, "[grabber] unknown colour decoder '%s' - this build offers%s\n",
+                 colorDecoderName.c_str(), offered_decoders().c_str());
     return 2;
+  }
+
+  // The enumerator the name resolved to, spelled back through the same table `--help` prints
+  // from. A resolution arm assigning the wrong enumerator reaches here as a decoder the operator
+  // did not ask for, which is the one step between the flag and the library that nothing else
+  // watches.
+  if (std::strcmp(decoder_flag_value(colorDecoder), colorDecoderName.c_str()) != 0) {
+    std::fprintf(stderr, "[grabber] asked for the %s colour decoder and resolved to %s - the "
+                 "grabber's own name table disagrees with itself\n",
+                 colorDecoderName.c_str(), decoder_flag_value(colorDecoder));
+    return 1;
+  }
+
+  // Every refusal above this line is about the arguments alone, so --check reaches all of them
+  // without a sensor, a USB bus or a GL context. It stops here rather than building a pipeline,
+  // because constructing the gl one opens a window.
+  if (checkOnly) {
+    std::fprintf(stderr, "[grabber] arguments accepted: %s pipeline, %s colour decode\n",
+                 pipelineName.c_str(), colorDecoderName.c_str());
+    return 0;
   }
 
   // Debug is genuinely noisy - one line per incomplete depth frame - so it stays opt-in.
@@ -736,11 +777,14 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Refused here rather than left to run, because nothing substitutes any more. A device decoder
-  // that failed to start hands out no buffers, so every colour transfer would log an error - a few
-  // hundred lines a second - while depth streamed on and the hello still said colour was on. The
-  // software decoders hold no device and always report started, so this only ever fires on one the
-  // operator asked for by name.
+  // Refused before the sensor opens, because nothing substitutes. A vaapi that failed to start
+  // hands out no buffers, so every colour transfer would log an error - a few hundred lines a
+  // second - while depth streamed on and the hello still said colour was on.
+  //
+  // Only vaapi and tegrajpeg can fail this. videotoolbox and turbojpeg leave good() at the base
+  // class's true whatever happened to them, so both reach here as started. A turbojpeg that never
+  // opened its decompressor then holds the colour count at zero; a videotoolbox that cannot decode
+  // delivers a frame with no pixel buffer, which registration reads as a null pointer.
   if (wantColor && !pipeline->colorDecoderStarted()) {
     std::fprintf(stderr, "[grabber] the %s colour decoder did not start - its own error is above. "
                  "Ask for a different --color-decoder, or --no-color to shoot depth alone\n",
@@ -823,7 +867,7 @@ int main(int argc, char **argv) {
     CAPTURE_FORMAT, serial.c_str(), dev->getFirmwareVersion().c_str(), DW, DH,
     ir.fx, ir.fy, ir.cx, ir.cy, wantColor ? "true" : "false",
     minDepth, maxDepth, (wantColor && lowLight) ? "true" : "false",
-    colorDecoderName.c_str(), startedAt);
+    pipeline->colorDecoderName(), startedAt);
   // snprintf truncates silently, and a truncated hello is not JSON - every take recorded
   // afterwards would carry a sensor record nothing can parse. The serial and the firmware are
   // device strings, so the length is not something this file can reason about once.
@@ -834,7 +878,7 @@ int main(int argc, char **argv) {
   }
   if (!write_message(STDOUT_FILENO, TYPE_HELLO, hello, (uint32_t)helloLen)) return 1;
   std::fprintf(stderr, "[grabber] streaming %s (fx=%.2f fy=%.2f cx=%.2f cy=%.2f, %s colour decode)\n",
-               serial.c_str(), ir.fx, ir.fy, ir.cx, ir.cy, colorDecoderName.c_str());
+               serial.c_str(), ir.fx, ir.fy, ir.cx, ir.cy, pipeline->colorDecoderName());
 
   tjhandle jpegCompressor = wantColor ? tjInitCompress() : nullptr;
   unsigned char *jpegBuf = nullptr;
@@ -894,7 +938,11 @@ int main(int argc, char **argv) {
       // `status` is libfreenect2 saying this frame's own decode failed, and it hands the frame
       // over regardless. Dropped back to no colour rather than reused - the previous good one
       // was already released a line above, and an untextured cloud is better than a torn one.
-      if (haveColor && colorFrames[libfreenect2::Frame::Color]->status != 0) {
+      // `data` as well as `status`, because a VideoToolbox frame that failed to decode carries
+      // status 0 and a null pointer, and `registration.apply` checks the dimensions and not the
+      // pointer. Dropped here it costs a frame; passed on it is a null read.
+      if (haveColor && (colorFrames[libfreenect2::Frame::Color]->status != 0
+                        || colorFrames[libfreenect2::Frame::Color]->data == nullptr)) {
         badColor++;
         colorListener.release(colorFrames);
         haveColor = false;

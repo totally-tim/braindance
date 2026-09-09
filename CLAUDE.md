@@ -122,7 +122,8 @@ Read the assertion count, never the exit code.
 | `preview-check.mjs` | rendered previews, camera identity, cancellation, and live fallback | `--url`, a take of at least 9s, a GPU browser |
 | `syntax-check.mjs` | every shipped file parses, the cross-language constants agree, the citations resolve, every tool is named here | nothing |
 | `hd-encoder-check.mjs` | native pairing under encoder backlog, held colour, key range and RGBX | a C++ compiler and TurboJPEG |
-| `cpp-check.mjs` | both C++ files parse and typecheck, in eight pipeline and colour-decoder configurations | a C++ compiler and turbojpeg's headers |
+| `cpp-check.mjs` | both C++ files parse and typecheck, in eight pipeline and colour-decoder configurations, and each ColorDecoder enumerator exists only where its decoder does | a C++ compiler and turbojpeg's headers |
+| `decoder-check.mjs` | each `ColorDecoder` enumerator builds its own processor in the loaded library, and the grabber offers and defaults to what that library carries | a C++ compiler, `vendor/prefix` and the built grabber |
 | `vendor-check.mjs` | `third_party` is upstream v0.2.1 plus declared edits | nothing |
 | `registration-check.mjs` | our registration equals upstream's, bit for bit | a corpus from `grabber --dump-corpus` |
 | `release-gate-check.mjs` | the `.npmrc` supply-chain gate is actually armed | the npm registry |

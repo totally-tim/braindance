@@ -156,6 +156,8 @@ if (!offers || !offers.split(/\s+/).includes(backend)) {
 // the offered set rather than printed, because `decoder_flag_value` answers "" for an enumerator
 // it has no case for - so a decoder added to libfreenect2's enum and not to the grabber's spelling
 // table would leave the grabber defaulting to a name no arm accepts, and every run would exit 2.
+// Both names being real is all this can see. `tools/decoder-check.mjs` asks the grabber and the
+// library the same question and compares their answers.
 const usage = `${probe.stderr}${probe.stdout}`;
 const decoders = /This build offers:\s*\n\s*([a-z ]+)/.exec(usage)?.[1]?.trim();
 const defaultDecoder = /This build offers:[\s\S]*?and defaults to ([a-z]+)\./.exec(usage)?.[1];

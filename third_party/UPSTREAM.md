@@ -123,24 +123,32 @@ and bind to `OpenCLPacketPipeline(const int deviceId)`.
 
 `src/packet_pipeline.cpp` replaces `getDefaultRgbPacketProcessor` with
 `defaultColorDecoder` and `createRgbPacketProcessor`. The default order is VideoToolbox,
-TurboJPEG, TegraJPEG, VAAPI — software decode ahead of any hardware decoder that can lose
-a device context — so on a build carrying TurboJPEG the hardware decoders are reached only
-by asking for them. **Nothing substitutes**, because a stream that changes decoder under the
-operator hides the fault it should be reporting.
+TurboJPEG, TegraJPEG, VAAPI. TurboJPEG decodes on the CPU and cannot lose a device context,
+and it comes ahead of the two that can, so on a build carrying it TegraJPEG and VAAPI are
+reached only by asking for them. VideoToolbox leads on Apple's builds, which is upstream's
+order kept. **Nothing substitutes**, because a stream that changes decoder
+under the operator hides the fault it should be reporting.
 
-The two kinds fail differently. VAAPI and TegraJPEG hold a device, and one that fails to
-start hands out no buffers at all, so every colour transfer reaches the parser with a null
-buffer and logs — hundreds of lines a second — while depth streams on and the sensor reads
-healthy. Upstream never met that case because it substituted TurboJPEG at exactly that
-point. `PacketPipeline::colorDecoderStarted` reports the initialise result without naming
-`RgbPacketProcessor`, whose declaration is not installed, and the grabber refuses on it
-before opening the sensor. VideoToolbox and TurboJPEG hold no device, drop the frame they
-could not read and carry on.
+Only two of the four report whether they started. VAAPI and TegraJPEG track their device's
+health in `good()`, and a VAAPI that failed to start hands out no buffers at all, so every
+colour transfer reaches the parser with a null buffer and logs — hundreds of lines a second
+— while depth streams on and the sensor reads healthy. `PacketPipeline::colorDecoderStarted`
+reports `good()` without naming `RgbPacketProcessor`, whose declaration is not installed, and
+the grabber refuses on it before opening the sensor. `PacketPipeline::colorDecoderName` reports
+that processor's `name()` the same way, so a caller names the decoder it was given rather than
+the one it asked for.
 
-The scoped enum is what makes `-DENABLE_CXX11=ON` a requirement of this fork; the flag was
-already set for the threading backend, so no build changes. The grabber
-picks a decoder with `--color-decoder` and defaults from `defaultColorDecoder()`, so one
-build cannot disagree with itself about which decoder it will use.
+VideoToolbox and TurboJPEG leave `good()` at the base class's `true` whatever happened to
+them, so the refusal cannot see either, and they fail differently from each other. A TurboJPEG
+whose decompressor never opened logs the reason once and then delivers no frame at all, so the
+grabber's colour count stays at zero; one that fails on a single frame logs and decodes the next.
+VideoToolbox discards the status of its session and of every frame, logs none of it, and delivers
+the frame anyway with `status` 0 and no pixel buffer behind `Frame::data`. `Registration::apply`
+checks the dimensions and not the pointer, so a VideoToolbox decode failure is a null read rather
+than a missing frame. That is the failure mode of the decoder Apple builds default to.
+
+The grabber picks a decoder with `--color-decoder` and defaults from `defaultColorDecoder()`,
+so one build cannot disagree with itself about which decoder it will use.
 
 ## How the proof works
 
@@ -156,8 +164,9 @@ as upstream published them. `tools/vendor-check.mjs` asserts five things:
 5. The harness oracle beside the tree is upstream's own `registration.cpp` byte for
    byte, and the library at `vendor/prefix` carries both `LIBFREENECT2_REG_THREADS`
    and `defaultColorDecoder`'s mangled symbol, so a stale prefix cannot pass as a
-   build of this tree. The macOS edit leaves no symbol behind and cannot be pinned
-   this way.
+   build of this tree. Three of the five edits change no exported name and carry no
+   marker: the two `src/` edits that alter behaviour inside existing functions, and the
+   header, whose declarations leave nothing in the library on their own.
 
 Six controls. Each must be caught, and the failed-assertion count is what to read.
 Note that this tool exits 0 on a caught mutation.

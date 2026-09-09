@@ -57,17 +57,33 @@ rides inside the `--grabber` string.
 | `--dump-count N` | `24` | How many frames that dump holds. |
 | `--help` | | Prints the usage, the pipelines and colour decoders this build offers and the stdin commands, then exits. |
 | `--dump-every N` | `10` | Dumps every Nth frame. |
+| `--check` | off | Resolves every argument, prints what it settled on and exits 0 without opening a bus, a device or a window. |
 
-**Only the decoders this libfreenect2 was built with can be named.** `--help` lists them, and the
-grabber resolves the name before it touches the device: a name no build has exits 2, and a name
-this build was not compiled with exits 1. Nothing substitutes, and the two kinds fail differently.
-`vaapi` and `tegrajpeg` hold a device: one that fails to start is refused before the sensor opens,
-naming the decoder, and one that loses its context mid-stream stops delivering colour for the rest
-of the run. `videotoolbox` and `turbojpeg` hold nothing, drop the frame they could not read and
-carry on with the next.
-The default order is `videotoolbox`, `turbojpeg`, `tegrajpeg`, `vaapi`, which puts software decode
-ahead of a hardware decoder that can lose its device context mid-stream and end the grabber. On a
-build carrying TurboJPEG, `tegrajpeg` and `vaapi` are reached only by asking for them.
+**Only the decoders this libfreenect2 was built with can be named.** `--help` lists them, and so
+does the refusal of a name it does not know. The grabber resolves the name before it touches the
+device: a name no build has exits 2, and a name this build was not compiled with exits 1. It then
+spells the decoder it resolved to back through its own name table and refuses a disagreement, so
+the name it reports is the name it resolved. `--check` runs all of that and exits, which is how to
+try a `--grabber` string on a machine with no sensor. Nothing substitutes.
+
+**Two of the four report whether they started, and the grabber refuses on that.** `vaapi` and
+`tegrajpeg` hold a device and track its health, so one that fails to start is refused before the
+sensor opens, naming the decoder. One that loses its context mid-stream delivers that frame with
+its error flag set, which the grabber counts under `bad colour`, and then delivers nothing for the
+rest of the run.
+
+**The other two report nothing, so neither is refused, and they fail differently from each other.**
+A `turbojpeg` that cannot open its decompressor logs the reason once and delivers no frame at all,
+so the grabber streams, the hello says colour is on, and the `[grabber] N frames (M colour, ...)`
+line it writes every 150 frames holds M at zero. A `videotoolbox` that cannot decode logs nothing
+and delivers the frame anyway, with its error flag clear and no pixel buffer behind it; the
+grabber counts it as colour and hands it to registration, which checks the dimensions and not the
+pointer. On this build that is a crash, not a quiet loss of colour.
+
+The default order is `videotoolbox`, `turbojpeg`, `tegrajpeg`, `vaapi`. `turbojpeg` decodes on the
+CPU and cannot lose a device context, and it comes ahead of the two decoders that can, so on a
+build carrying it `tegrajpeg` and `vaapi` are reached only by asking for them. `videotoolbox` leads on the builds that
+have it, which are Apple's, and that is upstream's order kept.
 
 **`--min-depth` and `--max-depth` decide what exists.** They clip on the GPU before a frame is
 built, so a point outside them is never recorded. The viewer's own `near` and `far` only hide

@@ -64,13 +64,19 @@ class PacketPipelineComponents;
  * An enumerator exists only where this build can construct that decoder, so a value naming a
  * decoder is always a decoder the pipeline will use. Nothing substitutes.
  *
- * The two kinds fail differently, and the difference is the whole reason to pick one. VAAPI and
- * TegraJPEG hold a device: one that fails to start, or that loses its context mid-stream, leaves
- * good() false and delivers no more colour at all. VideoToolbox and TurboJPEG hold nothing, drop
- * the frame they could not read, and carry on with the next one.
+ * VAAPI and TegraJPEG hold a device and report its health through good(). A failed start, or a
+ * context lost mid-stream, leaves good() false, and the pipeline delivers no further colour for
+ * the rest of the run. A VAAPI that did not start also hands out no buffers, so every colour
+ * transfer reaches the parser with a null one. colorDecoderStarted() reports that, and is worth
+ * asking after constructing a pipeline.
  *
- * Ask colorDecoderStarted() after constructing a pipeline. A device decoder that did not start
- * would otherwise take every frame's buffer allocation down with it.
+ * VideoToolbox and TurboJPEG leave good() at the base class's true whatever happens to them, so
+ * colorDecoderStarted() says nothing about either, and they fail differently from each other.
+ * TurboJPEG logs a frame it could not read and decodes the next; one whose decompressor never
+ * opened logs once and delivers nothing for the rest of the run. VideoToolbox discards the status
+ * of its session and of every frame, logs none of it, and delivers the frame anyway with status 0
+ * and no pixel buffer behind Frame::data. A consumer that trusts status and the dimensions reads
+ * that null pointer, which is what Registration::apply does.
  */
 enum class ColorDecoder
 {
@@ -109,9 +115,12 @@ public:
   virtual RgbPacketProcessor *getRgbPacketProcessor() const;
   virtual DepthPacketProcessor *getDepthPacketProcessor() const;
 
-  // LOCAL EDIT: whether the colour decoder came up, asked without naming RgbPacketProcessor -
-  // its declaration is not installed, so a caller outside this library cannot reach good().
+  // LOCAL EDIT: whether the colour decoder came up, and which one it is, both asked without
+  // naming RgbPacketProcessor - its declaration is not installed, so a caller outside this
+  // library can reach neither good() nor name(). colorDecoderName() is the decoder that was
+  // built, so a caller reports what it got rather than what it asked for.
   virtual bool colorDecoderStarted() const;
+  virtual const char *colorDecoderName() const;
 protected:
   PacketPipelineComponents *comp_;
 };

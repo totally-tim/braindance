@@ -492,10 +492,11 @@ file was allowed to contain, and the editor paints its preview range from them. 
 whether the colour camera was run long-exposure.
 
 **`decoder` is a record and nothing reads it.** It names which decoder turned the camera's JPEG
-packets into images for this take — `videotoolbox`, `turbojpeg`, `tegrajpeg` or `vaapi` — so a
+packets into images for this take — `VideoToolbox`, `TurboJPEG`, `TegraJPEG` or `VAAPI` — so a
 take whose colour looks wrong can be told apart from one shot through another decoder. The
-grabber's `--color-decoder` picks it, and the same name goes on the `[grabber] streaming` line
-on stderr.
+grabber's `--color-decoder` picks it by its lower-case flag name, and the value here is what
+libfreenect2 answers when asked which processor it built, so it is the decoder that ran rather
+than the one that was asked for. The same name goes on the `[grabber] streaming` line on stderr.
 
 **`startedAt` means one thing on the wire and a narrower thing in a file.** The grabber says hello
 once per process, so the wire's value is when the grabber came up and would date a session's takes

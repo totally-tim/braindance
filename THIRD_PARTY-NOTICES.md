@@ -129,9 +129,10 @@ the browser at `/vendor/three/`, so a deployment does redistribute it.
   **this software is based in part on the work of the Independent JPEG Group.**
 
   libfreenect2 decodes the sensor's colour stream with it wherever
-  `--color-decoder` names `turbojpeg`, which is the default on a build without
-  VideoToolbox, and `native/grabber.cpp` uses it to re-encode the registered
-  frame on every build. Installed as a system package (`brew install
+  `--color-decoder` names `turbojpeg`, and `native/grabber.cpp` uses it to
+  re-encode the registered frame on every build. Upstream makes it a required
+  dependency of any build without VideoToolbox, so every Linux build carries it
+  and defaults to it. Installed as a system package (`brew install
   jpeg-turbo`, or `libturbojpeg0-dev`).
 - **OpenCL** — the depth solve runs through OpenCL on macOS. No OpenCL
   implementation is redistributed; the build links the platform's ICD loader

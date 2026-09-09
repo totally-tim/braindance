@@ -49,10 +49,10 @@ namespace libfreenect2
 {
 
 // LOCAL EDIT: the build's own pick, named so a caller can read it and so the grabber does not
-// keep a second copy of this order. VideoToolbox first, because it is the decoder Apple ships a
-// path for and nothing has been reported against it. Then TurboJPEG, which decodes on the CPU
-// and so cannot lose a device context mid-stream. The hardware decoders that can are last, and
-// on any build carrying TurboJPEG they are reached only by asking for them.
+// keep a second copy of this order. VideoToolbox first on the builds that have it, which is
+// upstream's order kept. Then TurboJPEG, which decodes on the CPU and so cannot lose a device
+// context mid-stream. The two that can are last, and on any build carrying TurboJPEG they are
+// reached only by asking for them.
 ColorDecoder defaultColorDecoder()
 {
 #if defined(LIBFREENECT2_WITH_VT_SUPPORT)
@@ -70,8 +70,10 @@ ColorDecoder defaultColorDecoder()
 
 // LOCAL EDIT: one case per enumerator, each gated the way its enumerator is, so a decoder this
 // build cannot construct cannot be named. Nothing tests good() and nothing substitutes: a
-// hardware decoder that starts and later loses its context is a fault to report, and both the
-// failed start and the failed frame already log for themselves.
+// decoder that starts and later fails is a fault to report. TurboJPEG, VAAPI and TegraJPEG log
+// their own failures. VideoToolbox discards every status it is handed, logs none, and delivers
+// the frame with status 0 and no pixel buffer, so its failure reaches the consumer as a null
+// Frame::data rather than as anything readable.
 static RgbPacketProcessor *createRgbPacketProcessor(ColorDecoder decoder)
 {
   switch (decoder)
@@ -161,13 +163,21 @@ DepthPacketProcessor *PacketPipeline::getDepthPacketProcessor() const
   return comp_->depth_processor_;
 }
 
-// LOCAL EDIT: read once after construction, this is the decoder's initialise result. A device
-// decoder that failed to start returns no allocator, so every RGB transfer arrives with a NULL
-// buffer and the parser logs one error per transfer - hundreds a second - while depth streams on
-// and the sensor looks healthy. Upstream never saw that because it substituted TurboJPEG here.
+// LOCAL EDIT: the decoder's own good(), which VAAPI and TegraJPEG track and the other two leave
+// at true. Read after construction it is the initialise result. A VAAPI that failed to start
+// returns no allocator, so every RGB transfer arrives with a NULL buffer and the parser logs one
+// error per transfer - hundreds a second - while depth streams on and the sensor looks healthy.
 bool PacketPipeline::colorDecoderStarted() const
 {
   return comp_->rgb_processor_->good();
+}
+
+// LOCAL EDIT: the processor's own name(), so a caller names the decoder it was given. A caller
+// that echoes back the value it passed in cannot tell that apart from one createRgbPacketProcessor
+// mapped somewhere else.
+const char *PacketPipeline::colorDecoderName() const
+{
+  return comp_->rgb_processor_->name();
 }
 
 CpuPacketPipeline::CpuPacketPipeline()
