@@ -580,7 +580,8 @@ monotonic; page cache is not flushed and is irrelevant to live USB latency.
 The medians are 4.375 seconds to exit and 1.052 seconds to the first depth frame.
 Every exit reports code 0 and signal null, and every old child PID is gone before wake.
 The final health counters report ten wakes, zero respawns and zero restarts. A final
-standby leaves no grabber running. Emitter darkness is not yet visually confirmed.
+standby leaves no grabber running. The operator visually confirms that the red emitter
+lights are off after this final stop; emitter darkness is not timed per cycle.
 
 The standby grace remains 15 seconds, above the observed 4.405-second maximum. The MJPEG
 first-frame hold remains 45 seconds: three times the median depth wake (3.156 seconds)
