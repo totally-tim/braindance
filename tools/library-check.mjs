@@ -367,8 +367,8 @@ const MUTATIONS = {
   // The requested restart is counted where it is learned rather than beside the spawn it
   // excuses, which is where it used to be.
   'respawns-dip-before-the-spawn': { file: 'server/index.js', edits: [[
-    'setTimeout(() => { grabberRestarts++; spawnGrabber(); }, delay);',
-    'grabberRestarts++;\n        setTimeout(spawnGrabber, delay);',
+    'spawnTimer = setTimeout(() => { spawnTimer = null; grabberRestarts++; spawnGrabber(); }, delay);',
+    'grabberRestarts++;\n        spawnTimer = setTimeout(() => { spawnTimer = null; spawnGrabber(); }, delay);',
   ]] },
 
   // `openPath` goes back to answering only for the take currently being written.
@@ -1323,7 +1323,7 @@ async function startServer(root, args, port) {
   // last holder is dropped rather than left beside the new one.
   const stale = servers.findIndex((s) => s.port === port);
   if (stale !== -1) retired.push(...servers.splice(stale, 1));
-  const child = spawn(process.execPath, [join(root, 'server/index.js'), '--port', String(port), ...args], {
+  const child = spawn(process.execPath, [join(root, 'server/index.js'), '--standby-after', '0', '--port', String(port), ...args], {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const log = [];
@@ -5086,7 +5086,7 @@ async function runChecks() {
       if (running.state === 'live') break;
       await new Promise((done) => { setTimeout(done, 250); });
     }
-    const totalSpawns = (h) => h.respawns + h.restarts + 1;
+    const totalSpawns = (h) => h.respawns + h.restarts + h.wakes + 1;
     const beforeToggle = await getJson(`${toggleUrl}/sensor/health`);
     check(running?.state === 'live' && beforeToggle.respawns === 0 && beforeToggle.restarts === 0,
       'a healthy grabber that has never failed reads zero respawns and zero restarts, which is what the toggle below has to move exactly one of',

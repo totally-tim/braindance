@@ -180,9 +180,6 @@ function connect() {
 
   ws.onopen = () => {
     ws.send(JSON.stringify({ key: true }));
-    // Asked for rather than waited for: OBS reconnects a browser source on its own schedule, and
-    // the operator only volunteers its registry when somebody says hello.
-    ws.send(JSON.stringify({ programOut: { hello: true } }));
   };
 
   ws.onmessage = (event) => {

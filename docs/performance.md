@@ -550,3 +550,15 @@ behind its number.
 | accept a depth frame missing only sub-image 9, which the depth solve never reads | +12.9% on the degraded topology, 12.82 to 14.48 fps, and inert on a healthy one | 6.8% of discarded frames were missing nothing else. Interleaved with both paths in one binary behind a switch, every new-path run beating every old-path run |
 | thread registration's occlusion filter | 2.07 ms of registration's 5.76 ms p50 at four threads on an M2 Max, and p90 from 6.69 to 4.59 ms | the offline A/B harness, interleaved A/B/A/B/A/B against upstream's scatter, three rounds, about 1000 frames per arm after 60 of warmup, all six arms at 30.03 to 30.04 fps. The default is two threads, because a Pi 5 measures four as the worst threaded setting there is: two holds 29.56–29.75 fps at 11.87 ms, three registers fastest at 10.03 ms and drops frames in 3 of 3 rounds, four is slower at 13.10 ms. The constrained machine decides |
 | ignore two USB link setup calls on Apple Silicon that `Freenect2DeviceImpl::open` otherwise treats as must-succeed | no throughput number: without it the sensor never opens, because the controller does not implement U1/U2 link power states and `enablePowerStates()` answers `LIBUSB_ERROR_PIPE` | both calls are still made and still log through `CHECK_LIBUSB_RESULT`. `failed to enable power states U1!` is harmless and the U2 form is not, so grep the startup log before reading packet loss on a Mac as a topology problem |
+
+## Standby timing
+
+The standby grace is a conservative 15-second bound; the MJPEG first-frame hold is 45 seconds.
+Physical Kinect timing is unmeasured. The fake grabber proves process exit, wake and stream
+resumption, but cannot establish emitter darkness or USB teardown latency.
+
+Measure ten warm-USB samples on an M-series Mac with the `gl` pipeline and on the Pi. For each,
+record POST standby to clean grabber exit, inspect the emitter, then record POST wake to the first
+type-2 frame on a loopback socket. Discard no warmup samples after USB warmup; page cache is
+irrelevant. Use the exit distribution to set the grace and about three times median wake latency
+for the hold. Report the window and each sample before changing these bounds.

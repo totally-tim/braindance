@@ -150,7 +150,7 @@ try {
   await ssh(`sudo systemctl stop kinect-node 2>/dev/null || true; `
     + `${KILL_SERVER}; ${KILL_SAMPLER}; rm -f ${LOG} ${SAMPLES}; sleep 1`);
   sshDetached(`cd ${DIR} && XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 `
-    + `setsid node server/index.js --port ${PORT} --host 0.0.0.0 --record `
+    + `setsid node server/index.js --standby-after 0 --port ${PORT} --host 0.0.0.0 --record `
     + `--grabber "$PWD/native/build/grabber --log debug" < /dev/null > ${LOG} 2>&1`);
   await awaitServer(40000);
   console.log('[cost] server up; warming up (device open, exposure, first flush) - discarded');

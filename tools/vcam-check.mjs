@@ -236,8 +236,8 @@ const MUTATIONS = {
   },
 
   'operator-reconnect-keeps-old-framing': {
-    file: 'web/main.js',
-    edits: [['    else sendProgramOutState();', '    // The mutation advertises only on request.']],
+    file: 'server/index.js',
+    edits: [['  sendOutput(ws);', '  // The mutation omits restoration.']],
     fails: 'the socket reconnect and operator reload rows in section 9',
   },
 
@@ -527,7 +527,7 @@ const start = async (extra = []) => {
     const grabber = `${join(WORK, 'tools/fake-grabber.mjs')} --source ${SOURCE} --fps 30 --hd `
       + `--key --emit-log ${EMIT_LOG}`;
     const child = spawn(process.execPath, [
-      join(WORK, 'server/index.js'), '--port', String(PORT),
+      join(WORK, 'server/index.js'), '--standby-after', '0', '--port', String(PORT),
       '--captures', join(WORK, 'takes'), '--grabber', grabber, ...extra,
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
     servers.push(child);
@@ -1085,6 +1085,17 @@ try {
       ok('while a pose that is one still reaches it, so the refusal is a gate rather than the mirror switched off',
         Math.abs(moved[0] - 1.5) < 1e-3 && Math.abs(moved[2] - 2.5) < 1e-3, moved.map((v) => v.toFixed(3)).join(', '));
 
+      await page.evaluate(() => __kinect.applyProgramOut({ preset: {
+        version: __kinect.library.PROJECT_VERSION, requires: [], values: { exposure: 1.8 },
+      } }));
+      ok('a source applies a preset through the stored-preset door',
+        await page.evaluate('__kinect.params.get("exposure")') === 1.8);
+      await operator.reload();
+      await operator.waitForFunction(() => globalThis.__kinect?.params.get('pointSize') === 4.2, null, { timeout: 5000 }).catch(() => {});
+      ok('record boot adopts the server output mode and size',
+        await operator.inputValue('#progMode') === 'mirror' && await operator.inputValue('#progSize') === '1280x720'
+        && await operator.evaluate('__kinect.params.get("pointSize")') === 4.2);
+
       await browser.close();
       await stopAll();
     }
@@ -1411,16 +1422,16 @@ try {
           globalThis.__proofSocket.close();
           globalThis.__kinect.params.set('far', 4);
         });
-        const resynced = await page.waitForFunction(() => __key.faces().far === 4, null, { timeout: 5000 })
+        const resynced = await operator.waitForFunction(() => __kinect.params.get('far') === 2, null, { timeout: 5000 })
           .then(() => true, () => false);
-        ok('socket reconnect advertises a framing change made while disconnected', resynced,
-          `key far ${await page.evaluate('__key.faces().far')}, operator far 4`);
+        ok('socket reconnect restores the server framing over an unsent local edit', resynced && await page.evaluate('__key.faces().far === 2'),
+          `key far ${await page.evaluate('__key.faces().far')}, server far 2`);
         await operator.reload();
-        await operator.waitForFunction(() => Boolean(globalThis.__kinect?.params));
+        await operator.waitForFunction(() => globalThis.__kinect?.params.get('far') === 2, null, { timeout: 5000 }).catch(() => {});
         const ownerFar = await operator.evaluate('__kinect.params.get("far")');
         const reloaded = await page.waitForFunction((far) => __key.faces().far === far, ownerFar, { timeout: 5000 })
           .then(() => true, () => false);
-        ok('operator reload replaces the keyed framing with the operator registry', reloaded,
+        ok('operator reload adopts the framing held by the server', reloaded && ownerFar === 2,
           `key far ${await page.evaluate('__key.faces().far')}, operator far ${ownerFar}`);
 
         await setFaces({ far: 2 });

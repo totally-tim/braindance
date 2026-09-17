@@ -25,6 +25,7 @@ import { Recorder } from './recorder.js';
 import { JobStore } from './jobs.js';
 import { renderVersion } from './render-version.js';
 import { Webcam } from './webcam.js';
+import { Output } from './output.js';
 import { KeyStream } from './key-stream.js';
 import { requireMutation, originAllowed, sameOriginBrowser } from './http-guard.js';
 
@@ -47,6 +48,10 @@ const HOST = flag('--host', LOOPBACK);
 const REPLAY = flag('--replay');
 // Recording is a runtime action; this only says whether the first take arms itself at hello.
 const RECORD = has('--record');
+const STANDBY_AFTER_MS = Number(flag('--standby-after', '600')) * 1000;
+if (!Number.isFinite(STANDBY_AFTER_MS) || STANDBY_AFTER_MS < 0) {
+  throw new Error('--standby-after must be a non-negative number of seconds');
+}
 // A node is an ordinary instance of this server with no `--node`, so the link is one-directional.
 const NODE_URL = flag('--node');
 const NODE_NAME = flag('--node-name', 'node');
@@ -937,7 +942,12 @@ const serveRecordStart = shooting(async (req, res) => {
   if (costly.length) {
     console.log(`[server] starting a take with ${costly.length} costly consumer(s): the operator accepted the cost`);
   }
-  sendJson(res, await recorder.start(helloJson));
+  recordingStarts++;
+  try {
+    const state = await recorder.start(helloJson);
+    wakeSensor?.();
+    sendJson(res, state);
+  } finally { recordingStarts--; }
 });
 const serveRecordStop = shooting(async (req, res) => sendJson(res, { stopped: await recorder.stop() }));
 const serveRecordMark = shooting(async (req, res) => {
@@ -1079,8 +1089,8 @@ const serveSensorHealth = (req, res) => sendJson(res, {
   state: sensorState,
   // The last window that carried frames, deliberately older than the window below when the
   // sensor has stopped.
-  fps: observedFps,
-  bytesPerSec: observedBytesPerSec,
+  fps: sensorState === 'standby' ? 0 : observedFps,
+  bytesPerSec: sensorState === 'standby' ? 0 : observedBytesPerSec,
   // And the last window that closed, whether or not anything arrived in it.
   window: lastWindow,
   // Named for what it counts: `stats.dropped` moves per socket whose send buffer is over the
@@ -1088,10 +1098,12 @@ const serveSensorHealth = (req, res) => sendJson(res, {
   monitorDropped: droppedTotal,
   // The first spawn is a start rather than a respawn, and restarts somebody asked for come off it:
   // a flapping count an operator can raise by ticking a checkbox is not a health reading.
-  respawns: Math.max(0, grabberSpawns - 1 - grabberRestarts),
+  respawns: Math.max(0, grabberSpawns - 1 - grabberRestarts - grabberWakes),
   // Beside it rather than folded in, or a node that restarted forty times for forty colour toggles
   // reads zero respawns and the reading that says why is gone.
   restarts: grabberRestarts,
+  wakes: grabberWakes,
+  consumers: { monitors: attachedMonitors().length, webcam: webcam.count, key: keyStream.count, recording: Boolean(recorder.armed || recorder.take) },
 });
 // The monitor half is here so the button can say "this take will refuse" before it is pressed: a
 // check built only out of 409s would pass against a server that refused everything.
@@ -1140,11 +1152,55 @@ async function serveLocalTakes(req, res) {
   sendJson(res, { here: HERE_NAME, ...here, storage: await remaining(CAPTURES_DIR, recordingRate()) });
 }
 
+const output = new Output({ presets: PRESETS, effects: EFFECTS, version: PROJECT_VERSION });
+const sendOutput = (ws) => {
+  for (const patch of output.messages()) ws.send(JSON.stringify({ programOut: patch }));
+};
+const broadcastOutput = () => {
+  for (const patch of output.messages()) broadcastText(JSON.stringify({ programOut: patch }));
+};
+const serveOutputWrite = async (req, res) => {
+  try {
+    await output.write(await readBody(req));
+    broadcastOutput();
+    sendJson(res, output.state);
+  } catch (err) { sendJson(res, { error: err.message }, err.status ?? 400); }
+};
+
+const replayRefusal = () => `this server is replaying ${basename(REPLAY)}, so there is no colour camera to serve`;
+const cameraState = () => ({ camera, available: !webcam.unavailable, unavailable: webcam.unavailable });
+const serveStandby = shooting(async (req, res) => {
+  if (REPLAY) throw new Error(replayRefusal());
+  await standbySensor();
+  serveSensorHealth(req, res);
+});
+const serveWake = shooting(async (req, res) => {
+  if (REPLAY) throw new Error(replayRefusal());
+  await wakeSensor();
+  serveSensorHealth(req, res);
+});
+const serveCameraWrite = async (req, res) => {
+  if (REPLAY) return sendJson(res, { error: replayRefusal() }, 409);
+  try {
+    const body = await readBody(req);
+    if (!body || Array.isArray(body) || typeof body !== 'object'
+        || Object.entries(body).some(([key, value]) => !['color', 'lowLight'].includes(key) || typeof value !== 'boolean')) {
+      throw new Error('camera accepts boolean color and lowLight');
+    }
+    const restarting = Boolean(applyCamera({ ...camera, ...body }));
+    sendJson(res, { ...cameraState(), restarting });
+  } catch (err) { sendJson(res, { error: err.message }, 400); }
+};
+
 // The HTTP surface as one table, walked by one dispatcher - the table *is* the dispatch, which is
 // what stops it drifting from the behaviour. Having a `write` is how a route declares that it
 // changes something, and the dispatcher puts every one through `requireMutation` in one place. The
 // table is served at `/library/routes`, so a check can enumerate rather than name.
 const ROUTES = [
+  { path: '/output', pattern: /^\/output$/, read: (req, res) => sendJson(res, output.state), write: { methods: ['POST'], run: serveOutputWrite } },
+  { path: '/sensor/standby', pattern: /^\/sensor\/standby$/, write: { methods: ['POST'], run: serveStandby } },
+  { path: '/sensor/wake', pattern: /^\/sensor\/wake$/, write: { methods: ['POST'], run: serveWake } },
+  { path: '/sensor/camera', pattern: /^\/sensor\/camera$/, read: (req, res) => sendJson(res, cameraState()), write: { methods: ['POST'], run: serveCameraWrite } },
   { path: '/preview/renderer', pattern: /^\/preview\/renderer$/, read: async (req, res) => {
     sendJson(res, { version: await renderVersion(WEB_DIR, THREE_DIR) });
   } },
@@ -1251,7 +1307,7 @@ const ROUTES = [
   // `live` rather than `write`: it changes nothing, but it hands out what the colour camera sees
   // this second. `embeddable`, and the one route that is, because a media source and a plain
   // `<img>` in somebody's overlay are documented uses.
-  { path: '/camera.mjpg', pattern: /^\/camera\.mjpg$/, live: true, embeddable: true, read: (req, res) => webcam.attach(req, res) },
+  { path: '/camera.mjpg', pattern: /^\/camera\.mjpg$/, live: true, embeddable: true, read: (req, res) => { wakeSensor?.(); webcam.attach(req, res); } },
 
   // ---- the sensor
   //
@@ -1560,6 +1616,10 @@ let grabberSpawns = 0;
 // turns "this node is flapping" into a number a checkbox produces. Counted where the exit is
 // *consumed*, or an arm that never becomes a spawn subtracts a respawn that did happen.
 let grabberRestarts = 0;
+let grabberWakes = 0;
+let recordingStarts = 0;
+let standbySensor = null;
+let wakeSensor = null;
 
 let sensorState = 'starting';
 
@@ -1573,7 +1633,9 @@ function setSensorState(state) {
   // The webcam cannot outlive the sensor being live, and hanging it off the state change rather
   // than off each path that causes one keeps a route added later from missing a case.
   if (state !== 'live') {
-    webcam.setUnavailable(`the sensor is ${state}`);
+    webcam.setUnavailable(REPLAY ? replayRefusal() : !camera.color
+      ? 'colour is off on this grabber, so there is no colour camera to serve'
+      : `the sensor is ${state}`, !REPLAY && camera.color && state !== 'absent');
     keyStream.setUnavailable(`the sensor is ${state}`);
   }
 }
@@ -1601,6 +1663,7 @@ const isLoopback = (req) => {
 const whole = (v, max) => (Number.isInteger(v) && v >= 1 && v <= max ? v : null);
 
 wss.on('connection', (ws, req) => {
+  wakeSensor?.();
   ws.binaryType = 'nodebuffer';
   // A loopback socket starts at full rate, its frames never crossing the link the cap is about. A
   // remote one is ineligible until it asks, and finer than the cap is refused rather than clamped.
@@ -1613,6 +1676,7 @@ wss.on('connection', (ws, req) => {
   ws.send(JSON.stringify({ status: sensorState }));
   ws.send(JSON.stringify({ camera }));
   sendMonitor(ws);
+  sendOutput(ws);
   ws.on('error', (err) => console.error('[server] socket error:', err.message));
   ws.on('close', () => keyStream.detach(ws));
 
@@ -1679,10 +1743,18 @@ wss.on('connection', (ws, req) => {
     // parameter means, so one added next year reaches the program-out page without this changing.
     // To others only, or a surface applies its own writes twice and mirror mode fights the hand.
     if (typeof msg.programOut === 'object' && msg.programOut) {
-      const text = raw.toString('utf8');
-      for (const other of wss.clients) {
-        if (other !== ws && other.readyState === other.OPEN) other.send(text);
-      }
+      const patch = msg.programOut;
+      output.write(patch).then(() => {
+        const messages = 'preset' in patch ? output.messages() : [patch];
+        for (const next of messages) {
+          const text = JSON.stringify({ programOut: next });
+          for (const other of wss.clients) {
+            if (other !== ws && other.readyState === other.OPEN) other.send(text);
+          }
+        }
+      }).catch((err) => {
+        if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ outputError: err.message }));
+      });
       return;
     }
 
@@ -1881,6 +1953,10 @@ function startLive() {
   let attempt = 0;
   let shuttingDown = false;
   let restarting = false;
+  let standby = false;
+  let spawnTimer = null;
+  let standbyPending = null;
+  let idleSince = null;
   // Whether a sensor has ever handshaken with this process. Monotonic on purpose: it separates
   // "the link dropped" from "nothing is plugged in here", which are one event at the exit handler.
   let everLive = false;
@@ -1896,9 +1972,10 @@ function startLive() {
   // SIGTERM alone is not enough and the failure is silent: the grabber leaves its loop and blocks
   // in libfreenect2's `dev->stop()` with transfers in flight, and every restart runs through the
   // `exit` handler, so the respawn never happens. Observed as eight minutes with no frames.
-  const stopGrabber = ({ holdProcessOpen = false } = {}) => {
+  const stopGrabber = ({ holdProcessOpen = false, grace = STOP_GRACE_MS } = {}) => {
     const dying = child;
-    if (!dying) return;
+    if (!dying) return Promise.resolve();
+    const exited = new Promise((done) => dying.once('exit', done));
     dying.kill('SIGTERM');
     const timer = setTimeout(() => {
       if (dying.exitCode === null && dying.signalCode === null) {
@@ -1906,17 +1983,19 @@ function startLive() {
         killedHard = true;
         dying.kill('SIGKILL');
       }
-    }, STOP_GRACE_MS);
+    }, grace);
     // On a restart the grace period must not hold the process up, so it is unreferenced. On the way
     // out it is the opposite: the sensor would stay claimed by an orphan, which fails the *next*
     // server's enumeration as a broken Kinect.
     if (!holdProcessOpen) timer.unref?.();
     dying.once('exit', () => clearTimeout(timer));
+    return exited;
   };
 
   // Reached from the two ways a grabber can fail to be running: it exited, or it never started.
   // Written out only in the exit handler before, which is why the second way had no backoff.
   const scheduleRetry = () => {
+    if (standby || shuttingDown) return;
     // A grabber that has *never* handshaken is a machine with no sensor rather than the flaky USB
     // link this backoff is for. The full table is spent first, because a node whose sensor is slow
     // to enumerate at boot is the same shape for a few seconds.
@@ -1930,10 +2009,11 @@ function startLive() {
     else if (attempt === RESTART_DELAYS.length + 1) {
       console.log(`[server] no sensor found in ${attempt} attempts - looking again every ${ABSENT_DELAY / 1000}s`);
     }
-    setTimeout(spawnGrabber, delay);
+    spawnTimer = setTimeout(() => { spawnTimer = null; spawnGrabber(); }, delay);
   };
 
   const spawnGrabber = () => {
+    if (standby || shuttingDown || child || spawnTimer) return;
     // Counted here rather than in the backoff, because every road to a running grabber ends at
     // this function, so a path added later is counted by going through it.
     grabberSpawns++;
@@ -1964,6 +2044,7 @@ function startLive() {
     });
 
     child.stdout.on('data', (chunk) => {
+      if (standby || shuttingDown) return;
       try {
         for (const msg of parser.push(chunk)) {
           handleMessage(msg);
@@ -2003,12 +2084,19 @@ function startLive() {
       helloJson = null;
       // The picture goes with the grabber too, said as a sentence: a webcam that answers "the
       // grabber is restarting" is one somebody waits three seconds for rather than debugs.
-      webcam.setUnavailable('the grabber is restarting');
+      webcam.setUnavailable('the grabber is restarting', camera.color);
       keyStream.setUnavailable('the grabber is restarting');
       // The take ends here. One take is one continuous stream with one hello and monotonic stamps,
       // and a blend fraction across a restart seam has no meaning. Nothing is discarded.
       recorder.split().catch((err) => console.error(`[recorder] ${err.message}`));
       if (shuttingDown) return;
+      if (standby) {
+        killedHard = false;
+        attempt = 0;
+        restarting = false;
+        setSensorState('standby');
+        return;
+      }
       if (restarting) {
         // Asked for, not a failure, so it counts toward neither the backoff nor the respawns
         // `/sensor/health` reports. This is the one place that knows the difference.
@@ -2017,7 +2105,7 @@ function startLive() {
         killedHard = false;
         // Counted beside the spawn it excuses: `respawns` is `grabberSpawns - 1 - grabberRestarts`,
         // so incrementing on the exit makes that subtraction run one ahead of itself for the gap.
-        setTimeout(() => { grabberRestarts++; spawnGrabber(); }, delay);
+        spawnTimer = setTimeout(() => { spawnTimer = null; grabberRestarts++; spawnGrabber(); }, delay);
         return;
       }
       scheduleRetry();
@@ -2039,7 +2127,7 @@ function startLive() {
   applyCamera = (next) => {
     const needsRestart = next.color !== camera.color;
     const lowLightChanged = next.lowLight !== camera.lowLight;
-    if (!needsRestart && !lowLightChanged) return;
+    if (!needsRestart && !lowLightChanged) return false;
 
     Object.assign(camera, next);
     broadcastText(JSON.stringify({ camera }));
@@ -2058,12 +2146,13 @@ function startLive() {
         keyStream.setUnavailable('colour is off on this grabber, so there is no colour camera to key');
       }
       console.log(`[server] colour camera ${camera.color ? 'on' : 'off'} - ${child ? 'restarting grabber' : 'takes effect on the next spawn'}`);
-      if (child) {
+      if (child && !standby) {
         restarting = true;
         attempt = 0;
         stopGrabber();
+        return true;
       }
-      return;
+      return false;
     }
     // Colour off means there is no exposure to set, but the flag is remembered for when it returns.
     if (camera.color) {
@@ -2071,6 +2160,46 @@ function startLive() {
       child?.stdin.write(`low-light ${camera.lowLight ? 'on' : 'off'}\n`);
     }
   };
+
+  // Conservative bounds; physical teardown and first-frame measurements belong in performance.md.
+  const STANDBY_GRACE_MS = 15000;
+  standbySensor = async () => {
+    if (recordingStarts || recorder.armed || recorder.take) throw new Error('cannot enter standby while a take is armed or recording');
+    if (standbyPending) return standbyPending;
+    if (standby) return Promise.resolve();
+    standby = true;
+    clearTimeout(spawnTimer);
+    spawnTimer = null;
+    helloJson = null;
+    standbyPending = stopGrabber({ grace: STANDBY_GRACE_MS }).then(() => {
+      setSensorState('standby');
+      observedFps = 0;
+      observedBytesPerSec = 0;
+      standbyPending = null;
+    });
+    return standbyPending;
+  };
+  wakeSensor = () => {
+    if (!standby || shuttingDown) return;
+    if (standbyPending) {
+      return standbyPending.then(() => wakeSensor());
+    }
+    standby = false;
+    idleSince = null;
+    attempt = 0;
+    grabberWakes++;
+    spawnGrabber();
+  };
+  if (STANDBY_AFTER_MS > 0) setInterval(() => {
+    const idle = attachedMonitors().length === 0 && keyStream.count === 0 && webcam.count === 0
+      && !recordingStarts && !recorder.armed && !recorder.take;
+    if (!idle) { idleSince = null; return; }
+    if (sensorState !== 'live' && sensorState !== 'lost') { idleSince = null; return; }
+    idleSince ??= Date.now();
+    if (Date.now() - idleSince >= STANDBY_AFTER_MS) {
+      standbySensor().catch((err) => console.error(`[server] ${err.message}`));
+    }
+  }, 5000).unref();
 
   // Armed at boot rather than recording at boot, so there is one path into a take file. Armed
   // *before* the grabber is spawned, because a hello arriving during that disk read would find the
@@ -2084,13 +2213,19 @@ function startLive() {
     spawnGrabber();
   }
 
-  process.on('SIGINT', () => {
+  const shutdown = async () => {
+    if (shuttingDown) return;
     shuttingDown = true;
-    stopGrabber({ holdProcessOpen: true });
-    // Closed and scanned before the process goes, because a take without a sidecar is one the
-    // library has to rebuild. A courtesy: the guarantee is that the bytes are already on disk.
-    recorder.close('server stopped').finally(() => process.exit(0));
-  });
+    clearTimeout(spawnTimer);
+    await Promise.all([
+      stopGrabber({ holdProcessOpen: true, grace: STANDBY_GRACE_MS }),
+      recorder.close('server stopped'),
+    ]);
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
 }
 
 async function startReplay() {

@@ -5,6 +5,7 @@ import { OnDemand } from './on-demand.js';
 
 // Appears in the response header and between every part, and the two have to agree.
 const BOUNDARY = 'braindanceframe';
+const HOLD_MS = 45000;
 
 // Drop-to-latest. MJPEG has no divisor or stride to negotiate, so this is the webcam's only
 // backpressure control - a queue would push back through the grabber's pipe and cost the take.
@@ -22,6 +23,7 @@ export class Webcam {
     // whether there is a colour camera, never whether a frame has arrived - the grabber encodes
     // only while subscribed, so refusing on "no frame yet" deadlocks the first subscriber.
     this.unavailable = 'no sensor has handshaken with this server yet';
+    this.transient = true;
     this.served = 0;
     this.dropped = 0;
   }
@@ -68,8 +70,13 @@ export class Webcam {
     for (const s of this.subscribers) this.#push(s);
   }
 
-  setUnavailable(reason) {
+  setUnavailable(reason, transient = false) {
     this.unavailable = reason;
+    this.transient = transient;
+    for (const sub of this.subscribers) {
+      if (!transient) sub.res.end(reason);
+      else this.#hold(sub);
+    }
     // Dropped, so a source reconnecting during an outage is not painted a still of a dead sensor.
     this.latest = null;
   }
@@ -85,7 +92,7 @@ export class Webcam {
   // The MJPEG route. The origin rule belongs to the dispatcher, which asks it of every route
   // the table marks as serving live sensor bytes; a copy here would be the second copy.
   attach(req, res) {
-    if (this.unavailable) {
+    if (this.unavailable && !this.transient) {
       res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ error: this.unavailable }));
       return;
@@ -101,7 +108,10 @@ export class Webcam {
     });
     console.log(`[webcam] subscriber attached (${this.subscribers.size} total, ${sub.loopback ? 'loopback' : 'remote'})`);
 
+    res.flushHeaders();
+    this.#hold(sub);
     const drop = () => {
+      clearTimeout(sub.hold);
       if (!this.subscribers.delete(sub)) return;
       console.log(`[webcam] subscriber gone (${this.subscribers.size} left)`);
       this.demand.settle();
@@ -114,8 +124,18 @@ export class Webcam {
     if (this.latest) this.#push(sub);
   }
 
+  #hold(sub) {
+    if (sub.hold) return;
+    sub.hold = setTimeout(() => {
+      sub.res.end(this.unavailable ?? 'no colour frame arrived before the wait expired');
+    }, HOLD_MS);
+    sub.hold.unref?.();
+  }
+
   #push(sub) {
     if (!this.latest) return;
+    clearTimeout(sub.hold);
+    sub.hold = null;
     // Drop-to-latest: a subscriber still draining the previous frame is owed the newest, not this.
     if (sub.inFlight >= MAX_IN_FLIGHT) {
       sub.behind++;

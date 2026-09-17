@@ -14,6 +14,7 @@ the checkout.
 | `--port N` | `8080` | The port to listen on. |
 | `--host ADDR` | `127.0.0.1` | The address to bind. A non-loopback address makes the server reachable from other machines; `::1` stays loopback. |
 | `--record` | off | Arms the first take at boot. |
+| `--standby-after S` | `600` | Idle seconds before sensor standby; `0` disables it. Checked every five seconds. |
 | `--replay PATH` | none | Loops a recorded capture instead of reading a sensor. |
 | `--pipeline NAME` | the grabber's own pick | Depth processor: `gl`, `cl` or `cpu`. Handed to the grabber. |
 | `--no-color` | colour on | Depth only. Handed to the grabber. |
@@ -80,6 +81,32 @@ The WebSocket upgrade goes through the same origin check on both its paths, `/` 
 stream and `/export` for a running render. A caller sending no `Origin` is not a browser and
 is allowed everything, so `curl` and other machines on the network are unrestricted.
 [SECURITY.md](../SECURITY.md) carries the threat model.
+
+## Command line client
+
+`braindance [--url URL] [--json] <verb>`. The default URL is `http://127.0.0.1:8080`;
+`BRAINDANCE_URL` overrides it, and `--url` takes precedence. Writes print the state read back.
+Exit codes: 0 success, 1 server refusal, 2 invalid arguments or no server response.
+
+| verb | result |
+| --- | --- |
+| `status` | Sensor health, recording, output and consumers. |
+| `sensor status` | Sensor health. |
+| `sensor standby` | Stop the grabber; refuse while recording or armed. |
+| `sensor wake [--wait]` | Start the grabber; optionally wait up to 60 seconds for live or failure. |
+| `record start`, `record stop`, `record mark` | Control the current take. |
+| `camera color on\|off`, `camera low-light on\|off` | Update the camera; color changes restart a running grabber. |
+| `output` | Read the server's OBS output state. |
+| `output mode camera\|mirror` | Select program camera or the last relayed operator view. |
+| `output size WxH` | Positive integer dimensions, at most 4096 by 2160. |
+| `output preset NAME` | Replace the look from defaults with a stored preset while retaining composition. |
+| `output set key=value ...` | Merge parameter edits; values use JSON syntax. |
+| `presets`, `takes`, `jobs` | List the corresponding store. |
+
+Output state lasts for the server process. A source receives mode and size, then the preset,
+then parameter edits. Mirror without an operator uses the source's last view or default pose.
+Parameter names and values are validated by the browser registry; an invalid parameter patch
+is refused as a whole by that browser. The server stores those values without registry validation.
 
 ## Viewer and timeline controls
 
@@ -372,6 +399,7 @@ are doing. `r` starts and stops a take and `m` marks a running one.
 | record | Starts a take, and stops the one running. |
 | mark | Marks the running take at the moment you press. |
 | colour camera | Whether the colour stream runs at all. With it off, exposure means nothing and the control says so. |
+| Standby / Wake sensor | Stop or start the sensor while keeping the server up. An armed or running take refuses standby. |
 | low light | The sensor's low-light exposure mode. |
 | Monitor: depth ÷ | Sends every Nth depth sample, 1 to 16, so a thin link still shows a picture. |
 | Monitor: every Nth | Sends one frame in N, 1 to 30. |
@@ -750,7 +778,11 @@ route with a write method goes through the three checks under
 | `/effects/:id/file/:name` | GET | One chunk's own bytes, as `text/plain`. |
 | `/effect-refusals` | POST | Sets aside packages a page could not compile. |
 | `/camera.mjpg` | GET | The colour camera as MJPEG. The one embeddable route. |
-| `/sensor/health` | GET | What the sensor is doing. |
+| `/sensor/health` | GET | Sensor state, rates, respawns, requested restarts, `wakes` and consumer counts. Standby rates are zero. |
+| `/sensor/standby` | POST | Enter standby after the grabber exits; 409 while armed or recording, or in replay. |
+| `/sensor/wake` | POST | Wake from standby; 409 in replay. |
+| `/sensor/camera` | GET, POST | Camera booleans, availability and reason; writes return whether a restart was requested. |
+| `/output` | GET, POST | OBS mode, size, preset name and merged parameter edits. |
 | `/record/state` | GET | Whether a take is running. |
 | `/record/start` | POST | Starts a take. |
 | `/record/stop` | POST | Stops it. |

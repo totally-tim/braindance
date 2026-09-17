@@ -651,7 +651,7 @@ async function startPrivateServer() {
   const source = join(CAPTURES_DIR, onDisk.file);
   if (!existsSync(source)) throw new Error(`no capture at ${source} to link into the private server`);
   symlinkSync(source, join(caps, onDisk.file));
-  const child = spawn(process.execPath, [join(REPO, 'server/index.js'),
+  const child = spawn(process.execPath, [join(REPO, 'server/index.js'), '--standby-after', '0',
     '--port', String(PRIVATE_PORT), '--captures', caps,
     '--projects', join(WORK, 'projects'), '--presets', join(WORK, 'presets'),
     '--deliverables', join(WORK, 'deliverables'), '--jobs', join(WORK, 'jobs')],

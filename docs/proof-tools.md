@@ -743,7 +743,7 @@ and its picture the way sections 1 to 6 hold the webcam's.
   where it should be transparent.
 - **`key-decode-survives-outage`** — an obsolete decode is allowed to finish, and the late-decode
   transparency row in section 9 fails.
-- **`operator-reconnect-keeps-old-framing`** — the operator socket stops advertising on connect,
+- **`operator-reconnect-keeps-old-framing`** — the server omits output restoration on connect,
   so a reconnect or reload keeps the framing it opened with.
 - **`pair-serves-stale-depth`** — the depth stamp is one frame behind the colour it is paired with,
   the one-frame silhouette lag at the wire seam, and only section 7's pair-stamp row sees it.
@@ -1191,3 +1191,32 @@ directory with no `.npmrc` to prove the cutoff came from the file under test.
 - **`wrong-unit`** — `min-release-age=2d`, a value npm cannot parse.
 - **`no-gate`** — an `.npmrc` naming no gate.
 - **`absent`** — no `.npmrc` at all, so a contributor cloning the tree inherits nothing.
+
+## Command line and standby
+
+```bash
+node tools/cli-check.mjs
+node tools/cli-check.mjs --no-browser
+```
+
+`cli-check` probes port 8401 and stages under `.cli-check/`. It uses `captures/sample.knct`,
+the fake grabber's HD stream, ffmpeg and a GPU browser. `--no-browser` omits the UI rows.
+The rows walk verbs against routes in both directions, check clean child exit and wake counters,
+exercise auto-standby and MJPEG demand, drive recorder and camera controls, restore output to
+new sockets, refuse incompatible presets, and drive the record and program pages. Replay and
+absent-sensor cases use separate server instances. The final line reports passed and failed
+assertions; a crash is exit 2, never a caught mutation.
+
+Mutation controls (`node tools/cli-check.mjs --mutate NAME`):
+
+- `standby-is-a-bare-kill`: a stopped child respawns.
+- `standby-leaves-the-retry-timer`: wake waits on an obsolete retry timer.
+- `wake-reads-as-a-respawn`: a requested wake counts as failure.
+- `idle-ignores-the-recorder`: a recording is considered idle.
+- `standby-from-absent`: an editing station enters standby.
+- `mjpeg-refuses-while-waking`: the first subscriber receives 503.
+- `camera-route-bypasses-applyCamera`: an HTTP write misses the broadcast and restart.
+- `output-forgets-on-connect`: a new source receives no saved output.
+- `preset-skips-requires`: a preset naming a missing effect is accepted.
+- `verb-without-a-route`: the command table names an absent route.
+- `partial-preset-retains-old-look`: a partial preset leaves existing and fresh sources with different looks.

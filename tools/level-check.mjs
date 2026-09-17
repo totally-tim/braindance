@@ -182,7 +182,7 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const servers = [];
 const start = () => new Promise((resolve, reject) => {
-  const child = spawn(process.execPath, [join(WORK, 'server/index.js'), '--port', String(PORT)], {
+  const child = spawn(process.execPath, [join(WORK, 'server/index.js'), '--standby-after', '0', '--port', String(PORT)], {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   servers.push(child);
