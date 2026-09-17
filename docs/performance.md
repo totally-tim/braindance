@@ -583,9 +583,27 @@ The final health counters report ten wakes, zero respawns and zero restarts. A f
 standby leaves no grabber running. The operator visually confirms that the red emitter
 lights are off after this final stop; emitter darkness is not timed per cycle.
 
-The standby grace remains 15 seconds, above the observed 4.405-second maximum. The MJPEG
-first-frame hold remains 45 seconds: three times the median depth wake (3.156 seconds)
-would miss the 6.304-second sample, and a depth frame does not establish first-JPEG latency.
-These are conservative bounds, not measured platform limits. Pi timing and physical MJPEG
-startup remain unmeasured. Repeat the ten-cycle method on the Pi with its `gl` pipeline
-before reducing either bound for both platforms.
+A second set of ten cycles, same host, macOS build, native build and method, with the sensor
+on a USB 3.0 hub rather than a direct port, gives medians of 4.402 seconds to exit and 0.984
+seconds to the first depth frame. Every sample falls inside the table's spread and none wakes
+slowly, so across twenty cycles the 6.304-second sample stands alone. Each live dwell of that
+set delivers 29.6 to 30.0 fps, so its timings are not starvation artifacts.
+
+The first colour picture is measured as an MJPEG consumer attaching at wake, the way an OBS
+source arrives, and timed to the first JPEG part on that response, with the same warmup
+discarded. Five cycles give a median of 1.504 seconds, ranging 1.487 to 1.557. Depth arrives
+at a median of 0.948 seconds in the same cycles (0.925 to 1.001), so the colour encoder costs
+about half a second over the depth path and asking for colour does not slow depth.
+
+With the last consumer gone the idle timer stands the sensor down by itself. At
+`--standby-after 5` that takes 9.4 to 14.1 seconds from the departure: one tick has to notice
+the idle, the window has to fill, and the next tick fires it, so the worst case is about twice
+the setting plus a tick rather than the setting.
+
+The standby grace remains 15 seconds, above the 4.434-second maximum of the twenty cycles.
+The MJPEG first-frame hold remains 45 seconds. The worst arrival it covers is the 6.304-second
+slow wake plus the half second the encoder adds, about 6.8 seconds, so the hold is around seven
+times what this host has asked for, where three times the median depth wake would have missed
+the slow wake. These are conservative bounds, not measured platform limits. Pi timing remains
+unmeasured. Repeat the ten-cycle method on the Pi with its `gl` pipeline before reducing either
+bound for both platforms.
