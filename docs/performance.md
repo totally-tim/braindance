@@ -553,12 +553,38 @@ behind its number.
 
 ## Standby timing
 
-The standby grace is a conservative 15-second bound; the MJPEG first-frame hold is 45 seconds.
-Physical Kinect timing is unmeasured. The fake grabber proves process exit, wake and stream
-resumption, but cannot establish emitter darkness or USB teardown latency.
+Ten warm-USB standby/wake cycles on an Apple M2 Max, macOS 26.6.2 (25G83),
+2026-09-17, use the current native build and the macOS preset's OpenCL (`cl`) pipeline.
+The macOS preset does not build the issue's proposed `gl` pipeline. The input is a real
+Kinect v2 with color enabled, not a synthetic capture.
 
-Measure ten warm-USB samples on an M-series Mac with the `gl` pipeline and on the Pi. For each,
-record POST standby to clean grabber exit, inspect the emitter, then record POST wake to the first
-type-2 frame on a loopback socket. Discard no warmup samples after USB warmup; page cache is
-irrelevant. Use the exit distribution to set the grace and about three times median wake latency
-for the hold. Report the window and each sample before changing these bounds.
+One loopback monitor stays connected throughout. After the first depth frame, discard
+10 seconds of startup warmup, then retain all ten cycles. Each cycle measures POST standby
+to receipt of the server's grabber-exit log, waits 2 seconds in standby, measures POST wake
+to the first type-2 depth payload on that socket, and runs live for 5 seconds. The clock is
+monotonic; page cache is not flushed and is irrelevant to live USB latency.
+
+| Cycle | Standby to clean exit (s) | Wake to depth frame (s) |
+| --- | ---: | ---: |
+| 1 | 4.400 | 0.961 |
+| 2 | 4.376 | 1.160 |
+| 3 | 4.375 | 1.070 |
+| 4 | 4.363 | 0.970 |
+| 5 | 4.394 | 1.018 |
+| 6 | 4.351 | 6.304 |
+| 7 | 4.405 | 1.069 |
+| 8 | 4.374 | 1.035 |
+| 9 | 4.380 | 1.020 |
+| 10 | 4.360 | 1.344 |
+
+The medians are 4.375 seconds to exit and 1.052 seconds to the first depth frame.
+Every exit reports code 0 and signal null, and every old child PID is gone before wake.
+The final health counters report ten wakes, zero respawns and zero restarts. A final
+standby leaves no grabber running. Emitter darkness is not yet visually confirmed.
+
+The standby grace remains 15 seconds, above the observed 4.405-second maximum. The MJPEG
+first-frame hold remains 45 seconds: three times the median depth wake (3.156 seconds)
+would miss the 6.304-second sample, and a depth frame does not establish first-JPEG latency.
+These are conservative bounds, not measured platform limits. Pi timing and physical MJPEG
+startup remain unmeasured. Repeat the ten-cycle method on the Pi with its `gl` pipeline
+before reducing either bound for both platforms.

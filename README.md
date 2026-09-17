@@ -252,6 +252,7 @@ Use `node bin/braindance.mjs` without linking. Use `--url http://HOST:8080` or s
 Keep `npm start` running. The sensor enters standby after 600 seconds without a consumer.
 Use `npm start -- --standby-after 0` to keep it awake, or press **Standby** on the record surface.
 Opening an OBS source, a record tab, or starting a take wakes it. Close record tabs to let it idle.
+Allow several seconds for the picture to return; see [standby timing](docs/performance.md#standby-timing).
 
 For login startup on macOS, save this as `~/Library/LaunchAgents/eu.tim.braindance.plist`,
 replace both absolute paths, and run `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/eu.tim.braindance.plist`:
