@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn, execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -21,17 +21,33 @@ const MUTATIONS = {
     '    standby = true;\n    clearTimeout(spawnTimer);\n    spawnTimer = null;', '    standby = true;',
   ]] },
   'wake-reads-as-a-respawn': { file: 'server/index.js', edits: [['    grabberWakes++;', '    // wake omitted']] },
+  // `all` rather than `allSettled`: the recorder's rejection wins the race, so the process is gone
+  // before the grace period ends and the grabber that ignored SIGTERM is left holding the sensor.
+  'shutdown-abandons-a-stubborn-grabber': { file: 'server/index.js', edits: [[
+    '    const [grabber, take] = await Promise.allSettled([',
+    '    const [grabber, take] = await Promise.all([',
+  ]] },
   'idle-ignores-the-recorder': { file: 'server/index.js', edits: [[
     '      && !recordingStarts && !recorder.armed && !recorder.take;', ';',
   ]] },
-  'standby-from-absent': { file: 'server/index.js', edits: [[
-    "    if (sensorState !== 'live' && sensorState !== 'lost')", "    if (sensorState !== 'live' && sensorState !== 'lost' && sensorState !== 'absent')",
+  'standby-from-absent': { file: 'server/idle.js', edits: [[
+    "const HOLDS_NO_DEADLINE = new Set(['absent', 'standby']);",
+    "const HOLDS_NO_DEADLINE = new Set(['standby']);",
   ]] },
   'mjpeg-refuses-while-waking': { file: 'server/webcam.js', edits: [[
     '    if (this.unavailable && !this.transient) {', '    if (this.unavailable) {',
   ]] },
   'camera-route-bypasses-applyCamera': { file: 'server/index.js', edits: [[
     '    const restarting = Boolean(applyCamera({ ...camera, ...body }));', '    const restarting = false; Object.assign(camera, body);',
+  ]] },
+  'wake-for-an-unserveable-source': { file: 'server/index.js', edits: [[
+    '    if (webcam.unavailable === null || webcam.transient) wakeSensor?.();', '    wakeSensor?.();',
+  ]] },
+  'idle-counts-an-unservable-key': { file: 'server/index.js', edits: [[
+    'keyStream.demandCount === 0', 'keyStream.count === 0',
+  ]] },
+  'wait-gives-up-on-a-single-lost': { file: 'bin/braindance.mjs', edits: [[
+    "if (result.state === 'absent')", "if (['lost', 'absent'].includes(result.state))",
   ]] },
   'output-forgets-on-connect': { file: 'server/index.js', edits: [['  sendOutput(ws);', '  // output omitted']] },
   'preset-skips-requires': { file: 'server/output.js', edits: [[
@@ -280,6 +296,43 @@ async function main() {
     let alive = false;
     try { process.kill(Number(closingPid), 0); alive = true; } catch {}
     check(!alive, 'SIGTERM waits for the owned grabber to exit');
+    // Two faults at once, which is what a shutdown has to survive: a take it cannot finalise and a
+    // grabber that ignores the ask to stop. The take's magic is overwritten while its file is still
+    // open, so the index the close builds refuses the file instead of hashing it, and `--stubborn`
+    // is the grabber that takes no notice of SIGTERM, so nothing but the force kill at the end of
+    // the grace ends it. A process that leaves on the recorder's failure leaves the Kinect claimed
+    // by a process nobody owns, which the next server's enumeration reads as a broken sensor.
+    const DEAD_GRABBER = `${process.execPath} ${join(WORK, 'tools/fake-grabber.mjs')}`
+      + ` --source ${join(ROOT, 'captures/sample.knct')} --stubborn`;
+    await start(['--grabber', DEAD_GRABBER], false);
+    await cli('record', 'start');
+    const stuckTake = await until(async () => (await json('/record/state')).body.takeId);
+    const stuckFile = join(WORK, 'captures', `${stuckTake}.knct`);
+    const head = openSync(stuckFile, 'r+');
+    writeSync(head, Buffer.alloc(4), 0, 4, 0);
+    closeSync(head);
+    const dyingServer = server;
+    const stubborn = pids()[0];
+    const stoppedAt = Date.now();
+    await stop();
+    const waitedMs = Date.now() - stoppedAt;
+    check(Boolean(stuckTake) && !new RegExp(`take ${stuckTake} closed`).test(log),
+      'the take really could not be finalised', stuckTake ?? 'no take was open');
+    const named = log.match(/\[server\][^\n]*(stream desync|not a Kinect capture)[^\n]*/);
+    check(Boolean(named), 'the shutdown reports the take it could not close', named?.[0] ?? 'nothing was reported');
+    check(waitedMs > 12000, 'the shutdown grace runs out before the process leaves', `${waitedMs} ms`);
+    let orphan = false;
+    try { process.kill(Number(stubborn), 0); orphan = true; } catch {}
+    check(!orphan, 'a take that cannot close still ends with its grabber force-killed',
+      orphan ? `grabber ${stubborn} outlived the server` : `grabber ${stubborn} gone with the server`);
+    check(dyingServer.exitCode === 1, 'a shutdown that failed half its work exits 1', String(dyingServer.exitCode));
+    for (const entry of readdirSync(join(WORK, 'captures'))) {
+      if (entry.startsWith(stuckTake)) rmSync(join(WORK, 'captures', entry), { force: true });
+    }
+    // The orphan a caught control creates is that run's to clean up.
+    try { process.kill(Number(stubborn), 'SIGKILL'); } catch {}
+
+    if (mutation === 'shutdown-abandons-a-stubborn-grabber') return;
     await start(['--replay', join(ROOT, 'captures/sample.knct')], false);
     for (const path of ['/sensor/standby', '/sensor/wake', '/sensor/camera']) {
       const result = await json(path, {});
@@ -289,12 +342,50 @@ async function main() {
     check((await cli('output', 'mode', 'camera')).code === 0, 'replay allows output writes');
 
   }
+  // A source that can never be served is the one wake the sensor does not owe it. OBS retries a dead
+  // source hard, so a request answered with a permanent 503 has to be refused without starting the
+  // grabber, or the sensor spins up once per retry forever.
+  await start(['--no-color', '--standby-after', '2']);
+  check(await state('live'), 'colour off still starts the depth camera');
+  await json('/sensor/standby', {});
+  check(await state('standby', 16000), 'a colourless idle sensor stands down');
+  const asleepWakes = (await health()).wakes;
+  const mjpg = await fetch(`${url}/camera.mjpg`, { signal: AbortSignal.timeout(20000) });
+  const refusal = (await mjpg.text()).trim();
+  check(mjpg.status === 503 && refusal.includes('colour is off'), 'the webcam refuses a colour this server will never have',
+    `${mjpg.status} ${refusal}`);
+  await sleep(3000);
+  const afterMjpg = await health();
+  check(afterMjpg.wakes === asleepWakes && afterMjpg.state === 'standby', 'a request that cannot be served wakes nothing',
+    `wakes ${asleepWakes} to ${afterMjpg.wakes}, state ${afterMjpg.state}`);
+  // A key page is attached whether or not there is colour to key, and it keeps that socket through
+  // the refusal it is owed. A socket arriving is a consumer arriving and wakes the sensor; holding
+  // the sensor up forever for a picture that cannot exist is a different thing, and that is this row.
+  const key = await socket();
+  key.ws.send(JSON.stringify({ key: true }));
+  check(await state('live', 6000), 'a socket arriving wakes the standby sensor');
+  check(Boolean(await until(async () => (await health()).consumers.key === 1, 6000)), 'the key page is attached and counted',
+    JSON.stringify((await health()).consumers));
+  check(await state('standby', 16000), 'a key page nothing can serve does not hold the sensor awake');
+  check((await health()).consumers.key === 1, 'and it stays attached through a standby it is not the reason for');
+  if (['wake-for-an-unserveable-source', 'idle-counts-an-unservable-key'].includes(mutation)) return;
   await start(['--grabber', '/missing-braindance-grabber', '--standby-after', '20'], false);
   check(await state('lost'), 'failed spawn enters retry');
   await json('/sensor/standby', {});
   await json('/sensor/wake', {});
   check(await state('lost', 500), 'wake cancels pending retry and attempts immediately');
   if (mutation === 'standby-leaves-the-retry-timer') return;
+  // `lost` is one sample and not a verdict: the server has another attempt queued, so a wait that
+  // reads a single `lost` reports a failed wake on a machine that is still waking.
+  const waiting = spawn(process.execPath, [join(WORK, 'bin/braindance.mjs'), '--url', url, '--json',
+    'sensor', 'wake', '--wait'], { cwd: WORK, stdio: ['ignore', 'pipe', 'pipe'] });
+  let waitingDone = false;
+  waiting.once('exit', () => { waitingDone = true; });
+  await sleep(1400);
+  check(!waitingDone, 'sensor wake --wait polls through a lost sample while a retry is queued');
+  waiting.kill('SIGKILL');
+  await until(async () => waitingDone, 3000);
+  if (mutation === 'wait-gives-up-on-a-single-lost') return;
   check(await state('absent', 22000), 'failed enumeration becomes absent');
   await sleep(31000);
   check((await health()).state === 'absent', 'automatic standby excludes absent');

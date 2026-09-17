@@ -34,6 +34,9 @@ const ARGUMENTS = {
   '--key': { value: false },
   '--no-color': { value: false },
   '--no-low-light': { value: false },
+  // Ignore the ask to stop, so the only thing that ends this child is a force kill. The server's
+  // teardown has to reach that force kill even when the other half of shutdown failed.
+  '--stubborn': { value: false },
   '--pipeline': { value: true, ignored: true },
   '--log': { value: true, ignored: true },
   '--quality': { value: true, ignored: true },
@@ -333,4 +336,7 @@ if (DIE_AFTER > 0 && n >= DIE_AFTER) {
 } else if (!(FRAMES > 0 && n >= FRAMES)) {
   setTimeout(tick, 1000 / FPS);
 }
-process.on('SIGTERM', () => process.exit(0));
+    // This fixture stops when asked unless `--stubborn` says otherwise, which is how `cli-check`
+    // holds a grabber to the force kill at the end of the shutdown grace.
+    if (given('--stubborn')) process.on('SIGTERM', () => {});
+    else process.on('SIGTERM', () => process.exit(0));

@@ -93,7 +93,7 @@ Exit codes: 0 success, 1 server refusal, 2 invalid arguments or no server respon
 | `status` | Sensor health, recording, output and consumers. |
 | `sensor status` | Sensor health. |
 | `sensor standby` | Stop the grabber; refuse while recording or armed. |
-| `sensor wake [--wait]` | Start the grabber; optionally wait up to 60 seconds for live or failure. |
+| `sensor wake [--wait]` | Start the grabber; optionally wait up to 60 seconds for live, for an absent sensor, or for the wait to run out. |
 | `record start`, `record stop`, `record mark` | Control the current take. |
 | `camera color on\|off`, `camera low-light on\|off` | Update the camera; color changes restart a running grabber. |
 | `output` | Read the server's OBS output state. |
@@ -104,9 +104,12 @@ Exit codes: 0 success, 1 server refusal, 2 invalid arguments or no server respon
 | `presets`, `takes`, `jobs` | List the corresponding store. |
 
 Output state lasts for the server process. A source receives mode and size, then the preset,
-then parameter edits. Mirror without an operator uses the source's last view or default pose.
-Parameter names and values are validated by the browser registry; an invalid parameter patch
-is refused as a whole by that browser. The server stores those values without registry validation.
+then parameter edits, then the last operator pose whenever the mode is mirror. Mirror with no pose
+ever relayed uses the source's default pose. Parameter names and values are validated by the
+browser registry; an invalid parameter patch is refused as a whole by that browser. The server
+stores those values without registry validation. A `view` is the one field the server shapes,
+because it hands that pose to every source connecting afterwards: three position numbers, four
+quaternion terms and a finite field of view, and the whole patch goes with it.
 
 ## Viewer and timeline controls
 

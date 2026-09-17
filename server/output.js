@@ -5,6 +5,12 @@ const object = (value) => value !== null && typeof value === 'object' && !Array.
 const refuse = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
 const composition = new Set(FRAMING_NAMES);
 for (const name of ['camera', 'transform', 'spin', 'renderScale']) composition.add(name);
+// Shaped here, not merely counted: this pose goes to every source that connects later, so one
+// accepted garbage pose poisons them all. The registry in `web/main.js` still decides whether a
+// shape means a drawable camera.
+const pose = (v) => object(v) && Array.isArray(v.position) && v.position.length === 3
+  && Array.isArray(v.quaternion) && v.quaternion.length === 4 && Number.isFinite(v.fov)
+  && [...v.position, ...v.quaternion, v.fov].every(Number.isFinite);
 const dimensions = EXPORT_SIZES.flatMap((group) => group.sizes);
 const maxWidth = Math.max(...dimensions.map(([w]) => w));
 const maxHeight = Math.max(...dimensions.map(([, h]) => h));
@@ -18,15 +24,23 @@ export class Output {
     this.state = { mode: 'camera', size: { w: 1920, h: 1080 }, preset: null, params: {} };
     this.tags = {};
     this.presetBody = null;
+    // Where the operator was looking when they last moved. `web/main.js` streams a pose only when it
+    // changes, so a source that connects while the operator is still gets nothing else, and mirror
+    // mode would draw it at the boot pose. Held beside `presetBody` rather than in `state`: this is
+    // what a new page is told, not a field of the output.
+    this.lastView = null;
     this.pending = Promise.resolve();
   }
 
+  // The pose goes with a mirror-mode reader only: the program camera is what `camera` mode draws,
+  // and telling a page a pose it will not use is a claim about the picture that is not true.
   messages() {
     const { mode, size, params } = this.state;
     return [
       { mode, size },
       ...(this.presetBody ? [{ preset: this.presetBody }] : []),
       ...(Object.keys(params).length ? [{ params }] : []),
+      ...(mode === 'mirror' && this.lastView ? [{ view: this.lastView }] : []),
     ];
   }
 
@@ -50,6 +64,7 @@ export class Output {
     for (const key of ['params', 'tags']) {
       if (key in patch && !object(patch[key])) refuse(`${key} must be an object`);
     }
+    if ('view' in patch && !pose(patch.view)) refuse('view must be a position, a quaternion and a fov');
     const next = { ...this.state, params: { ...this.state.params } };
     let presetBody = this.presetBody;
     if ('preset' in patch) {
@@ -72,6 +87,7 @@ export class Output {
       }
     }
     if ('mode' in patch) next.mode = patch.mode;
+    if ('view' in patch) this.lastView = patch.view;
     if ('size' in patch) next.size = { w: patch.size.w, h: patch.size.h };
     if (patch.params) next.params = { ...next.params, ...patch.params };
     this.tags = { ...this.tags, ...patch.tags };

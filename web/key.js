@@ -94,9 +94,9 @@ function writeFaces() {
 }
 
 /**
- * The operator's registry, whole when a source says hello and one name at a time after that. Every
- * value is checked here rather than trusted, because a face holding NaN cuts nothing and a face
- * holding a string cuts everything.
+ * The operator's registry, whole from the server when this page connects and one name at a time
+ * after that. Every value is checked here rather than trusted, because a face holding NaN cuts
+ * nothing and a face holding a string cuts everything.
  */
 function readFaces(values) {
   if (typeof values !== 'object' || !values) return;

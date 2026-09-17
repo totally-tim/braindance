@@ -30,7 +30,10 @@ async function main() {
       do {
         result = await request('/sensor/health');
         if (result.state === 'live') break;
-        if (['lost', 'absent'].includes(result.state)) throw Object.assign(new Error(`sensor is ${result.state}`), { exit: 1 });
+        if (result.state === 'absent') throw Object.assign(new Error('sensor is absent'), { exit: 1 });
+        // `lost` is polled through rather than reported: a wake whose first grabber died has
+        // another attempt already queued, so the one sample the server calls lost says nothing about
+        // whether the wake failed. `absent` is the server's own word for no sensor worth looking at.
         if (Date.now() >= deadline) throw Object.assign(new Error('sensor did not wake within 60 seconds'), { exit: 1 });
         await sleep(200);
       } while (true);

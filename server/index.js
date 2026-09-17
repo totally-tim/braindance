@@ -25,6 +25,7 @@ import { Recorder } from './recorder.js';
 import { JobStore } from './jobs.js';
 import { renderVersion } from './render-version.js';
 import { Webcam } from './webcam.js';
+import { IdleDeadline } from './idle.js';
 import { Output } from './output.js';
 import { KeyStream } from './key-stream.js';
 import { requireMutation, originAllowed, sameOriginBrowser } from './http-guard.js';
@@ -1307,7 +1308,14 @@ const ROUTES = [
   // `live` rather than `write`: it changes nothing, but it hands out what the colour camera sees
   // this second. `embeddable`, and the one route that is, because a media source and a plain
   // `<img>` in somebody's overlay are documented uses.
-  { path: '/camera.mjpg', pattern: /^\/camera\.mjpg$/, live: true, embeddable: true, read: (req, res) => { wakeSensor?.(); webcam.attach(req, res); } },
+  { path: '/camera.mjpg', pattern: /^\/camera\.mjpg$/, live: true, embeddable: true, read: (req, res) => {
+    // Woken only for a request that can be served. A source pointed at a colour camera this server
+    // will never have retries after every idle window, and each retry would start the grabber to
+    // answer a 503. A transient outage is what waking is for, so the first subscriber to a camera
+    // that has not handshaken yet still gets the grabber it is waiting on.
+    if (webcam.unavailable === null || webcam.transient) wakeSensor?.();
+    webcam.attach(req, res);
+  } },
 
   // ---- the sensor
   //
@@ -1956,7 +1964,7 @@ function startLive() {
   let standby = false;
   let spawnTimer = null;
   let standbyPending = null;
-  let idleSince = null;
+  const idleRule = new IdleDeadline({ afterMs: STANDBY_AFTER_MS });
   // Whether a sensor has ever handshaken with this process. Monotonic on purpose: it separates
   // "the link dropped" from "nothing is plugged in here", which are one event at the exit handler.
   let everLive = false;
@@ -2185,18 +2193,17 @@ function startLive() {
       return standbyPending.then(() => wakeSensor());
     }
     standby = false;
-    idleSince = null;
+    idleRule.reset();
     attempt = 0;
     grabberWakes++;
     spawnGrabber();
   };
   if (STANDBY_AFTER_MS > 0) setInterval(() => {
-    const idle = attachedMonitors().length === 0 && keyStream.count === 0 && webcam.count === 0
+    // A key page attached while there is no colour to key is a socket waiting for a reason rather
+    // than a consumer, so it does not hold the sensor up.
+    const idle = attachedMonitors().length === 0 && keyStream.demandCount === 0 && webcam.count === 0
       && !recordingStarts && !recorder.armed && !recorder.take;
-    if (!idle) { idleSince = null; return; }
-    if (sensorState !== 'live' && sensorState !== 'lost') { idleSince = null; return; }
-    idleSince ??= Date.now();
-    if (Date.now() - idleSince >= STANDBY_AFTER_MS) {
+    if (idleRule.ask({ idle, state: sensorState }).expired) {
       standbySensor().catch((err) => console.error(`[server] ${err.message}`));
     }
   }, 5000).unref();
@@ -2217,11 +2224,17 @@ function startLive() {
     if (shuttingDown) return;
     shuttingDown = true;
     clearTimeout(spawnTimer);
-    await Promise.all([
+    // Settled rather than awaited together. A take whose final index fails is still a take the
+    // grabber has to stop for, and a rejection escaping this listener is an unhandled one that can
+    // end the process before the shutdown grace has asked a stubborn grabber to die, which leaves
+    // the sensor claimed by a process nobody owns.
+    const [grabber, take] = await Promise.allSettled([
       stopGrabber({ holdProcessOpen: true, grace: STANDBY_GRACE_MS }),
       recorder.close('server stopped'),
     ]);
-    process.exit(0);
+    const failed = [take, grabber].filter((r) => r.status === 'rejected');
+    for (const f of failed) console.error(`[server] ${f.reason?.message ?? f.reason}`);
+    process.exit(failed.length ? 1 : 0);
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

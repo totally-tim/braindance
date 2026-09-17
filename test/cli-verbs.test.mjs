@@ -36,15 +36,43 @@ test('preset clears look edits while preserving composition and tags', async () 
 });
 test('invalid patch leaves the whole output intact', async () => {
   const output = store();
-  for (const patch of [null, [], { mode: 'x' }, { size: { w: 999999, h: 1 } }, { params: [] }, { preset: 'old', mode: 'mirror' }, { preset: 'missing' }]) {
+  for (const patch of [null, [], { mode: 'x' }, { size: { w: 999999, h: 1 } }, { params: [] }, { preset: 'old', mode: 'mirror' }, { preset: 'missing' }, { view: 'x' }]) {
     const before = structuredClone(output.state);
     await assert.rejects(output.write(patch));
     assert.deepEqual(output.state, before);
   }
 });
-test('concurrent preset and parameter writes retain request order and view is ephemeral', async () => {
+const LOOKED = { position: [1.5, -2.25, 3], quaternion: [0.1, 0.2, 0.3, 0.92], fov: 55 };
+const ELSEWHERE = { position: [0, 1.75, -4], quaternion: [0, 0.7071, 0, 0.7071], fov: 62 };
+test('concurrent preset and parameter writes retain request order, and the pose is not a field of the output', async () => {
   const output = store();
-  await Promise.all([output.write({ preset: 'look' }), output.write({ params: { exposure: 2 }, view: { fov: 80 } })]);
+  await Promise.all([output.write({ preset: 'look' }), output.write({ params: { exposure: 2 }, view: LOOKED })]);
   assert.equal(output.state.params.exposure, 2);
   assert.equal('view' in output.state, false);
+});
+test('the last relayed pose is waiting for a source that connects while the operator is still', async () => {
+  const output = store();
+  // Nothing relayed yet, in either mode: a pose nobody sent is not a pose to hand out.
+  assert.deepEqual(output.messages().map((patch) => Object.keys(patch)), [['mode', 'size']]);
+  await output.write({ mode: 'mirror' });
+  assert.deepEqual(output.messages().map((patch) => Object.keys(patch)), [['mode', 'size']]);
+  await output.write({ view: LOOKED });
+  await output.write({ view: ELSEWHERE });
+  assert.deepEqual(output.messages().at(-1).view, ELSEWHERE);
+  // The program camera is what `camera` mode draws, so the operator's view is not what that source
+  // should be told, and a stale pose must not come back on the next switch.
+  await output.write({ mode: 'camera' });
+  assert.deepEqual(output.messages().map((patch) => Object.keys(patch)), [['mode', 'size']]);
+  await output.write({ mode: 'mirror' });
+  assert.deepEqual(output.messages().at(-1).view, ELSEWHERE);
+});
+test('a malformed pose is refused whole and never reaches the sources that connect after it', async () => {
+  const output = store();
+  await output.write({ mode: 'mirror', view: LOOKED });
+  for (const view of [{}, { fov: 80 }, { position: [1, 2], quaternion: [0, 0, 0, 1], fov: 55 },
+    { position: [1, 2, 3], quaternion: [0, 0, 0], fov: 55 }, { position: ['1', 2, 3], quaternion: [0, 0, 0, 1], fov: 55 },
+    { position: [1, 2, 3], quaternion: [0, 0, 0, 1] }, { position: [1, 2, NaN], quaternion: [0, 0, 0, 1], fov: 55 }]) {
+    await assert.rejects(output.write({ view }), /view must be/);
+  }
+  assert.deepEqual(output.messages().at(-1).view, LOOKED);
 });

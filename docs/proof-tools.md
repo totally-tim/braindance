@@ -745,6 +745,9 @@ and its picture the way sections 1 to 6 hold the webcam's.
   transparency row in section 9 fails.
 - **`operator-reconnect-keeps-old-framing`** — the server omits output restoration on connect,
   so a reconnect or reload keeps the framing it opened with.
+- **`pose-not-held-for-a-late-source`** — the held pose is left out of what a connecting page is
+  told, so a source that arrives while the operator is still draws its boot camera; the row that
+  opens a page after the operator orbited and stopped is the catch.
 - **`pair-serves-stale-depth`** — the depth stamp is one frame behind the colour it is paired with,
   the one-frame silhouette lag at the wire seam, and only section 7's pair-stamp row sees it.
 - **`key-linger-never-fires`** — the last client goes away and the key stream stays wanted
@@ -1202,10 +1205,12 @@ node tools/cli-check.mjs --no-browser
 `cli-check` probes port 8401 and stages under `.cli-check/`. It uses `captures/sample.knct`,
 the fake grabber's HD stream, ffmpeg and a GPU browser. `--no-browser` omits the UI rows.
 The rows walk verbs against routes in both directions, check clean child exit and wake counters,
-exercise auto-standby and MJPEG demand, drive recorder and camera controls, restore output to
-new sockets, refuse incompatible presets, and drive the record and program pages. Replay and
-absent-sensor cases use separate server instances. The final line reports passed and failed
-assertions; a crash is exit 2, never a caught mutation.
+exercise auto-standby and MJPEG demand, hold a consumer that can never be served out of both the
+wake and the idle count, keep `--wait` polling through a retry, stop a take that cannot be finalised
+from abandoning the owned grabber, drive recorder and camera controls,
+restore output to new sockets, refuse incompatible presets, and drive the record and program pages.
+Replay and absent-sensor cases use separate server instances. The final line reports passed and
+failed assertions; a crash is exit 2, never a caught mutation.
 
 Mutation controls (`node tools/cli-check.mjs --mutate NAME`):
 
@@ -1216,6 +1221,11 @@ Mutation controls (`node tools/cli-check.mjs --mutate NAME`):
 - `standby-from-absent`: an editing station enters standby.
 - `mjpeg-refuses-while-waking`: the first subscriber receives 503.
 - `camera-route-bypasses-applyCamera`: an HTTP write misses the broadcast and restart.
+- `wake-for-an-unserveable-source`: a request answered with a permanent 503 starts the grabber.
+- `idle-counts-an-unservable-key`: a key page that can never be fed keeps the sensor running.
+- `wait-gives-up-on-a-single-lost`: `sensor wake --wait` quits on one `lost` sample.
+- `shutdown-abandons-a-stubborn-grabber`: a take that cannot be finalised ends the process before
+  the grace period ends, leaving a grabber that ignored SIGTERM holding the sensor.
 - `output-forgets-on-connect`: a new source receives no saved output.
 - `preset-skips-requires`: a preset naming a missing effect is accepted.
 - `verb-without-a-route`: the command table names an absent route.
