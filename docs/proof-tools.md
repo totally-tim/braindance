@@ -726,6 +726,15 @@ in the difference, which no upscale can invent. The keyed page cuts that same fr
 against a live depth in colour-camera space, and sections 7, 8 and 9 hold the key's wire, its bytes
 and its picture the way sections 1 to 6 hold the webcam's.
 
+Section 10 asks which subscribers a revocation ends. A grabber restart holds them and colour off
+ends them, and the recorder's accounting must lose every ended one, including a client that stopped
+reading and whose socket therefore never closes. That client is asked in standby: on a running
+grabber, colour off is followed by the grabber's exit, which ends every response a second time, and
+the write-after-end error prunes the subscriber whether or not the reap does. The section waits out
+the webcam's whole hold, `HOLD_MS` in `server/webcam.js`, which it reads from the source: 45
+seconds, and no flag shortens it. It removes the fixture's capture after the first respawn, so every
+later spawn fails and only the hold can end the subscriber.
+
 - **`pose-skips-the-registry`** — the camera pose in a socket patch bypasses the registry, so four
   finite numbers are drawn as a rotation.
 - **`patch-params-applied-one-at-a-time`** — the parameter half lands name by name, so a refused
@@ -738,6 +747,16 @@ and its picture the way sections 1 to 6 hold the webcam's.
   message type and its content hash moves.
 - **`refusal-ignores-webcam`** — the refusal loses its webcam clause, so a take starts while a
   full-rate MJPEG pull competes with the depth packets.
+- **`revoke-keeps-subscribers`** — colour off sets its reason and leaves every open response
+  attached and silent. Section 10's ended row and both accounting rows fail; the 503 row stays
+  green, because `attach` refuses on the reason whether or not anybody was ended.
+- **`restart-drops-subscribers`** — every revocation ends its subscribers, the grabber restart
+  included, which makes OBS reconnect on every USB drop. Only section 10's survives-a-restart row
+  fails.
+- **`hold-never-expires`** — a subscriber held through a restart that never comes back stays open
+  for good, and section 10's hold row fails after the hold and its margin.
+- **`reap-skips-ended`** — an ended response stays counted until its socket closes, so only the
+  standby accounting row fails, through the subscriber that stopped reading.
 - **`key-runs-unasked`** — the key encode runs before anybody asks, on the thread the colour
   camera already holds, and section 7's first row asks while no client exists.
 - **`key-never-asks`** — the socket attaches and is acknowledged, but the demand edge never
