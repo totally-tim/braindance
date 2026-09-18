@@ -1067,6 +1067,7 @@ console.log('\n[1] the take carries its own intrinsics');
 
   if (failures > 0) {
     console.log('\n[export] the intrinsics claim failed; everything below renders geometry, so the run stops here');
+    console.log(`[export] ${checks} assertions, ${failures} failed`);
     await main.close();
     process.exit(1);
   }
@@ -2410,6 +2411,6 @@ console.log('\n[9] an edit is refused while a render runs, and the file is the d
 
 check(pageErrors.length === 0, 'no page errors', pageErrors.slice(0, 3).join(' | '));
 
-console.log(`\n[export] ${checks - failures}/${checks} passed, ${failures} failed`);
+console.log(`\n[export] ${checks} assertions, ${failures} failed`);
 if (MUTATE && MUTATIONS[MUTATE]?.fails) console.log(`[export] it should redden: ${MUTATIONS[MUTATE].fails}`);
 process.exit(failures > 0 ? 1 : 0);

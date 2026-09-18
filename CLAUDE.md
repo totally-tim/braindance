@@ -114,14 +114,14 @@ Read the assertion count, never the exit code.
 | `sensor-view-check.mjs` | the intrinsics a take was shot with, against a build assuming them | `--url`, plus port 8131 |
 | `level-check.mjs` | levelling: the room turns and every surface keeps its meaning | port 8377 free |
 | `vcam-check.mjs` | the output to OBS: the colour camera, the keyed webcam and its page, and the take neither may touch | port 8361 free |
-| `guard-check.mjs` | the socket's origin rule, the bind, the rebinding rule | port 8321 free |
+| `guard-check.mjs` | the socket's origin rule, the bind, the rebinding rule | port 8321 free, `captures/sample.knct` |
 | `jobs-check.mjs` | the queue, the pin, a real render, a job this build cannot read | ports 8231 and 8232, a GPU browser, ffprobe |
 | `effect-check.mjs` | installing an effect: revisions, the door, the hotload, park and restore | port 8281 free, a GPU browser |
 | `effect-conformance-check.mjs` | every installed effect draws nothing at all when it is off | `--url`, a GPU browser |
 | `module-check.mjs` | the boundaries in `web/`: the import graph, what crosses it | nothing |
 | `preview-check.mjs` | rendered previews, camera identity, cancellation, and live fallback | `--url`, a take of at least 9s, a GPU browser |
 | `cli-check.mjs` | CLI, standby, demand wake, camera and server-owned output | port 8401 free, a synthetic capture, ffmpeg and a GPU browser |
-| `syntax-check.mjs` | every shipped file parses, the cross-language constants agree, the citations resolve, every tool is named here | nothing |
+| `syntax-check.mjs` | every shipped file parses, the cross-language constants agree, the citations resolve, every tool is named here, every check tool is run by CI or listed as not run | nothing |
 | `hd-encoder-check.mjs` | native pairing under encoder backlog, held colour, key range and RGBX | a C++ compiler and TurboJPEG |
 | `cpp-check.mjs` | both C++ files parse and typecheck, in eight pipeline and colour-decoder configurations, and each ColorDecoder enumerator exists only where its decoder does | a C++ compiler and turbojpeg's headers |
 | `decoder-check.mjs` | each `ColorDecoder` enumerator builds its own processor in the loaded library, and the grabber offers and defaults to what that library carries | a C++ compiler, `vendor/prefix` and the built grabber |
@@ -161,7 +161,8 @@ node tools/build-native.mjs        # builds libfreenect2 into vendor/prefix, the
 node tools/fake-grabber.mjs        # a grabber that needs no sensor, for driving the server
 node tools/make-sample.mjs         # a synthetic capture, so a clone with no Kinect has one to loop
 node tools/make-fixture.js         # loops one short capture into an arbitrarily long one
-node tools/sweep-all.mjs           # every mutation of four tools; needs a server and hours
+node tools/sweep-all.mjs           # every mutation of --tools a,b; with none, the five browser tools, which need a server and hours
+tools/mutation-verdict.mjs         # the one reading of a mutation run: CAUGHT, NOT CAUGHT or DID NOT RUN
 node tools/suite.mjs               # the proof tools in three stages, one verdict line per tool
 node tools/settle-probe.mjs        # does settle()'s drain scale with the take or the ceiling
 node tools/prof-summary.mjs        # reads grabber --profile output, flags contended runs

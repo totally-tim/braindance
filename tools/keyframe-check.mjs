@@ -551,10 +551,13 @@ function bracketOf(sourceSec) {
   return lo;
 }
 
+let assertions = 0;
 let failures = 0;
+const fired = [];
 const check = (ok, label, detail = '') => {
+  assertions++;
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? `   ${detail}` : ''}`);
-  if (!ok) failures++;
+  if (!ok) { failures++; fired.push(label); }
 };
 const show = (d) => `max ${d.max}/255, mean ${d.mean.toFixed(4)}, ${d.pct.toFixed(3)}% of pixels differ`;
 const worst = (xs) => xs.reduce((a, b) => Math.max(a, b), 0);
@@ -785,12 +788,14 @@ if (!(SOURCE_DURATION >= NEEDS_TAKE_SEC)) {
 }
 
 // An evaluator that announced its writes never settles, and takes the page down rather
-// than failing a row. Reported as what it is rather than left to crash the tool.
+// than failing a row. A lost page is the run not finishing, never a failed assertion, which
+// sweep-all would read as a caught mutation.
 const lost = (err) => {
   const line = String(err?.message ?? err).split('\n')[0];
-  console.log(`  FAIL  the page stopped answering, so the run could not finish   ${line}`);
-  console.log('\n[keyframe] FAIL (the page was lost)');
-  process.exit(1);
+  console.log(`\n[keyframe] DID NOT RUN - the page stopped answering: ${line}`);
+  console.log(`[keyframe] ${assertions} assertions ran, ${failures} failed before the crash`);
+  if (fired.length) console.log(`[keyframe] rows that had already fired: ${fired.join('; ')}`);
+  process.exit(2);
 };
 process.on('unhandledRejection', lost);
 process.on('uncaughtException', lost);
@@ -878,7 +883,8 @@ console.log('\n== 0. an evaluated frame schedules no work of its own ==');
   }
   if (failures) {
     console.log('\n  the remaining sections were not run: a build that storms cannot be measured');
-    console.log(`\n[keyframe] FAIL (${failures})`);
+    console.log(`\n[keyframe] ${assertions} assertions, ${failures} failed`);
+    console.log('[keyframe] FAIL');
     await browser.close();
     process.exit(1);
   }
@@ -2567,7 +2573,8 @@ if (SHOTS) {
   await page.screenshot({ path: join(SHOTS, 'keyframe-page.png') });
 }
 
-console.log(`\n[keyframe] ${failures ? `FAIL (${failures})` : 'PASS'}`);
+console.log(`\n[keyframe] ${assertions} assertions, ${failures} failed`);
+console.log(`[keyframe] ${failures ? 'FAIL' : 'PASS'}`);
 await browser.close();
 if (MUTATE && MUTATIONS[MUTATE]?.fails) console.log(`[keyframe] it should redden: ${MUTATIONS[MUTATE].fails}`);
 process.exit(failures ? 1 : 0);
