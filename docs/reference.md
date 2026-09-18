@@ -793,8 +793,8 @@ route with a write method goes through the three checks under
 | `/library/writes` | GET | Write counts per store. |
 | `/library/remote-frame/:id/:n` | GET | One frame of a node-only take, fetched through here. |
 | `/library/download/:id` | POST | Pulls a take from the linked node. |
-| `/library/delete/:id` | POST | Deletes a take. |
-| `/library/reclaim/:id` | POST | Deletes the local copy of a take the node still holds. |
+| `/library/delete/:id` | POST | Deletes a take and its marks. Refused while the node holds a copy or cannot be asked. |
+| `/library/reclaim/:id` | POST | Merges the node's marks into the local copy, then deletes the node's copy. |
 | `/library/sync-marks/:id` | POST | Merges the node's marks for this take into its log here. |
 | `/library/rename/:id` | POST | Renames a take. |
 | `/library/reveal/:id` | POST | Starts the file manager on the take. |

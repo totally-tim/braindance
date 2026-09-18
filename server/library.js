@@ -3,8 +3,8 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createReadStream, createWriteStream, statSync } from 'node:fs';
-import { readdir, readFile, writeFile, appendFile, stat, unlink, rename, link, mkdir, statfs } from 'node:fs/promises';
+import { createWriteStream, statSync } from 'node:fs';
+import { readdir, readFile, writeFile, appendFile, stat, unlink, rename, link, mkdir, open, statfs } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -226,12 +226,7 @@ async function describeTake(dir, file, recording) {
 }
 
 export async function scanTakes(dir, owns = () => false) {
-  let files;
-  try {
-    files = (await readdir(dir)).filter(isKnct).sort();
-  } catch {
-    return { takes: [], unreadable: [] };
-  }
+  const files = (await directoryNames(dir, { what: 'captures directory' })).filter(isKnct);
   const takes = [];
   const unreadable = [];
   for (const file of files) {
@@ -600,13 +595,23 @@ export const takeIdentity = (path) => {
 /** Whether two identities are one file. Anything carrying `dev` and `ino` compares, a `Stats` too. */
 export const sameTake = (a, b) => a !== null && b !== null && a.dev === b.dev && a.ino === b.ino;
 
-/** The content hash of a file, streamed. Nothing here ever holds a capture whole. */
-export async function hashFile(path) {
+/** The content hash of an open file, streamed from its first byte. The caller closes the handle. */
+async function hashOpenFile(handle) {
   const hash = createHash('sha256');
-  for await (const chunk of createReadStream(path, { highWaterMark: 4 * 1024 * 1024 })) {
+  for await (const chunk of handle.createReadStream({ start: 0, highWaterMark: 4 * 1024 * 1024, autoClose: false })) {
     hash.update(chunk);
   }
   return `sha256:${hash.digest('hex')}`;
+}
+
+/** The content hash of a file, streamed. Nothing here ever holds a capture whole. */
+export async function hashFile(path) {
+  const handle = await open(path, 'r');
+  try {
+    return await hashOpenFile(handle);
+  } finally {
+    await handle.close();
+  }
 }
 
 /**
@@ -616,7 +621,17 @@ export async function hashFile(path) {
 export async function removeTake(dir, id, { hash, verifiedElsewhere = null }) {
   if (!VALID_ID.test(id)) throw new Error(`unusable take id ${id}`);
   const path = join(dir, `${id}.knct`);
-  const actual = await hashFile(path);
+  // Hashed through one descriptor and unlinked by name, so the name is asked again before the
+  // unlink: a rename landing during the hash can free this id and move another take into it.
+  const handle = await open(path, 'r');
+  let hashed;
+  let actual;
+  try {
+    hashed = await handle.stat();
+    actual = await hashOpenFile(handle);
+  } finally {
+    await handle.close();
+  }
   if (actual !== hash) {
     throw new Error(
       `${id} is ${actual} here, not the ${hash} this removal named: `
@@ -630,7 +645,20 @@ export async function removeTake(dir, id, { hash, verifiedElsewhere = null }) {
       + 'would be deleting the last copy of both',
     );
   }
+  if (!sameTake(hashed, takeIdentity(path))) {
+    throw new Error(
+      `${id} was renamed or replaced while it was being hashed: the file under that name now is not `
+      + 'the one whose bytes were checked, and nothing was removed',
+    );
+  }
+  // `unlink` takes a name, so a rename can still land between the check above and this line. That
+  // remainder is a few microtasks, where the window it replaces was a streaming sha256 of the take.
   await unlink(path);
+  // The marks go with the take: a log left under a freed name attaches to the next take given it.
+  // A reclaim has already merged this log into the copy it keeps, in `serveRemoval`.
+  await unlink(marksPathFor(path)).catch((err) => {
+    if (err.code !== 'ENOENT') console.warn(`[library] ${id} was removed but its marks log was not: ${err.message}`);
+  });
   await unlink(indexPathFor(path)).catch(() => {});
   forgetCapture(path);
   return { removed: `${id}.knct`, hash: actual };
@@ -759,18 +787,25 @@ export async function revealTake(dir, id, { program = null } = {}) {
 
 
 /**
- * The JSON documents in a directory, and the one place that decides a missing directory may read as
- * an empty one. Only `ENOENT` is an absence: `EACCES` turned into `[]` answers 200 with no reason.
+ * The names in a directory, sorted, and the one place that decides a missing directory may read as
+ * an empty one. Only `ENOENT` is an absence. `EACCES`, `EIO`, `ENOTDIR` or `EMFILE` turned into `[]`
+ * answers 200 with no reason, and a captures directory answering that way tells the machine asking
+ * it that the node holds no second copy, which is the answer delete's refusal rests on.
  */
-export async function listJsonNames(dir, { required = false, what = 'directory' } = {}) {
+export async function directoryNames(dir, { required = false, what = 'directory' } = {}) {
   try {
-    return (await readdir(dir)).filter((f) => f.endsWith('.json')).sort();
+    return (await readdir(dir)).sort();
   } catch (err) {
     if (required || err?.code !== 'ENOENT') {
       throw new Error(`the ${what} ${dir} cannot be read: ${err.message}`);
     }
     return [];
   }
+}
+
+/** The JSON documents in a directory, under the rule `directoryNames` keeps. */
+export async function listJsonNames(dir, { required = false, what = 'directory' } = {}) {
+  return (await directoryNames(dir, { required, what })).filter((f) => f.endsWith('.json'));
 }
 
 /** The revision of a name nothing is filed under: what a write says when it expects to create. */

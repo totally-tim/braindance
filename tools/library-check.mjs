@@ -725,10 +725,52 @@ const MUTATIONS = {
     '  /* mutation: the captures directory is assumed */',
   ]] },
   // Delete goes back to trusting the sidecar where reclaim re-hashes, so the irreversible
-  // action carries the weaker check.
+  // action carries the weaker check. Anchored on the descriptor's hash since `removeTake` stopped
+  // hashing by name.
   'delete-trusts-sidecar': { file: 'server/library.js', edits: [[
-    '  const actual = await hashFile(path);', '  const actual = (await cachedIndex(path)).hash;',
+    '    actual = await hashOpenFile(handle);', '    actual = (await cachedIndex(path)).hash;',
   ]] },
+  // Removal goes back to leaving the marks log under the freed name, where the next take given that
+  // name finds it.
+  'delete-leaves-the-marks': { file: 'server/library.js', edits: [[
+    '  await unlink(marksPathFor(path)).catch((err) => {\n'
+    + "    if (err.code !== 'ENOENT') console.warn(`[library] ${id} was removed but its marks log was not: ${err.message}`);\n"
+    + '  });\n',
+    '',
+  ]],
+    fails: 'the node-side marks row of the reclaim, the last-copy marks row and the reused-name row. '
+      + 'The merge and the two reclaim refusals stay green',
+  },
+  // A reclaim goes back to removing the node's copy without bringing its marks here first.
+  'reclaim-drops-node-marks': { file: 'server/index.js', edits: [[
+    '    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? []);',
+    '    const marksMerged = 0;',
+  ]],
+    fails: 'the row saying a reclaim brings the node\'s marks onto the kept copy, and no other',
+  },
+  // A reclaim treats a node marks log it could not read as an empty one and goes on to delete.
+  'reclaim-ignores-an-unread-log': { file: 'server/index.js', edits: [[
+    '      theirLog = await node.fetchJson(`/capture/${encodeURIComponent(theirs.id)}/marks/log`, { signal: left });',
+    '      theirLog = await node.fetchJson(`/capture/${encodeURIComponent(theirs.id)}/marks/log`, { signal: left })\n'
+    + '        .catch(() => ({ log: [] }));',
+  ]],
+    fails: 'the row saying a reclaim whose node marks cannot be read is refused, and no other',
+  },
+  // A reclaim goes back to appending the node's marks by name after an await a rename can land in.
+  'reclaim-merges-under-a-race': { file: 'server/index.js', edits: [[
+    '    if (!sameTake(kept, takeIdentity(keptPath))) {', '    if (false) {',
+  ]],
+    fails: 'both reclaim-race rows: the refusal, and no marks log at the freed name',
+  },
+  // Delete goes back to unlinking whatever the name holds once the hash is done, so a rename during
+  // the hash that moves another take into the name loses that take.
+  'delete-unlinks-under-a-race': { file: 'server/library.js', edits: [[
+    '  if (!sameTake(hashed, takeIdentity(path))) {', '  if (false) {',
+  ]],
+    fails: 'the delete-race refusal and the row saying the take renamed into the name is still on '
+      + 'disk. The row saying the named take survives under its new name stays green, and so does '
+      + 'every other delete row',
+  },
   // The decimation path stops checking that a frame's two declared lengths describe the frame,
   // so an overstated colour length returns the uninitialised tail of an `allocUnsafe` buffer.
   'decimate-skips-length-check': { file: 'server/capture.js', edits: [[
@@ -748,6 +790,26 @@ const MUTATIONS = {
   'list-swallows-unreadable': { file: 'server/library.js', edits: [[
     "    if (required || err?.code !== 'ENOENT') {", '    if (required) {',
   ]] },
+  // The take scan goes back to its own catch, so a captures directory that cannot be read answers
+  // an empty library, and the machine asking it reads a node holding nothing.
+  'scan-swallows-unreadable': { file: 'server/library.js', edits: [[
+    "  const files = (await directoryNames(dir, { what: 'captures directory' })).filter(isKnct);",
+    '  let files;\n  try {\n    files = (await readdir(dir)).filter(isKnct).sort();\n'
+    + '  } catch {\n    return { takes: [], unreadable: [] };\n  }',
+  ]],
+    fails: 'the /library/takes error row, the gallery sentence row, the reclaim row and the delete '
+      + 'row of the unreadable-captures section: the node lies in a 200. Its ENOENT and empty-directory '
+      + 'rows stay green',
+  },
+  // The node's answer goes back to being coalesced, so a node that could not be asked reads as a
+  // node holding no copy and delete's second-copy refusal never fires.
+  'delete-trusts-a-silent-node': { file: 'server/library.js', edits: [[
+    '  if (there === null) throw new Error(`${node.name} could not be asked which takes it holds: ${node.lastError}`);',
+    '  if (there === null) return null;',
+  ]],
+    fails: 'the reclaim row and the delete row of the unreadable-captures section: the node reports '
+      + 'honestly and the consumer ignores it. The /library/takes error row and the gallery row stay green',
+  },
   // The editor goes back to swallowing a library that will not load, which is the empty picker
   // an operator gets told nothing about.
   'open-take-swallows-library': { file: 'web/main.js', edits: [[
@@ -1365,7 +1427,9 @@ async function reservePorts() {
   process.exit(2);
 }
 
-async function startServer(root, args, port) {
+// `ready` is the route polled until the server answers. `/library/takes` unless the fixture's
+// captures directory cannot be listed on purpose, which that route reports as an error.
+async function startServer(root, args, port, { ready = '/library/takes' } = {}) {
   // A port outside the declared span would not have been checked by `reservePorts`, so it is
   // the one thing that could still attach to a stranger.
   if (port !== NODE_PORT && (port < MAC_PORT || port > MAC_PORT + PORT_SPAN)) {
@@ -1394,7 +1458,7 @@ async function startServer(root, args, port) {
         + `so anything answering there is not ours:\n${log.join('')}`);
     }
     try {
-      const res = await fetch(`http://localhost:${port}/library/takes`);
+      const res = await fetch(`http://localhost:${port}${ready}`);
       if (res.ok) return `http://localhost:${port}`;
     } catch { /* not listening yet */ }
   }
@@ -2402,7 +2466,7 @@ async function runChecks() {
       const clashUrl = await startServer(root, [
         '--captures', clash, '--name', 'shooting', '--record', '--no-color',
         '--grabber', `${join(REPO, 'tools/fake-grabber.mjs')} --source ${SAMPLE} --fps 40 --burst 4`,
-      ], MAC_PORT + 6);
+      ], MAC_PORT + 6, { ready: '/record/state' });
       for (let i = 0; i < 40; i++) {
         await new Promise((done) => { setTimeout(done, 250); });
         state = await getJson(`${clashUrl}/record/state`);
@@ -4382,6 +4446,263 @@ async function runChecks() {
       'delete removes the last copy, and it is the file that goes');
     check(!(await getJson(`${macUrl}/library/all`)).takes.some((t) => t.id === 'one-frame-take'),
       'and the library no longer lists it');
+  }
+
+  console.log('\n[library] a captures directory that cannot be read is reported, and delete does not act on the silence');
+  {
+    const silentDir = join(WORK, 'silent-node-captures');
+    const keptDir = join(WORK, 'silent-mac-captures');
+    for (const d of [silentDir, keptDir]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    writeTake(silentDir, 'on-both-machines', { frames: 6 });
+    cpSync(join(silentDir, 'on-both-machines.knct'), join(keptDir, 'on-both-machines.knct'));
+    // Offsets the rename and preset sections have already released.
+    const silentUrl = await startServer(root, ['--captures', silentDir, '--name', 'pi-silent',
+      '--presets', join(WORK, 'silent-presets'), '--projects', join(WORK, 'silent-projects')], MAC_PORT + 14);
+    const keptUrl = await startServer(root, ['--captures', keptDir, '--name', 'mac-kept',
+      '--node', silentUrl, '--node-name', 'pi-silent',
+      '--presets', join(WORK, 'kept-presets'), '--projects', join(WORK, 'kept-projects')], MAC_PORT + 15);
+    const shared = (await getJson(`${keptUrl}/library/all`)).takes.find((t) => t.id === 'on-both-machines');
+    const armed = await post(`${keptUrl}/library/delete/on-both-machines`, { hash: shared?.hash, confirm: true });
+    check(shared?.state === 'both' && /exists on pi-silent as well/.test(armed.error ?? ''),
+      'a take on both machines, whose delete the node\'s answer refuses, which is the refusal the rows below need armed',
+      `${shared?.state}: ${(armed.error ?? 'ACCEPTED').slice(0, 60)}`);
+
+    // Replaced under the running server, because `startServer` waits for `/library/takes` to answer
+    // 200. A regular file gives ENOTDIR from `readdir` on every platform and for root, where a chmod
+    // does neither.
+    rmSync(silentDir, { recursive: true, force: true });
+    writeFileSync(silentDir, 'a file where the captures directory was\n');
+    const listing = await fetch(`${silentUrl}/library/takes`);
+    const listingBody = await listing.json().catch(() => null);
+    check(!listing.ok && /captures directory .* cannot be read: ENOTDIR/.test(listingBody?.error ?? '')
+      && listingBody?.takes === undefined,
+      '/library/takes on a node whose captures directory cannot be read answers an error rather than an empty list',
+      `${listing.status} ${JSON.stringify(listingBody).slice(0, 110)}`);
+    {
+      const { page: shelf, errors: shelfErrors } = await openPage(browser, libraryPage(silentUrl));
+      const said = await shelf.waitForFunction(
+        '(() => { const t = document.getElementById("note")?.textContent ?? ""; return /cannot be read/.test(t) ? t : null; })()',
+        null, { timeout: 20000 },
+      ).then((h) => h.jsonValue(), () => null);
+      const drawn = await shelf.evaluate('document.getElementById("note")?.textContent ?? ""');
+      check(said !== null && /ENOTDIR/.test(said),
+        'and the gallery on that node shows the server\'s own sentence rather than an empty shelf',
+        JSON.stringify((said ?? drawn).slice(0, 110)));
+      const thrown = shelfErrors.filter((e) => !/Failed to load resource/.test(e));
+      check(thrown.length === 0, 'and saying so raises no page error', thrown.slice(0, 2).join(' | ') || 'none beyond the 500');
+      await shelf.close();
+    }
+    // Reclaim first: it removes nothing here, so a mutated build that lets the delete below
+    // through cannot take this row's fixture with it.
+    const reclaim = await post(`${keptUrl}/library/reclaim/on-both-machines`, {});
+    check(/pi-silent could not be asked/.test(reclaim.error ?? ''),
+      'a reclaim against that node says the node could not be asked, rather than that the take is not on it',
+      (reclaim.error ?? JSON.stringify(reclaim)).slice(0, 110));
+    const refused = await post(`${keptUrl}/library/delete/on-both-machines`, { hash: shared?.hash, confirm: true });
+    check(/pi-silent could not be asked/.test(refused.error ?? '') && existsSync(join(keptDir, 'on-both-machines.knct')),
+      'a delete of a take on both machines is refused when the node cannot say what it holds, and this machine\'s copy is still on disk',
+      (refused.error ?? `REMOVED ${JSON.stringify(refused)}`).slice(0, 110));
+
+    // ENOENT is still an absence, which is the branch the shared rule keeps.
+    rmSync(silentDir, { force: true });
+    const absent = await fetch(`${silentUrl}/library/takes`);
+    const absentBody = await absent.json().catch(() => null);
+    check(absent.ok && Array.isArray(absentBody?.takes) && absentBody.takes.length === 0,
+      'while a captures directory removed from under the server still answers 200 with no takes',
+      `${absent.status} ${JSON.stringify(absentBody?.takes ?? absentBody).slice(0, 60)}`);
+    mkdirSync(silentDir, { recursive: true });
+    const empty = await getJson(`${silentUrl}/library/takes`).catch(() => null);
+    check(Array.isArray(empty?.takes) && empty.takes.length === 0,
+      'and an empty one answers an empty library', JSON.stringify(empty?.takes ?? empty).slice(0, 60));
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 14 || sv.port === MAC_PORT + 15)) {
+      p.child.kill('SIGKILL');
+    }
+  }
+
+  console.log('\n[library] delete unlinks the file it hashed, not whatever holds the name once the hash is done');
+  {
+    // The staged module rather than a route, so a mutated run tests the mutated code and the race
+    // is two renames this process lands, not a request's timing across a socket.
+    const lib = await import(pathToFileURL(join(root, 'server/library.js')).href);
+    const { fstatSync } = await import('node:fs');
+    const raceDir = join(WORK, 'delete-race');
+    rmSync(raceDir, { recursive: true, force: true });
+    mkdirSync(raceDir, { recursive: true });
+    // Sized by frames so the hash outlasts two renames, about 200MB of the sample.
+    writeTake(raceDir, 'asked-to-go', { frames: 400 });
+    writeTake(raceDir, 'never-named', { frames: 5 });
+    // The listing the delete is pressed from, which also builds both indexes: `renameTake` reads
+    // `cachedIndex`, and a cold one is a full parse that would outlast the hash it races.
+    const listed = await lib.scanTakes(raceDir);
+    const asked = listed.takes.find((t) => t.id === 'asked-to-go');
+    const stranger = listed.takes.find((t) => t.id === 'never-named');
+    const inode = statSync(join(raceDir, 'asked-to-go.knct'));
+    // Whether this process holds the take open, read off its own descriptor table.
+    const holding = () => readdirSync('/dev/fd').some((n) => {
+      try {
+        const st = fstatSync(Number(n));
+        return st.dev === inode.dev && st.ino === inode.ino;
+      } catch {
+        return false;
+      }
+    });
+    const heldBefore = holding();
+    let settled = false;
+    const pending = lib.removeTake(raceDir, 'asked-to-go', { hash: asked.hash })
+      .then((done) => ({ done }), (err) => ({ error: err.message }))
+      .finally(() => { settled = true; });
+    for (let i = 0; i < 2000 && !holding() && !settled; i++) await new Promise((r) => { setImmediate(r); });
+    // The descriptor is what says the hash has begun; before it, the removal would hash the take
+    // renamed in and be refused by the hash rather than by the question this section asks.
+    const opened = !heldBefore && holding();
+    // A removal that settles first has already unlinked the take, and the rename then throws.
+    let renameRefused = null;
+    try {
+      await lib.renameTake(raceDir, 'asked-to-go', 'moved-away', { hash: asked.hash });
+      await lib.renameTake(raceDir, 'never-named', 'asked-to-go', { hash: stranger.hash });
+    } catch (err) {
+      renameRefused = err.message;
+    }
+    const inside = opened && renameRefused === null && !settled;
+    const outcome = await pending;
+    const hashOf = async (id) => (existsSync(join(raceDir, `${id}.knct`))
+      ? lib.hashFile(join(raceDir, `${id}.knct`)) : null);
+    if (!inside) {
+      skipped.push('the delete-race refusal, whose renames did not land inside the hash');
+      console.log(`  ...   the renames did not land inside the hash (${heldBefore ? 'the take was already held open'
+        : !opened ? 'the removal never opened the take' : renameRefused ?? 'the removal settled first'}), so the race was not entered`);
+    } else {
+      check(/renamed or replaced while it was being hashed/.test(outcome.error ?? ''),
+        'a delete is refused when its take is renamed away, and another renamed into its name, while it hashes',
+        (outcome.error ?? `REMOVED ${JSON.stringify(outcome.done)}`).slice(0, 100));
+      check(await hashOf('asked-to-go') === stranger.hash,
+        'and the take renamed into that name is still on disk, which is the footage an unlink by name takes',
+        `asked-to-go.knct now hashes ${String(await hashOf('asked-to-go')).slice(7, 19)}, the stranger ${stranger.hash.slice(7, 19)}`);
+      check(await hashOf('moved-away') === asked.hash,
+        'while the take the delete named survives under its new name, because nothing was removed',
+        String(await hashOf('moved-away')).slice(7, 19));
+    }
+    rmSync(raceDir, { recursive: true, force: true });
+  }
+
+  console.log('\n[library] a take\'s marks go with it, and a reclaim brings the node\'s marks here first');
+  {
+    const marksNodeDir = join(WORK, 'marks-node-captures');
+    const marksMacDir = join(WORK, 'marks-mac-captures');
+    for (const d of [marksNodeDir, marksMacDir]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    // Distinct frame counts, so each pair is its own hash and one reclaim cannot reach another.
+    for (const [id, frames] of [['kept-here', 6], ['fails-to-sync', 7], ['moves-mid-reclaim', 8]]) {
+      writeTake(marksNodeDir, id, { frames });
+      cpSync(join(marksNodeDir, `${id}.knct`), join(marksMacDir, `${id}.knct`));
+    }
+    writeTake(marksMacDir, 'last-copy', { frames: 9 });
+    writeFileSync(join(marksMacDir, 'last-copy.marks.jsonl'),
+      markLine({ id: 'lc1', sourceMs: 60, label: 'on the last copy', at: 1000 }));
+    const marksNodeUrl = await startServer(root, ['--captures', marksNodeDir, '--name', 'pi-marks',
+      '--presets', join(WORK, 'marks-node-presets'), '--projects', join(WORK, 'marks-node-projects')], MAC_PORT + 12);
+    // The link between the two machines, passed through except where a row needs it to fail or to
+    // hold. Inside the reserved span and closed before the section that needs +16 unanswered.
+    const reached = [];
+    let linkMode = 'pass';
+    let releaseHeld = null;
+    const link = await new Promise((done) => {
+      const srv = createServer(async (req, res) => {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        reached.push(`${req.method} ${req.url}`);
+        if (req.url.endsWith('/marks/log') && linkMode === 'fail') {
+          res.writeHead(500, { 'content-type': 'application/json' })
+            .end('{"error":"the card holding the marks is not answering"}');
+          return;
+        }
+        if (req.url.endsWith('/marks/log') && linkMode === 'hold') await new Promise((r) => { releaseHeld = r; });
+        try {
+          const up = await fetch(`${marksNodeUrl}${req.url}`, {
+            method: req.method,
+            headers: { 'content-type': req.headers['content-type'] ?? 'application/json' },
+            body: req.method === 'GET' || req.method === 'HEAD' ? undefined : Buffer.concat(chunks),
+          });
+          res.writeHead(up.status, { 'content-type': up.headers.get('content-type') ?? 'application/json' })
+            .end(Buffer.from(await up.arrayBuffer()));
+        } catch {
+          res.writeHead(502).end();
+        }
+      });
+      srv.listen(MAC_PORT + 16, '127.0.0.1', () => done(srv));
+    });
+    const marksMacUrl = await startServer(root, ['--captures', marksMacDir, '--name', 'mac-marks',
+      '--node', `http://127.0.0.1:${MAC_PORT + 16}`, '--node-name', 'pi-marks',
+      '--presets', join(WORK, 'marks-mac-presets'), '--projects', join(WORK, 'marks-mac-projects')], MAC_PORT + 13);
+    const macMarks = async (id) => ((await getJson(`${marksMacUrl}/capture/${id}/marks`)).marks ?? [])
+      .map((m) => m.label);
+    const askedToDelete = (id) => reached.some((r) => r === `POST /library/delete/${id}`);
+    for (const id of ['kept-here', 'fails-to-sync', 'moves-mid-reclaim']) {
+      await post(`${marksNodeUrl}/capture/${id}/marks`,
+        { marks: [{ id: `on-node-${id}`, sourceMs: 90, label: `pressed on the node for ${id}`, at: 7000 }] });
+    }
+    const pairs = (await getJson(`${marksMacUrl}/library/all`)).takes.filter((t) => t.state === 'both');
+    check(pairs.length === 3 && (await macMarks('kept-here')).length === 0,
+      'three takes on both machines, each with a mark pressed only on the node',
+      `${pairs.length} on both, ${(await macMarks('kept-here')).length} marks here on kept-here`);
+
+    const kept = await post(`${marksMacUrl}/library/reclaim/kept-here`, {});
+    check(kept.reclaimed && (await macMarks('kept-here')).includes('pressed on the node for kept-here'),
+      'a reclaim brings the node\'s marks onto the copy it keeps before it asks the node to remove its own',
+      kept.error ? kept.error.slice(0, 90) : `${kept.marksMerged} merged, here: ${JSON.stringify(await macMarks('kept-here'))}`);
+    check(!existsSync(join(marksNodeDir, 'kept-here.knct')) && !existsSync(join(marksNodeDir, 'kept-here.marks.jsonl')),
+      'and the node\'s marks log went with its copy, so nothing is left there under a name a later take can be given',
+      readdirSync(marksNodeDir).sort().join(' '));
+
+    linkMode = 'fail';
+    const unread = await post(`${marksMacUrl}/library/reclaim/fails-to-sync`, {});
+    check(/marks on pi-marks's copy could not be read/.test(unread.error ?? '') && !askedToDelete('fails-to-sync')
+      && existsSync(join(marksNodeDir, 'fails-to-sync.knct')),
+      'a reclaim whose node marks cannot be read is refused, and the node is never asked to remove its copy',
+      `${(unread.error ?? JSON.stringify(unread)).slice(0, 80)}; delete asked: ${askedToDelete('fails-to-sync')}`);
+
+    linkMode = 'hold';
+    const racing = post(`${marksMacUrl}/library/reclaim/moves-mid-reclaim`, {});
+    for (let i = 0; i < 200 && releaseHeld === null; i++) await new Promise((r) => { setTimeout(r, 25); });
+    const holding = releaseHeld !== null;
+    const movesHash = pairs.find((t) => t.id === 'moves-mid-reclaim')?.hash;
+    const moved = holding ? await post(`${marksMacUrl}/library/rename/moves-mid-reclaim`,
+      { hash: movesHash, to: 'moved-mid-reclaim' }) : { error: 'the link never held the marks log' };
+    linkMode = 'pass';
+    releaseHeld?.();
+    const raced = await racing;
+    if (!holding || moved.id !== 'moved-mid-reclaim') {
+      skipped.push('the reclaim-race refusal, whose rename did not land while the node marks were held');
+      console.log(`  ...   the rename did not land inside the reclaim (${(moved.error ?? 'no hold').slice(0, 60)})`);
+    } else {
+      check(/renamed or replaced here while the reclaim ran/.test(raced.error ?? '') && !askedToDelete('moves-mid-reclaim'),
+        'a reclaim whose kept copy is renamed while the node\'s marks are on the way is refused, and the node is not asked to delete',
+        `${(raced.error ?? JSON.stringify(raced)).slice(0, 80)}; delete asked: ${askedToDelete('moves-mid-reclaim')}`);
+      check(!existsSync(join(marksMacDir, 'moves-mid-reclaim.marks.jsonl')),
+        'and no marks log was made at the name the rename freed, where nothing would read it',
+        readdirSync(marksMacDir).sort().join(' '));
+    }
+
+    const lastCopy = (await getJson(`${marksMacUrl}/library/takes`)).takes.find((t) => t.id === 'last-copy');
+    const gone = await post(`${marksMacUrl}/library/delete/last-copy`, { hash: lastCopy?.hash, confirm: true });
+    check(gone.removed === 'last-copy.knct' && !existsSync(join(marksMacDir, 'last-copy.marks.jsonl')),
+      'a delete of the last copy removes its marks log with it',
+      gone.error ? gone.error.slice(0, 90) : readdirSync(marksMacDir).sort().join(' '));
+    writeTake(marksMacDir, 'last-copy', { frames: 3 });
+    const reborn = (await getJson(`${marksMacUrl}/library/takes`)).takes.find((t) => t.id === 'last-copy');
+    check(reborn !== undefined && reborn.marks.length === 0,
+      'so a take given that name later starts with no marks, rather than with the deleted take\'s',
+      JSON.stringify(reborn?.marks?.map((m) => m.label) ?? null));
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 12 || sv.port === MAC_PORT + 13)) {
+      p.child.kill('SIGKILL');
+    }
+    link.closeAllConnections();
+    await new Promise((done) => { link.close(done); });
   }
 
   console.log('\n[library] every route that changes something requires its method, its type and its origin');
