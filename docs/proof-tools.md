@@ -12,12 +12,13 @@ or `FAIL` alone, `index-check` and `registry-check` print `PASS` or `FAIL (n)` w
 count only, and `syntax-check` counts files, not assertions. A run with zero failed assertions and
 a non-zero exit is a crash to investigate, not a catch to record.
 
-`tools/mutation-verdict.mjs` is the one reading of a mutation run, and `sweep-all` grades every
-run with it. A run is **CAUGHT** when the tool printed its count line, exited 0 or 1, and at least one
-assertion failed; **NOT CAUGHT** when it finished with none failed, or printed `NOT CAUGHT` because
-a required row stayed green; and **DID NOT RUN** otherwise: no count line, exit 2, or killed. A
-`FAIL` row printed on the way to a crash is not a catch, so a tool that crashes after its rows
-fired exits 2 or dies without its count line, never with the crash counted as an assertion.
+`tools/mutation-verdict.mjs` is the one reading of a mutation run: `sweep-all` grades every run
+with it, and CI runs its mutations through `sweep-all`. A run is **CAUGHT** when the tool printed
+its count line, exited 0 or 1, and at least one assertion failed; **NOT CAUGHT** when it finished
+with none failed, or printed `NOT CAUGHT` because a required row stayed green; and **DID NOT RUN**
+otherwise: no count line, exit 2, or killed. A `FAIL` row printed on the way to a crash is not a
+catch, so a tool that crashes after its rows fired exits 2 or dies without its count line, never
+with the crash counted as an assertion.
 
 The tools disagree about what a caught mutation exits. Four exit **0** on a catch and 1 on a miss
 — `registry-check`, `vendor-check`, `registration-check` and `release-gate-check` — so anything

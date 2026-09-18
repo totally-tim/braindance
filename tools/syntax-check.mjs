@@ -273,7 +273,10 @@ if (!existsSync(DOC)) {
   } else {
     const lines = workflow.split('\n');
     const code = lines.filter((line) => !/^\s*#/.test(line)).join('\n');
-    const run = new Set([...code.matchAll(/tools\/([\w-]+)-check\.mjs/g)].map((m) => m[1]));
+    const run = new Set([
+      ...[...code.matchAll(/tools\/([\w-]+)-check\.mjs/g)].map((m) => m[1]),
+      ...[...code.matchAll(/sweep-all\.mjs --tools ([\w,-]+)/g)].flatMap((m) => m[1].split(',')),
+    ]);
     const notRun = lines.flatMap((line) => /^# not-run:(.*)$/.exec(line)?.[1].trim().split(/\s+/).filter(Boolean) ?? []);
     const neither = tools.filter((t) => !run.has(t) && !notRun.includes(t));
     const both = tools.filter((t) => run.has(t) && notRun.includes(t));

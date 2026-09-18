@@ -27,38 +27,8 @@ jobs:
       # Exit 2 is its full answer on a runner: the source proven, and no built prefix to hold
       # the library to. A failed assertion or a crash exits 1.
       - run: node tools/vendor-check.mjs || [ $? -eq 2 ]
-      - name: and both of them reject every tree their own tables call broken
-        run: |
-          # Actions runs this under `bash -e`, and a caught mutation exits non-zero.
-          set +e -uo pipefail
-          bad=0
-          for tool in syntax module; do
-            names=$(node "tools/${tool}-check.mjs" --mutate 2>&1 \
-              | sed -n 's/.*this tool knows //p' | tr ',' '\n' | sed 's/[[:space:]]//g' | grep .)
-            count=$(printf '%s\n' "$names" | grep -c .)
-            if [ "$count" -eq 0 ]; then
-              echo "DID NOT RUN: ${tool}-check named no mutations, so this step asserted nothing"
-              exit 1
-            fi
-            echo "${tool}-check declares ${count} mutations"
-            for m in $names; do
-              out=$(node "tools/${tool}-check.mjs" --mutate "$m" 2>&1); code=$?
-              n=$(printf '%s\n' "$out" | sed -n 's/.*, \([0-9][0-9]*\) failed$/\1/p' | tail -1)
-              if [ "$code" -eq 2 ]; then
-                echo "DID NOT RUN: ${tool}-check --mutate ${m} refused the run - $(printf '%s' "$out" | head -1)"
-                bad=1
-              elif [ -z "$n" ]; then
-                echo "DID NOT RUN: ${tool}-check --mutate ${m} printed no assertion count, so it fell over before asserting"
-                bad=1
-              elif [ "$n" -eq 0 ]; then
-                echo "NOT CAUGHT: ${tool}-check --mutate ${m} left every assertion green"
-                bad=1
-              else
-                echo "  caught: ${tool}-check --mutate ${m} (${n} failed)"
-              fi
-            done
-          done
-          exit "$bad"
+      # Every mutation both tables declare, one per core: both apply theirs in memory.
+      - run: node tools/sweep-all.mjs --tools syntax,module --jobs "$(nproc)"
 
   unit:
     name: the unit tests and the socket guard
@@ -87,25 +57,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libturbojpeg0-dev
       - run: node tools/cpp-check.mjs
       - run: node tools/hd-encoder-check.mjs
-      - name: and it rejects the five ways the source could be wrong
-        run: |
-          # Caught is exit 1 here and 2 is cpp-check declining, so neither may pass for the other.
-          set +e -uo pipefail
-          for m in grabber-syntax-error grabber-type-error opencl-branch-broken \
-                   opengl-branch-broken harness-syntax-error; do
-            node tools/cpp-check.mjs --mutate "$m" > /dev/null 2>&1
-            rc=$?
-            if [ "$rc" -eq 0 ]; then
-              echo "NOT CAUGHT: $m passed a check it must fail"
-              exit 1
-            fi
-            if [ "$rc" -ne 1 ]; then
-              echo "DID NOT RUN: $m exited $rc, which is cpp-check declining rather than a catch"
-              node tools/cpp-check.mjs --mutate "$m" 2>&1 | tail -5
-              exit 1
-            fi
-            echo "caught: $m"
-          done
+      - run: node tools/sweep-all.mjs --tools cpp,hd-encoder --jobs "$(nproc)"
 
   supply-chain-gate:
     name: the minimum release age is armed
@@ -116,13 +68,7 @@ jobs:
         with:
           node-version: 26
       - run: node tools/release-gate-check.mjs
-      - name: and it rejects the three ways it could be wrong
-        run: |
-          # Caught is exit 0 for this tool, so `-e` fails the step on a miss.
-          set -euo pipefail
-          for m in wrong-unit no-gate absent; do
-            node tools/release-gate-check.mjs --mutate "$m"
-          done
+      - run: node tools/sweep-all.mjs --tools release-gate
 
 # not-run: boot cli determinism editor effect effect-conformance export index jobs keyframe
 # not-run: level library monitor preview registration registry sensor-view timeline vcam
