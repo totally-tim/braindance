@@ -207,33 +207,25 @@ const MUTATIONS = {
     "      input.addEventListener('input', () => { writeFromControl(name, Number(input.value)); history.commit(); });",
   ]] },
   // A seek plans its span once and never looks again.
-  'seek-plans-once': { file: 'web/main.js', edits: [
-    [`        this.overtaken++;
-        if (this.overtaken > SEEK_OVERTAKEN_LIMIT) {
-          this.overtaken = 0;
-          throw new Error(
-            \`\${SEEK_OVERTAKEN_LIMIT} seeks in a row were overtaken before they could land: \`
-            + 'the span a seek plans is not becoming resident, which is not a moving clip',
-          );
-        }
-        requestRepaint();
-        return null;
+  'seek-plans-once': { file: 'web/main.js', edits: [[
+    `    let replans = 0;
+    while (!this.resident(planned.spans)) {
+      if (replans >= SEEK_REPLAN_LIMIT) {
+        throw new Error(
+          \`a seek to \${programSec}s re-planned \${SEEK_REPLAN_LIMIT} times and its span never became \`
+          + 'resident: the clip never held still, or the cache is not keeping what it fetched',
+        );
       }
       await this.fetch(planned.spans);
       planned = this.planSeek(programSec, options.frames);
       this.askFor(planned.spans);
+      replans++;
     }
-`, ''],
-    [`    let planned = this.planSeek(programSec, options.frames);
-    this.askFor(planned.spans);
-    for (let attempt = 0; !this.resident(planned.spans); attempt++) {
-      if (attempt >= SEEK_REPLANS) {
 `,
-    `    const planned = this.planSeek(programSec, options.frames);
-    this.askFor(planned.spans);
+    `    const replans = 0;
     await this.fetch(planned.spans);
-`],
-  ] },
+`,
+  ]] },
   // The pre-roll reads the uniforms, which hold the look where the playhead was parked.
   // The surface half alone; `trails-damp-at-target` is the trails half.
   'preroll-reads-uniforms': { file: 'web/main.js', edits: [[
@@ -1574,14 +1566,13 @@ console.log('\n== 4e. clip timing moving while a seek is fetching ==');
         armed = false;
         source.ensure = real;
       }
-      const overtaken = t.overtaken;
       await k.timeline.settled();
       const read = k.timeline.read();
       const clip = k.timeline.clips()[0];
       return {
         threw,
         hits,
-        overtaken,
+        replans: landed?.replans ?? null,
         landed: landed !== null,
         at: read.programSec,
         sourceAt: read.sourceSec,
@@ -1594,8 +1585,8 @@ console.log('\n== 4e. clip timing moving while a seek is fetching ==');
     const wantSource = c.after.sourceStart + (got.at - got.start) * c.after.speed;
     const drift = Math.abs(got.sourceAt - wantSource);
     console.log(`  ${c.label}: timing changed on fetch ${got.hits > 0 ? 'yes' : 'NO'}, `
-      + `seek ${got.threw ? `threw: ${got.threw}` : (got.landed ? 'landed' : 'STOOD DOWN')} `
-      + `with ${got.overtaken} stand-downs; ${got.sourceStart}s at ${got.speed}x maps `
+      + `seek ${got.threw ? `threw: ${got.threw}` : (got.landed ? 'landed' : 'RESOLVED WITHOUT LANDING')} `
+      + `after ${got.replans} re-plans; ${got.sourceStart}s at ${got.speed}x maps `
       + `${got.at.toFixed(3)}s to source ${got.sourceAt.toFixed(4)}s`);
 
     check(got.hits > 0,
@@ -1607,9 +1598,9 @@ console.log('\n== 4e. clip timing moving while a seek is fetching ==');
     check(got.threw === null,
       `${c.label}: the seek re-planned around it instead of refusing`,
       got.threw ?? '');
-    check(got.landed === true && got.overtaken === 0,
-      `${c.label}: and the seek itself landed rather than standing down for a repaint`,
-      `landed ${got.landed}, ${got.overtaken} stand-downs`);
+    check(got.landed === true,
+      `${c.label}: and the seek itself answered with a landing`,
+      `landed ${got.landed} after ${got.replans} re-plans`);
     check(Math.abs(got.at - 12.0) < 1e-6,
       `${c.label}: at the program position it was asked for`,
       `${got.at.toFixed(4)}s of 12s`);

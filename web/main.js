@@ -4805,10 +4805,11 @@ const AFTERIMAGE_RESIDUAL = 0.01;
 
 // The most output frames one tick may render to catch up.
 const CATCHUP_FRAMES = 4;
-// How far behind real time playback has to fall before it says so.
-const SEEK_REPLANS = 2;
-// How many stand-downs in a row before this is a seek that cannot converge.
-const SEEK_OVERTAKEN_LIMIT = 12;
+// How many times a draft re-plans around a moving clip before it refuses.
+const DRAFT_REPLANS = 2;
+// How many times one seek re-plans before its span is taken as never becoming resident. A hand on
+// the clip overtakes the plan for as long as it moves, and the seek outlasts the hand.
+const SEEK_REPLAN_LIMIT = 24;
 
 // The arithmetic of the last cap said out loud, so a seek that keeps capping says it once.
 let cappedSeekSaid = '';
@@ -4854,7 +4855,8 @@ class TimelineTransport {
     this.lastCostMs = 0;
     // How far playback is behind real time, in wall milliseconds. Reported, never skipped.
     this.behindMs = 0;
-    this.overtaken = 0;
+    // The position the last `seek` asked for, held until that seek answers with a landing.
+    this.owed = null;
     this.queue = null;
     this.working = false;
     this.faults = 0;
@@ -5052,7 +5054,14 @@ class TimelineTransport {
    * far enough back.
    */
   seek(programSec, options = {}) {
-    return this.exclusive(() => this.seekNow(programSec, options));
+    const owed = { programSec };
+    this.owed = owed;
+    return this.exclusive(async () => {
+      const landed = await this.seekNow(programSec, options);
+      // Only a landing pays: `settled` refuses to call the transport idle while this is owed.
+      if (landed && this.owed === owed) this.owed = null;
+      return landed;
+    });
   }
 
   /** An accurate render at wherever the playhead is when this runs, not when it was called. */
@@ -5107,27 +5116,23 @@ class TimelineTransport {
   }
 
   async seekNow(programSec, options = {}) {
-    // Planned, fetched, then planned again: a clip's speed, in-point or start can move under
-    // the await.
+    // Planned, fetched, then planned again until the plan is resident: a clip's speed, in-point
+    // or start can move under the await. Standing down would lose the target: the repaint
+    // behind it draws wherever the playhead already was.
     let planned = this.planSeek(programSec, options.frames);
     this.askFor(planned.spans);
-    for (let attempt = 0; !this.resident(planned.spans); attempt++) {
-      if (attempt >= SEEK_REPLANS) {
-        // Overtaken, not broken: the hand that moved the clip timing has already queued a repaint.
-        this.overtaken++;
-        if (this.overtaken > SEEK_OVERTAKEN_LIMIT) {
-          this.overtaken = 0;
-          throw new Error(
-            `${SEEK_OVERTAKEN_LIMIT} seeks in a row were overtaken before they could land: `
-            + 'the span a seek plans is not becoming resident, which is not a moving clip',
-          );
-        }
-        requestRepaint();
-        return null;
+    let replans = 0;
+    while (!this.resident(planned.spans)) {
+      if (replans >= SEEK_REPLAN_LIMIT) {
+        throw new Error(
+          `a seek to ${programSec}s re-planned ${SEEK_REPLAN_LIMIT} times and its span never became `
+          + 'resident: the clip never held still, or the cache is not keeping what it fetched',
+        );
       }
       await this.fetch(planned.spans);
       planned = this.planSeek(programSec, options.frames);
       this.askFor(planned.spans);
+      replans++;
     }
     const { target, t, plan, asked, spans, bound } = planned;
     const { length, start } = planned;
@@ -5144,12 +5149,11 @@ class TimelineTransport {
     }
 
     this.lastCostMs = performance.now() - began;
-    this.overtaken = 0;
     this.frame = target;
     this.drafted = false;
     this.previewed = false;
     this.lastSeek = {
-      target, start, frames: length, plan,
+      target, start, frames: length, plan, replans,
       clamped: asked > target,
       capped: length < Math.min(asked, target),
       shortfall: Math.min(asked, target) - length,
@@ -5180,8 +5184,8 @@ class TimelineTransport {
     let spans = this.spansOver(target, target);
     this.askFor(spans);
     for (let attempt = 0; !this.resident(spans); attempt++) {
-      if (attempt >= SEEK_REPLANS) {
-        throw new Error(`a clip's timing moved under ${SEEK_REPLANS} plans of a draft at ${programSec}s`);
+      if (attempt >= DRAFT_REPLANS) {
+        throw new Error(`a clip's timing moved under ${DRAFT_REPLANS} plans of a draft at ${programSec}s`);
       }
       await this.fetch(spans);
       target = this.frameAt(programSec);
@@ -11762,15 +11766,24 @@ globalThis.__kinect = {
     open: openTake,
     transport: () => timeline,
     counters,
-    /** Resolves once every scheduled repaint has run and the transport's queue has drained. */
+    /**
+     * Resolves once every scheduled repaint has run and the transport's queue has drained, and
+     * rejects if the last seek asked for ended without landing.
+     */
     async settled() {
       for (let i = 0; i < 200; i++) {
         // A macrotask, so a repaint on the microtask queue has been enqueued by the
         // time this returns.
         await new Promise((resolve) => { setTimeout(resolve, 0); });
-        await timeline?.idle();
+        const queue = timeline?.queue;
+        await queue;
+        // Work queued while that drained has not run yet, however idle the flags read.
+        if (timeline?.queue !== queue) continue;
         if (!repaintWanted && !repaintBusy && !repaintScheduled && !timeline?.working
-          && draftWanted === null && !draftBusy && !orbitRedrawWanted && !orbitSettling) return;
+          && draftWanted === null && !draftBusy && !orbitRedrawWanted && !orbitSettling) {
+          if (timeline?.owed) throw new Error(`a seek to ${timeline.owed.programSec}s ended without landing`);
+          return;
+        }
       }
       throw new Error('the transport never settled');
     },
@@ -11859,7 +11872,6 @@ globalThis.__kinect = {
         settling: orbitSettling,
         lastSeek: t.lastSeek,
         lastCostMs: t.lastCostMs,
-        overtaken: t.overtaken,
         behindMs: t.behindMs,
         preroll: t.preroll(),
         applied: t.clip.source.applied,

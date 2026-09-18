@@ -46,6 +46,20 @@ const RAIN_CONTROL_MIN = 64;
 const RAIN_CONTROL_MIN_PCT = 0.8;
 const RAIN_CONTROL_MIN_MEAN = 0.08;
 
+// The silent give-up: two re-plans, then a repaint and null.
+const SEEK_STANDS_DOWN = [
+  `      if (replans >= SEEK_REPLAN_LIMIT) {
+        throw new Error(
+          \`a seek to \${programSec}s re-planned \${SEEK_REPLAN_LIMIT} times and its span never became \`
+          + 'resident: the clip never held still, or the cache is not keeping what it fetched',
+        );
+      }`,
+  `      if (replans >= 2) {
+        requestRepaint();
+        return null;
+      }`,
+];
+
 const MUTATIONS = {
   // Every clip warms on the selected clip's persistence rather than on its own, so a take's
   // demand stops depending on what each clip cut on it actually asks for. Must redden section
@@ -250,6 +264,28 @@ const MUTATIONS = {
   ]],
     fails: 'every clip opening its own copy of its take, so two clips of one take carry two '
       + 'indexes, two caches and two decodes of every frame they both want',
+  },
+  // A seek overtaken twice stands down and answers null, and the repaint behind it draws wherever
+  // the playhead already was. Must redden section 1e's landing rows.
+  'seek-stands-down': { file: 'web/main.js', edits: [SEEK_STANDS_DOWN],
+    fails: 'a seek overtaken twice answering null with the playhead where it was. Section 1e\'s '
+      + 'landing rows are the catch, and its agreement rows stay green because settled() refuses',
+  },
+  // The same stand-down, with any answer counted as a landing, which is `settled()` reporting
+  // idle either way. Must also redden section 1e's agreement rows.
+  'stand-down-counts-as-landed': { file: 'web/main.js', edits: [
+    SEEK_STANDS_DOWN,
+    ['      if (landed && this.owed === owed) this.owed = null;', '      if (this.owed === owed) this.owed = null;'],
+  ],
+    fails: 'a seek standing down and settled() calling it idle anyway, because any answer counted '
+      + 'as a landing. Section 1e\'s agreement rows are the catch, beside its landing rows',
+  },
+  // `settled()` stops asking whether the last seek landed. Must redden section 1e's refusal row.
+  'settled-ignores-owed': { file: 'web/main.js', edits: [[
+    '          if (timeline?.owed) throw new Error(`a seek to ${timeline.owed.programSec}s ended without landing`);\n',
+    '',
+  ]],
+    fails: 'settled() calling a seek that rejected idle. Section 1e\'s refusal row reddens alone',
   },
   'rain-phase-unread': { file: 'effects-builtin/rain/cell.vert.glsl', edits: [[
     '    vRain = (rainPhase * rainSpeed + room.y) / rainSpan + hash(dot(wc.xz, vec2(269.5, 183.3)));',
@@ -810,6 +846,138 @@ console.log('\n== 1d. the timeline binds colour, not just depth ==');
   // would pass all of them with both arms rendering grey.
   console.log(`  hasColor reads ${state.hasColor} after a seek to ${TARGET_SEC}s in RGB mode`);
   check(state.hasColor === 1, 'a decoded colour frame is bound after a seek');
+}
+
+
+console.log('\n== 1e. a seek the clip moves under lands where it was asked, or says it could not ==');
+{
+  // A hand on the in-point, placed deterministically: the fetch a seek awaits ends with the clip
+  // moved under it, the first `nudges` times, so the plan it re-reads is never the one it fetched.
+  // `stall` makes the fetch deliver nothing at all, which no number of re-plans survives.
+  const HAND = `async (o) => {
+    const k = globalThis.__kinect;
+    const t = k.timeline.transport();
+    // Each arm starts from a landed seek, so what an earlier arm left owed under a mutation is
+    // not what refuses this arm's settle.
+    await t.seek(t.programSec);
+    await globalThis.__tl.configure(o.config);
+    const base = k.timeline.read().sourceStart;
+    // A step asks for a second past wherever it is parked, so it is parked somewhere fresh first,
+    // and what it asks for is read before the press moves anything.
+    if (o.fromSec !== undefined) await t.seek(o.fromSec);
+    const askedSec = o.key ? (t.frame + t.outputFps) / t.outputFps : o.targetSec;
+    const hand = { base, hits: 0, askedSec, residentBefore: t.resident(t.planSeek(askedSec).spans) };
+    globalThis.__hand = hand;
+    t.fetch = async (spans) => {
+      if (o.stall) { hand.hits++; return []; }
+      const out = await Object.getPrototypeOf(t).fetch.call(t, spans);
+      if (hand.hits < o.nudges) {
+        hand.hits++;
+        k.keyframes.setSourceStart(base + hand.hits * o.nudgeSec);
+      }
+      return out;
+    };
+    document.activeElement?.blur?.();
+    return true;
+  }`;
+  const SEEK = `async () => {
+    const hand = globalThis.__hand;
+    try {
+      hand.seek = await globalThis.__kinect.timeline.transport().seek(hand.askedSec);
+    } catch (err) {
+      hand.threw = String(err?.message ?? err);
+    }
+    return true;
+  }`;
+  // Settles, lifts the hand and puts the in-point back, reporting what the playhead did meanwhile.
+  const LIFT = `async () => {
+    const k = globalThis.__kinect;
+    const t = k.timeline.transport();
+    const hand = globalThis.__hand;
+    let settledThrew = null;
+    try {
+      await k.timeline.settled();
+    } catch (err) {
+      settledThrew = String(err?.message ?? err);
+    } finally {
+      delete t.fetch;
+    }
+    const out = {
+      residentBefore: hand.residentBefore, hits: hand.hits, askedSec: hand.askedSec,
+      threw: hand.threw ?? null, settledThrew,
+      landed: hand.seek !== undefined && hand.seek !== null,
+      replans: hand.seek?.replans ?? null,
+      target: hand.seek?.target ?? null,
+      want: t.frameAt(hand.askedSec),
+      frame: t.frame,
+    };
+    k.keyframes.setSourceStart(hand.base);
+    return out;
+  }`;
+  const overtake = async (o) => {
+    await page.evaluate(`(${HAND})(${JSON.stringify({
+      config: { look: BLACKWALL_LOOK, rate: 1, fps: 30 }, nudges: 0, nudgeSec: 0.25, stall: false, ...o,
+    })})`);
+    if (o.key) await page.keyboard.press(o.key);
+    else await page.evaluate(`(${SEEK})()`);
+    return page.evaluate(`(${LIFT})()`);
+  };
+  const NUDGES = 3;
+
+  // A seek at a span nothing has fetched yet, overtaken three times before it can land.
+  const moved = await overtake({ targetSec: DURATION * 0.5, nudges: NUDGES });
+  console.log(`  seek to ${moved.askedSec.toFixed(2)}s: resident before ${moved.residentBefore}, `
+    + `${moved.hits} fetches ended with the in-point moved, ${moved.replans} re-plans, `
+    + `${moved.landed ? `landed on ${moved.target}` : 'resolved without landing'}, `
+    + `playhead on ${moved.frame} of ${moved.want}`);
+  check(moved.residentBefore === false && moved.hits > 0,
+    'the probe holds: the span had to be fetched, and the clip moved under the fetch',
+    `resident ${moved.residentBefore}, ${moved.hits} moves`);
+  check(moved.threw === null && moved.landed && moved.hits === NUDGES && moved.replans > NUDGES,
+    `the seek re-planned past all ${NUDGES} moves and answered with a landing`,
+    moved.threw ?? `landed ${moved.landed} after ${moved.hits} moves and ${moved.replans} re-plans`);
+  check(moved.target === moved.want && moved.frame === moved.want,
+    'on the output frame it was asked for', `playhead ${moved.frame}, landing ${moved.target}, asked ${moved.want}`);
+  check(moved.landed ? moved.settledThrew === null : moved.settledThrew !== null,
+    'settled() agrees with the seek: idle after a landing, refused without one',
+    `landed ${moved.landed}, settled() ${moved.settledThrew ?? 'resolved'}`);
+
+  // The same hand under a key press, which is the door a person uses and whose caller only catches.
+  // A step and not End: the out-point stays on the take's last frame however the in-point moves,
+  // so a hand on the in-point never overtakes a seek there.
+  const keyed = await overtake({ key: 'Shift+ArrowRight', fromSec: DURATION * 0.7, nudges: NUDGES });
+  console.log(`  shift+right to ${keyed.askedSec.toFixed(2)}s: resident before ${keyed.residentBefore}, `
+    + `${keyed.hits} moves, playhead on ${keyed.frame} of ${keyed.want}`
+    + `${keyed.settledThrew ? `, settled() refused: ${keyed.settledThrew}` : ''}`);
+  check(keyed.residentBefore === false && keyed.hits > 0,
+    'the probe holds for the key too', `resident ${keyed.residentBefore}, ${keyed.hits} moves`);
+  check(keyed.hits === NUDGES && keyed.frame === keyed.want,
+    'a second\'s step pressed under a moving clip leaves the playhead where it asked',
+    `playhead ${keyed.frame} of ${keyed.want} after ${keyed.hits} moves`);
+  check(keyed.frame === keyed.want ? keyed.settledThrew === null : keyed.settledThrew !== null,
+    'and settled() calls that idle only if it got there', keyed.settledThrew ?? 'settled() resolved');
+
+  // A fetch that never delivers: the seek has to fail out loud, and settled() with it.
+  const stalled = await overtake({ targetSec: DURATION * 0.3, stall: true });
+  console.log(`  seek to ${stalled.askedSec.toFixed(2)}s with a fetch that delivers nothing: `
+    + `${stalled.hits} fetches, ${stalled.threw ? `rejected: ${stalled.threw}` : 'resolved'}; `
+    + `settled() ${stalled.settledThrew ? `refused: ${stalled.settledThrew}` : 'resolved'}`);
+  check(stalled.residentBefore === false && stalled.hits > 0,
+    'the probe holds: the span was missing and the seek asked for it', `resident ${stalled.residentBefore}, ${stalled.hits} fetches`);
+  check(stalled.threw !== null && /never became resident/.test(stalled.threw),
+    'a seek whose span never arrives rejects and says why', stalled.threw ?? 'it resolved');
+  check(stalled.settledThrew !== null && stalled.settledThrew.includes(`${stalled.askedSec}s`),
+    'and settled() refuses to call that idle, naming the seek', stalled.settledThrew ?? 'it resolved');
+  const paid = await page.evaluate(`(async () => {
+    const k = globalThis.__kinect;
+    const t = k.timeline.transport();
+    const seek = await t.seek(${TARGET_SEC});
+    let settledThrew = null;
+    try { await k.timeline.settled(); } catch (err) { settledThrew = String(err?.message ?? err); }
+    return { landed: seek !== null, settledThrew, frame: t.frame, want: t.frameAt(${TARGET_SEC}) };
+  })()`);
+  check(paid.landed && paid.frame === paid.want && paid.settledThrew === null,
+    'and the next seek that lands is what clears it', paid.settledThrew ?? `playhead ${paid.frame} of ${paid.want}`);
 }
 
 
@@ -1707,13 +1875,7 @@ const MULTI = `(() => {
         await t.seek(fromSec);
         await t.runTo(t.frameAt(targetSec));
       } else {
-        // A seek answers null when it stood down for a repaint rather than landing. Asked again
-        // rather than read as a result: null is "come back", and reading it as one is how a
-        // stand-down would arrive here wearing the shape of a finding.
-        for (let attempt = 0; attempt < 4 && seek === null; attempt++) {
-          seek = await t.seek(targetSec, frames === null ? {} : { frames });
-        }
-        if (seek === null) throw new Error('the seek to ' + targetSec + 's stood down four times');
+        seek = await t.seek(targetSec, frames === null ? {} : { frames });
       }
       const pixels = tl.grab(label);
       return {

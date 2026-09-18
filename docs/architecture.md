@@ -124,7 +124,8 @@ unless the browser is on the server's machine, and refused for the take being re
 file manager would stat and index as the recorder writes it.
 
 **The editor** keyframes the camera on its own track and the look on others. Seeking to a frame
-and playing to it produce the same image, which `tools/timeline-check.mjs` proves.
+and playing to it produce the same image, which `tools/timeline-check.mjs` proves. A seek re-plans
+for as long as the clip moves under its fetch, and either lands where it was asked or rejects.
 
 **The render queue** produces video from finished edits. A job is a self-contained project body
 plus the captures it names and an output spec, claimed by a worker pinned to the renderer class it

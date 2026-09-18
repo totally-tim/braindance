@@ -131,8 +131,8 @@ is the normal state.
   control to become actionable; read the disabled state and assert on it instead.
 - A driver pressing a control the page also presses on a timer is turned away by the reentrancy
   guard, so wait for the state the row is about and never for your own call to return.
-- A seek can resolve without moving: `settled()` can return before the seek it waited on has been
-  applied, so a seek-then-assert row is suspect before it is a finding.
+- `settled()` rejects while the last seek asked for has not landed, so a row that makes a seek
+  fail on purpose lands another seek before anything else settles.
 - A gitignored fixture is a term in the assertion — a literal in seconds or pixels is a claim about
   that machine's `captures/`, so take it as a fraction of the measured duration and read the page's
   own scale back off where it drew.
