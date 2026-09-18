@@ -13,7 +13,7 @@ import { openCapture, withCapture, captureIdFor, openCaptureCount, decimatePaylo
 import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
 import {
   VALID_ID, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, copyOnNode, downloadTake,
-  downloadsInFlight, hashFile, markWriteCount, readMarkLog, readMarks, reconcile, remaining,
+  downloadsInFlight, hashFile, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
   removeTake, renameTake, resolveMarks, revealSupport, revealTake, sameTake, scanTakes, takeIdentity,
 } from './library.js';
 import { EffectStore } from './effect-store.js';
@@ -557,6 +557,8 @@ async function serveRemoval(req, res, [id], kind) {
       sendJson(res, { error: `${id} is not on ${node?.name ?? 'any node'}: there is nothing to reclaim` }, 409);
       return;
     }
+    const keptPath = join(CAPTURES_DIR, mine.file);
+    const kept = takeIdentity(keptPath);
     const verified = await hashFile(join(CAPTURES_DIR, mine.file));
     if (verified !== mine.hash) {
       sendJson(res, {
@@ -565,6 +567,25 @@ async function serveRemoval(req, res, [id], kind) {
       }, 409);
       return;
     }
+    // The node's marks come here before its copy goes, because removing a take removes its log.
+    let theirLog;
+    try {
+      theirLog = await node.fetchJson(`/capture/${encodeURIComponent(theirs.id)}/marks/log`, { signal: left });
+    } catch (err) {
+      sendJson(res, {
+        error: `refusing to reclaim ${id}: the marks on ${node.name}'s copy could not be read (${err.message}), `
+          + 'and removing that copy would remove them with it',
+      }, 502);
+      return;
+    }
+    if (!sameTake(kept, takeIdentity(keptPath))) {
+      sendJson(res, {
+        error: `${id} was renamed or replaced here while the reclaim ran, so ${node.name}'s marks were not `
+          + 'written and its copy was not removed',
+      }, 409);
+      return;
+    }
+    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? []);
     try {
       const done = await node.fetchJson(`/library/delete/${encodeURIComponent(theirs.id)}`, {
         method: 'POST',
@@ -574,7 +595,7 @@ async function serveRemoval(req, res, [id], kind) {
         // ends this side waiting rather than the request.
         signal: left,
       });
-      sendJson(res, { reclaimed: done, keptHere: verified });
+      sendJson(res, { reclaimed: done, keptHere: verified, marksMerged });
     } catch (err) {
       sendJson(res, { error: `the node refused the reclaim: ${err.message}` }, 502);
     }

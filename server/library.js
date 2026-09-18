@@ -77,6 +77,17 @@ export async function appendMarks(capturePath, records) {
   if (lines) await appendFile(marksPathFor(capturePath), lines);
 }
 
+/**
+ * Appends the records of another machine's log that this take's log lacks, and answers how many.
+ * Appended rather than rewritten, so both logs stay whole and a merge is safe to run twice.
+ */
+export async function mergeMarkLog(capturePath, theirLog) {
+  const known = new Set((await readMarkLog(capturePath)).map((r) => `${r.id}@${r.at}`));
+  const fresh = theirLog.filter((r) => !known.has(`${r.id}@${r.at}`));
+  await appendMarks(capturePath, fresh);
+  return fresh.length;
+}
+
 
 /** Every reason this build can refuse to open a take. `web/library.js` badges these same keys. */
 export const OPEN_REFUSALS = {
