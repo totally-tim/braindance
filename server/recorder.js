@@ -63,9 +63,15 @@ function settle(take) {
 // Marks hang off the take rather than the recorder, or a take that failed mid-write leaves them
 // for whichever take closes next.
 async function flushMarks(take) {
-  if (!take.pendingMarks.length) return;
+  // The drop count goes into the marks log because it is the one sidecar neither derived from the
+  // take's bytes nor thrown away with them, and a count held in memory is gone at the next restart.
+  // Only when frames were dropped: a take that lost nothing gains no sidecar it did not have.
+  const drop = take.dropped > 0
+    ? [{ id: `drop:${take.id}`, at: Date.now(), kind: 'drop', dropped: take.dropped }]
+    : [];
+  if (!take.pendingMarks.length && !drop.length) return;
   try {
-    await appendMarks(take.path, take.pendingMarks.splice(0));
+    await appendMarks(take.path, [...take.pendingMarks.splice(0), ...drop]);
   } catch (err) {
     console.error(`[recorder] take ${take.id}: could not write its marks: ${err.message}`);
   }

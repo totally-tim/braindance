@@ -116,8 +116,10 @@ is a decision, one that dies at eighty percent is a loss.
 **The media library** joins takes across two machines on content hash, because two machines can
 hold different takes under one name. A take can be pulled down, and the node's copy reclaimed once
 the local one is re-hashed and the node's marks are merged into it. A delete takes the marks with
-the take, and refuses while the node holds a copy or cannot say whether it does. Warnings — truncated, no sensor hello, no whole frame, still recording
-— show as badges on the poster.
+the take, and refuses while the node holds a copy or cannot say whether it does. Warnings — truncated, dropped frames, no sensor hello, no whole frame, still recording
+— show as badges on the poster. A take that dropped frames to a slow disk says so in its marks log,
+as one record with `kind: 'drop'` and the count, written at close by `flushMarks`; the record has
+no `sourceMs`, so `resolveMarks` never returns it as a mark, and it travels with the marks.
 
 **Renaming moves a label, and a reference is a hash.** Each clip records its take as `{id, hash}`
 and the loader resolves the hash against the library listing, so a rename carries the capture, its

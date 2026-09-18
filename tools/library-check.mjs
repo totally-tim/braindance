@@ -672,6 +672,22 @@ const MUTATIONS = {
   'mid-write-drops-marks': { file: 'server/recorder.js', edits: [[
     '        flushMarks(failed);', '        /* mutation: the marks go nowhere */',
   ]] },
+  // The drop count reaches the monitor and the close log and stops there, so a take with a hole in
+  // it lists exactly like a whole one once the process that counted is gone.
+  'flush-forgets-the-drop': { file: 'server/recorder.js', edits: [[
+    "    ? [{ id: `drop:${take.id}`, at: Date.now(), kind: 'drop', dropped: take.dropped }]",
+    '    ? [/* mutation: the drop leaves no record */]',
+  ]] },
+  // The record is written and the listing never reads it back.
+  'listing-forgets-the-drop': { file: 'server/library.js', edits: [[
+    '  const dropped = Number.isSafeInteger(drop?.dropped) && drop.dropped > 0 ? drop.dropped : 0;',
+    '  const dropped = 0;',
+  ]] },
+  // The listing carries the count and the tile draws no badge for it.
+  'badge-ignores-the-drop': { file: 'web/library.js', edits: [[
+    '  if (take.dropped > 0) {\n    out.push({\n      key: \'dropped\',',
+    '  if (false) {\n    out.push({\n      key: \'dropped\',',
+  ]] },
   // The flush moves out of the `finally`, so a close that rejects loses them - the second way
   // the same orphaning arrived.
   'close-rethrows-before-indexing': { file: 'server/recorder.js', edits: [[
@@ -1002,8 +1018,8 @@ const MUTATIONS = {
   },
   // The link admits a manifest from the build before the refusals moved.
   'node-admits-an-old-manifest': { file: 'server/library.js', edits: [[
-    '      const older = takes.find((t) => !carriesRefusals(t));\n      if (older) {',
-    '      const older = takes.find((t) => !carriesRefusals(t));\n      if (false) {',
+    '      const older = takes.find((t) => !carriesRefusals(t) || t.dropped === undefined);\n      if (older) {',
+    '      const older = takes.find((t) => !carriesRefusals(t) || t.dropped === undefined);\n      if (false) {',
   ]] },
 
   // The same gate on the other route goes away: a `/record/state` with no `writingIds` in it is
@@ -1362,6 +1378,9 @@ function buildFixture() {
     + markLine({ id: 'kBeyond', sourceMs: 900000, label: 'past the end', at: 1000 }));
   writeFileSync(join(macCaps, 'same-name.marks.jsonl'),
     markLine({ id: 'only', sourceMs: 500, label: 'sole mark', at: 1000 }));
+  // The record the recorder writes for a take that lost frames to a slow disk, in its shape.
+  writeFileSync(join(macCaps, 'generation-zero-take.marks.jsonl'),
+    markLine({ id: 'drop:generation-zero-take', at: 1000, kind: 'drop', dropped: 11 }));
   // The node's log for the shared take, which the download has to merge: one mark the mac has
   // never seen, one the mac will supersede, and one already tombstoned.
   writeFileSync(join(nodeCaps, 'node-name-for-it.marks.jsonl'),
@@ -1940,6 +1959,12 @@ async function runChecks() {
       `${byId['local-clip'].marks.length} on local-clip`);
     check(byId['same-name'].marks.length === 1 && byId['truncated-take'].marks.length === 0,
       'and the one-mark and no-mark cases are both real');
+    check(byId['generation-zero-take'].dropped === 11 && byId['generation-zero-take'].marks.length === 0,
+      'a take whose marks log records frames dropped to a slow disk lists that count, and the record is not a mark',
+      `dropped ${byId['generation-zero-take'].dropped}, ${byId['generation-zero-take'].marks.length} marks`);
+    check(byId['local-clip'].dropped === 0 && byId['generation-zero-take'].openable === true,
+      'while a take with no such record lists none, and a take with a gap still opens',
+      `local-clip dropped ${byId['local-clip'].dropped}, generation-zero openable ${byId['generation-zero-take'].openable}`);
   }
 
   console.log('\n[library] one library, joined by content hash and never by name');
@@ -2001,6 +2026,7 @@ async function runChecks() {
       ...oldShape,
       id: 'shot-on-this-build',
       hash: `sha256:${'cd'.repeat(32)}`,
+      dropped: 0,
       openRefusals: [{ key: 'short', why: 'a take needs two frames to bracket a position, so there is nothing here to play' }],
     };
     // And the take that carries none, which is nearly every take there is.
@@ -2010,6 +2036,7 @@ async function runChecks() {
       hash: `sha256:${'ef'.repeat(32)}`,
       frames: 60,
       durationSec: 4,
+      dropped: 0,
       openable: true,
       openRefusals: [],
     };
@@ -2019,6 +2046,7 @@ async function runChecks() {
       ['frames', { ...openableShape, id: 'markup-in-frames', frames: scriptish }],
       ['marks', { ...openableShape, id: 'markup-in-marks', marks: { length: scriptish } }],
       ['durationSec', { ...openableShape, id: 'markup-in-duration', durationSec: scriptish }],
+      ['dropped', { ...openableShape, id: 'markup-in-dropped', dropped: scriptish }],
       ['dateSource', { ...openableShape, id: 'a-date-source-that-is-not-one', dateSource: scriptish }],
       ['hello', { ...openableShape, id: 'a-hello-that-is-not-intrinsics', hello: { fx: scriptish, fy: 1, cx: 1, cy: 1 } }],
       // The key as markup rather than as a key this build has not heard of - a node one build.
@@ -2036,6 +2064,16 @@ async function runChecks() {
       check(/older build/.test(oldLink.lastError ?? '') && /shot-on-an-old-node/.test(oldLink.lastError ?? ''),
         'and the link says it is the node\'s build and which take arrived without them, rather than reporting a timeout',
         JSON.stringify(oldLink.lastError));
+
+      // The build before drop counts: open refusals, and no `dropped` on any take.
+      const noDrops = await stub([{ ...newShape, id: 'shot-before-drop-counts', dropped: undefined }]);
+      const noDropsLink = new NodeLink(noDrops.url, 'no-drops-node');
+      const noDropsTakes = await noDropsLink.takes();
+      check(noDropsTakes === null && /older build/.test(noDropsLink.lastError ?? '')
+        && /dropped-frame count/.test(noDropsLink.lastError ?? '') && /shot-before-drop-counts/.test(noDropsLink.lastError ?? ''),
+        'a manifest with refusals and no dropped-frame count is an older build too, and the link says which field it lacks',
+        JSON.stringify(noDropsLink.lastError));
+      noDrops.srv.close();
 
       // The other arm, and the row is unfalsifiable without it.
       const currentLink = new NodeLink(current.url, 'current-node');
@@ -2979,6 +3017,11 @@ async function runChecks() {
     check(!zeroTile.flags.includes('format'),
       'while a take that declares no format carries no such badge, so the badge is about the generation and not about the key being absent',
       zeroTile.flags.join(' ') || 'no badges');
+    await page.keyboard.press('Escape');
+    const zeroMenu = await page.evaluate(`globalThis.__library.openMenu(${JSON.stringify(zeroTile.hash)})`);
+    check(eq(zeroTile.flags, ['dropped']) && /11 frames were never written/.test(zeroMenu.note),
+      'a take that lost frames to a slow disk carries a badge, and the sentence behind it gives the count',
+      `${zeroTile.flags.join(' ') || 'no badges'}; ${zeroMenu.note.replace(/\n/g, ' | ').slice(0, 130) || 'the menu says nothing'}`);
     await page.keyboard.press('Escape');
     const oneFrameTile = one('one-frame-take');
     check(oneFrameTile.flags.includes('short'),
@@ -5215,6 +5258,16 @@ async function runChecks() {
     check(closed.frames === BURST - midBurst.dropped,
       'with the frames that landed being the ones that were accepted - a dropped frame is a gap, not a miscount',
       `${closed.frames} scanned, ${BURST} offered, ${midBurst.dropped} dropped`);
+    // The count outlives this process. Both out of the staged tree, like `Recorder` above.
+    const dropRecords = marksOf(burstTake).map((line) => JSON.parse(line)).filter((rec) => rec.kind === 'drop');
+    check(dropRecords.length === 1 && dropRecords[0].dropped === midBurst.dropped,
+      'the take\'s marks log records how many frames it dropped, so the gap is still known once the process that counted it has gone',
+      `${dropRecords.length} drop records, ${JSON.stringify(dropRecords[0] ?? null)}, ${midBurst.dropped} dropped`);
+    const { scanTakes } = await import(pathToFileURL(join(root, 'server/library.js')).href);
+    const listedBurst = (await scanTakes(recDir)).takes.find((t) => t.id === burstTake);
+    check(listedBurst?.dropped === midBurst.dropped,
+      'and the library lists that take with the same count',
+      `listed ${listedBurst?.dropped}, ${midBurst.dropped} dropped`);
 
     // `write` pushes a frame end-offset per frame and `settle` is what removes them.
     const PER_CHUNK = 500;

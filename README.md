@@ -75,7 +75,7 @@ sliders, and the OBS output settings with both source URLs.](media/viewer.png)
 - **mark** drops a mark at the current frame. Marks show up on the media library's scrub bar
   and the editor's ruler.
 - **stop** closes the take. The `.knct` capture and its `.idx` index land in `captures/`,
-  with a `.marks.jsonl` sidecar if you marked anything.
+  with a `.marks.jsonl` sidecar if you marked anything or the disk dropped frames.
 - `R` and `M` do the same two things from the keyboard.
 
 The panel has four tabs. **Record** arms the sensor and points the OBS output somewhere.
