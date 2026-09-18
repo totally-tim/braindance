@@ -566,6 +566,7 @@ const declaredMutations = new Map();
           anchors: spec.edits.map(([from, to, where]) => ({ file: where ?? spec.file, from, to })),
         };
       }
+      if (spec.stores && typeof spec.stores === 'object') return { anchorless: 'store reads pointed at another route' };
     }
     return null;
   };
@@ -704,7 +705,7 @@ const declaredMutations = new Map();
         continue;
       }
       if (shape.anchorless) {
-        if (!anchorless.some((a) => a.name === name)) anchorless.push({ name, why: shape.anchorless });
+        if (!anchorless.some((a) => a.name === name && a.why === shape.anchorless)) anchorless.push({ name, why: shape.anchorless });
         continue;
       }
       for (const { file, from, to } of shape.anchors) {
@@ -762,7 +763,7 @@ const declaredMutations = new Map();
   }
 
   for (const { name, why } of anchorless) {
-    console.log(`  anchors/ ${name} declares ${why} rather than source anchors, so it has none to check`);
+    console.log(`  anchors/ ${name} declares ${why}, which carry no source anchors to check`);
   }
   if (anchorsChecked === 0) {
     fail('no mutation anchors were checked at all, so this assertion passed on nothing - the tables moved or this scan is looking in the wrong place');

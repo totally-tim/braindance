@@ -624,6 +624,9 @@ between them is visible.
 - **`no-repaint`** — the button moves the camera and asks for no repaint.
 - **`sensor-view-keys-camera`** — the button writes a camera key as well as moving the view, so
   looking at the intrinsics becomes an edit to the clip.
+- **`store-answers-a-page`** — the projects store read at `/projects`, the projects page, instead
+  of its listing at `/projects/all`. Only the projects store row fails; a store answering anything
+  but JSON is a failed row, not a run that stops.
 
 ## `level-check`
 
