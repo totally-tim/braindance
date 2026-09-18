@@ -1599,7 +1599,13 @@ const FATAL_LOG = [
   /recording is off/, // every recorder failure ends here, and none of them says "Error"
   /no free take name/,
 ];
-const looksFatal = (line) => FATAL_LOG.some((re) => re.test(line)) && !BENIGN_LOG.some((re) => re.test(line));
+// A path is not a diagnosis, and the server prints absolute ones, so a checkout whose directory
+// name holds `error` would otherwise read every `starting grabber:` line as fatal.
+const withoutPaths = (line) => line.replace(/[^\s'"]*[\\/][^\s'"]*/g, '');
+const looksFatal = (line) => {
+  const message = withoutPaths(line);
+  return FATAL_LOG.some((re) => re.test(message)) && !BENIGN_LOG.some((re) => re.test(message));
+};
 
 // The predicate's own falsification control, run before anything else so a sweep that has been
 // quietly blinded says so in the first three lines rather than by passing a mutated tree.
@@ -1616,6 +1622,11 @@ function checkLogPredicate() {
     ['[recorder] 2026-07-31-take1 is already taken, trying the next name', false],
     ['[server] 24.8 fps  12.2 MB/s  dropped=0  clients=1', false],
     ['[recorder] take 2026-07-31-take3 open', false],
+    // The paths a checkout lends every line, and the fatal lines that must survive losing them.
+    ['[server] starting grabber: /w/fixes-an-error-channel/native/build/grabber --source /w/throw/sample.knct', false],
+    ['[server] cannot open /w/unhandled-errors/missing.knct: ENOENT: no such file or directory', false],
+    ['[recorder] cannot open /caps/error-dir/take1.knct: EIO: i/o error - recording is off', true],
+    ['[server] capture request failed: Error: short read at 4096 in /caps/an-error-take.knct', true],
   ];
   const wrong = cases.filter(([line, want]) => looksFatal(line) !== want);
   check(wrong.length === 0,
@@ -6641,12 +6652,10 @@ async function runChecks() {
   check(swept.length === serversStarted,
     'the fatal-log sweep reads every server this run started, including the ones whose port was later reclaimed',
     `swept ${swept.length} of ${serversStarted} started`);
-  for (const { log } of swept) {
-    const text = log.join('');
-    const bad = text.split('\n').filter(looksFatal);
-    if (bad.length) {
-      console.log(`\n[library] server log:\n  ${bad.slice(0, 4).join('\n  ')}`);
-      failures++;
-    }
+  // A row per server, so a fatal line is a failure this run prints rather than one it counts.
+  for (const { log, port } of swept) {
+    const bad = log.join('').split('\n').filter(looksFatal);
+    check(bad.length === 0, `the server on port ${port} logged nothing that means this run went wrong`,
+      bad.length ? bad.slice(0, 3).join(' | ') : `${log.join('').split('\n').length} lines read`);
   }
 }

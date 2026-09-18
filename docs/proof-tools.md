@@ -523,8 +523,9 @@ reading `real 19 against a baseline of 18`: its settle is a fixed 250ms against 
 takes 300ms to 1s. All three fail on unmutated trees as well as mutated ones and disagree with
 themselves across runs of one tree, so a run reddening only these is a re-run and not a finding.
 
-The fatal-log sweep matches `/Error|throw|unhandled/i`, so a checkout whose own path contains the
-word reddens the sweep on every server it started.
+The fatal-log sweep tests each line a server printed with its paths taken out, so a checkout
+whose path contains `error` reads clean, and each server it started is a row of its own, so a
+fatal line is a `FAIL` row that quotes it.
 
 ## `boot-check`
 
