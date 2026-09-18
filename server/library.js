@@ -113,10 +113,18 @@ export const markLogPath = (take) => `/capture/${encodeURIComponent(take.id)}/ma
  * The marks log of the take `capturePath` holds, or null when that take's content hash is not
  * `hash`. Under the take's lock, so no rename in this process lands between the hash and the read.
  */
-export async function markLogFor(capturePath, hash) {
+export async function markLogFor(capturePath, hash, { ownsFile = () => false } = {}) {
   return withTakeLock([capturePath], async () => {
-    const index = await cachedIndex(capturePath);
-    return index.hash === hash ? readMarkLog(capturePath) : null;
+    // Opened and asked about by the file opened: while this waited for the lock the name could
+    // have been freed and given to the recorder's next take, which a read by name would scan.
+    const handle = await open(capturePath, 'r');
+    try {
+      if (ownsFile(await handle.stat())) return null;
+      const index = await loadIndex(capturePath, handle);
+      return index.hash === hash ? readMarkLog(capturePath) : null;
+    } finally {
+      await handle.close();
+    }
   });
 }
 
@@ -679,14 +687,14 @@ export async function hashFile(path) {
  * Removes a copy of a take. Both hashes are read rather than trusted - `verifiedElsewhere` is what
  * the surviving copy reported, and this take's own is re-derived, because delete cannot be undone.
  */
-export async function removeTake(dir, id, { hash, verifiedElsewhere = null }) {
+export async function removeTake(dir, id, { hash, verifiedElsewhere = null, ownsFile = () => false }) {
   if (!VALID_ID.test(id)) throw new Error(`unusable take id ${id}`);
   const path = join(dir, `${id}.knct`);
-  return withTakeLock([path], () => removeHeld(id, path, { hash, verifiedElsewhere }));
+  return withTakeLock([path], () => removeHeld(id, path, { hash, verifiedElsewhere, ownsFile }));
 }
 
 // `removeTake` once it holds the take's lock.
-async function removeHeld(id, path, { hash, verifiedElsewhere }) {
+async function removeHeld(id, path, { hash, verifiedElsewhere, ownsFile }) {
   // Hashed through one descriptor and unlinked by name, so the name is asked again before the
   // unlink: a rename landing during the hash can free this id and move another take into it.
   const handle = await open(path, 'r');
@@ -694,6 +702,9 @@ async function removeHeld(id, path, { hash, verifiedElsewhere }) {
   let actual;
   try {
     hashed = await handle.stat();
+    // The file opened, not the name the route asked about before the lock: that name can have
+    // gone to the recorder's next take since, and hashing it reads the take being written.
+    if (ownsFile(hashed)) throw new Error(`${id} is being recorded right now: stop the take before removing it`);
     actual = await hashOpenFile(handle);
   } finally {
     await handle.close();
@@ -735,7 +746,7 @@ async function removeHeld(id, path, { hash, verifiedElsewhere }) {
  * the reconciliation and the menu all reference footage by content hash. The take being recorded is
  * refused, because the recorder names the files it owns by path and a renamed one stops matching.
  */
-export async function renameTake(dir, id, requested, { hash, owns = () => false }) {
+export async function renameTake(dir, id, requested, { hash, ownsFile = () => false }) {
   if (!VALID_ID.test(id)) throw new Error(`unusable take id ${id}`);
   const to = String(requested ?? '').trim().replace(/\.knct$/i, '');
   if (!VALID_ID.test(to)) {
@@ -754,12 +765,22 @@ export async function renameTake(dir, id, requested, { hash, owns = () => false 
       throw new Error(`refusing to rename outside ${root}`);
     }
   }
-  if (owns(from)) {
-    throw new Error(`${id} is being recorded right now: stop the take before renaming it`);
-  }
   // Under both names' locks, so nothing in this process writes marks to either mid-rename.
   return withTakeLock([from, target], async () => {
-    const index = await cachedIndex(from);
+    // Opened and asked about by the file opened, as `downloadClaimed` does: while this waited for
+    // the lock the name could have gone to the recorder's next take, which a read by name would scan.
+    const opened = await open(from, 'r').catch((err) => {
+      throw err.code === 'ENOENT' ? new Error(`${id} is no longer in ${root}`) : err;
+    });
+    let index;
+    try {
+      if (ownsFile(await opened.stat())) {
+        throw new Error(`${id} is being recorded right now: stop the take before renaming it`);
+      }
+      index = await loadIndex(from, opened);
+    } finally {
+      await opened.close();
+    }
     if (index.hash !== hash) {
       throw new Error(
         `${id} is ${index.hash} here, not the ${hash} this rename named: `

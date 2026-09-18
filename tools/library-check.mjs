@@ -916,8 +916,8 @@ const MUTATIONS = {
   },
   // The take being recorded becomes renameable.
   'rename-during-a-shoot': { file: 'server/library.js', edits: [[
-    '  if (owns(from)) {',
-    '  if (false) {',
+    '      if (ownsFile(await opened.stat())) {',
+    '      if (false) {',
   ]] },
 
   // The path is dropped from the arguments, so the file manager is started on nothing - a route

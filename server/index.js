@@ -341,7 +341,7 @@ async function serveMarks(req, res, [id], query, { log = false } = {}) {
     sendJson(res, { error: recordingRefusal(id) }, 409);
     return;
   }
-  const entries = hash === null ? await readMarkLog(path) : await markLogFor(path, hash)
+  const entries = hash === null ? await readMarkLog(path) : await markLogFor(path, hash, { ownsFile: (identity) => recorder.ownsFile(identity) })
     .catch((err) => (err.code === 'ENOENT' ? null : Promise.reject(err)));
   if (entries === null) {
     sendJson(res, {
@@ -499,7 +499,7 @@ async function serveRename(req, res, [id]) {
   try {
     const done = await renameTake(CAPTURES_DIR, id, body.to, {
       hash: body.hash,
-      owns: (path) => recorder.owns(path),
+      ownsFile: (identity) => recorder.ownsFile(identity),
     });
     sendJson(res, done);
   } catch (err) {
@@ -654,6 +654,7 @@ async function serveRemoval(req, res, [id], kind) {
     const done = await removeTake(CAPTURES_DIR, id, {
       hash: body.hash,
       verifiedElsewhere: body.verifiedElsewhere ?? null,
+      ownsFile: (identity) => recorder.ownsFile(identity),
     });
     sendJson(res, done);
   } catch (err) {
