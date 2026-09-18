@@ -560,6 +560,8 @@ await page.waitForFunction(() => globalThis.__kinect.takeOpened(), null, { timeo
 // pass. At three it stopped at 626x352 and the guard below threw before the first assertion -
 // on this branch and on a `git archive HEAD` tree alike, so it was never a regression and the
 // only thing wrong was the iteration count.
+// A pass waits for the buffer to move or to land, because every pass before the last lands short
+// of 640x360: a wait for the target alone spends its whole timeout on each of them.
 for (let attempt = 0; attempt < 12; attempt++) {
   await page.evaluate('globalThis.__kinect.timeline.settled()').catch(() => {});
   const furniture = await page.evaluate(`(() => {
@@ -570,6 +572,10 @@ for (let attempt = 0; attempt < 12; attempt++) {
       shell: appBar && !appBar.hidden ? Math.round(appBar.getBoundingClientRect().height) : 0,
     };
   })()`);
+  const was = await page.evaluate(() => {
+    const gl = globalThis.__kinect?.renderer?.getContext?.();
+    return gl ? { w: gl.drawingBufferWidth, h: gl.drawingBufferHeight } : null;
+  });
   await page.setViewportSize({
     width: STAGE.width,
     height: STAGE.height + furniture.strip + furniture.shell,
@@ -578,11 +584,16 @@ for (let attempt = 0; attempt < 12; attempt++) {
   // a throw inside `waitForFunction` is not caught by it: the twenty seconds a wait is
   // given are never spent, and the failure arrives instantly wearing the shape of a
   // finding.
-  const landed = await page.waitForFunction((want) => {
+  const landed = await page.waitForFunction(({ want, was }) => {
     const gl = globalThis.__kinect?.renderer?.getContext?.();
-    return !!gl && gl.drawingBufferWidth === want.w && gl.drawingBufferHeight === want.h;
-  }, { w: STAGE.width, h: STAGE.height }, { timeout: 15000 }).then(() => true).catch(() => false);
-  if (landed) break;
+    if (!gl) return false;
+    const w = gl.drawingBufferWidth;
+    const h = gl.drawingBufferHeight;
+    if (w === want.w && h === want.h) return 'target';
+    return !was || w !== was.w || h !== was.h ? 'moved' : false;
+  }, { want: { w: STAGE.width, h: STAGE.height }, was }, { timeout: 15000 })
+    .then((handle) => handle.jsonValue()).catch(() => 'timeout');
+  if (landed === 'target') break;
 }
 await page.evaluate(INSTALL);
 
