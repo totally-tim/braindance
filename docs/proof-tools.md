@@ -37,7 +37,7 @@ Per tool, read from the source:
 | `sensor-view-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no sensor hello, a stale anchor, no browser |
 | `level-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8377 held, no GPU browser |
 | `vcam-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`, or section 6 unproven without an IPv4 |
-| `guard-check` | pass | a failed assertion, a catch, or a miss | `PASS, with claims untested here`: no non-internal IPv4 |
+| `guard-check` | pass | a failed assertion, a catch, or a miss | `PASS, with claims untested here`: no non-internal IPv4; `DID NOT RUN`: a crash |
 | `jobs-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a port held, a crash |
 | `effect-check` | pass | a failed assertion, a catch, or a miss | `UNTESTED`, or `DID NOT RUN` |
 | `effect-conformance-check` | pass | a failed assertion, a catch, or a miss | `UNTESTED`, or `DID NOT RUN` |
@@ -800,7 +800,9 @@ node tools/guard-check.mjs
 | network | a non-internal IPv4, or the bind half is unproven and it exits 2 |
 
 It spawns its own servers and needs none running. Every refusal row has a positive twin, so a
-server that refused every upgrade fails.
+server that refused every upgrade fails. A run that stops before its verdict, such as a server
+that never comes up, prints `DID NOT RUN` with the count so far and the rows already fired, and
+exits 2, because a crash counted as a failed assertion reads under `--mutate` as a catch.
 
 - **`reads-answer-any-page`** — the reads a cross-origin `<img>` can start, which `originAllowed`
   cannot see: an `<img>` sends no Origin, so the header that separates it from the capture node is
