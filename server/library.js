@@ -29,13 +29,24 @@ export const MIN_TAKE_SEC = 120;
 const isKnct = (name) => name.toLowerCase().endsWith('.knct');
 
 
-/** The take's append-only marks sidecar, merged per mark id by the highest `at`. */
-export const marksPathFor = (capturePath) => `${capturePath.replace(/\.knct$/i, '')}.marks.jsonl`;
+/**
+ * A take's append-only marks log, merged per mark id by the highest `at`. Filed by the take's
+ * content hash in `marks/` under the captures directory, never by its name: a rename frees a name,
+ * and a log filed under it would attach to the next take given that name.
+ */
+export const marksPathFor = (dir, hash) => {
+  if (!VALID_HASH.test(hash ?? '')) throw new Error(`a marks log is filed by content hash, and ${JSON.stringify(hash)} is not one`);
+  return join(dir, 'marks', `${hash.slice('sha256:'.length)}.jsonl`);
+};
 
-export async function readMarkLog(capturePath) {
+export async function readMarkLog(dir, hash) {
+  return readLogAt(marksPathFor(dir, hash));
+}
+
+async function readLogAt(path) {
   let text;
   try {
-    text = await readFile(marksPathFor(capturePath), 'utf8');
+    text = await readFile(path, 'utf8');
   } catch {
     return [];
   }
@@ -63,17 +74,18 @@ export function resolveMarks(log) {
     .sort((a, b) => a.sourceMs - b.sourceMs);
 }
 
-export async function readMarks(capturePath) {
-  return resolveMarks(await readMarkLog(capturePath));
+export async function readMarks(dir, hash) {
+  return resolveMarks(await readMarkLog(dir, hash));
 }
 
 // Monotonic and never reset: a write-then-restore is invisible to a before-and-after read.
 let markWrites = 0;
 export const markWriteCount = () => markWrites;
 
-// Renames, removals, marks writes and a download's install run one at a time per take name in this
-// process, so a check of which file a name holds still holds when the write lands. Case-folded,
-// because the volume here folds case. A rename made outside this process takes no lock.
+// Renames, removals and a download's install run one at a time per take name in this process, and
+// marks writes per marks log, so a check of which file a name holds, or whether a take is still
+// here, still holds when the write lands. Case-folded, because the volume here folds case. A rename
+// made outside this process takes no lock.
 const takeLocks = new Map();
 
 /** Runs `work` holding the lock of every take `paths` names, all taken in one turn. */
@@ -92,59 +104,49 @@ async function withTakeLock(paths, work) {
   }
 }
 
-async function appendLines(capturePath, records) {
+async function appendLines(dir, hash, records) {
   const lines = records.map((rec) => `${JSON.stringify(rec)}\n`).join('');
-  if (lines) markWrites++;
-  if (lines) await appendFile(marksPathFor(capturePath), lines);
-}
-
-// `identity` is the file the caller checked the name against, asked again under the lock. Without
-// one the name is trusted, which is right only for the recorder's own open take.
-const stillNames = (capturePath, identity) => identity === undefined || sameTake(identity, takeIdentity(capturePath));
-
-/**
- * Where a node serves the marks log of `take`, asked for by content: the node refuses when the
- * name now holds a different take, because a rename there between its listing and this request
- * would otherwise hand over another take's marks by name.
- */
-export const markLogPath = (take) => `/capture/${encodeURIComponent(take.id)}/marks/log?hash=${encodeURIComponent(take.hash)}`;
-
-/**
- * The marks log of the take `capturePath` holds, or null when that take's content hash is not
- * `hash`. Under the take's lock, so no rename in this process lands between the hash and the read.
- */
-export async function markLogFor(capturePath, hash) {
-  return withTakeLock([capturePath], async () => {
-    const index = await cachedIndex(capturePath);
-    return index.hash === hash ? readMarkLog(capturePath) : null;
-  });
+  if (!lines) return;
+  markWrites++;
+  await mkdir(join(dir, 'marks'), { recursive: true });
+  await appendFile(marksPathFor(dir, hash), lines);
 }
 
 /**
- * Appends records to a take's marks log, and answers false, writing nothing, when the name no
- * longer holds `identity`.
+ * Appends records to the marks log of the take `hash` names, and answers false, writing nothing,
+ * when `present` says no take here has that hash any more. Under the log's lock, which a delete
+ * takes too, so a delete cannot land between the question and the write. The recorder passes no
+ * `present`: the take it flushes is its own, and the listing does not answer for it until it closes.
  */
-export async function appendMarks(capturePath, records, { identity } = {}) {
-  return withTakeLock([capturePath], async () => {
-    if (!stillNames(capturePath, identity)) return false;
-    await appendLines(capturePath, records);
+export async function appendMarks(dir, hash, records, { present = null } = {}) {
+  return withTakeLock([marksPathFor(dir, hash)], async () => {
+    if (present && !await present()) return false;
+    await appendLines(dir, hash, records);
     return true;
   });
 }
 
+/** Where a node serves the marks log of `take`: by content, like every `/capture/` route. */
+export const markLogPath = (take) => `/capture/${encodeURIComponent(take.hash)}/marks/log`;
+
 /**
  * Appends the records of another machine's log that this take's log lacks, and answers how many,
- * or null, writing nothing, when the name no longer holds `identity`. Appended rather than
+ * or null, writing nothing, when `present` says no take here has that hash. Appended rather than
  * rewritten, so both logs stay whole and a merge is safe to run twice.
  */
-export async function mergeMarkLog(capturePath, theirLog, { identity } = {}) {
-  return withTakeLock([capturePath], async () => {
-    if (!stillNames(capturePath, identity)) return null;
-    const known = new Set((await readMarkLog(capturePath)).map((r) => `${r.id}@${r.at}`));
-    const fresh = theirLog.filter((r) => !known.has(`${r.id}@${r.at}`));
-    await appendLines(capturePath, fresh);
-    return fresh.length;
+export async function mergeMarkLog(dir, hash, theirLog, { present = null } = {}) {
+  return withTakeLock([marksPathFor(dir, hash)], async () => {
+    if (present && !await present()) return null;
+    return mergeHeld(dir, hash, theirLog);
   });
+}
+
+// `mergeMarkLog` once it holds the log's lock.
+async function mergeHeld(dir, hash, theirLog) {
+  const known = new Set((await readMarkLog(dir, hash)).map((r) => `${r.id}@${r.at}`));
+  const fresh = theirLog.filter((r) => !known.has(`${r.id}@${r.at}`));
+  await appendLines(dir, hash, fresh);
+  return fresh.length;
 }
 
 
@@ -244,14 +246,15 @@ async function describeTake(dir, file, recording) {
       openRefusals,
       openable: openRefusals.length === 0,
       recording: true,
-      marks: await readMarks(path),
+      // Marks pressed during the shoot are the recorder's until the close gives them a hash.
+      marks: [],
     };
   }
 
   const index = await cachedIndex(path);
   const stamps = index.frames.stampMs;
   const hello = await readHelloOnce(path, index);
-  const marks = await readMarks(path);
+  const marks = await readMarks(dir, index.hash);
 
   const fromHello = Number.isFinite(hello?.startedAt) && hello.startedAt > 0;
   const format = hello?.format ?? null;
@@ -282,6 +285,39 @@ async function describeTake(dir, file, recording) {
     recording: false,
     marks,
   };
+}
+
+// Where each content hash was last found. A name, so it is asked again on every use.
+const foundAt = new Map();
+
+const holdsHash = async (path, hash, owns) => {
+  if (owns(path)) return false;
+  try {
+    return (await cachedIndex(path)).hash === hash;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * The file here holding the take whose content hash is `hash`, or null when none does: the one
+ * way a request names a take. The take the recorder still owns has no hash and is never answered,
+ * because asking would scan a growing file. `also` names files outside `dir` that count as here.
+ */
+export async function takeFileFor(dir, hash, { owns = () => false, also = [] } = {}) {
+  if (!VALID_HASH.test(hash ?? '')) return null;
+  const held = foundAt.get(hash);
+  if (held && await holdsHash(held, hash, owns)) return held;
+  const names = (await directoryNames(dir, { what: 'captures directory' })).filter(isKnct);
+  let found = null;
+  for (const path of [...names.map((file) => join(dir, file)), ...also]) {
+    if (owns(path)) continue;
+    const index = await cachedIndex(path).catch(() => null);
+    if (!index) continue;
+    foundAt.set(index.hash, path);
+    if (index.hash === hash) found ??= path;
+  }
+  return found;
 }
 
 export async function scanTakes(dir, owns = () => false) {
@@ -551,7 +587,7 @@ async function downloadToPath(node, take, dir, targetIn) {
   const stall = untilItStalls(() => progress.received);
   let res;
   try {
-    res = await fetch(`${node.url}/capture/${encodeURIComponent(take.id)}/file`, { signal: stall.signal });
+    res = await fetch(`${node.url}/capture/${encodeURIComponent(take.hash)}/file`, { signal: stall.signal });
   } catch (err) {
     stall.stop();
     throw new Error(`downloading ${take.id}: ${err.message}`);
@@ -633,15 +669,11 @@ async function downloadToPath(node, take, dir, targetIn) {
     stall.stop();
   }
 
-  // The file installed, because fetching the log is a round trip and `target` is a name: a rename in
-  // that window would leave this appending beside a take that moved.
-  const installed = await stat(target).catch(() => null);
+  // Filed by the hash the copy was just verified against, so a rename landing while the log is
+  // on its way changes nothing about where it goes.
   try {
     const log = await node.fetchJson(markLogPath(take), { signal: AbortSignal.timeout(MARKS_MS) });
-    if (!await appendMarks(target, log.log ?? [], { identity: installed })) {
-      console.warn(`[library] ${take.id} was renamed or replaced while its marks were arriving, `
-        + 'so they were not written here - sync marks on the take under its new name to bring them across');
-    }
+    await appendMarks(dir, take.hash, log.log ?? []);
   } catch { /* a node that went away mid-download still leaves a verified take */ }
   return target;
 }
@@ -689,7 +721,9 @@ export async function hashFile(path) {
 export async function removeTake(dir, id, { hash, verifiedElsewhere = null }) {
   if (!VALID_ID.test(id)) throw new Error(`unusable take id ${id}`);
   const path = join(dir, `${id}.knct`);
-  return withTakeLock([path], () => removeHeld(id, path, { hash, verifiedElsewhere }));
+  // The marks log's lock as well, so no marks write lands between the hash and the unlink.
+  const log = VALID_HASH.test(hash ?? '') ? [marksPathFor(dir, hash)] : [];
+  return withTakeLock([path, ...log], () => removeHeld(dir, id, path, { hash, verifiedElsewhere }));
 }
 
 /**
@@ -707,7 +741,7 @@ async function hashThrough(path) {
 }
 
 // `removeTake` once it holds the take's lock.
-async function removeHeld(id, path, { hash, verifiedElsewhere }) {
+async function removeHeld(dir, id, path, { hash, verifiedElsewhere }) {
   // Hashed through one descriptor and unlinked by name, so the name is asked again before the
   // unlink: a rename landing during the hash can free this id and move another take into it.
   const { identity: hashed, hash: actual } = await hashThrough(path);
@@ -733,9 +767,9 @@ async function removeHeld(id, path, { hash, verifiedElsewhere }) {
   // `unlink` takes a name, so a rename can still land between the check above and this line. That
   // remainder is a few microtasks, where the window it replaces was a streaming sha256 of the take.
   await unlink(path);
-  // The marks go with the take: a log left under a freed name attaches to the next take given it.
-  // A reclaim has already merged this log into the copy it keeps, in `serveRemoval`.
-  await unlink(marksPathFor(path)).catch((err) => {
+  // The marks go with the last copy here. `serveRemoval` refuses a take with a second name, and a
+  // reclaim has already merged the node's log into the copy it keeps.
+  await unlink(marksPathFor(dir, actual)).catch((err) => {
     if (err.code !== 'ENOENT') console.warn(`[library] ${id} was removed but its marks log was not: ${err.message}`);
   });
   await unlink(indexPathFor(path)).catch(() => {});
@@ -794,8 +828,8 @@ export async function removeName(dir, id, { keep, hash, owns = () => false }) {
 }
 
 /**
- * Renames a take and everything filed beside it. Safe because nothing here goes by name: projects,
- * the reconciliation and the menu all reference footage by content hash. The take being recorded is
+ * Renames a take and its index. Safe because nothing here goes by name: projects, marks, the
+ * reconciliation and the menu all reference footage by content hash. The take being recorded is
  * refused, because the recorder names the files it owns by path and a renamed one stops matching.
  */
 export async function renameTake(dir, id, requested, { hash, owns = () => false }) {
@@ -820,7 +854,7 @@ export async function renameTake(dir, id, requested, { hash, owns = () => false 
   if (owns(from)) {
     throw new Error(`${id} is being recorded right now: stop the take before renaming it`);
   }
-  // Under both names' locks, so nothing in this process writes marks to either mid-rename.
+  // Under both names' locks, so no removal or install in this process lands on either mid-rename.
   return withTakeLock([from, target], async () => {
     const index = await cachedIndex(from);
     if (index.hash !== hash) {
@@ -830,7 +864,7 @@ export async function renameTake(dir, id, requested, { hash, owns = () => false 
       );
     }
 
-    for (const path of [target, marksPathFor(target), indexPathFor(target)]) {
+    for (const path of [target, indexPathFor(target)]) {
       try {
         await stat(path);
         throw new Error(`${to} is taken: ${basename(path)} is already in ${root}`);
@@ -852,13 +886,7 @@ export async function renameTake(dir, id, requested, { hash, owns = () => false 
         throw err;
       }
     };
-    const marksMoved = await linkInto(marksPathFor(from), marksPathFor(target));
-    try {
-      if (!await linkInto(from, target)) throw new Error(`${id} is no longer in ${root}`);
-    } catch (err) {
-      if (marksMoved) await unlink(marksPathFor(target)).catch(() => {});
-      throw err;
-    }
+    if (!await linkInto(from, target)) throw new Error(`${id} is no longer in ${root}`);
     try {
       await unlink(from);
     } catch (err) {
@@ -866,16 +894,14 @@ export async function renameTake(dir, id, requested, { hash, owns = () => false 
       // outside this process, which takes no lock - and the rollback below would unlink the last entry.
       if (err.code !== 'ENOENT') {
         await unlink(target).catch(() => {});
-        if (marksMoved) await unlink(marksPathFor(target)).catch(() => {});
         throw err;
       }
     }
-    if (marksMoved) await unlink(marksPathFor(from)).catch(() => {});
     await rename(indexPathFor(from), indexPathFor(target))
       .catch(() => unlink(indexPathFor(from)).catch(() => {}));
     forgetCapture(from);
     forgetCapture(target);
-    return { renamed: `${id}.knct`, id: to, file: `${to}.knct`, hash: index.hash, marks: marksMoved };
+    return { renamed: `${id}.knct`, id: to, file: `${to}.knct`, hash: index.hash };
   });
 }
 

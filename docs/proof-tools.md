@@ -71,7 +71,7 @@ fixture, server or browser first (`timeline-check`, `keyframe-check`, `export-ch
 A mutated run prints the expected failure row when its entry carries a `fails:` field.
 For other entries, read the catch from the assertions that fired.
 
-Four tables are too large to reproduce here — `editor-check` declares 202, `library-check` 121,
+Four tables are too large to reproduce here — `editor-check` declares 202, `library-check` 136,
 `registry-check` 54 and `effect-check` 42. Their sections give the count and the enumerate
 command prints the names.
 
@@ -514,7 +514,7 @@ case, and name themselves in the verdict as unproven on one that does not. The t
 shoots on `+17` and `+18` at once, and the marks-sync section answers as the node from a stub
 inside the check on `+17`.
 
-129 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
+136 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
 
 **Known reds.** Three rows are flaky under machine contention. Two are
 in the marks-on-the-scrubber section and are one race between a seek, `settled()` and the mark's
@@ -796,7 +796,7 @@ node tools/guard-check.mjs
 | needs | |
 | --- | --- |
 | port | 8321 free; `--port` moves it |
-| fixture | `captures/sample.knct`, served with `--replay`; the read rows ask for `/capture/sample/...` |
+| fixture | `captures/sample.knct`, served with `--replay`; the read rows ask for it by its content hash |
 | network | a non-internal IPv4, or the bind half is unproven and it exits 2 |
 
 It spawns its own servers and needs none running. Every refusal row has a positive twin, so a

@@ -4,10 +4,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mergeMarkLog, readMarkLog, renameTake, takeIdentity } from '../server/library.js';
+import { marksPathFor, mergeMarkLog, readMarkLog, renameTake } from '../server/library.js';
 import { cachedIndex } from '../server/capture.js';
 import { encodeMessage, TYPE_FRAME, TYPE_HELLO } from '../server/protocol.js';
 
@@ -30,15 +30,15 @@ test('a marks merge lands in the take it checked, never in the take renamed into
     const z = join(dir, 'shot-z.knct');
     await writeFile(x, capture(1));
     await writeFile(z, capture(2));
-    const log = Array.from({ length: LOG_RECORDS }, (_, n) => `${JSON.stringify({ id: `m${n}`, sourceMs: n, at: n })}\n`);
-    await writeFile(join(dir, 'shot-x.marks.jsonl'), log.join(''));
     const hashA = (await cachedIndex(x)).hash;
     const hashB = (await cachedIndex(z)).hash;
+    const log = Array.from({ length: LOG_RECORDS }, (_, n) => `${JSON.stringify({ id: `m${n}`, sourceMs: n, at: n })}\n`);
+    await mkdir(join(dir, 'marks'), { recursive: true });
+    await writeFile(marksPathFor(dir, hashA), log.join(''));
 
     const fromNode = { id: 'm-from-the-node', sourceMs: 1, label: 'for take A', at: 1e12 };
-    const identity = takeIdentity(x);
     let mergeSettled = false;
-    const merging = mergeMarkLog(x, [fromNode], { identity }).finally(() => { mergeSettled = true; });
+    const merging = mergeMarkLog(dir, hashA, [fromNode]).finally(() => { mergeSettled = true; });
     // A leaves the name and B takes it, both through the library's own rename.
     let renamesSettledFirst = null;
     const renames = renameTake(dir, 'shot-x', 'shot-y', { hash: hashA })
@@ -46,12 +46,12 @@ test('a marks merge lands in the take it checked, never in the take renamed into
       .then(() => { renamesSettledFirst = !mergeSettled; });
     const [merged] = await Promise.all([merging, renames]);
 
-    const underX = await readMarkLog(join(dir, 'shot-x.knct'));
-    const underY = await readMarkLog(join(dir, 'shot-y.knct'));
-    assert.equal(underX.some((r) => r.id === fromNode.id), false,
+    const underB = await readMarkLog(dir, (await cachedIndex(join(dir, 'shot-x.knct'))).hash);
+    const underA = await readMarkLog(dir, (await cachedIndex(join(dir, 'shot-y.knct'))).hash);
+    assert.equal(underB.some((r) => r.id === fromNode.id), false,
       `take B, now under take A's old name, gained take A's mark (the renames ${renamesSettledFirst ? 'finished inside' : 'waited for'} the merge)`);
-    assert.ok(merged === null || underY.some((r) => r.id === fromNode.id),
-      'and the merge either landed in take A under its new name or said it wrote nothing');
+    assert.equal(merged, 1, 'and the merge wrote the one record it was given');
+    assert.ok(underA.some((r) => r.id === fromNode.id), 'into take A, under its new name');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
