@@ -43,7 +43,7 @@ const MAC_PORT = Number(flag('--mac-port', '8211'));
 // `MAC_PORT + n`, and `startServer` asserts its port is inside the span, so a section added
 // later at `+17` is caught by arithmetic rather than by a wrong reading. `startServer` polls
 // until something answers `/library/takes`, and a stranger on the port answers just as well.
-const PORT_SPAN = 16;
+const PORT_SPAN = 18;
 const MUTATE = flag('--mutate');
 const HEADED = argv.includes('--headed');
 const WORK = flag('--work') ?? join(REPO, '.library-check');

@@ -496,7 +496,7 @@ node tools/library-check.mjs
 
 | needs | |
 | --- | --- |
-| ports | `--node-port` (8210) and `--mac-port`..`+16` (8211..8227), all free |
+| ports | `--node-port` (8210) and `--mac-port`..`+18` (8211..8229), all free |
 | fixture | `captures/sample.knct`, or `--capture` |
 | browser | a GPU browser |
 
