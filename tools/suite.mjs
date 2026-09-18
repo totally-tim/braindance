@@ -4,7 +4,7 @@
 // at once, then the tools that share one `--url` server one after another, against a server this
 // starts on `--port` and stops.
 //
-//   node tools/suite.mjs [--port 8431] [--logs <dir>]
+//   node tools/suite.mjs [--port 8431] [--logs <dir>] [--help]
 //
 // Exit 0 when every tool passed, 1 when any failed, 2 when none failed and any did not run.
 import { spawn, spawnSync } from 'node:child_process';
@@ -14,15 +14,14 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
+import { CAUGHT, DID_NOT_RUN, NOT_CAUGHT, verdictOf } from './mutation-verdict.mjs';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
 const flag = (name, dflt = null) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : dflt);
 const PORT = Number(flag('--port', '8431'));
 const URL_BASE = `http://127.0.0.1:${PORT}`;
-const LOGS = flag('--logs') ?? mkdtempSync(join(tmpdir(), 'braindance-suite-'));
 const TOOL_TIMEOUT_MS = 30 * 60_000;
-mkdirSync(LOGS, { recursive: true });
 
 const range = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => from + i);
 const unitFiles = () => readdirSync(join(REPO, 'test')).filter((f) => f.endsWith('.test.mjs')).sort()
@@ -35,7 +34,9 @@ const OFFLINE = [
   { name: 'cpp-check' },
   { name: 'unit', argv: () => ['--test', '--test-reporter=spec', ...unitFiles()] },
   { name: 'release-gate-check' },
-  { name: 'vendor-check' },
+  // Its full answer on a machine with no built prefix, as CI takes it: the source proven, and no
+  // library to hold to it.
+  { name: 'vendor-check', answersWithExit2: 'PASS on the source, with the artifact untested here' },
 ];
 const SELF_SPAWNING = [
   { name: 'guard-check', ports: [8321] },
@@ -78,58 +79,28 @@ const FIXTURES = [
   ['captures/fixture-2x.knct', ['tools/make-fixture.js', 'captures/sample.knct', 'captures/fixture-2x.knct', '--loops', '2']],
 ];
 
-/**
- * The failed and total assertions a tool printed, either null when it printed none. Most print
- * `N assertions, M failed`; the rest are read in the shape each one prints, and a tool that prints
- * no total is counted by its `PASS` and `FAIL` rows.
- */
-function countOf(out) {
-  const last = (re) => [...out.matchAll(re)].at(-1);
-  let m = last(/^(?:\[[\w-]+\] |[^\n:]+: )?(\d+) (?:assertions|JavaScript files)(?: ran)?, (\d+|none) failed/gm);
-  if (m) return { failed: m[2] === 'none' ? 0 : Number(m[2]), total: Number(m[1]) };
-  m = last(/^(?:\[[\w-]+\] )?(\d+)\/(\d+) passed, (\d+) failed/gm);
-  if (m) return { failed: Number(m[3]), total: Number(m[2]) };
-  m = last(/^(\d+) passed, (\d+) failed/gm);
-  if (m) return { failed: Number(m[2]), total: Number(m[1]) + Number(m[2]) };
-  m = last(/^\[[\w-]+\] PASS \((\d+) assertions\)$/gm);
-  if (m) return { failed: 0, total: Number(m[1]) };
-  m = last(/^\[[\w-]+\] FAIL \((\d+)\/(\d+) assertions failed\)$/gm);
-  if (m) return { failed: Number(m[1]), total: Number(m[2]) };
-  const tests = last(/^[ℹ#] tests (\d+)$/gm);
-  const fails = last(/^[ℹ#] fail (\d+)$/gm);
-  if (tests && fails) return { failed: Number(fails[1]), total: Number(tests[1]) };
-  const rows = [...out.matchAll(/^ {2}(PASS|FAIL) +\S/gm)];
-  const total = rows.length || null;
-  m = last(/^(?:\[[\w-]+\] )?FAIL \((\d+)\)$/gm) ?? last(/^(\d+) failed$/gm);
-  if (m) return { failed: Number(m[1]), total };
-  if (last(/^(?:\[[\w-]+\] )?PASS$/gm)) return { failed: 0, total };
-  if (last(/^(?:\[[\w-]+\] )?FAIL$/gm)) return { failed: Math.max(1, rows.filter((r) => r[1] === 'FAIL').length), total };
-  return { failed: null, total };
-}
-
-/** The line a run that did not finish is explained by: its own refusal, the error, or its last word. */
-function whyOf(out) {
+/** The line a run that did not finish is explained by, for the reader: its refusal, its error, its last word. */
+function saidOf(out) {
   const lines = out.split('\n').map((l) => l.trim()).filter(Boolean);
   return lines.find((l) => /^(?:\[[\w-]+\] )?DID NOT RUN\b/.test(l))
     ?? lines.find((l) => /^(?:\w*Error|page\.\w+): /.test(l))
     ?? lines.filter((l) => !/^Node\.js v/.test(l)).at(-1) ?? 'no output';
 }
 
+const SAID = { [CAUGHT]: 'FAIL', [NOT_CAUGHT]: 'PASS', [DID_NOT_RUN]: 'DID NOT RUN' };
+
 /**
- * PASS, FAIL or DID NOT RUN. FAIL is a finished run with a failed assertion. A run finished when it
- * exited 0 or 1 with its count printed; exit 2 is a tool declining, and zero failed with exit 1 is
- * a crash rather than a pass.
+ * The run as `verdictOf` reads it: FAIL where it caught something, PASS where nothing failed. A tool
+ * whose exit 2 is its full answer here has that answer read as a finished run.
  */
-function verdictOf({ code, signal, out, timedOut }) {
-  const { failed, total } = countOf(out);
-  const counted = { failed, total };
-  if (timedOut) return { verdict: 'DID NOT RUN', ...counted, why: `killed after ${TOOL_TIMEOUT_MS / 60_000} minutes` };
-  if (signal || code === null) return { verdict: 'DID NOT RUN', ...counted, why: `killed by ${signal}` };
-  if (code !== 0 && code !== 1) return { verdict: 'DID NOT RUN', ...counted, why: `exit ${code}: ${whyOf(out)}` };
-  if (failed === null) return { verdict: 'DID NOT RUN', ...counted, why: `no assertion count: ${whyOf(out)}` };
-  if (failed > 0) return { verdict: 'FAIL', ...counted, why: '' };
-  if (code !== 0) return { verdict: 'DID NOT RUN', ...counted, why: `exit 1 with nothing failed: ${whyOf(out)}` };
-  return { verdict: 'PASS', ...counted, why: '' };
+function judge(entry, run) {
+  const answered = run.code === 2 && entry.answersWithExit2 && run.out.includes(entry.answersWithExit2);
+  const read = verdictOf(answered ? { ...run, code: 0 } : run);
+  const why = answered ? `exit 2: ${entry.answersWithExit2}`
+    : run.timedOut ? `killed after ${TOOL_TIMEOUT_MS / 60_000} minutes`
+      : read.verdict === DID_NOT_RUN ? `${read.why}: ${saidOf(run.out)}`
+        : run.code !== 0 ? `exit ${run.code}` : '';
+  return { verdict: SAID[read.verdict], failed: read.failed, total: read.total, why };
 }
 
 /** Whether something accepts a connection on this loopback port. */
@@ -163,7 +134,7 @@ function runTool(entry) {
       children.delete(child);
       out += decoder.end();
       writeFileSync(join(LOGS, `${entry.name}.log`), `$ node ${args.join(' ')}\n${out}\nexit ${code ?? signal}\n`);
-      resolve({ name: entry.name, seconds: (Date.now() - started) / 1000, ...verdictOf({ code, signal, out, timedOut }) });
+      resolve({ name: entry.name, seconds: (Date.now() - started) / 1000, ...judge(entry, { code, signal, out, timedOut }) });
     });
   });
 }
@@ -245,14 +216,27 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   });
 }
 
-const t0 = Date.now();
-console.log(`[suite] node ${process.version}, logs in ${LOGS}`);
-
 const known = new Set([...OFFLINE, ...SELF_SPAWNING, ...ON_ONE_SERVER].map((e) => e.name));
 const unknown = readdirSync(join(REPO, 'tools'))
   .filter((f) => /-check\.mjs$/.test(f))
   .map((f) => f.replace(/\.mjs$/, ''))
   .filter((name) => !known.has(name) && !Object.hasOwn(LEFT_OUT, name));
+
+if (argv.includes('--help')) {
+  const names = (entries) => entries.map((e) => `${e.name}${e.ports ? ` (${e.ports.length > 2 ? `${e.ports[0]}..${e.ports.at(-1)}` : e.ports.join(', ')})` : ''}`);
+  console.log('usage: node tools/suite.mjs [--port 8431] [--logs <dir>]\n');
+  console.log(`fixtures, built when missing: ${FIXTURES.map(([path]) => path).join(', ')}`);
+  console.log(`1. side by side: ${names(OFFLINE).join(', ')}`);
+  console.log(`2. at once: ${names(SELF_SPAWNING).join(', ')}`);
+  console.log(`3. one after another against a server on ${PORT}: ${names(ON_ONE_SERVER).join(', ')}`);
+  console.log(`left out: ${Object.keys(LEFT_OUT).join(', ')}${unknown.length ? `; named nowhere: ${unknown.join(', ')}` : ''}`);
+  process.exit(0);
+}
+
+const LOGS = flag('--logs') ?? mkdtempSync(join(tmpdir(), 'braindance-suite-'));
+mkdirSync(LOGS, { recursive: true });
+const t0 = Date.now();
+console.log(`[suite] node ${process.version}, logs in ${LOGS}`);
 
 console.log('\n[suite] fixtures');
 mkdirSync(join(REPO, 'captures'), { recursive: true });

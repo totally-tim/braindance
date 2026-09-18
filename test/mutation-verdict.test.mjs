@@ -114,6 +114,59 @@ test('every count line the swept and CI tools print is read, with its failed cou
   assert.equal(crash.verdict, DID_NOT_RUN, 'a crash line is not a count line');
 });
 
+// The shapes the tools print on an unmutated run, as suite reads them: each line below is one a
+// tool printed on this tree, with the verdict and the failed/total it has to come to.
+const read = (code, lines) => verdictOf({ code, signal: null, out: `${lines.join('\n')}\n` });
+const counted = (r) => `${r.failed ?? '?'}/${r.total ?? '?'}`;
+
+test('a count line carries the total beside the failed count, the label and trailing clause aside', () => {
+  const cases = [
+    [['126 JavaScript files, 0 failed'], NOT_CAUGHT, '0/126'],
+    [['vendored tree: 296 assertions, 0 failed, 1 unproven', 'PASS on the source, with the artifact untested here'], NOT_CAUGHT, '0/296'],
+    [['[library] 536 assertions, 2 failed, 1 claim unproven here (reveal)'], CAUGHT, '2/536'],
+    // A verdict line under the count is not a second count.
+    [['  FAIL  a row', '[jobs] 108 assertions, 1 failed', '[jobs] FAIL (1)'], CAUGHT, '1/108'],
+  ];
+  for (const [lines, verdict, count] of cases) {
+    const r = read(0, lines);
+    assert.equal(r.verdict, verdict, lines.at(-1));
+    assert.equal(counted(r), count, lines.at(-1));
+  }
+});
+
+test('the tools that print no count line are read by their tally, their test summary or their verdict line', () => {
+  const cases = [
+    // cli-check's tally, with and without the clause a mutated run adds.
+    [0, ['  PASS server up', '122 passed, 0 failed'], NOT_CAUGHT, '0/122'],
+    [1, ['  FAIL a row', '120 passed, 2 failed; mutation m: CAUGHT'], CAUGHT, '2/122'],
+    // node:test, spec and TAP.
+    [0, ['ℹ tests 299', 'ℹ suites 0', 'ℹ pass 299', 'ℹ fail 0'], NOT_CAUGHT, '0/299'],
+    [1, ['# tests 12', '# pass 9', '# fail 3'], CAUGHT, '3/12'],
+    // A verdict line alone, totalled by its rows, however far a row's label is indented.
+    [0, ['  PASS  one', '  PASS    and so on', '  PASS  three', '', '[registry] PASS'], NOT_CAUGHT, '0/3'],
+    [1, ['  PASS  one', '  FAIL  two', '  FAIL  three', '[registry] FAIL (2)'], CAUGHT, '2/3'],
+    // index-check's bare verdict, which is not one of its rows.
+    [0, ['  PASS  a frame', '  PASS  a range', '', 'PASS'], NOT_CAUGHT, '0/2'],
+    // determinism-check prints no rows, so it has no total.
+    [0, ['[determinism] run 1 vs run 3 (fresh page)     : IDENTICAL', '', '[determinism] PASS'], NOT_CAUGHT, '0/?'],
+    [1, ['[determinism] run 1 vs run 3 (fresh page)     : DIFFER at image 2 of 8', '[determinism] FAIL'], CAUGHT, '1/?'],
+  ];
+  for (const [code, lines, verdict, count] of cases) {
+    const r = read(code, lines);
+    assert.equal(r.verdict, verdict, lines.at(-1));
+    assert.equal(counted(r), count, lines.at(-1));
+  }
+});
+
+test('and a row is never a verdict: rows with no verdict line did not run, however red', () => {
+  const r = read(1, ['  PASS  one', '  FAIL  two', 'Error: the stage came out 320x180 and this file\'s figures are 640x360']);
+  assert.equal(r.verdict, DID_NOT_RUN);
+  assert.equal(counted(r), '?/?');
+  const declined = read(2, ['  FAIL  no hello', '[sensor-view] 86 assertions, 1 failed', '[sensor-view] DID NOT RUN - no sensor']);
+  assert.equal(declined.verdict, DID_NOT_RUN, 'exit 2 declines whatever it counted');
+  assert.equal(counted(declined), '1/86');
+});
+
 test('every refusal shape lists the names a tool declares', () => {
   assert.deepEqual(namesIn('unknown mutation __enumerate__ - have a, b-c, d\n'), ['a', 'b-c', 'd']);
   assert.deepEqual(namesIn("unknown mutation '__enumerate__'; have: a, b\n"), ['a', 'b']);
