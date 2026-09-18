@@ -1031,8 +1031,9 @@ name.
 
 ## `cpp-check`
 
-Both C++ files parse and typecheck, in all four combinations of the two macros `native/grabber.cpp`
-branches on.
+Both C++ files parse and typecheck, in eight configurations of the pipeline and colour-decoder
+macros `native/grabber.cpp` branches on, and each `ColorDecoder` enumerator exists only on a build
+carrying its decoder.
 
 ```
 node tools/cpp-check.mjs
@@ -1046,15 +1047,109 @@ node tools/cpp-check.mjs
 It parses and typechecks; it does not link and it does not run, so a call to a function present in
 the headers and absent from the library is as green here as a correct one. What it closes is that
 `native/grabber.cpp` — the only writer of the one artifact in this program that cannot be shot
-again — had no compile gate.
+again — has a compile gate over every branch, including the ones this machine never builds.
+
+Four arms carry a pipeline macro combination and no decoder macro, so they also compile the empty
+enum. Three more carry a colour decoder beside a pipeline — a Linux desktop, this Mac and a Jetson
+— and the eighth is a plain Linux box with a decoder and no pipeline macro. Every decoder macro has
+an arm defining it and an arm without it, so both sides of each decoder `#ifdef` are compiled
+somewhere.
+
+Five probes beside the arms hold the gating. Four are one per decoder: with the other three macros
+on, a translation unit naming this one alone has to be refused, and the rejection has to name it.
+The fifth turns all four on and requires the same unit to compile, so a refusal above is the gating
+rather than a bad include path. An all-off arm beside an all-on arm cannot ask this — the two differ
+only on whether any decoder exists, so one `#if defined(A) || defined(B) || defined(C) || defined(D)`
+around the whole list satisfies both while every enumerator exists on every build. That is the state
+in which `createRgbPacketProcessor` returns NULL for a name the grabber has already accepted.
+
+Which processor an enumerator actually builds is not asked here, because nothing is linked.
+`decoder-check` asks it. Neither reaches the CUDA pipelines: their decoder constructors sit behind
+`LIBFREENECT2_WITH_CUDA_SUPPORT`, no arm defines it and both build presets pass `-DENABLE_CUDA=OFF`,
+so nothing in this repo compiles them.
 
 - **`grabber-syntax-error`** — a token-level break in the grabber.
 - **`grabber-type-error`** — a wrong argument type, which is the row saying this is a semantic
   pass and not a tokeniser.
-- **`opencl-branch-broken`** — a break inside the OpenCL `#ifdef` arm.
+- **`opencl-branch-broken`** — a break inside the OpenCL `#ifdef` arm. It reddens 3 of the 8
+  grabber rows.
 - **`opengl-branch-broken`** — a break inside the Pi's arm, which is why the matrix exists: a gate
-  parsing one configuration reports this green. It reddens 2 of the 4 grabber rows.
+  parsing one configuration reports this green. It reddens 4 of the 8 grabber rows.
+- **`vaapi-branch-broken`** — a break inside the grabber's VAAPI arm, which no build on this
+  machine compiles, so it says the decoder configurations are parsed rather than listed. It
+  reddens 1 of the 8 grabber rows and leaves the five probe rows alone.
+- **`enum-gated-as-a-block`** — one gate around the whole enumerator list instead of one per
+  decoder, which is the shape an all-off/all-on pair reports green. It reddens all 4 per-decoder
+  rows, and leaves the all-four row and every grabber row green, because the grabber names an
+  enumerator only inside its own `#ifdef`.
 - **`harness-syntax-error`** — a break in `native/harness/reg-runner.cpp`.
+
+## `decoder-check`
+
+Each `ColorDecoder` enumerator builds its own processor in the library this build loads, and the
+grabber offers and defaults to what that library carries.
+
+```
+node tools/decoder-check.mjs
+```
+
+Needs `vendor/prefix` and the grabber beside it, so `npm run build:native` comes first, and a C++
+compiler. No sensor is needed and none is opened: the grabber is asked only for names it refuses
+inside its argument pass, before `enumerateDevices`. Constructing a `vaapi` or `tegrajpeg` pipeline
+does open that decoder's own device, because its processor does that in its constructor, so those
+two rows report what this machine's render node or driver answered rather than asserting it.
+
+What it closes is that nothing else can see the mapping. `cpp-check` never links, so it reaches
+the enumerator and not the processor behind it. The grabber reports the decoder by echoing the
+flag it was handed, so a `ColorDecoder::TurboJPEG` that builds the VideoToolbox processor still
+writes `turbojpeg colour decode` on the streaming line and `"decoder":"turbojpeg"` in the hello.
+`vendor-check` pins `src/packet_pipeline.cpp` by blob hash, which catches the file changing rather
+than the mapping being wrong, so re-pinning a hash after a real edit leaves the mapping unwatched.
+
+Section 1 links the built library and asks each enumerator this build carries which processor it
+made, then asks whether `CpuPacketPipeline()` and `CpuPacketPipeline(defaultColorDecoder())` make
+the same one. Section 2 reads `grabber --help` against that library: the names it offers are the
+decoders the library carries, and its default is the one `defaultColorDecoder()` answers. It then
+spawns the grabber for each name this build does not carry, which has to exit 1 naming the missing
+support, and for one no build has, which has to exit 2 and list this build's decoders and no
+others. Then `--color-decoder NAME --check` for each name it does carry, which has to exit 0
+having settled on that name.
+
+The probe leaks its pipelines rather than destroying them, and gives up after 60 seconds if it
+does not finish. `~AsyncPacketProcessor` sets `shutdown_` and notifies without holding
+`packet_mutex_`, so a notify landing between the worker's `!shutdown_` test and its wait is lost
+and `join()` never returns. A process building and dropping four pipelines back to back sits on
+that window; the grabber holds one for hours and effectively never does.
+
+That last row reaches the one step between the flag and the library: the grabber spells the
+enumerator it resolved to back through its own name table and refuses a disagreement. `--check`
+runs the whole argument pass and exits before it opens a bus, a device or a window, so the answer
+is the same on a machine with a sensor attached and on one without.
+
+One table in the tool carries the enumerator, the macro, the processor's own `name()` and the
+flag spelling, and the probe, the expectations and the grabber rows are all read off it, so a
+decoder added to libfreenect2 is asked by this tool as it stands.
+
+Both controls edit a file the build reads and rebuild, because asking a mutated library anything
+means building one. Each restores the source and rebuilds again on the way out, including out of a
+refusal. Ctrl-C kills the rebuild in flight rather than the script, which runs on to its end and
+restores from its `exit` hook, so the tree comes back either way. Two states it cannot put right
+on its own: a `SIGKILL`, and a restore whose rebuild itself fails, which prints what to do. Both
+leave `vendor/prefix` built from something `git status` no longer shows, and
+`npm run build:native` is what puts it back.
+
+- **`decoder-mapping-swapped`** — `ColorDecoder::TurboJPEG` builds the VideoToolbox processor. It
+  reddens the TurboJPEG row of section 1 and nothing else. `cpp-check` and `build-native` both
+  report this green, which is the reason this tool exists.
+- **`grabber-spelling-wrong`** — the grabber spells one enumerator as another decoder's flag. It
+  reddens 2 rows on a build defaulting to VideoToolbox: the default row, and that name's `--check`
+  row, because the grabber spells its own enumerator back and disagrees with itself.
+  `build-native` reports this green, because it reads the offered set against the default and both
+  names are real.
+- **`grabber-resolves-wrong-enumerator`** — the grabber's `turbojpeg` arm resolves to
+  `ColorDecoder::VideoToolbox`. It reddens that name's `--check` row on a build carrying both, and
+  says nothing on a build carrying one. This is the arm no other tool compiles a wrong answer out
+  of: `cpp-check` typechecks it and `decoder-check`'s section 1 never goes through it.
 
 ## `vendor-check`
 
@@ -1162,7 +1257,8 @@ discontinuities:
 
 `tools/fake-grabber.mjs` stands in for the sensor when a tool needs a live stream. It honours
 `--no-color` and `--no-low-light`, rewriting each payload at load so the declared lengths still
-describe it. `--pipeline`, `--log`, `--quality`, `--min-depth` and `--max-depth` are accepted and
+describe it. `--pipeline`, `--color-decoder`, `--log`, `--quality`, `--min-depth` and `--max-depth`
+are accepted and
 ignored, and anything else gets one line on stderr and is not refused.
 
 ## The supply-chain gate
