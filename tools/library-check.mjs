@@ -1322,7 +1322,9 @@ async function reservePorts() {
   process.exit(2);
 }
 
-async function startServer(root, args, port) {
+// `ready` is the route polled until the server answers. `/library/takes` unless the fixture's
+// captures directory cannot be listed on purpose, which that route reports as an error.
+async function startServer(root, args, port, { ready = '/library/takes' } = {}) {
   // A port outside the declared span would not have been checked by `reservePorts`, so it is
   // the one thing that could still attach to a stranger.
   if (port !== NODE_PORT && (port < MAC_PORT || port > MAC_PORT + PORT_SPAN)) {
@@ -1351,7 +1353,7 @@ async function startServer(root, args, port) {
         + `so anything answering there is not ours:\n${log.join('')}`);
     }
     try {
-      const res = await fetch(`http://localhost:${port}/library/takes`);
+      const res = await fetch(`http://localhost:${port}${ready}`);
       if (res.ok) return `http://localhost:${port}`;
     } catch { /* not listening yet */ }
   }
@@ -2359,7 +2361,7 @@ async function runChecks() {
       const clashUrl = await startServer(root, [
         '--captures', clash, '--name', 'shooting', '--record', '--no-color',
         '--grabber', `${join(REPO, 'tools/fake-grabber.mjs')} --source ${SAMPLE} --fps 40 --burst 4`,
-      ], MAC_PORT + 6);
+      ], MAC_PORT + 6, { ready: '/record/state' });
       for (let i = 0; i < 40; i++) {
         await new Promise((done) => { setTimeout(done, 250); });
         state = await getJson(`${clashUrl}/record/state`);
