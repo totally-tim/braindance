@@ -120,6 +120,7 @@ Read the assertion count, never the exit code.
 | `effect-conformance-check.mjs` | every installed effect draws nothing at all when it is off | `--url`, a GPU browser |
 | `module-check.mjs` | the boundaries in `web/`: the import graph, what crosses it | nothing |
 | `preview-check.mjs` | rendered previews, camera identity, cancellation, and live fallback | `--url`, a take of at least 9s, a GPU browser |
+| `cli-check.mjs` | CLI, standby, demand wake, camera and server-owned output | port 8401 free, a synthetic capture, ffmpeg and a GPU browser |
 | `syntax-check.mjs` | every shipped file parses, the cross-language constants agree, the citations resolve, every tool is named here | nothing |
 | `hd-encoder-check.mjs` | native pairing under encoder backlog, held colour, key range and RGBX | a C++ compiler and TurboJPEG |
 | `cpp-check.mjs` | both C++ files parse and typecheck, in eight pipeline and colour-decoder configurations, and each ColorDecoder enumerator exists only where its decoder does | a C++ compiler and turbojpeg's headers |
@@ -128,7 +129,7 @@ Read the assertion count, never the exit code.
 | `registration-check.mjs` | our registration equals upstream's, bit for bit | a corpus from `grabber --dump-corpus` |
 | `release-gate-check.mjs` | the `.npmrc` supply-chain gate is actually armed | the npm registry |
 
-**Ports.** These tools spawn their own server and need the port free:
+**Ports.** `cli-check` probes port 8401 before staging under `.cli-check/`. These tools spawn their own server and need the port free:
 `guard-check` 8321, `jobs-check` 8231 and 8232, `effect-check` 8281, `level-check` 8377,
 `monitor-check` 8341, `vcam-check` 8361, `boot-check` 8391, `library-check` 8210 (`--node-port`)
 and 8211..8227 (`--mac-port`..`+16`), `index-check` 8251 under `--stage` or `--mutate` only, and

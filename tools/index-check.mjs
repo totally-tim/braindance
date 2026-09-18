@@ -280,7 +280,7 @@ if (STAGE) {
   }
   // The real captures directory, because the fixtures are gigabytes and the victim section writes
   // a take into it by the same relative path this process uses.
-  staged = spawn(process.execPath, [join(root, 'server/index.js'),
+  staged = spawn(process.execPath, [join(root, 'server/index.js'), '--standby-after', '0',
     '--port', String(STAGE_PORT), '--captures', join(REPO, 'captures'),
     '--projects', join(WORK, 'projects'), '--presets', join(WORK, 'presets'),
     '--deliverables', join(WORK, 'deliverables'), '--jobs', join(WORK, 'jobs')],

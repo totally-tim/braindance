@@ -66,6 +66,34 @@ they are what a page you merely visit cannot produce.
 streams. `server/capture.js` is the only module that reads frames out of one; `server/recorder.js`
 writes the bytes and `server/library.js` streams a whole file through a hash.
 
+The sensor states are `starting`, `live`, `lost`, `absent` and `standby`. Standby owns no
+running grabber. Retry and restart timers are canceled on entry, and the spawn gate prevents
+parallel children. A recorder reservation prevents standby while a recording start awaits storage.
+A five-second tick checks monitors, webcam clients, feedable key clients and the recorder, and
+`server/idle.js` holds the deadline rule: idle live or lost sensors enter standby after
+`--standby-after`, absent sensors and replay are excluded, and a sensor retrying between `starting`
+and `lost` keeps the deadline it already has, because a link that flaps is otherwise set back often
+enough that it never stands down. A socket arriving wakes a sensor standing down, a key page with
+the rest, because a consumer arriving is a reason to look. What does not hold the sensor awake is a
+consumer that waking cannot serve: `GET /camera.mjpg` is refused without waking while colour is off
+and nothing is running to turn it on, and `applyCamera` re-derives that refusal when the camera
+changes, so a request made servable by switching colour on is not refused on the reason it was
+refused before. A key page attached while there is no colour to key is a socket waiting for a reason
+rather than demand. MJPEG holds transient outages for up to 45 seconds and refuses permanent
+unavailability with 503. SIGINT and SIGTERM wait for grabber teardown and recorder close whichever of
+the two fails, and say which of the two failed.
+
+`server/output.js` owns output state for the server process. Preset reads and patches are
+serialized in arrival order. The record page writes mode and size through HTTP and parameter
+values with their registry tags through its socket. Framing carries a composition tag, so
+preset changes clear only look overrides. Camera, transform and framing names are also protected
+for CLI writes. The last relayed view pose is kept, because `web/main.js` streams a pose only when
+it changes and a source that connects while the operator is still would otherwise draw its default
+camera. Each connecting page receives separate mode/size, preset, parameter and pose messages.
+Browser adoption suppresses write-back; the source
+validates presets through the stored-preset door, resets look values to defaults, then applies
+the preset. This makes partial presets agree across existing and newly connected sources.
+
 ## The surfaces
 
 | URL | file | what it is |
@@ -465,8 +493,8 @@ advances; the server sends a pair only when the declared colour identity matches
 encoded webcam image. The key scale is capped at 65.535 metres, the capture's u16 limit.
 The live header has no backward reader; the grabber and server must run the same build.
 
-The operator registry owns output framing and advertises its full state whenever its
-socket connects. The server relays it without maintaining another registry. The keyed
+`server/output.js` holds output framing for the server process and tells every connecting page
+what it holds, so a source needs no operator online to be told what to draw. The keyed
 page clears to transparent on an outage, disconnection, failed decode, or one second
 without a new colour identity. Clearing also invalidates any decode still in progress.
 

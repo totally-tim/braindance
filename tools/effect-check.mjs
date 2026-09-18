@@ -672,7 +672,7 @@ const servers = [];
 let serverLog = '';
 const start = () => new Promise((resolve, reject) => {
   const child = spawn(process.execPath, [
-    join(WORK, 'server/index.js'), '--port', String(PORT),
+    join(WORK, 'server/index.js'), '--standby-after', '0', '--port', String(PORT),
     '--effects', USER_ROOT, '--builtin-effects', BUILTIN_ROOT,
   ], { stdio: ['ignore', 'pipe', 'pipe'] });
   servers.push(child);
@@ -2626,7 +2626,7 @@ try {
     `the loser's root holds ${readdirSync(loserRoot).join(', ')}`);
 
   const loser = spawn(process.execPath, [
-    join(WORK, 'server/index.js'), '--port', String(PORT),
+    join(WORK, 'server/index.js'), '--standby-after', '0', '--port', String(PORT),
     '--effects', loserRoot, '--builtin-effects', BUILTIN_ROOT,
   ], { stdio: ['ignore', 'pipe', 'pipe'] });
   const loserOut = [];

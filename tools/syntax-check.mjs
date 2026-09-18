@@ -153,7 +153,7 @@ if (mutateAt !== -1 && !MUTATIONS[mutation]) {
 
 // A floor per directory rather than a total, so a tree that stopped being walked says so
 // instead of being covered by another that grew. A tripwire against zero, not a manifest.
-const FLOORS = { server: 5, test: 10, tools: 12, web: 18 };
+const FLOORS = { bin: 2, server: 5, test: 10, tools: 12, web: 18 };
 
 // `PARSES` is what `node --check` can be handed and have its answer mean anything; `SHIPPED`
 // is wider, because what is asked of `tools/` is about the file being ours, not about parsing.

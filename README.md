@@ -216,6 +216,66 @@ matte. Turning the colour camera off restarts the grabber and drops a live webca
 `/camera.mjpg` and `/key` serve the camera to anything that can reach the port, so read
 [SECURITY.md](SECURITY.md) before passing `--host 0.0.0.0`.
 
+In OBS, enable **Shutdown source when not visible** so a hidden source releases the sensor.
+
+## Command line client
+
+```bash
+npm link
+braindance status
+braindance sensor standby
+braindance sensor wake --wait
+braindance camera low-light off
+braindance record start
+braindance record mark
+braindance record stop
+braindance output mode camera
+braindance output size 1920x1080
+braindance output preset "Look name"
+braindance output set exposure=1.5
+braindance presets
+braindance takes
+braindance jobs
+```
+
+Use `node bin/braindance.mjs` without linking. Use `--url http://HOST:8080` or set
+`BRAINDANCE_URL` to select the server. Add `--json` for scripts.
+
+Keep `npm start` running. The sensor enters standby after 600 seconds without a consumer.
+Use `npm start -- --standby-after 0` to keep it awake, or press **Standby** on the record surface.
+Opening an OBS source, a record tab, or starting a take wakes it. Close record tabs to let it idle.
+Allow several seconds for the picture to return; see [standby timing](docs/performance.md#standby-timing).
+
+For login startup on macOS, save this as `~/Library/LaunchAgents/eu.tim.braindance.plist`,
+replace both absolute paths, and run `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/eu.tim.braindance.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>eu.tim.braindance</string>
+  <key>WorkingDirectory</key><string>/absolute/path/to/braindance</string>
+  <key>ProgramArguments</key><array><string>/absolute/path/to/node</string><string>server/index.js</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict></plist>
+```
+
+On Linux or a Pi, save this as `~/.config/systemd/user/braindance.service`, replace both paths,
+and run `systemctl --user enable --now braindance.service`:
+
+```ini
+[Unit]
+Description=Braindance sensor
+[Service]
+WorkingDirectory=/absolute/path/to/braindance
+ExecStart=/absolute/path/to/node server/index.js
+Restart=on-failure
+TimeoutStopSec=25
+[Install]
+WantedBy=default.target
+```
+
 ## Building the native side
 
 Both builds are one-time and offline. libfreenect2 lives at `third_party/libfreenect2`

@@ -17,7 +17,7 @@ export class KeyStream {
     // Per socket, because the colour elision is: two clients that joined a frame apart are owed
     // different bytes for the same pair.
     this.clients = new Map();
-    this.demand = new OnDemand({ request, count: () => this.clients.size });
+    this.demand = new OnDemand({ request, count: () => this.demandCount });
     // Why there is no keyed picture, or null when there is. The same question the webcam asks: is
     // there a colour camera, never has a frame arrived.
     this.unavailable = 'no sensor has handshaken with this server yet';
@@ -31,6 +31,14 @@ export class KeyStream {
   get count() {
     this.#reap();
     return this.clients.size;
+  }
+
+  // The clients this stream could actually feed. A page attached while there is no colour to key is
+  // a socket waiting for a reason, not demand that justifies running the sensor, so this is what
+  // the encoder follows and what the idle tick asks rather than `count`.
+  get demandCount() {
+    this.#reap();
+    return this.unavailable === null ? this.clients.size : 0;
   }
 
   // Every attached client, and whether its pairs cross a network. Read by `/record/state`.
@@ -115,6 +123,9 @@ export class KeyStream {
 
   setUnavailable(reason) {
     this.unavailable = reason;
+    // The encoder follows the clients that can be fed, so taking the colour away asks for it to
+    // stop, with the linger a subscriber leaving gets.
+    this.demand.settle();
     // The colour frames restart with the grabber that sends them, and their stamps restart with it
     // too. A `lastColourTs` carried across that seam could match a new frame and elide it, leaving
     // the page keying live depth against a picture from before the outage.
@@ -126,6 +137,9 @@ export class KeyStream {
 
   setAvailable() {
     this.unavailable = null;
+    // A client that attached while the colour was away is demand the moment it returns, and the
+    // grabber that brought the colour back has never heard of it.
+    this.demand.settle();
     for (const ws of this.clients.keys()) this.#sendStatus(ws);
   }
 

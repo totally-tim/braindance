@@ -72,6 +72,16 @@ test('outage and recovery publish availability and resend colour even when stamp
   assert.deepEqual(f.pairs().at(-1).colour, new Uint8Array([1]));
 });
 
+test('a key client the colour cannot reach is not demand the sensor has to run for', () => {
+  const f = fixture({ available: false });
+  assert.equal(f.key.count, 1, 'the page is attached, so `/record/state` has to say so');
+  assert.equal(f.key.demandCount, 0, 'and it is nothing for the idle rule to wait on');
+  assert.deepEqual(f.requested, []);
+  f.key.setAvailable();
+  assert.equal(f.key.demandCount, 1);
+  assert.deepEqual(f.requested, [true], 'the colour returning asks for the encode it never got');
+});
+
 test('malformed depth is dropped and a blocked client is owed a whole later pair', () => {
   const f = fixture();
   f.key.offer(new Uint8Array(3));

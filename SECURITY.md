@@ -74,3 +74,16 @@ a proof tool and is never passed on an operator's machine.
 
 Open an issue, or mail <tim@timkraus.eu> for anything you would rather not file in public.
 There is no bounty and no SLA. Say whether you found it by reading or by running it.
+
+## Automation routes
+
+| route | exposure |
+| --- | --- |
+| `POST /sensor/standby` | Stops the sensor and interrupts live OBS sources; refuses an armed or running take. |
+| `POST /sensor/wake` | Starts the sensor. |
+| `GET/POST /sensor/camera` | Reads or changes camera settings; color changes interrupt live OBS sources. |
+| `GET/POST /output` | Reads or changes the OBS output look, mode and size. |
+
+These writes use the route table's same-origin and JSON guards. The CLI sends HTTP requests
+without an Origin header. Network reachability grants control; keep the default loopback bind
+or use the authenticated tunnel described above.
