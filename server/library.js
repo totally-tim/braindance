@@ -312,6 +312,16 @@ export class NodeLink {
   }
 }
 
+/**
+ * The node's copy of a take, found by content hash, or null when the node answered and holds none.
+ * `there` is what `NodeLink.takes` returned, and its null throws: a node that could not be asked is
+ * not a node with nothing on it, and every caller acts on whether a second copy exists.
+ */
+export function copyOnNode(node, there, hash) {
+  if (there === null) throw new Error(`${node.name} could not be asked which takes it holds: ${node.lastError}`);
+  return there.find((t) => t.hash === hash) ?? null;
+}
+
 export function reconcile(localTakes, nodeTakes) {
   const byHash = new Map();
   // A take mid-write has no hash, so it is keyed by side and name. That is not identity: a take
