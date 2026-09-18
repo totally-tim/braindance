@@ -438,8 +438,9 @@ open and this tab's last change did not land.
 ## Surface memory
 
 A ray landing on a different surface between frames is a death and a birth, and teleporting the
-point is the loudest artifact in the image. A ping-pong float target in `web/surface-memory.js`
-remembers where each ray was and how long ago it swapped.
+point is the loudest artifact in the image. A ping-pong target in `web/surface-memory.js`
+remembers where each ray was and how long ago it swapped. It holds float, or half-float where float
+does not render, and **Render targets** below says what happens when neither does.
 
 - **`fade`** cross-fades the transition, the new point ramping in as the old one thins out. 120ms
   by default, and the correctness half.
@@ -450,6 +451,36 @@ Both are in milliseconds, so a better frame rate does not shorten the look. `MAX
 seconds and `refuseAgeCeiling` refuses a fade and wake asking for more, because a frame depending
 on more history than the memory holds is one no pre-roll reproduces. At zero the ghost geometry
 leaves the draw range and the plain 217,088-point draw is restored.
+
+## Render targets
+
+Every offscreen target the viewer draws into takes its pixel type and its largest size from one
+decision in `web/render-targets.js`. `renderTargetCaps` makes it the first time a target is
+allocated: it builds a 1x1 framebuffer on float, half-float and 8-bit and keeps the types that
+complete. The largest edge is the smaller of `MAX_TEXTURE_SIZE` and `MAX_RENDERBUFFER_SIZE`,
+because a post-chain target is a colour texture and a depth renderbuffer. A type is proved on a
+framebuffer and not read off extension names, because Firefox renders half-float through
+`EXT_color_buffer_float` and never lists `EXT_color_buffer_half_float`.
+
+- **The post chain asks for half-float and takes 8-bit where half-float does not render.**
+  `buildPostChain` hands the answer to the composer's two targets, the afterimage's history, the
+  mosh's history and every bloom level, which three.js would otherwise build as half-float without
+  asking. Where not even 8-bit renders, `chainType` is null, the viewer draws straight to the
+  canvas, and the warning chip in the application bar says that trails, bloom and the grade are off.
+- **The surface memory asks for float, then half-float, and nothing below.** Its channels hold
+  millimetres and seconds, which 8 bits cannot. Below half-float the memory is off: the cloud reads
+  a still state in which every ray has settled and none sheds a ghost, and the chip says that ghost
+  and wake are off.
+- **The drawing buffer is held to the largest target.** `resize` caps the pixel ratio so that the
+  buffer and every chain target fit. Firefox's `privacy.resistFingerprinting`, which LibreWolf
+  turns on by default, holds both limits at 2048, so any stage wider than 2048 device pixels meets
+  the cap. The canvas is not held to the limit, so an allocation past it fails only for the chain: a
+  look that skips the chain draws, and a look through it draws black.
+- **An export is refused, not capped.** Its size is the deliverable's, so `exportClip` refuses
+  one larger than the limit before it starts and names the limit.
+- **`/program` is capped, not refused.** It is a live source with no bar, so
+  `programOutDrawSize` scales its whole frame down to the limit and its readout names both
+  sizes, as in `3840x2160 capped to 2048x1152`.
 
 ## Frame interpolation
 

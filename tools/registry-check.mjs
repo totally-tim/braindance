@@ -753,6 +753,60 @@ const MUTATIONS = {
     fails: 'two rows: the wiring row, naming contour.bands as moving ghost.amount as well as '
       + 'contour.amount, and the planted ghost row, whose points read brighter than the formula',
   },
+  // The four below are about the render-target decision, and only the section that renders every
+  // shipped preset on a smaller context can see them: this machine renders float at 16384.
+  'targets-ignore-the-size-cap': {
+    file: 'web/main.js',
+    edits: [[
+      '    : Math.min(Math.min(devicePixelRatio, 2) * renderScale, renderTargetCaps().maxSize / Math.max(width, height));',
+      '    : Math.min(devicePixelRatio, 2) * renderScale;',
+    ]],
+    fails: 'ten rows of the 2048-cap arm, which is the reporter\'s: its buffer row, the eight '
+      + 'composer presets drawing black, and its incomplete-framebuffer row. The four direct '
+      + 'presets stay lit, which is the shape of the report',
+  },
+  'program-out-ignores-the-size-cap': {
+    file: 'web/main.js',
+    edits: [[
+      '  const scale = Math.min(1, renderTargetCaps().maxSize / Math.max(programOutSize.w, programOutSize.h));',
+      '  const scale = 1;',
+    ]],
+    fails: 'the 2048-cap arm\'s /program row alone: black at 3840x2160, with its buffer past the cap '
+      + 'and its draws landing in framebuffers that cannot complete',
+  },
+  'chain-assumes-half-float': {
+    file: 'web/post-chain.js',
+    edits: [[
+      '  chainType = targetType(THREE.HalfFloatType);',
+      '  chainType = THREE.HalfFloatType;',
+    ]],
+    fails: 'eleven rows of the arm with neither colour-buffer extension: its decision row, the '
+      + 'eight composer presets drawing black, its incomplete-framebuffer row, and its warning row, '
+      + 'which loses the 8-bit clause',
+  },
+  'memory-assumes-half-float': {
+    file: 'web/surface-memory.js',
+    edits: [[
+      '  const stateType = targetType(THREE.FloatType, THREE.HalfFloatType);',
+      "  const stateType = renderer.getContext().getExtension('EXT_color_buffer_float')\n"
+        + '    ? THREE.FloatType\n'
+        + '    : THREE.HalfFloatType;',
+    ]],
+    fails: 'seven rows of the arm with neither colour-buffer extension: its decision row, its '
+      + 'incomplete-framebuffer row, its warning row, which loses the ghost-and-wake clause, and the '
+      + 'four direct presets, which draw no point at all - a memory that never completes reads as '
+      + 'age zero, and a point of age zero has not faded in',
+  },
+  'types-read-from-extension-names': {
+    file: 'web/render-targets.js',
+    edits: [[
+      '      types: Object.freeze(LADDER.filter(completes)),',
+      '      types: Object.freeze(LADDER.filter((type) => type === THREE.UnsignedByteType\n'
+        + "        || gl.getExtension(type === THREE.FloatType ? 'EXT_color_buffer_float' : 'EXT_color_buffer_half_float'))),",
+    ]],
+    fails: 'two rows of the Firefox-shaped arm: its decision row, which reads byte for a chain that '
+      + 'renders half, and its warning row, which then says the chain runs at 8 bits',
+  },
 };
 
 const MUTATE = flag('--mutate');
@@ -1408,8 +1462,10 @@ async function openPage({
   viewportSize = VIEW,
   comparisonShell = false,
   base = URL_BASE,
+  within = context,
+  at = RECORDER_PATH,
 } = {}) {
-  const page = await context.newPage();
+  const page = await within.newPage();
   if (viewportSize.width !== VIEW.width || viewportSize.height !== VIEW.height) {
     await page.setViewportSize(viewportSize);
   }
@@ -1434,7 +1490,7 @@ async function openPage({
     // out of its own HTML, so pairing the old module with the new markup would boot it on
     // whatever a range input defaults to. The predicate and the `goto` below read one
     // constant rather than each spelling the path.
-    await page.route((url) => url.pathname === RECORDER_PATH,
+    await page.route((url) => url.pathname === at,
       (route) => { servedHtml = true; return route.fulfill({ contentType: 'text/html; charset=utf-8', body: source.html }); });
     await page.route((url) => url.pathname === MAIN_PATH, (route) => route.fulfill({
       contentType: 'text/javascript; charset=utf-8', body: source.js,
@@ -1458,7 +1514,7 @@ async function openPage({
     }));
   }
 
-  await page.goto(base + RECORDER_PATH, { waitUntil: 'load' });
+  await page.goto(base + at, { waitUntil: 'load' });
   // Proof the interception held. A predicate that stopped matching would pair the old module
   // with today's markup, which throws at boot and arrives as a timeout naming nothing.
   if (source && !servedHtml) {
@@ -4458,6 +4514,190 @@ console.log('\n[registry] what each reading draws, against a room planted off-ce
     };
     const r = rows(planted.blackwall, want, (p) => `${p.mm}mm${p.what ? ' on a step' : ''}`);
     check(r.ok, 'blackwall runs hotter near than far, and hottest on a step', r.detail);
+  }
+}
+
+console.log('\n[registry] every shipped preset draws on a context that renders less than this one');
+{
+  const { presets: listed } = await (await fetch(`${URL_BASE}/presets`)).json();
+  const shipped = listed.filter((p) => p.builtin);
+
+  // Installed before the page's first script: every draw and clear asks whether the framebuffer
+  // it lands in can complete. A target allocated anywhere, at a type or a size the context cannot
+  // render, is counted by being drawn into rather than by being named here.
+  const COUNT_INCOMPLETE = `(() => {
+    const seen = { draws: 0, incomplete: 0, statuses: {} };
+    globalThis.__incomplete = seen;
+    for (const C of [WebGLRenderingContext, WebGL2RenderingContext]) {
+      for (const name of ['drawArrays', 'drawElements', 'drawArraysInstanced', 'drawElementsInstanced', 'clear']) {
+        const real = C.prototype[name];
+        if (!real) continue;
+        C.prototype[name] = function (...args) {
+          const status = this.checkFramebufferStatus(this.FRAMEBUFFER);
+          seen.draws++;
+          if (status !== this.FRAMEBUFFER_COMPLETE) {
+            seen.incomplete++;
+            const key = '0x' + status.toString(16);
+            seen.statuses[key] = (seen.statuses[key] ?? 0) + 1;
+          }
+          return real.apply(this, args);
+        };
+      }
+    }
+  })();`;
+  const HIDE = (names) => `(() => {
+    const hide = new Set(${JSON.stringify(names)});
+    for (const C of [WebGLRenderingContext, WebGL2RenderingContext]) {
+      const get = C.prototype.getExtension;
+      C.prototype.getExtension = function (n) { return hide.has(n) ? null : get.call(this, n); };
+      const list = C.prototype.getSupportedExtensions;
+      C.prototype.getSupportedExtensions = function () { return (list.call(this) ?? []).filter((n) => !hide.has(n)); };
+    }
+  })();`;
+  // Firefox's privacy.resistFingerprinting, which LibreWolf ships on: both size limits read 2048
+  // and an allocation past them is refused, leaving the attachment with no storage at all. The
+  // canvas is not held to it, which is why the direct presets kept drawing.
+  const CAP = (cap) => `(() => {
+    const cap = ${cap};
+    const over = (w, h) => w > cap || h > cap;
+    for (const C of [WebGLRenderingContext, WebGL2RenderingContext]) {
+      const P = C.prototype;
+      const getParameter = P.getParameter;
+      P.getParameter = function (p) {
+        return p === this.MAX_TEXTURE_SIZE || p === this.MAX_RENDERBUFFER_SIZE ? cap : getParameter.call(this, p);
+      };
+      const texImage2D = P.texImage2D;
+      P.texImage2D = function (...a) { return a.length >= 8 && over(a[3], a[4]) ? undefined : texImage2D.apply(this, a); };
+      const texStorage2D = P.texStorage2D;
+      if (texStorage2D) P.texStorage2D = function (...a) { return over(a[3], a[4]) ? undefined : texStorage2D.apply(this, a); };
+      const storage = P.renderbufferStorage;
+      P.renderbufferStorage = function (...a) { return over(a[2], a[3]) ? undefined : storage.apply(this, a); };
+      const multisample = P.renderbufferStorageMultisample;
+      if (multisample) P.renderbufferStorageMultisample = function (...a) { return over(a[3], a[4]) ? undefined : multisample.apply(this, a); };
+    }
+  })();`;
+
+  // The cap arm is the reporter's and comes first. Its stage is wide enough at a pixel ratio of 2
+  // that an unclamped buffer passes 2048, or the clamp would be proved on a buffer already under it.
+  // The last two arms differ in one extension each, and they are where a decision read off
+  // extension names instead of off a framebuffer comes apart: Firefox renders half-float through
+  // EXT_color_buffer_float and never lists EXT_color_buffer_half_float.
+  const ARMS = [
+    {
+      name: 'a 2048 texture cap', script: CAP(2048), dpr: 2, viewport: { width: 1400, height: 800 },
+      cap: 2048, want: { maxSize: 2048, chain: 'half', memory: 'float' }, line: null, every: true,
+    },
+    {
+      name: 'neither colour-buffer extension',
+      script: HIDE(['EXT_color_buffer_float', 'EXT_color_buffer_half_float']), dpr: 1, viewport: VIEW,
+      want: { chain: 'byte', memory: null }, line: /ghost and wake are off, and trails, bloom and the grade run at 8 bits/, every: true,
+    },
+    {
+      name: 'no EXT_color_buffer_float', script: HIDE(['EXT_color_buffer_float']), dpr: 1, viewport: VIEW,
+      want: { chain: 'half', memory: 'half' }, line: null, every: false,
+    },
+    {
+      name: 'no EXT_color_buffer_half_float, as Firefox lists it',
+      script: HIDE(['EXT_color_buffer_half_float']), dpr: 1, viewport: VIEW,
+      want: { chain: 'half', memory: 'float' }, line: null, every: false,
+    },
+  ];
+  // The two a narrower arm renders: one through the post chain and one that reads the memory.
+  const SAMPLED = ['blackwall', 'ghost'];
+
+  for (const arm of ARMS) {
+    const within = await browser.newContext({ viewport: arm.viewport, deviceScaleFactor: arm.dpr });
+    await within.addInitScript(arm.script + COUNT_INCOMPLETE);
+    const opened = await openPage({ pin: true, viewportSize: arm.viewport, within });
+    const armPage = opened.page;
+    const decided = await armPage.evaluate(`(async () => {
+      const k = globalThis.__kinect;
+      k.drive.pin(await (await fetch('/__pinned.bin')).arrayBuffer());
+      const stage = k.renderer.domElement.getBoundingClientRect();
+      const line = document.getElementById('tGpu');
+      return {
+        caps: k.renderCaps(),
+        wanted: Math.max(stage.width, stage.height) * Math.min(devicePixelRatio, 2),
+        line: line && !line.hidden ? line.textContent : '',
+      };
+    })()`);
+    const got = { maxSize: decided.caps.maxSize, chain: decided.caps.chain, memory: decided.caps.memory };
+    const wrong = Object.keys(arm.want).filter((key) => got[key] !== arm.want[key]);
+    check(wrong.length === 0, `under ${arm.name} the page decides what the context renders`,
+      `${show(got)}${wrong.length ? ` against ${show(arm.want)}` : ''}`);
+    if (arm.cap) {
+      const biggest = Math.max(...decided.caps.buffer, ...decided.caps.chainSize.map(Math.floor));
+      check(decided.wanted > arm.cap && biggest <= arm.cap,
+        'and the stage asks for more than the cap, so the buffer and the chain are held to it',
+        `asked ${decided.wanted.toFixed(0)}, buffer ${decided.caps.buffer.join('x')}, `
+          + `chain ${decided.caps.chainSize.map(Math.floor).join('x')}`);
+    }
+
+    for (const preset of shipped.filter((p) => arm.every || SAMPLED.includes(p.name))) {
+      // A black canvas reads zero everywhere, where the scene's own background alone reads ten.
+      const drawn = await armPage.evaluate(`(() => {
+        const k = globalThis.__kinect;
+        k.params.reset();
+        k.applyPreset(${JSON.stringify(preset.body.values)});
+        k.drive.reset();
+        k.freeCamera.position.set(0, 0.1, 1.6);
+        k.freeCamera.lookAt(0, 0, -2.2);
+        k.freeCamera.updateMatrixWorld(true);
+        k.drive.stepTo(0.2);
+        k.drive.stepTo(0.4);
+        const px = k.drive.readPixels();
+        let lit = 0;
+        for (let i = 0; i < px.length; i += 4) if (Math.max(px[i], px[i + 1], px[i + 2]) > 16) lit++;
+        return {
+          lit: lit / (px.length / 4),
+          post: k.bloom.enabled || k.afterimage.enabled || k.mosh.enabled || k.grade.enabled,
+        };
+      })()`);
+      check(drawn.lit > 0.001, `${preset.name} draws under ${arm.name}`,
+        `${(100 * drawn.lit).toFixed(2)}% lit, ${drawn.post ? 'through the post chain' : 'straight to the canvas'}`);
+    }
+
+    if (arm.cap) {
+      // The OBS source at a 4K setting, which has no bar to say anything: it draws the whole shot
+      // smaller rather than a black frame.
+      const source = await openPage({ pin: true, viewportSize: arm.viewport, within, at: '/program' });
+      const drawn = await source.page.evaluate(`(async () => {
+        const k = globalThis.__kinect;
+        k.drive.pin(await (await fetch('/__pinned.bin')).arrayBuffer());
+        k.applyProgramOut({ size: { w: 3840, h: 2160 } });
+        k.applyPreset(${JSON.stringify(shipped.find((p) => p.name === 'blackwall').body.values)});
+        k.drive.reset();
+        k.drive.stepTo(0.2);
+        k.drive.stepTo(0.4);
+        const px = k.drive.readPixels();
+        let lit = 0;
+        for (let i = 0; i < px.length; i += 4) if (Math.max(px[i], px[i + 1], px[i + 2]) > 16) lit++;
+        return {
+          lit: lit / (px.length / 4),
+          buffer: k.renderCaps().buffer,
+          source: document.body.classList.contains('program-out'),
+          incomplete: globalThis.__incomplete.incomplete,
+        };
+      })()`);
+      check(drawn.source && drawn.lit > 0.001 && drawn.incomplete === 0 && Math.max(...drawn.buffer) <= arm.cap
+        && Math.abs(drawn.buffer[0] / drawn.buffer[1] - 16 / 9) < 0.01,
+      `and /program set to 3840x2160 draws Blackwall under ${arm.name}, scaled whole to fit`,
+      `${(100 * drawn.lit).toFixed(2)}% lit, buffer ${drawn.buffer.join('x')}, `
+        + `${drawn.incomplete} draws into an incomplete framebuffer${drawn.source ? '' : ', not the source page'}`);
+      await source.page.close();
+    }
+
+    const counted = await armPage.evaluate('globalThis.__incomplete');
+    check(counted.draws > 0 && counted.incomplete === 0,
+      `and no draw under ${arm.name} lands in a framebuffer that cannot complete`,
+      `${counted.incomplete} of ${counted.draws}${counted.incomplete ? ` ${show(counted.statuses)}` : ''}`);
+    check(arm.line ? arm.line.test(decided.line) : decided.line === '',
+      arm.line ? 'and the page says what it cannot draw' : 'and the page says nothing, because it draws everything',
+      show(decided.line));
+    if (opened.errors.length) {
+      check(false, `and the page under ${arm.name} reported no error`, opened.errors.slice(0, 2).join(' | '));
+    }
+    await within.close();
   }
 }
 

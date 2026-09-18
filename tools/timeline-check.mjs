@@ -201,7 +201,7 @@ const MUTATIONS = {
   'warm-without-reset': { file: 'web/main.js', edits: [
     [
       '  clearFeedback(\n'
-      + '    [statePrev, stateNext],\n'
+      + '    memoryTargets(clip.cloud.memory),\n'
       + "    'the surface memory moved: a clip can no longer be cleared on the frame it enters',\n"
       + '  );',
       '  /* mutation: the clip keeps whatever it last drew */',
