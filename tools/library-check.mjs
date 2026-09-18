@@ -426,8 +426,8 @@ const MUTATIONS = {
   // The marks sync stops asking which file its path names before it appends, so a take renamed
   // while the node's answer was on its way gets a marks sidecar recreated under its old name.
   'sync-appends-under-a-race': { file: 'server/index.js', edits: [[
-    '    if (!sameTake(mergingInto, takeIdentity(path))) {',
-    '    if (false) {',
+    'mergeMarkLog(path, theirs.log ?? [], { identity: mergingInto })',
+    'mergeMarkLog(path, theirs.log ?? [])',
   ]] },
 
   // The library's poll goes back to a first tick that cannot disagree with anything.
@@ -635,7 +635,7 @@ const MUTATIONS = {
   'marks-without-a-take': { file: 'server/index.js', edits: [
     ['  const wasThere = takeIdentity(path);\n  if (wasThere === null) {\n    sendJson(res, { error: `no take ${id} here, so there is nothing to mark` }, 404);\n    return;\n  }',
       '  const wasThere = takeIdentity(path);'],
-    ['  if (!sameTake(wasThere, takeIdentity(path))) {', '  if (false) {'],
+    ['  if (!await appendMarks(path, records, { identity: wasThere })) {', '  if (!await appendMarks(path, records)) {'],
   ] },
   // The document store restamps the version instead of checking it, so a project from a build
   // this one is not lands looking like one this build wrote.
@@ -743,7 +743,7 @@ const MUTATIONS = {
   },
   // A reclaim goes back to removing the node's copy without bringing its marks here first.
   'reclaim-drops-node-marks': { file: 'server/index.js', edits: [[
-    '    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? []);',
+    '    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? [], { identity: kept });',
     '    const marksMerged = 0;',
   ]],
     fails: 'the row saying a reclaim brings the node\'s marks onto the kept copy, and no other',
@@ -758,7 +758,8 @@ const MUTATIONS = {
   },
   // A reclaim goes back to appending the node's marks by name after an await a rename can land in.
   'reclaim-merges-under-a-race': { file: 'server/index.js', edits: [[
-    '    if (!sameTake(kept, takeIdentity(keptPath))) {', '    if (false) {',
+    '    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? [], { identity: kept });',
+    '    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? []);',
   ]],
     fails: 'both reclaim-race rows: the refusal, and no marks log at the freed name',
   },

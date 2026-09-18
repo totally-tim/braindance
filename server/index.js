@@ -14,7 +14,7 @@ import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
 import {
   VALID_ID, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, copyOnNode, downloadTake,
   downloadsInFlight, hashFile, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
-  removeTake, renameTake, resolveMarks, revealSupport, revealTake, sameTake, scanTakes, takeIdentity,
+  removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeIdentity,
 } from './library.js';
 import { EffectStore } from './effect-store.js';
 import { RESERVED_EFFECT_IDS, doorRefusal, forkRefusal } from './effect-door.js';
@@ -347,22 +347,22 @@ async function serveMarkWrite(req, res, [id]) {
     return;
   }
   const body = await readBody(req);
-  // Asked again, and asked *which* take: the check above is before an await of up to four
-  // megabytes over a room's wifi, and a rename landing in that gap recreates the old sidecar.
-  if (!sameTake(wasThere, takeIdentity(path))) {
-    sendJson(res, {
-      error: `${id} changed underneath this request - it was renamed or replaced while the marks `
-        + 'were being sent, and they have not been written to anything',
-    }, 409);
-    return;
-  }
   const now = Date.now();
   const records = (body.marks ?? []).map((m) => ({
     ...m,
     // `at` is what orders two machines' edits, and the resolver drops a record without one.
     at: Number.isFinite(m.at) ? m.at : now,
   }));
-  await appendMarks(path, records);
+  // Asked again, and asked *which* take, under the take's lock: the check above is before an await
+  // of up to four megabytes over a room's wifi, and a rename landing in that gap recreates the old
+  // sidecar.
+  if (!await appendMarks(path, records, { identity: wasThere })) {
+    sendJson(res, {
+      error: `${id} changed underneath this request - it was renamed or replaced while the marks `
+        + 'were being sent, and they have not been written to anything',
+    }, 409);
+    return;
+  }
   sendJson(res, { marks: resolveMarks(await readMarkLog(path)) });
 }
 
@@ -581,14 +581,14 @@ async function serveRemoval(req, res, [id], kind) {
       }, 502);
       return;
     }
-    if (!sameTake(kept, takeIdentity(keptPath))) {
+    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? [], { identity: kept });
+    if (marksMerged === null) {
       sendJson(res, {
         error: `${id} was renamed or replaced here while the reclaim ran, so ${node.name}'s marks were not `
           + 'written and its copy was not removed',
       }, 409);
       return;
     }
-    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? []);
     try {
       const done = await node.fetchJson(`/library/delete/${encodeURIComponent(theirs.id)}`, {
         method: 'POST',
@@ -903,9 +903,9 @@ async function serveMarkSync(req, res, [id]) {
     sendJson(res, { error: recordingRefusal(id) }, 409);
     return;
   }
-  // Which file the marks will go to, asked again before they are written: a rename can land in
-  // any of the awaits below, and appending under the old name recreates a sidecar beside nothing.
-  // This narrows the window rather than closing it, the way `serveMarkWrite` does.
+  // Which file the marks will go to, asked again under the take's lock before they are written: a
+  // rename can land in any of the awaits below, and appending under the old name recreates a
+  // sidecar beside nothing.
   const mergingInto = takeIdentity(path);
   try {
     // The node's *name* for this take, resolved by hash: asking under this machine's name returns
@@ -921,14 +921,14 @@ async function serveMarkSync(req, res, [id]) {
       return;
     }
     const theirs = await node.fetchJson(`/capture/${encodeURIComponent(match.id)}/marks/log`, { signal: left });
-    if (!sameTake(mergingInto, takeIdentity(path))) {
+    const merged = await mergeMarkLog(path, theirs.log ?? [], { identity: mergingInto });
+    if (merged === null) {
       sendJson(res, {
         error: `${id} changed underneath this request - it was renamed or replaced while the marks `
           + 'were being merged, and they have not been written to anything',
       }, 409);
       return;
     }
-    const merged = await mergeMarkLog(path, theirs.log ?? []);
     sendJson(res, { merged, marks: await readMarks(path) });
   } catch (err) {
     sendJson(res, { error: err.message }, 502);
