@@ -426,8 +426,14 @@ const MUTATIONS = {
   // The marks sync stops asking which file its path names before it appends, so a take renamed
   // while the node's answer was on its way gets a marks sidecar recreated under its old name.
   'sync-appends-under-a-race': { file: 'server/index.js', edits: [[
-    'mergeMarkLog(path, theirs.log ?? [], { identity: mergingInto, hash: match.hash })',
-    'mergeMarkLog(path, theirs.log ?? [])',
+    'mergeMarkLog(path, theirLog, { identity: mergingInto, hash: match.hash })',
+    'mergeMarkLog(path, theirLog)',
+  ]] },
+  // A caller takes a node's marks log whatever take the answer says it is for, which is what a
+  // node on an older build, answering by name, relies on.
+  'caller-takes-a-log-by-name': { file: 'server/library.js', edits: [[
+    '  if (body?.hash !== take.hash || !Array.isArray(body.log)) {',
+    '  if (!Array.isArray(body?.log)) {',
   ]] },
   // A node serves a take's marks log by name whatever hash it was asked for, so a rename on the
   // node between its listing and the request hands over another take's marks.
@@ -749,7 +755,7 @@ const MUTATIONS = {
   },
   // A reclaim goes back to removing the node's copy without bringing its marks here first.
   'reclaim-drops-node-marks': { file: 'server/index.js', edits: [[
-    '    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? [], { identity: kept, hash: mine.hash });',
+    '    const marksMerged = await mergeMarkLog(keptPath, theirLog, { identity: kept, hash: mine.hash });',
     '    const marksMerged = 0;',
   ]],
     // Two rows, because the merge is also where the kept copy's identity is asked: a merge that
@@ -758,16 +764,16 @@ const MUTATIONS = {
   },
   // A reclaim treats a node marks log it could not read as an empty one and goes on to delete.
   'reclaim-ignores-an-unread-log': { file: 'server/index.js', edits: [[
-    '      theirLog = await node.fetchJson(markLogPath(theirs), { signal: left });',
-    '      theirLog = await node.fetchJson(markLogPath(theirs), { signal: left })\n'
-    + '        .catch(() => ({ log: [] }));',
+    '      theirLog = checkedMarkLog(await node.fetchJson(markLogPath(theirs), { signal: left }), theirs);',
+    '      theirLog = await node.fetchJson(markLogPath(theirs), { signal: left }).then((b) => b.log)\n'
+    + '        .catch(() => []);',
   ]],
     fails: 'the row saying a reclaim whose node marks cannot be read is refused, and no other',
   },
   // A reclaim goes back to appending the node's marks by name after an await a rename can land in.
   'reclaim-merges-under-a-race': { file: 'server/index.js', edits: [[
-    '    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? [], { identity: kept, hash: mine.hash });',
-    '    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? []);',
+    '    const marksMerged = await mergeMarkLog(keptPath, theirLog, { identity: kept, hash: mine.hash });',
+    '    const marksMerged = await mergeMarkLog(keptPath, theirLog);',
   ]],
     fails: 'both reclaim-race rows: the refusal, and no marks log at the freed name',
   },
@@ -5642,6 +5648,8 @@ async function runChecks() {
     let stubTakes = () => ({ status: 500, body: { error: 'the stub cannot read its captures directory' } });
     const heldTakes = [];
     const stubLog = [{ id: 'm-from-the-node', sourceMs: 500, label: 'pressed on the node', at: 5 }];
+    // This build answers a log with the hash it was asked for; an older one answers by name, with none.
+    let stubEchoesHash = true;
     const answer = (res, { status, body }) => {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
@@ -5654,7 +5662,8 @@ async function runChecks() {
       } else if (req.url.startsWith('/record/state')) {
         answer(res, { status: 200, body: { recording: false, takeId: null, writingIds: [] } });
       } else if (/^\/capture\/[^/]+\/marks\/log(\?|$)/.test(req.url)) {
-        answer(res, { status: 200, body: { log: stubLog } });
+        const asked = new URL(req.url, 'http://stub').searchParams.get('hash');
+        answer(res, { status: 200, body: stubEchoesHash ? { log: stubLog, hash: asked } : { log: stubLog } });
       } else {
         answer(res, { status: 404, body: { error: 'not a stub route' } });
       }
@@ -5702,6 +5711,23 @@ async function runChecks() {
       check(!renamed.error && raced.status === 409 && /changed underneath/.test(raced.body?.error ?? '') && leftBehind.length === 0,
         'a take renamed while its sync waited on the node is refused, and no marks sidecar is written under the old name or the new',
         `rename ${renamed.error ?? 'done'}; HTTP ${raced.status}: ${JSON.stringify(raced.body).slice(0, 90)}; sidecars ${leftBehind.join(' ') || 'none'}`);
+
+      // A node on an older build ignores the hash and answers whatever the name holds.
+      const renamedMine = (await getJson(`${syncUrl}/library/takes`)).takes.find((t) => t.id === 'sync-stub-renamed');
+      stubTakes = () => ({ status: 200, body: { takes: [renamedMine] } });
+      stubEchoesHash = false;
+      const byName = await fetch(`${syncUrl}/library/sync-marks/sync-stub-renamed`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const byNameBody = await byName.json().catch(() => null);
+      check(!byName.ok && /older build/.test(byNameBody?.error ?? '') && !existsSync(join(syncDir, 'sync-stub-renamed.marks.jsonl')),
+        'a marks sync against a node whose log answers by name, naming no hash, is refused and merges nothing',
+        `HTTP ${byName.status}: ${JSON.stringify(byNameBody).slice(0, 110)}`);
+      stubEchoesHash = true;
+      const echoed = await post(`${syncUrl}/library/sync-marks/sync-stub-renamed`);
+      check(echoed.merged === 1,
+        'and the same node answering with the hash it was asked for is merged, so the refusal above was about the hash',
+        `merged ${echoed.merged ?? echoed.error}`);
       for (const p of servers.filter((sv) => sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
     } finally {
       stub.close();

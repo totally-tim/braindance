@@ -12,7 +12,7 @@ import { MessageParser, encodeMessage, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, TYPE_
 import { openCapture, withCapture, captureIdFor, openCaptureCount, decimatePayload, cloudExtent } from './capture.js';
 import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
 import {
-  VALID_ID, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, copyOnNode, downloadTake,
+  VALID_ID, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, checkedMarkLog, copyOnNode, downloadTake,
   downloadsInFlight, hashFile, markLogFor, markLogPath, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
   removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeIdentity,
 } from './library.js';
@@ -349,7 +349,9 @@ async function serveMarks(req, res, [id], query, { log = false } = {}) {
     }, 409);
     return;
   }
-  sendJson(res, log ? { log: entries } : { marks: resolveMarks(entries) });
+  // With the hash it was asked for, so the caller can refuse an answer that checked none; null
+  // when asked by name, because nothing here checked what the name holds.
+  sendJson(res, log ? { log: entries, hash } : { marks: resolveMarks(entries) });
 }
 
 async function serveMarkWrite(req, res, [id]) {
@@ -588,7 +590,7 @@ async function serveRemoval(req, res, [id], kind) {
     // The node's marks come here before its copy goes, because removing a take removes its log.
     let theirLog;
     try {
-      theirLog = await node.fetchJson(markLogPath(theirs), { signal: left });
+      theirLog = checkedMarkLog(await node.fetchJson(markLogPath(theirs), { signal: left }), theirs);
     } catch (err) {
       sendJson(res, {
         error: `refusing to reclaim ${id}: the marks on ${node.name}'s copy could not be read (${err.message}), `
@@ -596,7 +598,7 @@ async function serveRemoval(req, res, [id], kind) {
       }, 502);
       return;
     }
-    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? [], { identity: kept, hash: mine.hash });
+    const marksMerged = await mergeMarkLog(keptPath, theirLog, { identity: kept, hash: mine.hash });
     if (marksMerged === null) {
       sendJson(res, {
         error: `${id} was renamed or replaced here while the reclaim ran, so ${node.name}'s marks were not `
@@ -936,8 +938,8 @@ async function serveMarkSync(req, res, [id]) {
       sendJson(res, { merged: 0, marks: await readMarks(path), note: `${node.name} does not hold this take` });
       return;
     }
-    const theirs = await node.fetchJson(markLogPath(match), { signal: left });
-    const merged = await mergeMarkLog(path, theirs.log ?? [], { identity: mergingInto, hash: match.hash });
+    const theirLog = checkedMarkLog(await node.fetchJson(markLogPath(match), { signal: left }), match);
+    const merged = await mergeMarkLog(path, theirLog, { identity: mergingInto, hash: match.hash });
     if (merged === null) {
       sendJson(res, {
         error: `${id} changed underneath this request - it was renamed or replaced while the marks `

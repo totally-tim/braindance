@@ -110,6 +110,18 @@ const stillNames = (capturePath, identity) => identity === undefined || sameTake
 export const markLogPath = (take) => `/capture/${encodeURIComponent(take.id)}/marks/log?hash=${encodeURIComponent(take.hash)}`;
 
 /**
+ * The records of a node's answer for `take`'s marks log, refused unless the node says they are that
+ * take's: a node that ignores the hash, a build older than this one, answers by name.
+ */
+export function checkedMarkLog(body, take) {
+  if (body?.hash !== take.hash || !Array.isArray(body.log)) {
+    throw new Error(`the node's marks log for ${take.id} answers for ${JSON.stringify(body?.hash ?? null)}, not ${take.hash} - `
+      + 'a node on an older build reads it by name, so its records were not taken. Upgrade the node to this build.');
+  }
+  return body.log;
+}
+
+/**
  * The marks log of the take `capturePath` holds, or null when that take's content hash is not
  * `hash`. Under the take's lock, so no rename in this process lands between the hash and the read.
  */
@@ -644,8 +656,8 @@ async function downloadToPath(node, take, dir, targetIn) {
   }
 
   try {
-    const log = await node.fetchJson(markLogPath(take), { signal: AbortSignal.timeout(MARKS_MS) });
-    if (!await appendMarks(target, log.log ?? [], { identity: installed })) {
+    const log = checkedMarkLog(await node.fetchJson(markLogPath(take), { signal: AbortSignal.timeout(MARKS_MS) }), take);
+    if (!await appendMarks(target, log, { identity: installed })) {
       console.warn(`[library] ${take.id} was renamed or replaced while its marks were arriving, `
         + 'so they were not written here - sync marks on the take under its new name to bring them across');
     }
