@@ -506,6 +506,14 @@ machines reconciling and several of its mutations are in server code no served p
 naming what is held: a stranger already listening answers `/library/takes` just as well, so a
 borrowed port is a green run proving nothing.
 
+The restart-overlap section shoots 5000 frames at 400fps on `+17`, about 2.2 GB removed when the
+section ends, restarts the grabber with a colour toggle, and needs five samples to land between
+the next take's open and the closing take's close; fewer fails its window row rather than passing
+the rows after it. Its concurrent-scan row and its other-spelling row need a volume that folds
+case, and name themselves in the verdict as unproven on one that does not. The two-machine section
+shoots on `+17` and `+18` at once, and the marks-sync section answers as the node from a stub
+inside the check on `+17`.
+
 121 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
 
 **Known reds.** Three rows are flaky under machine contention. Two are

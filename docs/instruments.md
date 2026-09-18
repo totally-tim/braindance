@@ -40,6 +40,14 @@ cannot see. The control defuses both terms, which is the smallest edit that repr
 The shape to recognise is a guard downstream of the line a mutation edits: it turns the mutation
 into a no-op, and a no-op mutation and a blind instrument print the same verdict.
 
+`library-check` claims a take stays the recorder's until its close finishes, sampled inside the
+overlap a grabber restart opens between one take's close and the next take's open. Each sample is
+fired without waiting on the last: under a broken guard a request inside the window blocks for a
+second in a full scan of the take, so a sampler that waits on it takes no samples inside the window,
+and the row asserting the check entered the window fires in place of the rows about the guard. The
+window is timed on the check's own clock, off the lines the recorder logs, so that row reads the
+same under every build, and a control that reddens it was caught for the wrong reason.
+
 ## Count failed assertions, never exit codes
 
 Read the line the tool printed and which assertions fired. Zero failed assertions on a non-zero
