@@ -25,11 +25,11 @@ Per tool, read from the source:
 | --- | --- | --- | --- |
 | `determinism-check` | pass | a failed assertion | not used |
 | `index-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no 2 GiB fixture, a stale anchor, a crash |
-| `registry-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: a stale anchor, a crash, no browser |
+| `registry-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: a stale anchor, a crash, no browser, a `--before-url` that is `--url` |
 | `timeline-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `DID NOT RUN`: a take under 12s |
 | `preview-check` | pass, or a **catch** | a failed assertion, a crash, or a miss | an unknown `--mutate` name |
 | `keyframe-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or the page stopped answering | `DID NOT RUN`: a take under 24s |
-| `export-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or a crash (it has no crash handler) | `DID NOT RUN`: a mutation the page never requested, a `--before-url` server holding the take under another hash |
+| `export-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or a crash (it has no crash handler) | `DID NOT RUN`: a mutation the page never requested, a `--before-url` that is `--url` or cannot be compared |
 | `editor-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a take under 32s, a stale anchor |
 | `library-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `PASS WITH CLAIMS UNPROVEN`, or a held port |
 | `boot-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8391 held, a crash |
@@ -71,6 +71,10 @@ fixture, server or browser first (`timeline-check`, `keyframe-check`, `export-ch
 A mutated run prints the expected failure row when its entry carries a `fails:` field.
 For other entries, read the catch from the assertions that fired.
 
+Four tables are too large to reproduce here — `editor-check` declares 202, `library-check` 114,
+`registry-check` 55 and `effect-check` 42. Their sections give the count and the enumerate
+command prints the names.
+
 ## Comparing against another build
 
 `export-check` and `registry-check` take `--before-url`, a server running another build, and
@@ -85,14 +89,10 @@ cp -R node_modules /tmp/rev/ && mkdir /tmp/rev/captures && cp captures/sample.kn
 node tools/export-check.mjs --url http://localhost:8080 --before-url http://localhost:8081
 ```
 
-`export-check` exits 2 when the two servers hold the take under different hashes, or when the other
-build publishes no `setOutputSize`, which it does from `d9b5d9e` on. `registry-check` names each
-reading by its registry name, so a build from before the dotted names fails those rows and names
-what it lacks.
-
-Four tables are too large to reproduce here — `editor-check` declares 202, `library-check` 114,
-`registry-check` 55 and `effect-check` 42. Their sections give the count and the enumerate
-command prints the names.
+Both tools exit 2 when `--before-url` is `--url`. `export-check` also exits 2 when the two servers
+hold the take under different hashes, or when the other build publishes no `setOutputSize`, which
+it does from `d9b5d9e` on. `registry-check` names each reading by its registry name, so a build
+from before the dotted names fails those rows and names what it lacks.
 
 ## `determinism-check`
 

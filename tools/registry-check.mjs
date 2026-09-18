@@ -33,6 +33,10 @@ const BEFORE_REV = flag('--before') ?? revBeforeMarker('const PARAMS');
 // A server running another build, which the readings are rendered against as well. Only on
 // request: a standing comparison against a fixed revision forbids every intentional change.
 const BEFORE_URL = flag('--before-url');
+if (BEFORE_URL && BEFORE_URL.replace(/\/$/, '') === URL_BASE.replace(/\/$/, '')) {
+  console.log('[registry] DID NOT RUN - --before-url is --url, so both arms would be one build');
+  process.exit(2);
+}
 
 function revBeforeMarker(marker) {
   const introduced = execFileSync(

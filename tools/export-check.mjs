@@ -31,6 +31,10 @@ const MUTATE = flag('--mutate');
 // A server running another build, which the resolution arms are rendered against as well. Only on
 // request: a standing comparison against a fixed revision forbids every intentional change.
 const BEFORE_URL = flag('--before-url');
+if (BEFORE_URL && BEFORE_URL.replace(/\/$/, '') === URL_BASE.replace(/\/$/, '')) {
+  console.log('[export] DID NOT RUN - --before-url is --url, so both arms would be one build');
+  process.exit(2);
+}
 // Bare names, resolved through PATH, because an absolute Homebrew default is a macOS path
 // on a project that also ships to Linux and the Pi, and `jobs-check` spawns a bare ffprobe.
 const FFMPEG = flag('--ffmpeg', 'ffmpeg');
