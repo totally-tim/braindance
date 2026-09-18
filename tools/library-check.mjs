@@ -677,6 +677,38 @@ const MUTATIONS = {
   'delete-trusts-sidecar': { file: 'server/library.js', edits: [[
     '    actual = await hashOpenFile(handle);', '    actual = (await cachedIndex(path)).hash;',
   ]] },
+  // Removal goes back to leaving the marks log under the freed name, where the next take given that
+  // name finds it.
+  'delete-leaves-the-marks': { file: 'server/library.js', edits: [[
+    '  await unlink(marksPathFor(path)).catch((err) => {\n'
+    + "    if (err.code !== 'ENOENT') console.warn(`[library] ${id} was removed but its marks log was not: ${err.message}`);\n"
+    + '  });\n',
+    '',
+  ]],
+    fails: 'the node-side marks row of the reclaim, the last-copy marks row and the reused-name row. '
+      + 'The merge and the two reclaim refusals stay green',
+  },
+  // A reclaim goes back to removing the node's copy without bringing its marks here first.
+  'reclaim-drops-node-marks': { file: 'server/index.js', edits: [[
+    '    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? []);',
+    '    const marksMerged = 0;',
+  ]],
+    fails: 'the row saying a reclaim brings the node\'s marks onto the kept copy, and no other',
+  },
+  // A reclaim treats a node marks log it could not read as an empty one and goes on to delete.
+  'reclaim-ignores-an-unread-log': { file: 'server/index.js', edits: [[
+    '      theirLog = await node.fetchJson(`/capture/${encodeURIComponent(theirs.id)}/marks/log`, { signal: left });',
+    '      theirLog = await node.fetchJson(`/capture/${encodeURIComponent(theirs.id)}/marks/log`, { signal: left })\n'
+    + '        .catch(() => ({ log: [] }));',
+  ]],
+    fails: 'the row saying a reclaim whose node marks cannot be read is refused, and no other',
+  },
+  // A reclaim goes back to appending the node's marks by name after an await a rename can land in.
+  'reclaim-merges-under-a-race': { file: 'server/index.js', edits: [[
+    '    if (!sameTake(kept, takeIdentity(keptPath))) {', '    if (false) {',
+  ]],
+    fails: 'both reclaim-race rows: the refusal, and no marks log at the freed name',
+  },
   // Delete goes back to unlinking whatever the name holds once the hash is done, so a rename during
   // the hash that moves another take into the name loses that take.
   'delete-unlinks-under-a-race': { file: 'server/library.js', edits: [[
@@ -4495,6 +4527,123 @@ async function runChecks() {
         String(await hashOf('moved-away')).slice(7, 19));
     }
     rmSync(raceDir, { recursive: true, force: true });
+  }
+
+  console.log('\n[library] a take\'s marks go with it, and a reclaim brings the node\'s marks here first');
+  {
+    const marksNodeDir = join(WORK, 'marks-node-captures');
+    const marksMacDir = join(WORK, 'marks-mac-captures');
+    for (const d of [marksNodeDir, marksMacDir]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    // Distinct frame counts, so each pair is its own hash and one reclaim cannot reach another.
+    for (const [id, frames] of [['kept-here', 6], ['fails-to-sync', 7], ['moves-mid-reclaim', 8]]) {
+      writeTake(marksNodeDir, id, { frames });
+      cpSync(join(marksNodeDir, `${id}.knct`), join(marksMacDir, `${id}.knct`));
+    }
+    writeTake(marksMacDir, 'last-copy', { frames: 9 });
+    writeFileSync(join(marksMacDir, 'last-copy.marks.jsonl'),
+      markLine({ id: 'lc1', sourceMs: 60, label: 'on the last copy', at: 1000 }));
+    const marksNodeUrl = await startServer(root, ['--captures', marksNodeDir, '--name', 'pi-marks',
+      '--presets', join(WORK, 'marks-node-presets'), '--projects', join(WORK, 'marks-node-projects')], MAC_PORT + 12);
+    // The link between the two machines, passed through except where a row needs it to fail or to
+    // hold. Inside the reserved span and closed before the section that needs +16 unanswered.
+    const reached = [];
+    let linkMode = 'pass';
+    let releaseHeld = null;
+    const link = await new Promise((done) => {
+      const srv = createServer(async (req, res) => {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        reached.push(`${req.method} ${req.url}`);
+        if (req.url.endsWith('/marks/log') && linkMode === 'fail') {
+          res.writeHead(500, { 'content-type': 'application/json' })
+            .end('{"error":"the card holding the marks is not answering"}');
+          return;
+        }
+        if (req.url.endsWith('/marks/log') && linkMode === 'hold') await new Promise((r) => { releaseHeld = r; });
+        try {
+          const up = await fetch(`${marksNodeUrl}${req.url}`, {
+            method: req.method,
+            headers: { 'content-type': req.headers['content-type'] ?? 'application/json' },
+            body: req.method === 'GET' || req.method === 'HEAD' ? undefined : Buffer.concat(chunks),
+          });
+          res.writeHead(up.status, { 'content-type': up.headers.get('content-type') ?? 'application/json' })
+            .end(Buffer.from(await up.arrayBuffer()));
+        } catch {
+          res.writeHead(502).end();
+        }
+      });
+      srv.listen(MAC_PORT + 16, '127.0.0.1', () => done(srv));
+    });
+    const marksMacUrl = await startServer(root, ['--captures', marksMacDir, '--name', 'mac-marks',
+      '--node', `http://127.0.0.1:${MAC_PORT + 16}`, '--node-name', 'pi-marks',
+      '--presets', join(WORK, 'marks-mac-presets'), '--projects', join(WORK, 'marks-mac-projects')], MAC_PORT + 13);
+    const macMarks = async (id) => ((await getJson(`${marksMacUrl}/capture/${id}/marks`)).marks ?? [])
+      .map((m) => m.label);
+    const askedToDelete = (id) => reached.some((r) => r === `POST /library/delete/${id}`);
+    for (const id of ['kept-here', 'fails-to-sync', 'moves-mid-reclaim']) {
+      await post(`${marksNodeUrl}/capture/${id}/marks`,
+        { marks: [{ id: `on-node-${id}`, sourceMs: 90, label: `pressed on the node for ${id}`, at: 7000 }] });
+    }
+    const pairs = (await getJson(`${marksMacUrl}/library/all`)).takes.filter((t) => t.state === 'both');
+    check(pairs.length === 3 && (await macMarks('kept-here')).length === 0,
+      'three takes on both machines, each with a mark pressed only on the node',
+      `${pairs.length} on both, ${(await macMarks('kept-here')).length} marks here on kept-here`);
+
+    const kept = await post(`${marksMacUrl}/library/reclaim/kept-here`, {});
+    check(kept.reclaimed && (await macMarks('kept-here')).includes('pressed on the node for kept-here'),
+      'a reclaim brings the node\'s marks onto the copy it keeps before it asks the node to remove its own',
+      kept.error ? kept.error.slice(0, 90) : `${kept.marksMerged} merged, here: ${JSON.stringify(await macMarks('kept-here'))}`);
+    check(!existsSync(join(marksNodeDir, 'kept-here.knct')) && !existsSync(join(marksNodeDir, 'kept-here.marks.jsonl')),
+      'and the node\'s marks log went with its copy, so nothing is left there under a name a later take can be given',
+      readdirSync(marksNodeDir).sort().join(' '));
+
+    linkMode = 'fail';
+    const unread = await post(`${marksMacUrl}/library/reclaim/fails-to-sync`, {});
+    check(/marks on pi-marks's copy could not be read/.test(unread.error ?? '') && !askedToDelete('fails-to-sync')
+      && existsSync(join(marksNodeDir, 'fails-to-sync.knct')),
+      'a reclaim whose node marks cannot be read is refused, and the node is never asked to remove its copy',
+      `${(unread.error ?? JSON.stringify(unread)).slice(0, 80)}; delete asked: ${askedToDelete('fails-to-sync')}`);
+
+    linkMode = 'hold';
+    const racing = post(`${marksMacUrl}/library/reclaim/moves-mid-reclaim`, {});
+    for (let i = 0; i < 200 && releaseHeld === null; i++) await new Promise((r) => { setTimeout(r, 25); });
+    const holding = releaseHeld !== null;
+    const movesHash = pairs.find((t) => t.id === 'moves-mid-reclaim')?.hash;
+    const moved = holding ? await post(`${marksMacUrl}/library/rename/moves-mid-reclaim`,
+      { hash: movesHash, to: 'moved-mid-reclaim' }) : { error: 'the link never held the marks log' };
+    linkMode = 'pass';
+    releaseHeld?.();
+    const raced = await racing;
+    if (!holding || moved.id !== 'moved-mid-reclaim') {
+      skipped.push('the reclaim-race refusal, whose rename did not land while the node marks were held');
+      console.log(`  ...   the rename did not land inside the reclaim (${(moved.error ?? 'no hold').slice(0, 60)})`);
+    } else {
+      check(/renamed or replaced here while the reclaim ran/.test(raced.error ?? '') && !askedToDelete('moves-mid-reclaim'),
+        'a reclaim whose kept copy is renamed while the node\'s marks are on the way is refused, and the node is not asked to delete',
+        `${(raced.error ?? JSON.stringify(raced)).slice(0, 80)}; delete asked: ${askedToDelete('moves-mid-reclaim')}`);
+      check(!existsSync(join(marksMacDir, 'moves-mid-reclaim.marks.jsonl')),
+        'and no marks log was made at the name the rename freed, where nothing would read it',
+        readdirSync(marksMacDir).sort().join(' '));
+    }
+
+    const lastCopy = (await getJson(`${marksMacUrl}/library/takes`)).takes.find((t) => t.id === 'last-copy');
+    const gone = await post(`${marksMacUrl}/library/delete/last-copy`, { hash: lastCopy?.hash, confirm: true });
+    check(gone.removed === 'last-copy.knct' && !existsSync(join(marksMacDir, 'last-copy.marks.jsonl')),
+      'a delete of the last copy removes its marks log with it',
+      gone.error ? gone.error.slice(0, 90) : readdirSync(marksMacDir).sort().join(' '));
+    writeTake(marksMacDir, 'last-copy', { frames: 3 });
+    const reborn = (await getJson(`${marksMacUrl}/library/takes`)).takes.find((t) => t.id === 'last-copy');
+    check(reborn !== undefined && reborn.marks.length === 0,
+      'so a take given that name later starts with no marks, rather than with the deleted take\'s',
+      JSON.stringify(reborn?.marks?.map((m) => m.label) ?? null));
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 12 || sv.port === MAC_PORT + 13)) {
+      p.child.kill('SIGKILL');
+    }
+    link.closeAllConnections();
+    await new Promise((done) => { link.close(done); });
   }
 
   console.log('\n[library] every route that changes something requires its method, its type and its origin');

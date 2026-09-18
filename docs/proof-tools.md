@@ -71,7 +71,7 @@ fixture, server or browser first (`timeline-check`, `keyframe-check`, `export-ch
 A mutated run prints the expected failure row when its entry carries a `fails:` field.
 For other entries, read the catch from the assertions that fired.
 
-Four tables are too large to reproduce here — `editor-check` declares 202, `library-check` 114,
+Four tables are too large to reproduce here — `editor-check` declares 202, `library-check` 121,
 `registry-check` 54 and `effect-check` 42. Their sections give the count and the enumerate
 command prints the names.
 
@@ -506,7 +506,7 @@ machines reconciling and several of its mutations are in server code no served p
 naming what is held: a stranger already listening answers `/library/takes` just as well, so a
 borrowed port is a green run proving nothing.
 
-114 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
+121 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
 
 **Known reds.** Three rows are flaky under machine contention. Two are
 in the marks-on-the-scrubber section and are one race between a seek, `settled()` and the mark's

@@ -643,6 +643,11 @@ export async function removeTake(dir, id, { hash, verifiedElsewhere = null }) {
   // `unlink` takes a name, so a rename can still land between the check above and this line. That
   // remainder is a few microtasks, where the window it replaces was a streaming sha256 of the take.
   await unlink(path);
+  // The marks go with the take: a log left under a freed name attaches to the next take given it.
+  // A reclaim has already merged this log into the copy it keeps, in `serveRemoval`.
+  await unlink(marksPathFor(path)).catch((err) => {
+    if (err.code !== 'ENOENT') console.warn(`[library] ${id} was removed but its marks log was not: ${err.message}`);
+  });
   await unlink(indexPathFor(path)).catch(() => {});
   forgetCapture(path);
   return { removed: `${id}.knct`, hash: actual };
