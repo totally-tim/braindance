@@ -3,7 +3,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream, statSync } from 'node:fs';
 import { readdir, readFile, writeFile, appendFile, stat, unlink, rename, link, mkdir, statfs } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
@@ -550,9 +550,7 @@ async function downloadToPath(node, take, dir, targetIn) {
     const log = await node.fetchJson(`/capture/${encodeURIComponent(take.id)}/marks/log`,
       { signal: AbortSignal.timeout(MARKS_MS) });
     const stillThere = await stat(target).catch(() => null);
-    const same = installed !== null && stillThere !== null
-      && stillThere.dev === installed.dev && stillThere.ino === installed.ino;
-    if (!same) {
+    if (!sameTake(installed, stillThere)) {
       console.warn(`[library] ${take.id} was renamed or replaced while its marks were arriving, `
         + 'so they were not written here - sync marks on the take under its new name to bring them across');
     } else {
@@ -561,6 +559,23 @@ async function downloadToPath(node, take, dir, targetIn) {
   } catch { /* a node that went away mid-download still leaves a verified take */ }
   return target;
 }
+
+/**
+ * Which file a path names right now, as `dev` and `ino`, or null when it names none. The inode
+ * rather than the path, because a rename frees an id and a later take renamed into it is a
+ * different take under the same name.
+ */
+export const takeIdentity = (path) => {
+  try {
+    const st = statSync(path ?? '');
+    return { dev: st.dev, ino: st.ino };
+  } catch {
+    return null;
+  }
+};
+
+/** Whether two identities are one file. Anything carrying `dev` and `ino` compares, a `Stats` too. */
+export const sameTake = (a, b) => a !== null && b !== null && a.dev === b.dev && a.ino === b.ino;
 
 /** The content hash of a file, streamed. Nothing here ever holds a capture whole. */
 export async function hashFile(path) {
