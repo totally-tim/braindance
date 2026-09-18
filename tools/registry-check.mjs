@@ -67,7 +67,10 @@ const MUTATIONS = {
       '    alphaFactor += readRgb;',
       '    alphaFactor += 0.0;',
     ]],
-    fails: 'the readRgb row of 1b, alone - the other four readings are untouched',
+    fails: 'eleven rows. The claim is the planted colour row, reading black where each quadrant '
+      + 'should be opaque. The other ten are planted sections that draw at the default reading, '
+      + 'colour at 1, and go black with it: the lower-face arm, the six motion-plant rows, the '
+      + 'span-widening control and the two sprite-size guards',
   },
   'ghost-alpha-term-dropped': {
     file: 'effects-builtin/ghost/ghost.frag.glsl',
@@ -75,7 +78,8 @@ const MUTATIONS = {
       '    alphaFactor += (0.25 + 0.75 * rim + 0.25 * lum) * ghost;',
       '    alphaFactor += (0.25 + 0.75 * rim) * ghost;',
     ]],
-    fails: 'the ghost.amount row of 1b, alone - so 1b compares alpha and not just colour',
+    fails: 'the planted ghost row, alone: the points over white read 15,35,58 where the formula '
+      + 'says 31,70,116, and the points over black are unchanged, because their luminance is 0',
   },
   'mix-ignores-normalisation': {
     file: 'web/cloud-shader.js',
@@ -83,7 +87,7 @@ const MUTATIONS = {
       'float norm = readSum > 0.0 ? 1.0 / readSum : 0.0;',
       'float norm = readSum > 0.0 ? 1.0 : 0.0;',
     ]],
-    fails: 'the scale-cancels row of 8b, with every row of 1b still passing',
+    fails: 'the scale-cancels row, alone',
   },
   'contour-edges-round-in-float': {
     file: 'web/main.js',
@@ -102,7 +106,9 @@ const MUTATIONS = {
       '  if (ghost > 0.0) {',
       '  if (false) {',
     ]],
-    fails: 'ghost.amount, ghost.rim and ghost.fill in the drop-one sweep, plus ghost.amount\'s 1b row',
+    fails: 'four rows: the wiring row, naming ghost.rim and ghost.fill as moving nothing; the '
+      + 'drop-one sweep, naming ghost.amount, ghost.rim and ghost.fill, and its count at 98 of '
+      + '108; and the planted ghost row, black where every point should be blue',
   },
   'duotone-ignored': {
     file: 'effects-builtin/duotone/tone.frag.glsl',
@@ -229,7 +235,10 @@ const MUTATIONS = {
       '        if (scanAxis.x == 0.0 && scanAxis.y == 1.0 && scanPitch == 1.3 && scanHard == 0.0) {',
       '        if (false) {',
     ]],
-    fails: 'the raster-at-0.35 row against the pinned build, and nothing else',
+    fails: 'nothing on a standing run, which reports NOT CAUGHT. The default path is the old '
+      + 'line itself and the general path draws the same raster to within rounding, so only a '
+      + 'comparison against a build from before the raster took an axis can see it: run with '
+      + '--before-url against one',
   },
   'lattice-ignored': {
     file: 'effects-builtin/lattice/snap.vert.glsl',
@@ -355,14 +364,9 @@ const MUTATIONS = {
       '  return PASS_GATES[table].some(',
       '  return (table === \'grade\' && grade.uniforms.crush.value > 0) || PASS_GATES[table].some(',
     ]],
-    fails: 'seven rows: the pass-gate row for crush, all five reading rows of 1b (each at 6 of '
-      + '6 frames and about three quarters of every frame), and the boot comparison, whose '
-      + 'landing diff names rgbsplit.amount, raster.amount and grain.amount moving from '
-      + '[0,false] to [0,true]. **`GRADE_GATES` holds seven terms and this line used to say '
-      + 'four** - grain, scanlines, rgbSplit, streak, halation, stock and vignette, derived from the packages\' '
-      + '`gates` bindings rather than counted by hand, which is the whole point of deriving '
-      + 'them: the boot row names the three whose landing actually moves, and the number of '
-      + 'gates is a fact about the installed set rather than about this comment',
+    fails: 'four rows: the pass-gate row for crush, the boot comparison, whose landing diff names '
+      + 'rgbsplit.amount, raster.amount and grain.amount moving from [0,false] to [0,true], and the '
+      + 'reset and boot landing rows, which name every term the grade gate reads',
   },
   'glyph-ignored': {
     file: 'effects-builtin/glyph/size.vert.glsl',
@@ -660,26 +664,11 @@ const MUTATIONS = {
       '  fragColor = vec4(col * exposure, alpha * falloff);',
     ]],
     fails: 'a fragment at exactly zero alpha writing depth, which is invisible geometry per '
-      + 'point on the hard-edged path. Its two sections are the only ones here standing two '
-      + 'surfaces up: every other plants one wall coincident with itself, where nothing is '
-      + 'behind anything to be hidden. '
-      + 'Eight rows. **Two carry the claim**, one from each two-surface section: the '
-      + 'character section\'s is the far surface moving under pixels the near marks never drew '
-      + 'on; the newborn section\'s is the frame with an invisible cloud in it no longer being '
-      + 'the frame without it. Every guard beside them stays green, because both fixtures '
-      + 'still render and the sparse mark still leaves its box empty; what changes is only '
-      + 'whether an empty box is a surface. Those two sections are the only planted ones that '
-      + 'can see it, and that is the coverage they exist to state: every other planted section '
-      + 'here stands one wall coincident with itself, where there is nothing behind anything to '
-      + 'hide.\n'
-      + '           **The other six are section 1b, and this line used to say "nothing else".** '
-      + 'It was true when the golden arm compared against a revision with no discard at all: '
-      + 'removing the discard made this build agree with that revision, so those six went '
-      + '*green* under this mutation and the count came out below the clean tree\'s. The arm '
-      + 'has been handed the discard since, so the old source now carries it too - and a '
-      + 'mutation that takes it out of this build makes the two disagree, at 6 of 6 frames. '
-      + 'The direction inverted with the re-pin and the sentence did not follow it, which is '
-      + 'the specific way a re-pinned baseline rots the prose around it',
+      + 'point on the hard-edged path. Two rows, one from each two-surface section: the far '
+      + 'surface moving under pixels the near marks never drew on, and the frame with an '
+      + 'invisible cloud in it no longer being the frame without it. Every guard beside them '
+      + 'stays green, because both fixtures still render; only those two sections stand one '
+      + 'surface behind another',
   },
   'margins-confined-to-glyphs': {
     file: 'web/cloud-shader.js',
@@ -687,23 +676,10 @@ const MUTATIONS = {
       '  if (softEdge == 0 && alpha * falloff <= 0.0) discard;',
       '  if (softEdge == 0 && glyphMix > 0.0 && alpha * falloff <= 0.0) discard;',
     ]],
-    fails: 'the same discard narrowed back to characters, which is the state one commit of this '
-      + 'history was in and the wrong fix the character section cannot refuse. '
-      + 'Seven rows. **The claim is the newborn section\'s**, at 365 of 184184 pixels moved '
-      + 'with all 365 behind a newborn sprite. Both guards beside it stay green - the plant is '
-      + 'geometry and a condition does not move it - and so does every row of the character '
-      + 'section next door, which is the whole point of this control: that section holds the '
-      + 'glyph margins and cannot hold anything else, so a build that repaired only them reads '
-      + 'clean everywhere it used to be read. That is what separates this from '
-      + '`glyph-margins-occlude`, which reddens the character section\'s claim row as well.\n'
-      + '           **The other six are section 1b, and this line used to say the opposite.** '
-      + 'While the golden arm compared against a revision with no discard at all, the confined '
-      + 'condition *was* that revision\'s arithmetic on presets that draw no characters, so the '
-      + 'five reading rows and the raster row went green under this mutation and a reader '
-      + 'counting reds had to know it. The arm carries the discard now, so the confined '
-      + 'condition disagrees with it wherever the widening reaches, and the six redden at 6 of '
-      + '6 frames. Read the frame count to tell the three margin mutations apart: this one and '
-      + '`glyph-margins-occlude` move all six frames, `margins-miss-the-newborn` moves five',
+    fails: 'the same discard narrowed back to characters. One row, the newborn section\'s, at '
+      + '365 of 184184 pixels moved with all 365 behind a newborn sprite. The character section '
+      + 'stays green, because it holds the glyph margins and nothing else, which is what separates '
+      + 'this from glyph-margins-occlude',
   },
   'margins-miss-the-newborn': {
     file: 'web/cloud-shader.js',
@@ -712,20 +688,8 @@ const MUTATIONS = {
       '  if (softEdge == 0 && (glyphMix > 0.0 || falloff <= 0.0) && alpha * falloff <= 0.0) discard;',
     ]],
     fails: 'and narrowed the other way, to the disc\'s rim and not the point that has not faded '
-      + 'in yet. '
-      + 'Seven rows. The claim is the newborn section\'s, at the same 365 of 184184 - the '
-      + 'two narrowings are indistinguishable on that fixture and that is correct rather than a '
-      + 'gap, because on it every zero-alpha fragment is a birth. It is a separate control '
-      + 'because it is a separate reachable mistake: this one is what a reader repairing the '
-      + 'defect from the disc\'s end writes, and the fixture has to refuse both ends.\n'
-      + '           **The other six are section 1b, and they are the one place in this suite '
-      + 'the rim is visible at all.** That section renders this tree against a revision with no '
-      + 'zero-alpha discard of any kind, so it sees whatever this condition reaches: the whole '
-      + 'repair moves all six frames, five of them by 460 to 750 bytes of 921600, and a '
-      + 'condition reaching the rim alone moves five of the six by 3 to 12. Both are past the '
-      + 'tolerance - which asks for 64 bytes and a single step, and every one of these bytes is '
-      + 'a couple of hundred - so the rows are red either way and the byte count is the reading '
-      + 'rather than the verdict',
+      + 'in yet. One row, the newborn section\'s, at the same 365 of 184184: on that fixture every '
+      + 'zero-alpha fragment is a birth, so the two narrowings read alike there',
   },
   'normalisation-floor-restored': {
     file: 'web/cloud-shader.js',
@@ -746,21 +710,9 @@ const MUTATIONS = {
       '  float glyphMix = glyph * smoothstep(8.0, 16.0, vLegiblePx);',
       '  float glyphMix = glyph * smoothstep(8.0, 16.0, vLegiblePx) + 0.02;',
     ]],
-    fails: 'and the master exactly absent at 0, which is what eleven of the twelve shipped looks '
-      + 'rest on - cascade is the exception and the only one that draws a character at all. '
-      + 'The ten-of- twelve population next door is a different set: that one is the '
-      + 'lattice-zero looks the compensation has to leave alone. '
-      + 'Eight rows, and they are one fact arriving in three places. The row that names it '
-      + 'is the glyph-of-0-is-inert equality in the defaults section. **Six are '
-      + 'section 1b** - all five readings at 6 of 6 frames, plus the raster\'s cross-build row - '
-      + 'because 1b renders at parameter defaults against a build that predates the glyph '
-      + 'field, and a crossfade that is not exactly zero mixes a bitmask into every point of '
-      + 'every one of those frames. That 1b can see this is worth knowing rather than '
-      + 'trimming: it is the only comparison here with an oracle outside the build. **The '
-      + 'eighth is the above-1080 section\'s governing row**, which asks that a cell under the '
-      + 'band in reference pixels draws no character at a taller buffer either - a leak of 0.02 '
-      + 'draws one there too, so the smaller of the two readings stops governing. This list '
-      + 'said seven and eight fire; the one it left out is that row',
+    fails: 'five rows. The one that names it is the glyph-of-0-is-inert equality. The others are '
+      + 'the crop\'s round-mask row, the above-1080 governing row, and the planted colour and depth '
+      + 'rows, which read a crossfade that is not exactly zero as a few steps off their formula',
   },
   'rain-leaks-at-zero': {
     file: 'effects-builtin/rain/lift.frag.glsl',
@@ -768,17 +720,11 @@ const MUTATIONS = {
       '  col *= 1.0 + rain * rainLift;',
       '  col *= 1.0 + (rain + 0.02) * rainLift;',
     ]],
-    fails: 'twelve rows. The row that names it is the rain-of-0-is-inert equality, which sees '
-      + 'the leak only because its arms hold the vertex gate open - see the comment there. '
-      + 'Six more are section 1b\'s five readings and the raster cross-build row, for '
-      + '`glyph-leaks-at-zero`\'s reason: a multiplier that is not exactly one moves every '
-      + 'default-rendered frame. The last four are the glyph sections\' own equalities - the '
-      + 'thinning row, the turbulence control, the ripple control and the ink ramp - which is '
-      + 'the leak reaching them too, since those looks carry rain 0 with the glyph master up '
-      + 'and so have a live drop coordinate for it to vary along. The twelfth is the unit '
-      + 'section\'s hard-bit reference row, for the same reason stated the other way round: '
-      + 'that row counts colours and a multiplier varying per point turns one into many, '
-      + 'which is the failure its own comment predicts',
+    fails: 'eight rows. The one that names it is the rain-of-0-is-inert equality, which sees the '
+      + 'leak only because its arms hold the vertex gate open. Four are the glyph sections\' '
+      + 'thinning, turbulence and ripple equalities and the hard-bit reference row, since those '
+      + 'looks carry rain 0 with the glyph master up. Three are the planted colour, ghost and depth rows, off their formulas by a '
+      + 'multiplier that is not exactly one',
   },
   'compensation-leaks-at-lattice-zero': {
     file: 'effects-builtin/lattice/energy.vert.glsl',
@@ -800,7 +746,8 @@ const MUTATIONS = {
       '    col += mix(vec3(0.20, 0.45, 0.75) * (ghostFill + lum), vec3(0.75, 0.95, 1.0), rim) * ghost'
         + ' * (1.0 + 0.25 * fract(contourBands / 7.0));',
     ]],
-    fails: 'MEASURE-ME',
+    fails: 'two rows: the wiring row, naming contour.bands as moving ghost.amount as well as '
+      + 'contour.amount, and the planted ghost row, whose points read brighter than the formula',
   },
 };
 
@@ -4286,11 +4233,10 @@ console.log('\n[registry] the two masters are exactly absent at zero, and so is 
     // stage computes the drop coordinate under a gate naming both masters, so with both of
     // them down the coordinate is zero, the lift collapses to a constant, and the three
     // lengths cannot reach a pixel however leaky the term is - a row asked there is a row
-    // that cannot fail. Measured while getting this wrong: with the gate shut the leak
-    // control came back green while section 1b reddened on all five readings. With the
-    // gate open the lift is a value per point again and a term that is not exactly absent
-    // separates the two settings. The rain key stays at zero, or the lengths would reach
-    // the character index and the arms would differ on a build with nothing wrong with it.
+    // that cannot fail. With the gate open the lift is a value per point again and a term
+    // that is not exactly absent separates the two settings. The rain key stays at zero, or
+    // the lengths would reach the character index and the arms would differ on a build with
+    // nothing wrong with it.
     const GATED = { 'glyph.amount': 0.6, 'glyph.rain': 0, 'glyph.tone': 0, 'glyph.hash': 1 };
     return {
       rainOffSlow: await at({ 'rain.amount': 0, ...GATED, ...SLOW }),
