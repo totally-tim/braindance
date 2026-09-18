@@ -1566,11 +1566,20 @@ console.log('\n== 4e. clip timing moving while a seek is fetching ==');
         armed = false;
         source.ensure = real;
       }
-      await k.timeline.settled();
+      // A seek that threw leaves settled() refusing, which is read here rather than lost, and
+      // then paid with a seek that lands so the next case can settle.
+      let refused = null;
+      try {
+        await k.timeline.settled();
+      } catch (err) {
+        refused = String(err.message ?? err);
+      }
       const read = k.timeline.read();
       const clip = k.timeline.clips()[0];
+      if (refused) await t.seek(12.0);
       return {
         threw,
+        refused,
         hits,
         replans: landed?.replans ?? null,
         landed: landed !== null,
@@ -1597,7 +1606,7 @@ console.log('\n== 4e. clip timing moving while a seek is fetching ==');
       `${got.sourceStart}s at ${got.speed}x`);
     check(got.threw === null,
       `${c.label}: the seek re-planned around it instead of refusing`,
-      got.threw ?? '');
+      got.threw ? `${got.threw}; settled() ${got.refused ?? 'resolved'}` : '');
     check(got.landed === true,
       `${c.label}: and the seek itself answered with a landing`,
       `landed ${got.landed} after ${got.replans} re-plans`);
