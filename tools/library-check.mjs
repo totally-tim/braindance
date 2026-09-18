@@ -407,6 +407,22 @@ const MUTATIONS = {
     '    return here !== null && owned.some((take) => sameTake(here, take.identity));',
     '    return owned.some((take) => take.path === path);',
   ]] },
+  // The marks sync goes back to joining on the bare hash field and stops refusing the take being
+  // recorded. Two edits, both in index.js: with the refusal alone gone the guarded join still
+  // matches nothing, and with the join alone restored the refusal answers first, so either edit on
+  // its own reddens a response shape rather than the damage. The join is restored at the call site,
+  // bypassing `copyOnNode`, because a mutation edits one file and the refusal is in this one;
+  // test/copy-on-node.test.mjs holds the guard inside `copyOnNode`.
+  'sync-joins-open-takes': { file: 'server/index.js', edits: [
+    ['  // lands in this take\'s sidecar, which is append-only. Refused here as the frame API refuses it.\n'
+      + '  if (beingRecorded(path)) {\n'
+      + '    sendJson(res, { error: stillRecording(id) }, 409);\n'
+      + '    return;\n'
+      + '  }\n',
+    '  // lands in this take\'s sidecar, which is append-only. Refused here as the frame API refuses it.\n'],
+    ['    const match = here ? copyOnNode(node, theirTakes, here.hash) : null;',
+      '    const match = here && (theirTakes ?? []).find((t) => t.hash === here.hash);'],
+  ] },
 
   // The library's poll goes back to a first tick that cannot disagree with anything.
   'poll-first-tick-is-blind': { file: 'web/library.js', edits: [[
@@ -5196,6 +5212,13 @@ async function runChecks() {
       mkdirSync(d, { recursive: true });
     }
     cpSync(SAMPLE, join(shootNodeDir, `${take1}.knct`));
+    // A log with records already in it for the name the node's open take gets: what a node reaches
+    // on its own when it deletes a take, which leaves the log, and the next take reuses the name.
+    const orphaned = [
+      { id: 'm-orphan-1', sourceMs: 1000, label: 'from a take the node deleted', at: 1 },
+      { id: 'm-orphan-2', sourceMs: 2000, label: 'and another from it', at: 2 },
+    ];
+    writeFileSync(join(shootNodeDir, `${take2}.marks.jsonl`), orphaned.map((r) => `${JSON.stringify(r)}\n`).join(''));
     const grabbing = `${join(REPO, 'tools/fake-grabber.mjs')} --source ${SAMPLE} --fps 40`;
     const shootNodeUrl = await startServer(root, [
       '--captures', shootNodeDir, '--name', 'pi-shooting', '--record', '--no-color', '--grabber', grabbing,
@@ -5229,7 +5252,33 @@ async function runChecks() {
       'and nothing scanned the take being recorded to decide that - no sidecar beside it, and it is still being written',
       `${readdirSync(shootMacDir).sort().join(' ')}; recording ${stillShooting.takeId}`);
 
+    // Neither open take has a hash, so a join on the hash field joins them on its absence and the
+    // node's log for its own open take lands in this one's sidecar.
+    const sidecarOf = (dir, id) => (existsSync(join(dir, `${id}.marks.jsonl`)) ? readFileSync(join(dir, `${id}.marks.jsonl`)) : Buffer.alloc(0));
+    const macSidecarBefore = sidecarOf(shootMacDir, take1);
+    const [nodeNow, macNow] = await Promise.all([getJson(`${shootNodeUrl}/record/state`), getJson(`${shootMacUrl}/record/state`)]);
+    const syncedOpen = await fetch(`${shootMacUrl}/library/sync-marks/${take1}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    const syncedOpenBody = await syncedOpen.json().catch(() => null);
+    const macSidecarAfter = sidecarOf(shootMacDir, take1);
+    check(nodeNow.recording === true && macNow.recording === true && macNow.takeId === take1,
+      'both machines had a take open when the sync was asked for, which is what makes the two rows below about two unhashed takes rather than a finished one',
+      `node ${nodeNow.takeId} (recording ${nodeNow.recording}), here ${macNow.takeId} (recording ${macNow.recording})`);
+    check(Buffer.compare(macSidecarBefore, macSidecarAfter) === 0,
+      'a marks sync while both machines are recording appends nothing to the take being recorded here',
+      macSidecarAfter.length === macSidecarBefore.length ? `${macSidecarAfter.length} bytes before and after`
+        : `the sidecar gained ${macSidecarAfter.length - macSidecarBefore.length} bytes: ${macSidecarAfter.toString('utf8').trim().split('\n').slice(0, 2).join(' | ').slice(0, 120)}`);
+    check(syncedOpen.status === 409 && /being recorded right now/.test(syncedOpenBody?.error ?? ''),
+      'and it is refused as the take being recorded, rather than answered as a node that does not hold it',
+      `HTTP ${syncedOpen.status}: ${JSON.stringify(syncedOpenBody).slice(0, 110)}`);
+
     await post(`${shootMacUrl}/record/stop`);
+    const closedSidecarBefore = sidecarOf(shootMacDir, take1);
+    const syncedClosed = await post(`${shootMacUrl}/library/sync-marks/${take1}`);
+    check(syncedClosed.merged === 0 && Buffer.compare(sidecarOf(shootMacDir, take1), closedSidecarBefore) === 0,
+      'and a finished take here is never joined to the node\'s open one: nothing merged and nothing appended',
+      `merged ${syncedClosed.merged}, ${syncedClosed.note ?? syncedClosed.error ?? ''}`.slice(0, 110));
     const pulledAfter = await post(`${shootMacUrl}/library/download/${take1}`);
     check(typeof pulledAfter.downloaded === 'string' && pulledAfter.downloaded !== `${take1}.knct`
       && existsSync(join(shootMacDir, pulledAfter.downloaded)),

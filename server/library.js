@@ -335,6 +335,8 @@ export class NodeLink {
  */
 export function copyOnNode(node, there, hash) {
   if (there === null) throw new Error(`${node.name} could not be asked which takes it holds: ${node.lastError}`);
+  // A take still being written has no hash, and two of those are not one take - see `reconcile`.
+  if (!VALID_HASH.test(hash ?? '')) return null;
   return there.find((t) => t.hash === hash) ?? null;
 }
 

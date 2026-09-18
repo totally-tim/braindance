@@ -160,6 +160,9 @@ function beingRecorded(path) {
   return path !== null && recorder.owns(path);
 }
 
+// Said once, so every route refusing that take says the same thing about it.
+const stillRecording = (id) => `${id} is being recorded right now: it has no settled index or hash until the take closes`;
+
 async function withOpenCapture(res, id, fn) {
   const path = capturePathFor(id);
   if (!path) {
@@ -167,7 +170,7 @@ async function withOpenCapture(res, id, fn) {
     return;
   }
   if (beingRecorded(path)) {
-    sendJson(res, { error: `${id} is being recorded right now: it has no settled index or hash until the take closes` }, 409);
+    sendJson(res, { error: stillRecording(id) }, 409);
     return;
   }
   await withCapture(path, fn).catch((err) => {
@@ -891,6 +894,13 @@ async function serveMarkSync(req, res, [id]) {
   const path = capturePathFor(id);
   if (!path) {
     sendJson(res, { error: `unusable take id ${id}` }, 400);
+    return;
+  }
+  // The take being recorded has no hash, so no take on the node can be its copy, and the node's
+  // own open take has none either: joined on that absence, the node's log for an unrelated take
+  // lands in this take's sidecar, which is append-only. Refused here as the frame API refuses it.
+  if (beingRecorded(path)) {
+    sendJson(res, { error: stillRecording(id) }, 409);
     return;
   }
   try {
