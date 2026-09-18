@@ -396,7 +396,7 @@ function untilItStalls(readSoFar) {
   return { signal: ctl.signal, stop: () => clearInterval(timer) };
 }
 
-export async function downloadTake(node, take, dir) {
+export async function downloadTake(node, take, dir, { owns = () => false } = {}) {
   if (!VALID_ID.test(take.id)) throw new Error(`the node offered an unusable id: ${take.id}`);
   if (!VALID_HASH.test(take.hash ?? '')) {
     throw new Error(`the node offered ${take.id} with an unusable hash: ${JSON.stringify(take.hash ?? null)}`);
@@ -409,17 +409,26 @@ export async function downloadTake(node, take, dir) {
   }
   downloadClaims.add(claim);
   try {
-    return await downloadClaimed(node, take, dir);
+    return await downloadClaimed(node, take, dir, owns);
   } finally {
     downloadClaims.delete(claim);
   }
 }
 
-async function downloadClaimed(node, take, dir) {
-  let target = join(dir, `${take.id}.knct`);
+async function downloadClaimed(node, take, dir, owns) {
+  const plain = join(dir, `${take.id}.knct`);
+  const suffixed = join(dir, `${take.id}-${take.hash.slice(7, 15)}.knct`);
+  // Before the probe below, because the probe is a full read plus sha256, and two machines shooting
+  // on one day name their takes alike, so the plain name is routinely the take being recorded here.
+  const shooting = [plain, suffixed].find((path) => owns(path));
+  if (shooting) {
+    throw new Error(`${basename(shooting, '.knct')} is being recorded on this machine right now, under the name `
+      + `this download would check first: download ${take.id} once that take has closed`);
+  }
+  let target = plain;
   try {
     const local = await cachedIndex(target);
-    if (local.hash !== take.hash) target = join(dir, `${take.id}-${take.hash.slice(7, 15)}.knct`);
+    if (local.hash !== take.hash) target = suffixed;
   } catch { /* nothing at that name, or nothing readable: the plain name is free */ }
   // The path as well as the id, because the line above rewrites `target`: a take called foo can
   // write `foo-1a2b3c4d.knct.part`, which is a different take's literal `.part`.

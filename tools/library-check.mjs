@@ -389,6 +389,12 @@ const MUTATIONS = {
     'writingIds: this.ownedTakes().map((owned) => owned.id).sort(),',
     'writingIds: this.ownedTakes().map((owned) => owned.id).sort().slice(-1),',
   ]] },
+  // A download stops asking whether the name it probes is the take being recorded here, so the
+  // probe's full read plus sha256 runs against the file the recorder is writing.
+  'download-probes-the-open-take': { file: 'server/library.js', edits: [[
+    '  const shooting = [plain, suffixed].find((path) => owns(path));',
+    '  const shooting = null;',
+  ]] },
 
   // The library's poll goes back to a first tick that cannot disagree with anything.
   'poll-first-tick-is-blind': { file: 'web/library.js', edits: [[
@@ -5112,6 +5118,64 @@ async function runChecks() {
       `${String(settled?.hash).slice(7, 19)} listed, ${String(closedHash).slice(7, 19)} closed`);
     for (const p of servers.filter((sv) => sv.port === MAC_PORT + 17)) p.child.kill('SIGKILL');
     rmSync(overlapDir, { recursive: true, force: true });
+  }
+
+  console.log('\n[library] two machines shooting on one day: nothing here reads the take this machine is recording');
+  {
+    // Both recorders name takes `<day>-take<n>` off their own directory, so the names collide as
+    // the ordinary case. The node holds a finished `<day>-take1` and records `<day>-take2`; this
+    // machine starts empty and records `<day>-take1`.
+    const now = new Date();
+    const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const take1 = `${day}-take1`;
+    const take2 = `${day}-take2`;
+    const shootNodeDir = join(WORK, 'shooting-node');
+    const shootMacDir = join(WORK, 'shooting-mac');
+    for (const d of [shootNodeDir, shootMacDir]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    cpSync(SAMPLE, join(shootNodeDir, `${take1}.knct`));
+    const grabbing = `${join(REPO, 'tools/fake-grabber.mjs')} --source ${SAMPLE} --fps 40`;
+    const shootNodeUrl = await startServer(root, [
+      '--captures', shootNodeDir, '--name', 'pi-shooting', '--record', '--no-color', '--grabber', grabbing,
+    ], MAC_PORT + 17);
+    const shootMacUrl = await startServer(root, [
+      '--captures', shootMacDir, '--name', 'mac-shooting', '--record', '--no-color', '--grabber', grabbing,
+      '--node', shootNodeUrl, '--node-name', 'pi-shooting',
+    ], MAC_PORT + 18);
+    const bothShooting = async () => {
+      let pair = [null, null];
+      for (let i = 0; i < 60; i++) {
+        pair = await Promise.all([getJson(`${shootNodeUrl}/record/state`), getJson(`${shootMacUrl}/record/state`)]);
+        if (pair.every((s) => s.recording && s.frames > 5)) break;
+        await new Promise((done) => { setTimeout(done, 250); });
+      }
+      return pair;
+    };
+    const [nodeShot, macShot] = await bothShooting();
+    check(nodeShot?.takeId === take2 && macShot?.takeId === take1,
+      `both machines are recording, the node ${take2} beside a finished ${take1} and this machine ${take1}`,
+      `node ${nodeShot?.takeId} (recording ${nodeShot?.recording}), here ${macShot?.takeId} (recording ${macShot?.recording})`);
+
+    // The download's name probe is a full read plus sha256 of whatever holds the plain name, which
+    // here is the take being recorded. The sidecar is the tell that it ran.
+    const pulled = await post(`${shootMacUrl}/library/download/${take1}`);
+    const stillShooting = await getJson(`${shootMacUrl}/record/state`);
+    check(/being recorded on this machine/.test(pulled.error ?? '') && (pulled.error ?? '').includes(take1),
+      'downloading the node\'s finished take of the same name is refused while this machine records under that name, and the refusal names the take being shot',
+      (pulled.error ?? `ACCEPTED: ${JSON.stringify(pulled)}`).slice(0, 110));
+    check(!existsSync(join(shootMacDir, `${take1}.idx`)) && stillShooting.takeId === take1,
+      'and nothing scanned the take being recorded to decide that - no sidecar beside it, and it is still being written',
+      `${readdirSync(shootMacDir).sort().join(' ')}; recording ${stillShooting.takeId}`);
+
+    await post(`${shootMacUrl}/record/stop`);
+    const pulledAfter = await post(`${shootMacUrl}/library/download/${take1}`);
+    check(typeof pulledAfter.downloaded === 'string' && pulledAfter.downloaded !== `${take1}.knct`
+      && existsSync(join(shootMacDir, pulledAfter.downloaded)),
+      'and once this machine\'s take has closed the same download goes through, beside it under a name of its own - so the refusal was about the recording and not a download that could not work',
+      pulledAfter.downloaded ?? String(pulledAfter.error).slice(0, 100));
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 17 || sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
   }
 
   console.log('\n[library] a node with no captures directory makes one and says so');
