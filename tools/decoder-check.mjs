@@ -19,6 +19,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { mutateNative } from './native-mutation.mjs';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -28,7 +29,7 @@ const PIPELINE_CPP = 'third_party/libfreenect2/src/packet_pipeline.cpp';
 
 // Every mutation edits a file the build reads and is undone before this process exits, because
 // the only way to ask what the library does is to build one. `npm run build:native` is 4s once
-// the tree is warm, so each of these costs two rebuilds rather than a from-scratch one.
+// the tree is warm, so each of these costs three rebuilds rather than a from-scratch one.
 const MUTATIONS = {
   // The defect the grabber cannot report and `cpp-check` cannot compile its way to.
   'decoder-mapping-swapped': {
@@ -100,54 +101,14 @@ if (spawnSync(CXX, ['--version'], { encoding: 'utf8' }).status !== 0) {
 
 const TMP = mkdtempSync(join(tmpdir(), 'decoder-check-'));
 
-const rebuild = (why) => {
-  const r = spawnSync('node', [join(REPO, 'tools/build-native.mjs')], { encoding: 'utf8' });
-  if (r.status !== 0) {
-    console.error(`[decoder-check] the rebuild ${why} did not complete:\n`
-      + `${(r.stderr || r.stdout || '').trim().split('\n').slice(-6).join('\n')}`);
-    return false;
-  }
-  return true;
-};
-
-// The mutated file and the library built from it both go back, on every way out of this process
-// including a refusal below. The text is held here rather than in TMP, which a finished run
-// deletes. Leaving either behind hands the next tool a tree that reads clean and a prefix that
-// is not built from it, which is the one failure a mutation control must not cause.
-let pending = null;
-const restore = () => {
-  if (!pending) return;
-  const { file, text } = pending;
-  pending = null;
-  writeFileSync(file, text);
-  console.log(`[decoder-check] restored ${file.replace(`${REPO}/`, '')}, rebuilding`);
-  if (!rebuild('after restoring the source')) {
-    console.error(`[decoder-check] ${file.replace(`${REPO}/`, '')} is back but vendor/prefix is`
-      + ' still the mutated build - run `npm run build:native` before trusting anything');
-  }
-};
-// `exit` is the hook that works here. This script runs to its end without yielding, so a signal
-// handler would not be reached until there was nothing left to restore; what Ctrl-C actually does
-// is kill the rebuild in flight, after which the script runs on and `exit` restores the file.
-process.on('exit', restore);
-
+// `mutateNative` builds the tree as it stands, writes the mutation in the second after that build
+// so make cannot read it as up to date, rebuilds, and refuses a rebuild that changed nothing. The
+// source and the build go back on every way out of this process, a refusal below included.
 if (MUTATE) {
-  const { file: rel, edits } = MUTATIONS[MUTATE];
-  const file = join(REPO, rel);
-  const original = readFileSync(file, 'utf8');
-  let text = original;
-  for (const [from, to] of edits) {
-    const hits = text.split(from).length - 1;
-    if (hits !== 1) {
-      cannotRun(`mutation ${MUTATE} anchors on text appearing ${hits} times, not once`
-        + ' - re-anchor it. Nothing was checked.');
-    }
-    text = text.replace(from, to);
-  }
-  pending = { file, text: original };
-  writeFileSync(file, text);
-  console.log(`[decoder-check] ${MUTATE} applied to ${rel}, rebuilding`);
-  if (!rebuild('with the mutation applied')) process.exit(2);
+  const { file, edits } = MUTATIONS[MUTATE];
+  console.log(`[decoder-check] ${MUTATE} applied to ${file}, rebuilding`);
+  const refused = mutateNative('decoder-check', file, edits);
+  if (refused) cannotRun(`DID NOT RUN - ${refused}. Nothing was checked.`);
 }
 
 if (!existsSync(CONFIG_H)) {
@@ -316,5 +277,4 @@ console.log(`\n${asserted} assertions, ${failed} failed`);
 console.log('the library was built and read, and the grabber was asked only through --check and'
   + ' through names it refuses in its argument pass, so no device was opened and no frame decoded');
 if (MUTATE) console.log(`it should redden: ${MUTATIONS[MUTATE].fails}`);
-restore();
 process.exit(failed ? 1 : 0);

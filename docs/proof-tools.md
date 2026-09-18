@@ -1146,12 +1146,18 @@ One table in the tool carries the enumerator, the macro, the processor's own `na
 flag spelling, and the probe, the expectations and the grabber rows are all read off it, so a
 decoder added to libfreenect2 is asked by this tool as it stands.
 
-Both controls edit a file the build reads and rebuild, because asking a mutated library anything
-means building one. Each restores the source and rebuilds again on the way out, including out of a
-refusal. Ctrl-C kills the rebuild in flight rather than the script, which runs on to its end and
-restores from its `exit` hook, so the tree comes back either way. Two states it cannot put right
-on its own: a `SIGKILL`, and a restore whose rebuild itself fails, which prints what to do. Both
-leave `vendor/prefix` built from something `git status` no longer shows, and
+Every control edits a file the build reads and rebuilds, because asking a mutated library
+anything means building one. `mutateNative` in `tools/native-mutation.mjs` does it: it builds the
+tree as it stands, writes the mutation in the second after that build, rebuilds, and refuses as
+`DID NOT RUN` a rebuild that left the grabber and the library byte for byte as they were. The make
+cmake drives on macOS compares timestamps to the second, so a source written in the second its
+object was built in reads as up to date, and a control run straight after another reads as a miss
+against the unmutated grabber. The source goes back and is rebuilt on the way out, including out
+of a refusal, in the second after the mutated build for the same reason, and a restore that leaves
+the mutated build in place says so. Ctrl-C kills the rebuild in flight rather than the script,
+which runs on to its end and restores from its `exit` hook, so the tree comes back either way. Two
+states it cannot put right on its own: a `SIGKILL`, and a restore whose rebuild itself fails,
+which prints what to do. Both leave `vendor/prefix` built from something `git status` no longer shows, and
 `npm run build:native` is what puts it back.
 
 - **`decoder-mapping-swapped`** — `ColorDecoder::TurboJPEG` builds the VideoToolbox processor. It

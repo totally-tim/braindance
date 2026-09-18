@@ -161,6 +161,7 @@ node tools/fake-grabber.mjs        # a grabber that needs no sensor, for driving
 node tools/make-sample.mjs         # a synthetic capture, so a clone with no Kinect has one to loop
 node tools/make-fixture.js         # loops one short capture into an arbitrarily long one
 node tools/sweep-all.mjs           # every mutation of four tools; needs a server and hours
+tools/native-mutation.mjs          # a native source mutation that reached the build, and its restore
 node tools/settle-probe.mjs        # does settle()'s drain scale with the take or the ceiling
 node tools/prof-summary.mjs        # reads grabber --profile output, flags contended runs
 node tools/render-worker.mjs       # renders one queued job; jobs-check drives it
