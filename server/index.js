@@ -160,8 +160,8 @@ function beingRecorded(path) {
   return path !== null && recorder.owns(path);
 }
 
-// Said once, so every route refusing that take says the same thing about it.
-const stillRecording = (id) => `${id} is being recorded right now: it has no settled index or hash until the take closes`;
+// The refusal for a take the recorder still owns, said once so every route that refuses it agrees.
+const recordingRefusal = (id) => `${id} is being recorded right now: it has no settled index or hash until the take closes`;
 
 async function withOpenCapture(res, id, fn) {
   const path = capturePathFor(id);
@@ -170,7 +170,7 @@ async function withOpenCapture(res, id, fn) {
     return;
   }
   if (beingRecorded(path)) {
-    sendJson(res, { error: stillRecording(id) }, 409);
+    sendJson(res, { error: recordingRefusal(id) }, 409);
     return;
   }
   await withCapture(path, fn).catch((err) => {
@@ -900,7 +900,7 @@ async function serveMarkSync(req, res, [id]) {
   // own open take has none either: joined on that absence, the node's log for an unrelated take
   // lands in this take's sidecar, which is append-only. Refused here as the frame API refuses it.
   if (beingRecorded(path)) {
-    sendJson(res, { error: stillRecording(id) }, 409);
+    sendJson(res, { error: recordingRefusal(id) }, 409);
     return;
   }
   // Which file the marks will go to, asked again before they are written: a rename can land in

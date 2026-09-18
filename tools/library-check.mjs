@@ -416,7 +416,7 @@ const MUTATIONS = {
   'sync-joins-open-takes': { file: 'server/index.js', edits: [
     ['  // lands in this take\'s sidecar, which is append-only. Refused here as the frame API refuses it.\n'
       + '  if (beingRecorded(path)) {\n'
-      + '    sendJson(res, { error: stillRecording(id) }, 409);\n'
+      + '    sendJson(res, { error: recordingRefusal(id) }, 409);\n'
       + '    return;\n'
       + '  }\n',
     '  // lands in this take\'s sidecar, which is append-only. Refused here as the frame API refuses it.\n'],
