@@ -40,6 +40,14 @@ cannot see. The control defuses both terms, which is the smallest edit that repr
 The shape to recognise is a guard downstream of the line a mutation edits: it turns the mutation
 into a no-op, and a no-op mutation and a blind instrument print the same verdict.
 
+Give each input its own row, or the row cannot say which input carried the catch. `guard-check`
+claims a `Host` carrying userinfo, a path, a query or a fragment does not upgrade, and
+`host-parsed-loosely` removes the shape check that refuses all four. A build with a second check
+behind it, comparing the parsed URL's components, refuses three of them by itself, so one row over
+all four goes red through the fragment alone, and a client that stops sending the fragment turns
+the control NOT CAUGHT with nothing naming the input that went quiet. The rows are one per
+spelling, and the control fires all four.
+
 ## Count failed assertions, never exit codes
 
 Read the line the tool printed and which assertions fired. Zero failed assertions on a non-zero

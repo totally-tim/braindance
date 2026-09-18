@@ -801,7 +801,10 @@ server that refused every upgrade fails.
 - **`listen-any-host`** — the default bind becomes `0.0.0.0`.
 - **`origin-ignores-scheme`** — a parsed origin host compared against a raw Host string.
 - **`host-parsed-loosely`** — the authority-shape check goes, which is the hole the scheme fix
-  opened.
+  opened. It reddens all four malformed-Host rows, one per spelling.
+- **`host-accepts-a-duplicate`** — a request carrying two `Host` lines is no longer refused. Node's
+  parser keeps the first and answers 101, so the duplicate row fails and its single-`Host` twin
+  stays green.
 - **`host-accepts-a-name`** — the rebinding rule compares the two headers against each other,
   which a rebound browser satisfies by construction.
 - **`origin-allows-null`** — the literal string `null`, which a `file://` page and a sandboxed
