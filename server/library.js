@@ -149,6 +149,39 @@ async function mergeHeld(dir, hash, theirLog) {
   return fresh.length;
 }
 
+const NAMED_LOG = '.marks.jsonl';
+
+/**
+ * Moves each marks log a build that filed marks by a take's name left beside that take into the
+ * take's hash log, and removes it: the one reader of that naming, run once when the server starts.
+ * Merged rather than appended, so a crash between the merge and the removal merges again without
+ * a second copy of any mark. A log with no take beside it is left where it is.
+ */
+export async function adoptNamedMarkLogs(dir, { owns = () => false } = {}) {
+  const names = await directoryNames(dir, { what: 'captures directory' });
+  const adopted = [];
+  for (const file of names.filter((name) => name.endsWith(NAMED_LOG))) {
+    const stem = file.slice(0, -NAMED_LOG.length);
+    const take = names.find((name) => isKnct(name) && name.slice(0, -'.knct'.length) === stem);
+    if (!take) continue;
+    const path = join(dir, take);
+    if (owns(path)) continue;
+    const identity = takeIdentity(path);
+    // A take this build cannot read keeps its log where it is, and the rest are still moved.
+    const hash = (await cachedIndex(path).catch(() => null))?.hash;
+    if (!hash) continue;
+    // Under the take's lock and its log's, and only while the name still holds the file hashed.
+    const records = await withTakeLock([path, marksPathFor(dir, hash)], async () => {
+      if (!sameTake(identity, takeIdentity(path))) return null;
+      const merged = await mergeHeld(dir, hash, await readLogAt(join(dir, file)));
+      await unlink(join(dir, file));
+      return merged;
+    });
+    if (records !== null) adopted.push({ file, take, hash, records });
+  }
+  return adopted;
+}
+
 
 /** Every reason this build can refuse to open a take. `web/library.js` badges these same keys. */
 export const OPEN_REFUSALS = {

@@ -14,7 +14,7 @@ import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
 import {
   VALID_HASH, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, copyOnNode, downloadTake,
   downloadsInFlight, hashFile, markLogPath, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
-  removeName, removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeFileFor,
+  adoptNamedMarkLogs, removeName, removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeFileFor,
 } from './library.js';
 import { EffectStore } from './effect-store.js';
 import { RESERVED_EFFECT_IDS, doorRefusal, forkRefusal } from './effect-door.js';
@@ -2394,6 +2394,12 @@ httpServer.listen(PORT, HOST, () => {
   if (HOST !== LOOPBACK) {
     console.log(`[server] reachable from the network on ${HOST} - anyone who can route here can drive the recorder`);
   }
+  // Inside the bind for the same reason: this moves files in the captures directory.
+  adoptNamedMarkLogs(CAPTURES_DIR, { owns: (path) => recorder.owns(path) }).then((adopted) => {
+    for (const { file, take, hash, records } of adopted) {
+      console.log(`[library] moved ${file} into the marks log of ${take} (${hash.slice(0, 15)}…), ${records} new record(s)`);
+    }
+  }, (err) => console.error(`[library] marks logs filed by take name were not moved: ${err.message}`));
   if (REPLAY) startReplay().catch((err) => console.error(`[server] replay failed: ${err.message}`));
   else startLive();
 });

@@ -914,6 +914,21 @@ const MUTATIONS = {
   ]],
     fails: 'the editor-follows row: its frame requests name the take and are answered 404',
   },
+  // A marks log filed by a take's name stops being read at all, so a user's marks on footage shot
+  // by an older build are gone from the library.
+  'named-logs-left-unread': { file: 'server/library.js', edits: [[
+    '    if (!take) continue;\n    const path = join(dir, take);',
+    '    if (take || !take) continue;\n    const path = join(dir, take);',
+  ]],
+    fails: 'the two moved-log rows and the said-once row',
+  },
+  // The move appends the named log whole, so a move a crash interrupted appends it a second time.
+  'named-logs-appended-twice': { file: 'server/library.js', edits: [[
+    '      const merged = await mergeHeld(dir, hash, await readLogAt(join(dir, file)));',
+    '      const read = await readLogAt(join(dir, file));\n      await appendLines(dir, hash, read);\n      const merged = read.length;',
+  ]],
+    fails: 'the interrupted-move row alone: the marks still resolve to two, which is why the log is counted',
+  },
   // A second name for one hash goes back to being written over the first, so one name vanishes.
   'second-name-overwrites-the-first': { file: 'server/library.js', edits: [[
     '    if (held) {\n      held.names.push(take.id);\n      continue;\n    }\n',
@@ -3724,6 +3739,41 @@ async function runChecks() {
       `${xNow?.id} has ${xNow?.marks.length}, ${zNow?.id} has ${zNow?.marks.length}`);
     check(errors.length === 0, 'and the editor raised no error through any of it', errors.join(' | ').slice(0, 120));
     await page.close();
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 14)) p.child.kill('SIGKILL');
+  }
+
+  console.log('\n[library] a marks log filed by a take\'s name is moved to the take\'s hash log when the server starts');
+  {
+    const namedDir = join(WORK, 'named-logs');
+    rmSync(namedDir, { recursive: true, force: true });
+    mkdirSync(namedDir, { recursive: true });
+    writeTake(namedDir, 'named-log-take', { frames: 5 });
+    const pressed = [
+      { id: 'old-1', sourceMs: 40, label: 'pressed under an older build', at: 1000 },
+      { id: 'old-2', sourceMs: 90, label: 'and another', at: 1001 },
+    ];
+    writeFileSync(join(namedDir, 'named-log-take.marks.jsonl'), pressed.map(markLine).join(''));
+    // A crash between the merge and the removal: the hash log already holds one of the records.
+    writeMarkLog(namedDir, 'named-log-take', markLine(pressed[0]));
+    writeFileSync(join(namedDir, 'no-take-here.marks.jsonl'), markLine({ id: 'stray', sourceMs: 5, label: 'beside nothing', at: 3 }));
+    const namedUrl = await startServer(root, ['--captures', namedDir, '--name', 'named-logs',
+      '--projects', join(WORK, 'named-projects'), '--presets', join(WORK, 'named-presets')], MAC_PORT + 14);
+    for (let i = 0; i < 40 && existsSync(join(namedDir, 'named-log-take.marks.jsonl')); i++) {
+      await new Promise((done) => { setTimeout(done, 100); });
+    }
+    const adopted = (await getJson(`${namedUrl}/library/takes`)).takes.find((t) => t.id === 'named-log-take');
+    const logLines = existsSync(markLogFile(namedDir, 'named-log-take'))
+      ? readFileSync(markLogFile(namedDir, 'named-log-take'), 'utf8').trim().split('\n') : [];
+    check(eq((adopted?.marks ?? []).map((m) => m.id), ['old-1', 'old-2']) && !existsSync(join(namedDir, 'named-log-take.marks.jsonl')),
+      'the take lists the marks an older build filed beside it by name, and that file is gone',
+      `${JSON.stringify((adopted?.marks ?? []).map((m) => m.id))}; ${readdirSync(namedDir).sort().join(' ')}`);
+    check(logLines.length === 2,
+      'and a move interrupted after its merge is merged again without a second copy of any record',
+      `${logLines.length} records in the hash log`);
+    const said = servers.find((sv) => sv.port === MAC_PORT + 14).log.join('').split('\n').filter((l) => /moved .*marks\.jsonl/.test(l));
+    check(said.length === 1 && said[0].includes('named-log-take') && existsSync(join(namedDir, 'no-take-here.marks.jsonl')),
+      'the server says so once, and leaves a log with no take beside it where it is',
+      `${said.length} line(s): ${(said[0] ?? '').slice(0, 90)}`);
     for (const p of servers.filter((sv) => sv.port === MAC_PORT + 14)) p.child.kill('SIGKILL');
   }
 
