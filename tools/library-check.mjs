@@ -395,6 +395,12 @@ const MUTATIONS = {
     '  const shooting = [plain, suffixed].find((path) => owns(path));',
     '  const shooting = null;',
   ]] },
+  // Every scan of a take writes its sidecar through one scratch name again, so two scans of one
+  // file under ids differing only in case race one rename and the second fails.
+  'sidecar-shares-one-scratch': { file: 'server/capture.js', edits: [[
+    '  const scratch = `${sidecar}.${++indexWrites}.tmp`;',
+    '  const scratch = `${sidecar}.tmp`;',
+  ]] },
 
   // The library's poll goes back to a first tick that cannot disagree with anything.
   'poll-first-tick-is-blind': { file: 'web/library.js', edits: [[
@@ -5116,6 +5122,37 @@ async function runChecks() {
     check(settled?.recording === false && closedHash !== null && settled.hash === closedHash,
       'and once the close finishes the take is a library entry carrying the hash the close computed',
       `${String(settled?.hash).slice(7, 19)} listed, ${String(closedHash).slice(7, 19)} closed`);
+
+    // Two ids differing only in case are two cache keys and one file where the volume folds case,
+    // so asking for the closed take under four spellings at once runs four scans of one file, each
+    // writing its sidecar. A take this size keeps them overlapping for about a second.
+    const variants = [takeA, takeA?.toUpperCase(), takeA?.replace('take', 'Take'), takeA?.replace('take', 'tAKE')];
+    if (!takeA || !existsSync(join(overlapDir, `${variants[1]}.knct`))) {
+      console.log('  ...  this volume does not fold case, so two ids cannot name one take here and the concurrent-scan row has nothing to ask');
+      skipped.push('concurrent sidecar writes (needs a case-insensitive volume)');
+    } else {
+      rmSync(join(overlapDir, `${takeA}.idx`), { force: true });
+      const logBefore = servers.find((sv) => sv.port === MAC_PORT + 17).log.join('').length;
+      const scans = await Promise.all(variants.map(async (id) => {
+        const res = await fetch(`${overlapUrl}/capture/${id}/index`);
+        return { id, status: res.status, hash: (await res.json().catch(() => null))?.hash ?? null };
+      }));
+      await new Promise((done) => { setTimeout(done, 200); });
+      const logDuring = servers.find((sv) => sv.port === MAC_PORT + 17).log.join('').slice(logBefore);
+      const failedWrites = logDuring.split('\n').filter((l) => /could not write/.test(l));
+      let sidecar = 'absent';
+      try {
+        sidecar = JSON.parse(readFileSync(join(overlapDir, `${takeA}.idx`), 'utf8')).hash === closedHash ? 'parses' : 'parses, wrong hash';
+      } catch (err) {
+        sidecar = existsSync(join(overlapDir, `${takeA}.idx`)) ? `does not parse (${err.message.slice(0, 40)})` : 'absent';
+      }
+      const leftovers = readdirSync(overlapDir).filter((f) => f.endsWith('.tmp'));
+      check(scans.every((s) => s.status === 200 && s.hash === closedHash) && failedWrites.length === 0
+        && sidecar === 'parses' && leftovers.length === 0,
+        'four scans of one closed take at once, under ids differing only in case, each write their sidecar - no failed rename, one sidecar that parses, no scratch file left behind',
+        `${scans.map((s) => `${s.id}:${s.status}`).join(' ')}; sidecar ${sidecar}; `
+          + `${failedWrites.length ? `log: ${failedWrites[0].slice(0, 90)}` : 'no failed write'}; leftovers ${leftovers.join(' ') || 'none'}`);
+    }
     for (const p of servers.filter((sv) => sv.port === MAC_PORT + 17)) p.child.kill('SIGKILL');
     rmSync(overlapDir, { recursive: true, force: true });
   }

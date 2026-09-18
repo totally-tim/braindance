@@ -5,7 +5,7 @@
 
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { open, readFile, writeFile, rename, stat } from 'node:fs/promises';
+import { open, readFile, writeFile, rename, stat, unlink } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { basename, resolve } from 'node:path';
 import { MAGIC, HEADER_BYTES, TYPE_HELLO, TYPE_FRAME, MAX_PAYLOAD_BYTES } from './protocol.js';
@@ -68,6 +68,9 @@ export function decimatePayload(payload, depthDivisor, what = 'frame') {
 export const indexPathFor = (capturePath) => `${capturePath.replace(/\.knct$/i, '')}.idx`;
 
 export const captureIdFor = (capturePath) => basename(capturePath).replace(/\.knct$/i, '');
+
+// Numbers each scan's scratch sidecar, taken on the tick the scan writes so no two in flight share one.
+let indexWrites = 0;
 
 /** One sequential pass that produces the index and the content hash together. */
 export async function buildIndex(capturePath) {
@@ -169,12 +172,17 @@ export async function buildIndex(capturePath) {
   };
 
   const sidecar = indexPathFor(capturePath);
+  // Two ids differing only in case are two cache keys and one file on APFS and NTFS, so two scans
+  // of one take can overlap: with one scratch name the first rename moves it away from the second.
+  const scratch = `${sidecar}.${++indexWrites}.tmp`;
   try {
     // Written aside and renamed, so a crash cannot leave a sidecar that parses and lies.
-    await writeFile(`${sidecar}.tmp`, JSON.stringify(index));
-    await rename(`${sidecar}.tmp`, sidecar);
+    await writeFile(scratch, JSON.stringify(index));
+    await rename(scratch, sidecar);
   } catch (err) {
     console.error(`[capture] could not write ${sidecar}: ${err.message}`);
+    // A numbered scratch is never written again, so one left here by a failed write stays for good.
+    await unlink(scratch).catch(() => {});
   }
   return index;
 }
