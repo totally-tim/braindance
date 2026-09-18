@@ -2,12 +2,12 @@
 // is library entry is hash - is what the project model, the frame API and the library assume. One
 // take is one continuous stream, one hello, monotonic stamps; a grabber restart splits it.
 
-import { createWriteStream, openSync, readdirSync } from 'node:fs';
+import { createWriteStream, fstatSync, openSync, readdirSync } from 'node:fs';
 import { once } from 'node:events';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { encodeMessage, TYPE_HELLO } from './protocol.js';
 import { buildIndex, forgetCapture } from './capture.js';
-import { appendMarks, remaining, MIN_TAKE_SEC, durationLabel } from './library.js';
+import { appendMarks, remaining, MIN_TAKE_SEC, durationLabel, sameTake, takeIdentity } from './library.js';
 
 // `2026-07-31-take3`. Synchronous, because opening a take must finish in the same turn as the
 // hello or the frames behind it find no file.
@@ -115,9 +115,12 @@ export class Recorder {
 
   /** Whether `path` is a file this recorder is still writing: the open take, or one still closing. */
   owns(path) {
-    if (!path) return false;
-    const wanted = resolve(path);
-    return this.ownedTakes().some((take) => resolve(take.path) === wanted);
+    const owned = this.ownedTakes();
+    if (!path || owned.length === 0) return false;
+    // The file rather than the name: an id is joined into a path as given, and a volume that folds
+    // case opens one take under many spellings of it.
+    const here = takeIdentity(path);
+    return here !== null && owned.some((take) => sameTake(here, take.identity));
   }
 
   // Refuses when the disk cannot hold a sensible minimum, because with manual-only deletion the
@@ -203,6 +206,8 @@ export class Recorder {
     this.take = {
       id: take.id,
       path: take.path,
+      // Off the descriptor, which the stream closes at the end of the take.
+      identity: fstatSync(take.fd),
       stream,
       startedAt,
       frames: 0,

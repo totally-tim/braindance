@@ -506,7 +506,7 @@ machines reconciling and several of its mutations are in server code no served p
 naming what is held: a stranger already listening answers `/library/takes` just as well, so a
 borrowed port is a green run proving nothing.
 
-118 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
+119 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
 
 **Known reds.** Three rows are flaky under machine contention. Two are
 in the marks-on-the-scrubber section and are one race between a seek, `settled()` and the mark's

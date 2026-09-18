@@ -401,6 +401,12 @@ const MUTATIONS = {
     '  const scratch = `${sidecar}.${++indexWrites}.tmp`;',
     '  const scratch = `${sidecar}.tmp`;',
   ]] },
+  // The recorder compares paths as strings again, so an id spelled in another case names the take
+  // being recorded on a volume that folds case and walks past every refusal that asks.
+  'owns-compares-names': { file: 'server/recorder.js', edits: [[
+    '    return here !== null && owned.some((take) => sameTake(here, take.identity));',
+    '    return owned.some((take) => take.path === path);',
+  ]] },
 
   // The library's poll goes back to a first tick that cannot disagree with anything.
   'poll-first-tick-is-blind': { file: 'web/library.js', edits: [[
@@ -5057,7 +5063,7 @@ async function runChecks() {
     // which a row below asserts directly.
     const idReads = (await getJson(`${overlapUrl}/library/routes`)).routes
       .filter((r) => r.read && !r.live && r.path.includes(':id'))
-      .map((r) => r.path.replace(':id', encodeURIComponent(takeA)).replace(':a-:b', '0-1').replace(':n', '0'))
+      .map((r) => r.path.replace(':id', encodeURIComponent(takeA)).replace(':a-:b', '0-1').replace(':name', 'none').replace(':n', '0'))
       .filter((path) => !path.includes(':'));
     const routeAnswers = () => Promise.all(idReads.map(async (path) => {
       const res = await fetch(`${overlapUrl}${path}`);
@@ -5065,6 +5071,23 @@ async function runChecks() {
       return `${path.replace(encodeURIComponent(takeA), ':id')} ${res.status}`;
     }));
     const whileOpen = await routeAnswers();
+
+    // The same refusal under another spelling of the id. Where the volume folds case it opens the
+    // same file, and a scan of it would leave its sidecar beside the open take.
+    const spelled = takeA?.toUpperCase();
+    if (!takeA || !existsSync(join(overlapDir, `${spelled}.knct`))) {
+      console.log('  ...  this volume does not fold case, so another spelling of the id names no file here');
+      skipped.push('the recording refusal under another spelling of the id (needs a case-insensitive volume)');
+    } else {
+      const answers = await Promise.all(['index', 'hello', 'file'].map(async (leaf) => {
+        const res = await fetch(`${overlapUrl}/capture/${spelled}/${leaf}`);
+        await res.body?.cancel().catch(() => {});
+        return `${leaf} ${res.status}`;
+      }));
+      check(answers.every((a) => a.endsWith(' 409')) && !existsSync(join(overlapDir, `${takeA}.idx`)),
+        'the take being recorded is refused under another spelling of its id as well, and nothing scanned it - the recorder owns the file, not the name',
+        `${spelled}: ${answers.join(', ')}; ${readdirSync(overlapDir).sort().join(' ')}`);
+    }
 
     // Fired without waiting on the last: under a broken guard a request inside the window blocks
     // in a second full scan of A, and a sampler waiting on it stops sampling the window it measures.
