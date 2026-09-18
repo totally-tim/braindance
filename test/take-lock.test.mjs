@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mergeMarkLog, readMarkLog, renameTake, takeIdentity } from '../server/library.js';
+import { appendMarks, markLogFor, mergeMarkLog, readMarkLog, removeTake, renameTake, takeIdentity } from '../server/library.js';
 import { cachedIndex } from '../server/capture.js';
 import { encodeMessage, TYPE_FRAME, TYPE_HELLO } from '../server/protocol.js';
 
@@ -52,6 +52,27 @@ test('a marks merge lands in the take it checked, never in the take renamed into
       `take B, now under take A's old name, gained take A's mark (the renames ${renamesSettledFirst ? 'finished inside' : 'waited for'} the merge)`);
     assert.ok(merged === null || underY.some((r) => r.id === fromNode.id),
       'and the merge either landed in take A under its new name or said it wrote nothing');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a reclaim keeps the node\'s copy when a mark was added to it after the other machine read its log', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'braindance-take-reclaim-'));
+  try {
+    const path = join(dir, 'shot.knct');
+    await writeFile(path, capture(7));
+    await writeFile(join(dir, 'shot.marks.jsonl'), `${JSON.stringify({ id: 'old', at: 1, sourceMs: 1 })}\n`);
+    const hash = (await cachedIndex(path)).hash;
+    // The node's side in the two machines' order: the log is read, a mark is pressed, the delete arrives.
+    const read = await markLogFor(path, hash);
+    assert.equal(await appendMarks(path, [{ id: 'new-on-node', at: 2, sourceMs: 5 }], { identity: takeIdentity(path) }), true,
+      'the mark pressed after the read was written, which is the order under test');
+    const refused = await removeTake(dir, 'shot', { hash, verifiedElsewhere: hash, marksRead: read.length }).then(() => null, (err) => err.message);
+    assert.match(refused ?? 'REMOVED', /a mark was added here since/, 'the removal is refused');
+    assert.equal((await readMarkLog(path)).some((r) => r.id === 'new-on-node'), true, 'and the mark is still on the copy');
+    const removed = await removeTake(dir, 'shot', { hash, verifiedElsewhere: hash, marksRead: read.length + 1 });
+    assert.equal(removed.removed, 'shot.knct', 'and a removal naming every record the log holds goes through');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

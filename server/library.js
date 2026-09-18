@@ -705,14 +705,14 @@ export async function hashFile(path) {
  * Removes a copy of a take. Both hashes are read rather than trusted - `verifiedElsewhere` is what
  * the surviving copy reported, and this take's own is re-derived, because delete cannot be undone.
  */
-export async function removeTake(dir, id, { hash, verifiedElsewhere = null, ownsFile = () => false }) {
+export async function removeTake(dir, id, { hash, verifiedElsewhere = null, marksRead = null, ownsFile = () => false }) {
   if (!VALID_ID.test(id)) throw new Error(`unusable take id ${id}`);
   const path = join(dir, `${id}.knct`);
-  return withTakeLock([path], () => removeHeld(id, path, { hash, verifiedElsewhere, ownsFile }));
+  return withTakeLock([path], () => removeHeld(id, path, { hash, verifiedElsewhere, marksRead, ownsFile }));
 }
 
 // `removeTake` once it holds the take's lock.
-async function removeHeld(id, path, { hash, verifiedElsewhere, ownsFile }) {
+async function removeHeld(id, path, { hash, verifiedElsewhere, marksRead, ownsFile }) {
   // Hashed through one descriptor and unlinked by name, so the name is asked again before the
   // unlink: a rename landing during the hash can free this id and move another take into it.
   const handle = await open(path, 'r');
@@ -745,6 +745,21 @@ async function removeHeld(id, path, { hash, verifiedElsewhere, ownsFile }) {
       `${id} was renamed or replaced while it was being hashed: the file under that name now is not `
       + 'the one whose bytes were checked, and nothing was removed',
     );
+  }
+  // A reclaim says how many of this copy's marks the machine keeping the other copy merged. A mark
+  // added here since - the reclaim's read and this removal are two requests - goes with this copy
+  // unless it is refused, and a mark write waits on this lock, so none lands after the count.
+  if (verifiedElsewhere !== null) {
+    const now = (await readMarkLog(path)).length;
+    if (!Number.isInteger(marksRead)) {
+      throw new Error(`refusing to reclaim ${id}: the request does not say how many of this copy's marks the `
+        + 'other machine merged, which a build older than this one leaves out, and nothing was removed');
+    }
+    if (now !== marksRead) {
+      throw new Error(`refusing to reclaim ${id}: its marks log holds ${now} records, not the ${marksRead} the `
+        + 'other machine merged - a mark was added here since, and removing this copy would lose it. '
+        + 'Reclaim again to bring it across.');
+    }
   }
   // `unlink` takes a name, so a rename can still land between the check above and this line. That
   // remainder is a few microtasks, where the window it replaces was a streaming sha256 of the take.

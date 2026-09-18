@@ -610,7 +610,8 @@ async function serveRemoval(req, res, [id], kind) {
       const done = await node.fetchJson(`/library/delete/${encodeURIComponent(theirs.id)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hash: theirs.hash, confirm: true, verifiedElsewhere: verified }),
+        // With the count of the node's marks merged here, so the node keeps a copy that gained one since.
+        body: JSON.stringify({ hash: theirs.hash, confirm: true, verifiedElsewhere: verified, marksRead: theirLog.length }),
         // A reclaim that hangs here has already asked the node to unlink its copy, so the signal
         // ends this side waiting rather than the request.
         signal: left,
@@ -656,6 +657,7 @@ async function serveRemoval(req, res, [id], kind) {
     const done = await removeTake(CAPTURES_DIR, id, {
       hash: body.hash,
       verifiedElsewhere: body.verifiedElsewhere ?? null,
+      marksRead: body.marksRead ?? null,
       ownsFile: (identity) => recorder.ownsFile(identity),
     });
     sendJson(res, done);

@@ -435,6 +435,12 @@ const MUTATIONS = {
     '  if (body?.hash !== take.hash || !Array.isArray(body.log)) {',
     '  if (!Array.isArray(body?.log)) {',
   ]] },
+  // A reclaim's delete goes back to removing the node's copy however many marks it gained since
+  // the other machine read them, so a mark pressed in between goes with the copy.
+  'reclaim-loses-a-late-mark': { file: 'server/library.js', edits: [[
+    '    if (now !== marksRead) {',
+    '    if (false) {',
+  ]] },
   // A node serves a take's marks log by name whatever hash it was asked for, so a rename on the
   // node between its listing and the request hands over another take's marks.
   'node-log-ignores-the-hash': { file: 'server/library.js', edits: [[
@@ -5764,6 +5770,7 @@ async function runChecks() {
         const chunks = [];
         for await (const c of req) chunks.push(c);
         if (/\/marks\/log(\?|$)/.test(req.url) && heldLogs.hold) await new Promise((r) => { heldLogs.push(r); });
+        if (req.url.startsWith('/library/delete/') && heldLogs.holdDelete) await new Promise((r) => { heldLogs.push(r); });
         try {
           const up = await fetch(`${nodeUrlHere}${req.url}`, {
             method: req.method,
@@ -5831,6 +5838,29 @@ async function runChecks() {
       check(plain.merged === 1 && /m-on-a/.test(macLog()) && !/m-on-b/.test(macLog()),
         'and with nothing renamed the same sync brings the shared take\'s mark across, so the refusals above were about the rename',
         `merged ${plain.merged ?? plain.error}`);
+
+      // A mark pressed on the node between the reclaim's read of its log and its delete.
+      heldLogs.holdDelete = true;
+      let reclaimSettled = false;
+      const reclaiming = post(`${macUrlHere}/library/reclaim/shared`).finally(() => { reclaimSettled = true; });
+      for (let i = 0; i < 400 && heldLogs.length === 0; i++) await new Promise((done) => { setTimeout(done, 50); });
+      const late = { id: 'm-late-on-node', sourceMs: 30, label: 'pressed while the reclaim ran', at: 3 };
+      const pressed = await post(`${nodeUrlHere}/capture/shot-x/marks`, { marks: [late] });
+      const lateWindow = heldLogs.length === 1 && !reclaimSettled && !pressed.error;
+      heldLogs.holdDelete = false;
+      for (const release of heldLogs.splice(0)) release();
+      const lateReclaim = await reclaiming;
+      const stillThere = (await getJson(`${nodeUrlHere}/library/takes`)).takes.find((t) => t.id === 'shot-x');
+      check(lateWindow,
+        'the reclaim\'s delete was held while a mark was pressed on the node\'s copy, after the reclaim had read that copy\'s marks',
+        pressed.error ?? `${heldLogs.length} held`);
+      check(lateReclaim.error !== undefined && stillThere?.marks?.some((m) => m.id === late.id),
+        'and the node keeps its copy and the late mark, rather than deleting a mark nothing here has',
+        `${String(lateReclaim.error ?? JSON.stringify(lateReclaim)).slice(0, 110)}; node ${stillThere ? 'still holds shot-x' : 'removed shot-x'}`);
+      const again = await post(`${macUrlHere}/library/reclaim/shared`);
+      check(again.reclaimed?.removed === 'shot-x.knct' && /m-late-on-node/.test(macLog()),
+        'and reclaiming again brings the late mark across and removes the node\'s copy, so the refusal was about the mark',
+        String(again.error ?? JSON.stringify(again.reclaimed)).slice(0, 110));
     } finally {
       link.close();
       link.closeAllConnections();
