@@ -423,6 +423,12 @@ const MUTATIONS = {
     ['    const match = here ? copyOnNode(node, theirTakes, here.hash) : null;',
       '    const match = here && (theirTakes ?? []).find((t) => t.hash === here.hash);'],
   ] },
+  // The marks sync stops asking which file its path names before it appends, so a take renamed
+  // while the node's answer was on its way gets a marks sidecar recreated under its old name.
+  'sync-appends-under-a-race': { file: 'server/index.js', edits: [[
+    '    if (!sameTake(mergingInto, takeIdentity(path))) {',
+    '    if (false) {',
+  ]] },
 
   // The library's poll goes back to a first tick that cannot disagree with anything.
   'poll-first-tick-is-blind': { file: 'web/library.js', edits: [[
@@ -5296,13 +5302,26 @@ async function runChecks() {
         : new Promise((done) => { sv.child.once('exit', done); }))));
     await exited(MAC_PORT + 17);
     await exited(MAC_PORT + 18);
+    // `stubTakes` answers `/library/takes`, or returns null to hold the request in `heldTakes`.
     let stubTakes = () => ({ status: 500, body: { error: 'the stub cannot read its captures directory' } });
+    const heldTakes = [];
+    const stubLog = [{ id: 'm-from-the-node', sourceMs: 500, label: 'pressed on the node', at: 5 }];
+    const answer = (res, { status, body }) => {
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(body));
+    };
     const stub = createServer((req, res) => {
-      const answer = req.url.startsWith('/library/takes') ? stubTakes()
-        : req.url.startsWith('/record/state') ? { status: 200, body: { recording: false, takeId: null, writingIds: [] } }
-          : { status: 404, body: { error: 'not a stub route' } };
-      res.writeHead(answer.status, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(answer.body));
+      if (req.url.startsWith('/library/takes')) {
+        const now = stubTakes();
+        if (now === null) heldTakes.push(res);
+        else answer(res, now);
+      } else if (req.url.startsWith('/record/state')) {
+        answer(res, { status: 200, body: { recording: false, takeId: null, writingIds: [] } });
+      } else if (/^\/capture\/[^/]+\/marks\/log$/.test(req.url)) {
+        answer(res, { status: 200, body: { log: stubLog } });
+      } else {
+        answer(res, { status: 404, body: { error: 'not a stub route' } });
+      }
     });
     await new Promise((done) => { stub.listen(MAC_PORT + 17, '127.0.0.1', done); });
     const syncDir = join(WORK, 'syncing-mac');
@@ -5323,6 +5342,30 @@ async function runChecks() {
         && unaskedBody?.merged === undefined,
         'a marks sync against a node that could not be reached says so rather than saying the node does not hold the take',
         `HTTP ${unasked.status}: ${JSON.stringify(unaskedBody).slice(0, 120)}`);
+
+      // The node's answer is held while the take is renamed here, so the sync resumes onto a name
+      // that no longer names the take. The stub's manifest is this machine's own description of the
+      // take, which is a real one and joins by hash.
+      const mine = (await getJson(`${syncUrl}/library/takes`)).takes.find((t) => t.id === 'sync-stub-take');
+      stubTakes = () => null;
+      let raceSettled = false;
+      const racing = fetch(`${syncUrl}/library/sync-marks/sync-stub-take`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      }).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }))
+        .finally(() => { raceSettled = true; });
+      for (let i = 0; i < 100 && heldTakes.length === 0; i++) await new Promise((done) => { setTimeout(done, 50); });
+      await new Promise((done) => { setTimeout(done, 50); });
+      check(heldTakes.length === 1 && !raceSettled,
+        'the sync is waiting on the node\'s answer, which is the window the rename below lands in',
+        `${heldTakes.length} held, sync ${raceSettled ? 'already answered' : 'still waiting'}`);
+      const renamed = await post(`${syncUrl}/library/rename/sync-stub-take`, { hash: mine?.hash, to: 'sync-stub-renamed' });
+      stubTakes = () => ({ status: 200, body: { takes: [mine] } });
+      for (const res of heldTakes.splice(0)) answer(res, stubTakes());
+      const raced = await racing;
+      const leftBehind = readdirSync(syncDir).filter((f) => f.endsWith('.marks.jsonl'));
+      check(!renamed.error && raced.status === 409 && /changed underneath/.test(raced.body?.error ?? '') && leftBehind.length === 0,
+        'a take renamed while its sync waited on the node is refused, and no marks sidecar is written under the old name or the new',
+        `rename ${renamed.error ?? 'done'}; HTTP ${raced.status}: ${JSON.stringify(raced.body).slice(0, 90)}; sidecars ${leftBehind.join(' ') || 'none'}`);
       for (const p of servers.filter((sv) => sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
     } finally {
       stub.close();

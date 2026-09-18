@@ -903,6 +903,10 @@ async function serveMarkSync(req, res, [id]) {
     sendJson(res, { error: stillRecording(id) }, 409);
     return;
   }
+  // Which file the marks will go to, asked again before they are written: a rename can land in
+  // any of the awaits below, and appending under the old name recreates a sidecar beside nothing.
+  // This narrows the window rather than closing it, the way `serveMarkWrite` does.
+  const mergingInto = takeIdentity(path);
   try {
     // The node's *name* for this take, resolved by hash: asking under this machine's name returns
     // nothing whenever the two named the same footage differently, which is the ordinary case.
@@ -911,11 +915,19 @@ async function serveMarkSync(req, res, [id]) {
     // A node that could not be asked throws here and the catch names why: it is not a node that
     // does not hold this take.
     const match = here ? copyOnNode(node, theirTakes, here.hash) : null;
+    // Ungated, because this answer only reads.
     if (!match) {
       sendJson(res, { merged: 0, marks: await readMarks(path), note: `${node.name} does not hold this take` });
       return;
     }
     const theirs = await node.fetchJson(`/capture/${encodeURIComponent(match.id)}/marks/log`, { signal: left });
+    if (!sameTake(mergingInto, takeIdentity(path))) {
+      sendJson(res, {
+        error: `${id} changed underneath this request - it was renamed or replaced while the marks `
+          + 'were being merged, and they have not been written to anything',
+      }, 409);
+      return;
+    }
     const merged = await mergeMarkLog(path, theirs.log ?? []);
     sendJson(res, { merged, marks: await readMarks(path) });
   } catch (err) {
