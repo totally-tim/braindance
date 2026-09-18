@@ -761,9 +761,9 @@ const MUTATIONS = {
       '    : Math.min(Math.min(devicePixelRatio, 2) * renderScale, renderTargetCaps().maxSize / Math.max(width, height));',
       '    : Math.min(devicePixelRatio, 2) * renderScale;',
     ]],
-    fails: 'ten rows of the 2048-cap arm, which is the reporter\'s: its buffer row, the eight '
-      + 'composer presets drawing black, and its incomplete-framebuffer row. The four direct '
-      + 'presets stay lit, which is the shape of the report',
+    fails: 'eleven rows of the 2048-cap arm, which is the reporter\'s: its buffer row, the eight '
+      + 'composer presets drawing black, its incomplete-framebuffer row, and /program under the '
+      + 'cap. The four direct presets stay lit, which is the shape of the report',
   },
   'program-out-ignores-the-size-cap': {
     file: 'web/main.js',
