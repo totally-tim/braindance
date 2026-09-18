@@ -293,8 +293,7 @@ luminance ratios are:
 | recorded `2026-08-12-take1`, `lens-points` | 1.0037 | 0.9149 on `194ae972` |
 | recorded `2026-08-12-take1`, `lens-splat` | 1.0004 | 0.5459 on `194ae972` |
 
-The synthetic runs retain ten fixture failures and the recorded runs retain the crop-culling
-failure. `lens-absolute` fails the two ordinary-point rows; `vsize-lensed` fails only the additive
+`lens-absolute` fails the two ordinary-point rows; `vsize-lensed` fails only the additive
 row; `glyph-base-lens-absolute` fails only the glyph row. `splat-large`, with one accurate frame
 at 960x600 and 1920x1200 on warm synthetic pages, reads a coarse difference of 0.287/255 and a
 brightness ratio of 1.0001, against 17.567 and 0.6267 with `vsize-framebuffer`.

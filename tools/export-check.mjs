@@ -48,6 +48,9 @@ const TIMELINE_H_GUESS = 148;
 const SMALL = { width: 960, height: 600 };
 const BIG = { width: 1920, height: 1200 };
 const REF = { width: 1728, height: 1080 };
+const REF_2X = { width: 3456, height: 2160 };
+// The two sizes a resolution row compares unless its pipeline names its own.
+const RES_SIZES = [SMALL, BIG];
 
 // Two widths at one height, and the aspect is the whole reason they are here: at 1.6 a
 // reference taken from the width over 1728 and one taken from the height over 1080 are the
@@ -60,7 +63,10 @@ const AT_SEC = 4;
 const EXPORT_FRAMES = 8;
 const EXPORT_FPS = 30;
 
-const RES_LOOK = { far: 4.0, near: 0.05, pointSize: 12 };
+// Sprites wider than the sensor lattice's pitch at 960x600. A wall facing the camera at one depth
+// projects its lattice at 1.17px there, and sprites narrower than about twice that alias it into a
+// beat several pixels long that 1920x1200 resolves, which reads as the look moving when it has not.
+const RES_LOOK = { far: 4.0, near: 0.05, pointSize: 36 };
 
 // Measured rather than chosen, and stated per pass because the passes differ. Every number is
 // a mean absolute channel difference out of 255 on the coarse grid, or a ratio of mean
@@ -1052,7 +1058,9 @@ const PIPELINES = [
   ['trails', { look: { ...OFF, trails: 0.5 } }],
   ['rgbsplit', { look: { ...OFF, 'rgbsplit.amount': 1.6 } }],
   ['scanlines', { look: { ...OFF, 'raster.amount': 1 } }],
-  ['grain', { look: { ...OFF, 'grain.amount': 1 } }],
+  // A grain cell is one reference pixel, 0.56px at 600 rows, which a 960x600 frame cannot hold.
+  // At 1080 rows a cell is one pixel and at 2160 it is two by two, so the comparison is exact.
+  ['grain', { look: { ...OFF, 'grain.amount': 1 }, sizes: [REF, REF_2X] }],
   ['bloom', { look: { ...OFF, bloom: 0.5 } }],
   ['nobloom', { look: { bloom: 0 } }],
   ['full', { look: {} }],
@@ -1098,7 +1106,8 @@ const RES_TOLERANCE = {
   // ratio to 0.938, and either half alone catches it.
   datamosh: { on: 'coarse', mean: 4.0, ratio: 0.03 },
 };
-// The same frame at one height and two widths, compared pixel for pixel. MEASURE-ME.
+// The same frame at one height and two widths, compared pixel for pixel. Measured on make-sample:
+// mean 0.001 over 0.047% of pixels clean, against 3.115 over 34.0% under `--mutate scale-by-width`.
 const ASPECT_TOLERANCE = { mean: 0.05, pct: 0.5 };
 
 const ARMS = [];
@@ -1112,13 +1121,17 @@ async function armAt(page, opts) {
   return arm;
 }
 
+/** Every pipeline at its two sizes, the larger twice the smaller, and the two compared. */
 async function resolutionSweep(page, pipelines) {
   const out = new Map();
-  for (const [size, label] of [[SMALL, 'small'], [BIG, 'big']]) {
-    await setStage(page, size);
-    for (const [name, spec] of pipelines) {
-      const opts = { label: `${name}-${label}`, look: spec.look, camera: spec.camera ?? null };
-      out.set(`${name}-${label}`, await armAt(page, opts));
+  const pairs = [...new Set(pipelines.map(([, spec]) => spec.sizes ?? RES_SIZES))];
+  for (const pair of pairs) {
+    for (const [size, label] of [[pair[0], 'small'], [pair[1], 'big']]) {
+      await setStage(page, size);
+      for (const [name, spec] of pipelines.filter(([, p]) => (p.sizes ?? RES_SIZES) === pair)) {
+        const opts = { label: `${name}-${label}`, look: spec.look, camera: spec.camera ?? null };
+        out.set(`${name}-${label}`, await armAt(page, opts));
+      }
     }
   }
   const measured = new Map();
@@ -1158,11 +1171,11 @@ const after = await resolutionSweep(main.page, PIPELINES);
 await main.page.evaluate(`globalThis.__kinect.params.apply(${JSON.stringify(CROP_OPEN)})`);
 
 {
-  const leaked = [...after.entries()].flatMap(([label, arm]) => (arm?.dropped ?? [])
-    .map((p) => `${label}:${p}`));
-  check(leaked.length === 0,
+  const arms = [...after.entries()].flatMap(([name, m]) => [[`${name}-small`, m.small], [`${name}-big`, m.big]]);
+  const leaked = arms.flatMap(([label, arm]) => arm.dropped.map((p) => `${label}:${p}`));
+  check(arms.length > 0 && leaked.length === 0,
     'every parameter every row asks for exists on this build',
-    leaked.length ? leaked.join(' ') : `${after.size} arms, none dropped a name`);
+    leaked.length ? leaked.join(' ') : `${arms.length} arms, none dropped a name`);
 }
 
 {
@@ -1171,7 +1184,7 @@ await main.page.evaluate(`globalThis.__kinect.params.apply(${JSON.stringify(CROP
     for (const arm of [after.get(name).small, after.get(name).big]) {
       const s = arm.sizes;
       if (s.smallest < 1 || s.largest > Math.min(64, arm.pointRange[1])) {
-        bad.push(`${name}@${arm.size.h}: ${s.smallest.toFixed(2)}..${s.largest.toFixed(1)}px`);
+        bad.push(`${name}@${arm.size.w}x${arm.size.h}: ${s.smallest.toFixed(2)}..${s.largest.toFixed(1)}px`);
       }
     }
   }
@@ -1204,7 +1217,7 @@ for (const [name, tol] of Object.entries(RES_TOLERANCE)) {
   const d = m[tol.on];
   const corrOk = !tol.corr || m.corr >= tol.corr;
   check(d.mean <= tol.mean && Math.abs(m.ratio - 1) <= tol.ratio && corrOk,
-    `${name}: 1920x1200 is 960x600 at twice the size`,
+    `${name}: ${m.big.size.w}x${m.big.size.h} is ${m.small.size.w}x${m.small.size.h} at twice the size`,
     `${tol.on} mean ${fixed(d.mean)} <= ${tol.mean}, luminance ratio ${fixed(m.ratio, 4)} within ${tol.ratio}`
     + (tol.corr ? `, fine structure correlates ${fixed(m.corr, 4)} >= ${tol.corr}` : ''));
 }
@@ -1282,10 +1295,10 @@ if (BEFORE_URL) {
   await other.close();
 
   const pairs = [
-    ...PIPELINES.flatMap(([name]) => [
-      [`${name}@${SMALL.width}x${SMALL.height}`, after.get(name).small, theirSweep.get(name).small],
-      [`${name}@${BIG.width}x${BIG.height}`, after.get(name).big, theirSweep.get(name).big],
-    ]),
+    ...PIPELINES.flatMap(([name]) => ['small', 'big'].map((end) => {
+      const ours = after.get(name)[end];
+      return [`${name}@${ours.size.w}x${ours.size.h}`, ours, theirSweep.get(name)[end]];
+    })),
     [`aspect@${HD.width}x${HD.height}`, aspectWide, theirWide],
     [`aspect@${NON_169.width}x${NON_169.height}`, aspectNarrow, theirNarrow],
   ];

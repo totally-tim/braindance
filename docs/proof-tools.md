@@ -88,7 +88,7 @@ node tools/export-check.mjs --url http://localhost:8080 --before-url http://loca
 `export-check` exits 2 when the two servers hold the take under different hashes.
 
 Four tables are too large to reproduce here — `editor-check` declares 202, `library-check` 114,
-`registry-check` 54 and `effect-check` 42. Their sections give the count and the enumerate
+`registry-check` 55 and `effect-check` 42. Their sections give the count and the enumerate
 command prints the names.
 
 ## `determinism-check`
@@ -434,17 +434,11 @@ camera, requiring the smallest sprite above the 10.8-reference-pixel normalizati
   1080, and every term follows it.
 - **`export-fail-unlinks-output`** — the failure path reaches back to an output it did not write.
 
-**Known reds.** The recorded `make-sample` baseline has ten fixture-dependent failures.
-
-| commit | rows | cause |
-| --- | --- | --- |
-| `3b7ab90` | 9 resolution-invariance rows (`trails`, `rgbsplit`, `scanlines`, `grain`, `bloom`, `nobloom`, `full`, `regionpush`, `regionmask`) | the synthetic sample has no depth jitter, so the fine structure those rows correlate is aliasing |
-| `3b7ab90` | the crop's cull row | the same fixture |
-
-The numbers repeat to four figures across trees — `trails` at a coarse mean of 2.732, the crop row
-at 110 revealed and 314,021 lit against 410,577 released — so compare the numbers, not the pass
-count. An eleventh red in section 4 is inherited state: clear the server's working project and
-re-run.
+On a `make-sample` fixture a clean tree passes. The resolution arms draw at `pointSize` 36: that
+fixture's back wall faces the camera at one depth, so its sensor lattice lands 1.17px apart at
+960x600, and narrower sprites alias it into a beat that 1920x1200 resolves. The grain row compares
+1728x1080 with 3456x2160, because a grain cell is one reference pixel and 960x600 cannot hold it.
+A red in section 4 alone is inherited state: clear the server's working project and re-run.
 
 ## `editor-check`
 
