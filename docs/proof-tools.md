@@ -514,7 +514,7 @@ case, and name themselves in the verdict as unproven on one that does not. The t
 shoots on `+17` and `+18` at once, and the marks-sync section answers as the node from a stub
 inside the check on `+17`.
 
-128 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
+129 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
 
 **Known reds.** Three rows are flaky under machine contention. Two are
 in the marks-on-the-scrubber section and are one race between a seek, `settled()` and the mark's

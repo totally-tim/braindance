@@ -13,7 +13,7 @@ import { openCapture, withCapture, captureIdFor, openCaptureCount, decimatePaylo
 import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
 import {
   VALID_ID, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, copyOnNode, downloadTake,
-  downloadsInFlight, hashFile, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
+  downloadsInFlight, hashFile, markLogFor, markLogPath, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
   removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeIdentity,
 } from './library.js';
 import { EffectStore } from './effect-store.js';
@@ -333,7 +333,22 @@ async function serveMarks(req, res, [id], query, { log = false } = {}) {
     res.writeHead(404).end('unknown capture');
     return;
   }
-  const entries = await readMarkLog(path);
+  // Asked for by content, the log is refused unless the name still holds that take: another
+  // machine read the hash from a listing, and a rename here since then moves the name onto
+  // another take. The take being recorded has no hash to match.
+  const hash = log ? query.get('hash') : null;
+  if (hash !== null && beingRecorded(path)) {
+    sendJson(res, { error: recordingRefusal(id) }, 409);
+    return;
+  }
+  const entries = hash === null ? await readMarkLog(path) : await markLogFor(path, hash)
+    .catch((err) => (err.code === 'ENOENT' ? null : Promise.reject(err)));
+  if (entries === null) {
+    sendJson(res, {
+      error: `${id} here is not the take ${hash}: it was renamed or replaced since that was read, so its marks are not that take's`,
+    }, 409);
+    return;
+  }
   sendJson(res, log ? { log: entries } : { marks: resolveMarks(entries) });
 }
 
@@ -573,7 +588,7 @@ async function serveRemoval(req, res, [id], kind) {
     // The node's marks come here before its copy goes, because removing a take removes its log.
     let theirLog;
     try {
-      theirLog = await node.fetchJson(`/capture/${encodeURIComponent(theirs.id)}/marks/log`, { signal: left });
+      theirLog = await node.fetchJson(markLogPath(theirs), { signal: left });
     } catch (err) {
       sendJson(res, {
         error: `refusing to reclaim ${id}: the marks on ${node.name}'s copy could not be read (${err.message}), `
@@ -920,7 +935,7 @@ async function serveMarkSync(req, res, [id]) {
       sendJson(res, { merged: 0, marks: await readMarks(path), note: `${node.name} does not hold this take` });
       return;
     }
-    const theirs = await node.fetchJson(`/capture/${encodeURIComponent(match.id)}/marks/log`, { signal: left });
+    const theirs = await node.fetchJson(markLogPath(match), { signal: left });
     const merged = await mergeMarkLog(path, theirs.log ?? [], { identity: mergingInto });
     if (merged === null) {
       sendJson(res, {

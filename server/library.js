@@ -103,6 +103,24 @@ async function appendLines(capturePath, records) {
 const stillNames = (capturePath, identity) => identity === undefined || sameTake(identity, takeIdentity(capturePath));
 
 /**
+ * Where a node serves the marks log of `take`, asked for by content: the node refuses when the
+ * name now holds a different take, because a rename there between its listing and this request
+ * would otherwise hand over another take's marks by name.
+ */
+export const markLogPath = (take) => `/capture/${encodeURIComponent(take.id)}/marks/log?hash=${encodeURIComponent(take.hash)}`;
+
+/**
+ * The marks log of the take `capturePath` holds, or null when that take's content hash is not
+ * `hash`. Under the take's lock, so no rename in this process lands between the hash and the read.
+ */
+export async function markLogFor(capturePath, hash) {
+  return withTakeLock([capturePath], async () => {
+    const index = await cachedIndex(capturePath);
+    return index.hash === hash ? readMarkLog(capturePath) : null;
+  });
+}
+
+/**
  * Appends records to a take's marks log, and answers false, writing nothing, when the name no
  * longer holds `identity`.
  */
@@ -607,8 +625,7 @@ async function downloadToPath(node, take, dir, targetIn) {
   // that window would leave this appending beside a take that moved.
   const installed = await stat(target).catch(() => null);
   try {
-    const log = await node.fetchJson(`/capture/${encodeURIComponent(take.id)}/marks/log`,
-      { signal: AbortSignal.timeout(MARKS_MS) });
+    const log = await node.fetchJson(markLogPath(take), { signal: AbortSignal.timeout(MARKS_MS) });
     if (!await appendMarks(target, log.log ?? [], { identity: installed })) {
       console.warn(`[library] ${take.id} was renamed or replaced while its marks were arriving, `
         + 'so they were not written here - sync marks on the take under its new name to bring them across');

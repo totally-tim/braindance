@@ -429,6 +429,12 @@ const MUTATIONS = {
     'mergeMarkLog(path, theirs.log ?? [], { identity: mergingInto })',
     'mergeMarkLog(path, theirs.log ?? [])',
   ]] },
+  // A node serves a take's marks log by name whatever hash it was asked for, so a rename on the
+  // node between its listing and the request hands over another take's marks.
+  'node-log-ignores-the-hash': { file: 'server/library.js', edits: [[
+    '    return index.hash === hash ? readMarkLog(capturePath) : null;',
+    '    return readMarkLog(capturePath);',
+  ]] },
 
   // The library's poll goes back to a first tick that cannot disagree with anything.
   'poll-first-tick-is-blind': { file: 'web/library.js', edits: [[
@@ -750,8 +756,8 @@ const MUTATIONS = {
   },
   // A reclaim treats a node marks log it could not read as an empty one and goes on to delete.
   'reclaim-ignores-an-unread-log': { file: 'server/index.js', edits: [[
-    '      theirLog = await node.fetchJson(`/capture/${encodeURIComponent(theirs.id)}/marks/log`, { signal: left });',
-    '      theirLog = await node.fetchJson(`/capture/${encodeURIComponent(theirs.id)}/marks/log`, { signal: left })\n'
+    '      theirLog = await node.fetchJson(markLogPath(theirs), { signal: left });',
+    '      theirLog = await node.fetchJson(markLogPath(theirs), { signal: left })\n'
     + '        .catch(() => ({ log: [] }));',
   ]],
     fails: 'the row saying a reclaim whose node marks cannot be read is refused, and no other',
@@ -4617,12 +4623,12 @@ async function runChecks() {
         const chunks = [];
         for await (const c of req) chunks.push(c);
         reached.push(`${req.method} ${req.url}`);
-        if (req.url.endsWith('/marks/log') && linkMode === 'fail') {
+        if (/\/marks\/log(\?|$)/.test(req.url) && linkMode === 'fail') {
           res.writeHead(500, { 'content-type': 'application/json' })
             .end('{"error":"the card holding the marks is not answering"}');
           return;
         }
-        if (req.url.endsWith('/marks/log') && linkMode === 'hold') await new Promise((r) => { releaseHeld = r; });
+        if (/\/marks\/log(\?|$)/.test(req.url) && linkMode === 'hold') await new Promise((r) => { releaseHeld = r; });
         try {
           const up = await fetch(`${marksNodeUrl}${req.url}`, {
             method: req.method,
@@ -5643,7 +5649,7 @@ async function runChecks() {
         else answer(res, now);
       } else if (req.url.startsWith('/record/state')) {
         answer(res, { status: 200, body: { recording: false, takeId: null, writingIds: [] } });
-      } else if (/^\/capture\/[^/]+\/marks\/log$/.test(req.url)) {
+      } else if (/^\/capture\/[^/]+\/marks\/log(\?|$)/.test(req.url)) {
         answer(res, { status: 200, body: { log: stubLog } });
       } else {
         answer(res, { status: 404, body: { error: 'not a stub route' } });
@@ -5695,6 +5701,101 @@ async function runChecks() {
       for (const p of servers.filter((sv) => sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
     } finally {
       stub.close();
+    }
+  }
+
+  console.log('\n[library] a node\'s marks are asked for by what the take is, not by what it is called');
+  {
+    // A real node behind a link this check holds: the node's log is requested by a name read from
+    // its listing, and the node renames between the two. The link listens on a port the kernel
+    // picks, since nothing can be there before it binds.
+    await exitedOn(MAC_PORT + 17);
+    await exitedOn(MAC_PORT + 18);
+    const byContentNode = join(WORK, 'by-content-node');
+    const byContentMac = join(WORK, 'by-content-mac');
+    for (const d of [byContentNode, byContentMac]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    cpSync(SAMPLE, join(byContentNode, 'shot-x.knct'));
+    cpSync(SAMPLE, join(byContentNode, 'other.knct'));
+    appendFileSync(join(byContentNode, 'other.knct'), Buffer.from('a different take'));
+    cpSync(SAMPLE, join(byContentMac, 'shared.knct'));
+    const markA = { id: 'm-on-a', sourceMs: 10, label: 'on the shared take', at: 1 };
+    const markB = { id: 'm-on-b', sourceMs: 20, label: 'on the other take', at: 2 };
+    writeFileSync(join(byContentNode, 'shot-x.marks.jsonl'), `${JSON.stringify(markA)}\n`);
+    writeFileSync(join(byContentNode, 'other.marks.jsonl'), `${JSON.stringify(markB)}\n`);
+    const nodeUrlHere = await startServer(root, ['--captures', byContentNode, '--name', 'pi-by-content'], MAC_PORT + 17);
+    const heldLogs = [];
+    const link = await new Promise((done) => {
+      const srv = createServer(async (req, res) => {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        if (/\/marks\/log(\?|$)/.test(req.url) && heldLogs.hold) await new Promise((r) => { heldLogs.push(r); });
+        try {
+          const up = await fetch(`${nodeUrlHere}${req.url}`, {
+            method: req.method,
+            headers: { 'content-type': req.headers['content-type'] ?? 'application/json' },
+            body: req.method === 'GET' || req.method === 'HEAD' ? undefined : Buffer.concat(chunks),
+          });
+          res.writeHead(up.status, { 'content-type': up.headers.get('content-type') ?? 'application/json' })
+            .end(Buffer.from(await up.arrayBuffer()));
+        } catch {
+          res.writeHead(502).end();
+        }
+      });
+      srv.listen(0, '127.0.0.1', () => done(srv));
+    });
+    try {
+      const macUrlHere = await startServer(root, ['--captures', byContentMac, '--name', 'mac-by-content',
+        '--node', `http://127.0.0.1:${link.address().port}`, '--node-name', 'pi-by-content'], MAC_PORT + 18);
+      const onNode = (await getJson(`${nodeUrlHere}/library/takes`)).takes;
+      const takeA = onNode.find((t) => t.id === 'shot-x');
+      const takeB = onNode.find((t) => t.id === 'other');
+      const macLog = () => (existsSync(join(byContentMac, 'shared.marks.jsonl'))
+        ? readFileSync(join(byContentMac, 'shared.marks.jsonl'), 'utf8') : '');
+      // The node renames the shared take away and the other take into its name while the log
+      // request is held, then puts them back.
+      const renamedWhileHeld = async (kind) => {
+        heldLogs.hold = true;
+        let settled = false;
+        const asked = fetch(`${macUrlHere}/library/${kind}/shared`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        }).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }))
+          .finally(() => { settled = true; });
+        for (let i = 0; i < 200 && heldLogs.length === 0; i++) await new Promise((done) => { setTimeout(done, 50); });
+        const away = await post(`${nodeUrlHere}/library/rename/shot-x`, { hash: takeA.hash, to: 'shot-y' });
+        const into = await post(`${nodeUrlHere}/library/rename/other`, { hash: takeB.hash, to: 'shot-x' });
+        const window = heldLogs.length === 1 && !settled && !away.error && !into.error;
+        heldLogs.hold = false;
+        for (const release of heldLogs.splice(0)) release();
+        const answer = await asked;
+        const nodeHolds = (await getJson(`${nodeUrlHere}/library/takes`)).takes.map((t) => t.id).sort();
+        await post(`${nodeUrlHere}/library/rename/shot-x`, { hash: takeB.hash, to: 'other' });
+        await post(`${nodeUrlHere}/library/rename/shot-y`, { hash: takeA.hash, to: 'shot-x' });
+        return { window, answer, nodeHolds, detail: `${away.error ?? 'renamed away'}, ${into.error ?? 'renamed into its name'}` };
+      };
+
+      const synced = await renamedWhileHeld('sync-marks');
+      check(synced.window,
+        'the log request was held while the node renamed the take away and another take into its name, which is the window the rows below are about',
+        synced.detail);
+      check(!/m-on-b/.test(macLog()) && synced.answer.status !== 200 && /409/.test(synced.answer.body?.error ?? ''),
+        'a marks sync in that window brings nothing across: the node refuses the name, which no longer holds the take the sync asked for',
+        `HTTP ${synced.answer.status}: ${JSON.stringify(synced.answer.body).slice(0, 90)}; log here: ${macLog().trim() || '(none)'}`.slice(0, 200));
+      const reclaimed = await renamedWhileHeld('reclaim');
+      check(reclaimed.window && !/m-on-b/.test(macLog()) && reclaimed.answer.status !== 200
+        && eq(reclaimed.nodeHolds, ['shot-x', 'shot-y']),
+        'and a reclaim in that window merges nothing and removes nothing: both takes are still on the node',
+        `HTTP ${reclaimed.answer.status}; node holds ${reclaimed.nodeHolds.join(' ')}; log here: ${macLog().trim() || '(none)'}`.slice(0, 200));
+      const plain = await post(`${macUrlHere}/library/sync-marks/shared`);
+      check(plain.merged === 1 && /m-on-a/.test(macLog()) && !/m-on-b/.test(macLog()),
+        'and with nothing renamed the same sync brings the shared take\'s mark across, so the refusals above were about the rename',
+        `merged ${plain.merged ?? plain.error}`);
+    } finally {
+      link.close();
+      link.closeAllConnections();
+      for (const p of servers.filter((sv) => sv.port === MAC_PORT + 17 || sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
     }
   }
 
