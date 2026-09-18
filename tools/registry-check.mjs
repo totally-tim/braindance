@@ -71,10 +71,10 @@ const MUTATIONS = {
       '    alphaFactor += readRgb;',
       '    alphaFactor += 0.0;',
     ]],
-    fails: 'eleven rows. The claim is the planted colour row, reading black where each quadrant '
-      + 'should be opaque. The other ten are planted sections that draw at the default reading, '
-      + 'colour at 1, and go black with it: the lower-face arm, the six motion-plant rows, the '
-      + 'span-widening control and the two sprite-size guards',
+    fails: 'thirteen rows. The claim is the planted colour row, reading black where each quadrant '
+      + 'should be opaque. The other twelve draw at the default reading, colour at 1, and go black '
+      + 'with it: the lower-face arm, the six motion-plant rows, the span-widening control, the two '
+      + 'sprite-size guards, and the rgb preset under both constrained contexts',
   },
   'ghost-alpha-term-dropped': {
     file: 'effects-builtin/ghost/ghost.frag.glsl',
