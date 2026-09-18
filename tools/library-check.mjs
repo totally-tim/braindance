@@ -5846,14 +5846,15 @@ async function runChecks() {
       for (let i = 0; i < 400 && heldLogs.length === 0; i++) await new Promise((done) => { setTimeout(done, 50); });
       const late = { id: 'm-late-on-node', sourceMs: 30, label: 'pressed while the reclaim ran', at: 3 };
       const pressed = await post(`${nodeUrlHere}/capture/shot-x/marks`, { marks: [late] });
-      const lateWindow = heldLogs.length === 1 && !reclaimSettled && !pressed.error;
+      const heldDeletes = heldLogs.length;
+      const lateWindow = heldDeletes === 1 && !reclaimSettled && !pressed.error;
       heldLogs.holdDelete = false;
       for (const release of heldLogs.splice(0)) release();
       const lateReclaim = await reclaiming;
       const stillThere = (await getJson(`${nodeUrlHere}/library/takes`)).takes.find((t) => t.id === 'shot-x');
       check(lateWindow,
         'the reclaim\'s delete was held while a mark was pressed on the node\'s copy, after the reclaim had read that copy\'s marks',
-        pressed.error ?? `${heldLogs.length} held`);
+        pressed.error ?? `${heldDeletes} delete held, the mark written`);
       check(lateReclaim.error !== undefined && stillThere?.marks?.some((m) => m.id === late.id),
         'and the node keeps its copy and the late mark, rather than deleting a mark nothing here has',
         `${String(lateReclaim.error ?? JSON.stringify(lateReclaim)).slice(0, 110)}; node ${stillThere ? 'still holds shot-x' : 'removed shot-x'}`);
