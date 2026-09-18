@@ -24,6 +24,8 @@ If you have a sensor, please test on it.
 
 ## Running the checks
 
+The checks need Node 26 and the npm it bundles.
+
 ```bash
 npm ci                        # the lockfile and the .npmrc release gate are the point
 npx playwright install chromium
@@ -36,7 +38,8 @@ node tools/<tool>-check.mjs   # one proof tool; most need a running server, a GP
 
 CI runs `syntax-check`, `module-check`, `npm run test:unit`, `cpp-check` and
 `release-gate-check`, plus every mutation of the four check tools. `release-gate-check` needs an
-npm that knows `min-release-age` (npm 11 or newer) and access to the registry. The Chromium
+npm that knows `min-release-age` (npm 11 or newer, which Node 26 bundles) and access to the
+registry. The Chromium
 install and the fixtures are for the proof tools, which CI does not run.
 
 `CLAUDE.md` lists every proof tool with what it proves and what it needs.

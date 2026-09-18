@@ -17,7 +17,7 @@ commitment. Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 ## What you need
 
 - **A Kinect v2.** Without one you can still replay a capture and work on the browser side.
-- **Node 18.15 or newer.**
+- **Node 26 or newer.**
 - **macOS on Apple Silicon, or Debian / Raspberry Pi OS** for a capture node.
 - **ffmpeg** for video out, expected at `/opt/homebrew/bin/ffmpeg`. Set `FFMPEG=` to override.
 

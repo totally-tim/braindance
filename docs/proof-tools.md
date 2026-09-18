@@ -1177,7 +1177,7 @@ node tools/release-gate-check.mjs
 | needs | |
 | --- | --- |
 | network | the npm registry |
-| binaries | npm; CI pins `npm@12.0.2` in the gate job |
+| binaries | npm 11 or newer; Node 26 bundles one |
 
 The setting is `min-release-age=2` in `.npmrc`, and **the unit is days as a plain integer**. Other
 package managers in this family take minutes or seconds, which is how a wrong number gets written
