@@ -1071,8 +1071,12 @@ node tools/vendor-check.mjs
 
 Each declared edit pins the blob hash the patched file must have, because "differs from upstream"
 is not "contains our change". A declared edit that has quietly reverted fails too: that is what a
-careless re-vendor looks like. Its mutations are delivered as functions over a staged tree rather
-than as anchored text.
+careless re-vendor looks like. The other rows take `third_party/libfreenect2.manifest` as
+upstream, so the last row checks the manifest itself: its lines rebuild into git tree objects, and
+the root must equal the tree of upstream's v0.2.1 commit, a constant read from upstream and never
+from the tool's own output. That reaches every path, mode and hash in the manifest, and not the
+permission bits on disk. Its mutations are delivered as functions over a staged copy of the tree,
+the oracle and the manifest rather than as anchored text.
 
 - **`undeclared-edit`** — an edit nothing declares.
 - **`revert-local-edit`** — a declared edit quietly put back to upstream.
@@ -1081,6 +1085,8 @@ than as anchored text.
 - **`oracle-drift`** — the pristine upstream copy edited, so the comparison is against the wrong
   thing.
 - **`stale-prefix`** — the artifact rows pointed at a prefix from an earlier build.
+- **`manifest-relabel`** — a file edited and its manifest line rewritten to the new hash. Only the
+  manifest row fails.
 
 ## `registration-check`
 

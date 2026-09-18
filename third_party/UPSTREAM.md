@@ -103,8 +103,8 @@ fixes that.
 
 ## How the proof works
 
-`third_party/libfreenect2.manifest` records the git blob hash of all 140 files
-as upstream published them. `tools/vendor-check.mjs` asserts five things:
+`third_party/libfreenect2.manifest` records the mode and git blob hash of all 140
+files as upstream published them. `tools/vendor-check.mjs` asserts six things:
 
 1. Every upstream file is present and unchanged except the three declared above.
 2. The set that differs is exactly the declared set, in both directions.
@@ -115,8 +115,12 @@ as upstream published them. `tools/vendor-check.mjs` asserts five things:
 5. The harness oracle beside the tree is upstream's own `registration.cpp` byte for
    byte, and the library at `vendor/prefix` carries `LIBFREENECT2_REG_THREADS`, so
    a stale prefix cannot pass as a build of this tree.
+6. The manifest is upstream's. Its lines rebuild into git tree objects whose root
+   must be `8ac8ee52388586e8b1763f7a76531a299c3b8969`, the tree of upstream's v0.2.1
+   commit, read from upstream. The first five take the manifest as upstream, so
+   without this one a file edited with its manifest line rewritten to match passes.
 
-Six controls. Each must be caught, and the failed-assertion count is what to read.
+Seven controls. Each must be caught, and the failed-assertion count is what to read.
 Note that this tool exits 0 on a caught mutation.
 
 ```
@@ -127,6 +131,7 @@ node tools/vendor-check.mjs --mutate extra-file         # must FAIL
 node tools/vendor-check.mjs --mutate missing-file       # must FAIL
 node tools/vendor-check.mjs --mutate oracle-drift       # must FAIL
 node tools/vendor-check.mjs --mutate stale-prefix       # must FAIL
+node tools/vendor-check.mjs --mutate manifest-relabel   # must FAIL
 ```
 
 Mutations run against a throwaway copy. `stale-prefix` needs
@@ -137,4 +142,5 @@ without it.
 
 Edit the file, update its pinned hash in `DECLARED_EDITS` in
 `tools/vendor-check.mjs`, and say why here. A file changed for the first time also
-needs the section 4(b) notice in its header.
+needs the section 4(b) notice in its header. Leave the manifest as it is: it
+records upstream, and `vendor-check` fails a line rewritten to match our tree.

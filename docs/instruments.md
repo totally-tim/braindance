@@ -81,6 +81,13 @@ and together they leave the most valuable object in the system unwatched. The sw
 written against on-disk size once the take closes, where nothing is in flight and the identity is
 exact.
 
+The reference a check compares against is the easiest object to skip. `vendor-check` claims the
+vendored tree is upstream plus the declared edits, and its rows take the manifest as upstream, so
+a file edited with its manifest line rewritten to the new hash passes every one of them. A last
+row rebuilds the manifest's lines into git tree objects, and the root has to equal the tree of
+upstream's commit, read from upstream. A constant taken from the tool's own output would prove only
+that the tool agrees with itself.
+
 ## Close the class, not the instance
 
 Make the table be the dispatch and have the check walk it, so a member added later is asked by
