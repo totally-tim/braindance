@@ -705,6 +705,26 @@ const MUTATIONS = {
   'list-swallows-unreadable': { file: 'server/library.js', edits: [[
     "    if (required || err?.code !== 'ENOENT') {", '    if (required) {',
   ]] },
+  // The take scan goes back to its own catch, so a captures directory that cannot be read answers
+  // an empty library, and the machine asking it reads a node holding nothing.
+  'scan-swallows-unreadable': { file: 'server/library.js', edits: [[
+    "  const files = (await directoryNames(dir, { what: 'captures directory' })).filter(isKnct);",
+    '  let files;\n  try {\n    files = (await readdir(dir)).filter(isKnct).sort();\n'
+    + '  } catch {\n    return { takes: [], unreadable: [] };\n  }',
+  ]],
+    fails: 'the /library/takes error row, the gallery sentence row, the reclaim row and the delete '
+      + 'row of the unreadable-captures section: the node lies in a 200. Its ENOENT and empty-directory '
+      + 'rows stay green',
+  },
+  // The node's answer goes back to being coalesced, so a node that could not be asked reads as a
+  // node holding no copy and delete's second-copy refusal never fires.
+  'delete-trusts-a-silent-node': { file: 'server/library.js', edits: [[
+    '  if (there === null) throw new Error(`${node.name} could not be asked which takes it holds: ${node.lastError}`);',
+    '  if (there === null) return null;',
+  ]],
+    fails: 'the reclaim row and the delete row of the unreadable-captures section: the node reports '
+      + 'honestly and the consumer ignores it. The /library/takes error row and the gallery row stay green',
+  },
   // The editor goes back to swallowing a library that will not load, which is the empty picker
   // an operator gets told nothing about.
   'open-take-swallows-library': { file: 'web/main.js', edits: [[
@@ -4341,6 +4361,80 @@ async function runChecks() {
       'delete removes the last copy, and it is the file that goes');
     check(!(await getJson(`${macUrl}/library/all`)).takes.some((t) => t.id === 'one-frame-take'),
       'and the library no longer lists it');
+  }
+
+  console.log('\n[library] a captures directory that cannot be read is reported, and delete does not act on the silence');
+  {
+    const silentDir = join(WORK, 'silent-node-captures');
+    const keptDir = join(WORK, 'silent-mac-captures');
+    for (const d of [silentDir, keptDir]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    writeTake(silentDir, 'on-both-machines', { frames: 6 });
+    cpSync(join(silentDir, 'on-both-machines.knct'), join(keptDir, 'on-both-machines.knct'));
+    // Offsets the rename and preset sections have already released.
+    const silentUrl = await startServer(root, ['--captures', silentDir, '--name', 'pi-silent',
+      '--presets', join(WORK, 'silent-presets'), '--projects', join(WORK, 'silent-projects')], MAC_PORT + 14);
+    const keptUrl = await startServer(root, ['--captures', keptDir, '--name', 'mac-kept',
+      '--node', silentUrl, '--node-name', 'pi-silent',
+      '--presets', join(WORK, 'kept-presets'), '--projects', join(WORK, 'kept-projects')], MAC_PORT + 15);
+    const shared = (await getJson(`${keptUrl}/library/all`)).takes.find((t) => t.id === 'on-both-machines');
+    const armed = await post(`${keptUrl}/library/delete/on-both-machines`, { hash: shared?.hash, confirm: true });
+    check(shared?.state === 'both' && /exists on pi-silent as well/.test(armed.error ?? ''),
+      'a take on both machines, whose delete the node\'s answer refuses, which is the refusal the rows below need armed',
+      `${shared?.state}: ${(armed.error ?? 'ACCEPTED').slice(0, 60)}`);
+
+    // Replaced under the running server, because `startServer` waits for `/library/takes` to answer
+    // 200. A regular file gives ENOTDIR from `readdir` on every platform and for root, where a chmod
+    // does neither.
+    rmSync(silentDir, { recursive: true, force: true });
+    writeFileSync(silentDir, 'a file where the captures directory was\n');
+    const listing = await fetch(`${silentUrl}/library/takes`);
+    const listingBody = await listing.json().catch(() => null);
+    check(!listing.ok && /captures directory .* cannot be read: ENOTDIR/.test(listingBody?.error ?? '')
+      && listingBody?.takes === undefined,
+      '/library/takes on a node whose captures directory cannot be read answers an error rather than an empty list',
+      `${listing.status} ${JSON.stringify(listingBody).slice(0, 110)}`);
+    {
+      const { page: shelf, errors: shelfErrors } = await openPage(browser, libraryPage(silentUrl));
+      const said = await shelf.waitForFunction(
+        '(() => { const t = document.getElementById("note")?.textContent ?? ""; return /cannot be read/.test(t) ? t : null; })()',
+        null, { timeout: 20000 },
+      ).then((h) => h.jsonValue(), () => null);
+      const drawn = await shelf.evaluate('document.getElementById("note")?.textContent ?? ""');
+      check(said !== null && /ENOTDIR/.test(said),
+        'and the gallery on that node shows the server\'s own sentence rather than an empty shelf',
+        JSON.stringify((said ?? drawn).slice(0, 110)));
+      const thrown = shelfErrors.filter((e) => !/Failed to load resource/.test(e));
+      check(thrown.length === 0, 'and saying so raises no page error', thrown.slice(0, 2).join(' | ') || 'none beyond the 500');
+      await shelf.close();
+    }
+    // Reclaim first: it removes nothing here, so a mutated build that lets the delete below
+    // through cannot take this row's fixture with it.
+    const reclaim = await post(`${keptUrl}/library/reclaim/on-both-machines`, {});
+    check(/pi-silent could not be asked/.test(reclaim.error ?? ''),
+      'a reclaim against that node says the node could not be asked, rather than that the take is not on it',
+      (reclaim.error ?? JSON.stringify(reclaim)).slice(0, 110));
+    const refused = await post(`${keptUrl}/library/delete/on-both-machines`, { hash: shared?.hash, confirm: true });
+    check(/pi-silent could not be asked/.test(refused.error ?? '') && existsSync(join(keptDir, 'on-both-machines.knct')),
+      'a delete of a take on both machines is refused when the node cannot say what it holds, and this machine\'s copy is still on disk',
+      (refused.error ?? `REMOVED ${JSON.stringify(refused)}`).slice(0, 110));
+
+    // ENOENT is still an absence, which is the branch the shared rule keeps.
+    rmSync(silentDir, { force: true });
+    const absent = await fetch(`${silentUrl}/library/takes`);
+    const absentBody = await absent.json().catch(() => null);
+    check(absent.ok && Array.isArray(absentBody?.takes) && absentBody.takes.length === 0,
+      'while a captures directory removed from under the server still answers 200 with no takes',
+      `${absent.status} ${JSON.stringify(absentBody?.takes ?? absentBody).slice(0, 60)}`);
+    mkdirSync(silentDir, { recursive: true });
+    const empty = await getJson(`${silentUrl}/library/takes`).catch(() => null);
+    check(Array.isArray(empty?.takes) && empty.takes.length === 0,
+      'and an empty one answers an empty library', JSON.stringify(empty?.takes ?? empty).slice(0, 60));
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 14 || sv.port === MAC_PORT + 15)) {
+      p.child.kill('SIGKILL');
+    }
   }
 
   console.log('\n[library] delete unlinks the file it hashed, not whatever holds the name once the hash is done');
