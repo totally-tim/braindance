@@ -34,5 +34,8 @@
   },
   "devDependencies": {
     "playwright": "^1.62.1"
+  },
+  "bin": {
+    "braindance": "bin/braindance.mjs"
   }
 }

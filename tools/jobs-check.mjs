@@ -375,7 +375,7 @@ execFileSync(process.execPath, [join(REPO, 'tools/make-sample.mjs'), SECOND, '--
 const servers = [];
 const proxies = [];
 const startServer = async () => {
-  const child = spawn(process.execPath, [join(root, 'server/index.js'),
+  const child = spawn(process.execPath, [join(root, 'server/index.js'), '--standby-after', '0',
     '--port', String(PORT), '--captures', caps, '--jobs', jobsDir,
     // No `--replay`: a replaying server pushes frames at the page continuously, and a repaint
     // landing inside the export's first seek made `ExportTransport` count it one run in four.

@@ -69,6 +69,19 @@ const MUTATIONS = {
       + 'pose-still-arrives row green',
   },
 
+  // A source that reconnects while the operator is still is answered by the server, because a still
+  // camera sends nothing. Dropping the held pose from what a connecting page is told leaves that
+  // source at its boot camera until the operator moves again.
+  'pose-not-held-for-a-late-source': {
+    file: 'server/output.js',
+    edits: [[
+      "      ...(mode === 'mirror' && this.lastView ? [{ view: this.lastView }] : []),",
+      '',
+    ]],
+    fails: 'the row that opens a source page after the operator has orbited and stopped; it adopts '
+      + 'the boot pose instead of the one the server is holding',
+  },
+
   // The parameter half of the patch goes back to landing one name at a time with a catch per entry,
   // so a patch from a mismatched build applies its good half and draws the new mode against a stale
   // value. Must redden the half-right-patch row alone, because a wholly valid patch lands
@@ -183,7 +196,7 @@ const MUTATIONS = {
   'key-runs-unasked': {
     file: 'server/key-stream.js',
     edits: [[
-      'this.demand = new OnDemand({ request, count: () => this.clients.size });',
+      'this.demand = new OnDemand({ request, count: () => this.demandCount });',
       'this.demand = new OnDemand({ request, count: () => 1 });\n    this.demand.settle();',
     ]],
     fails: 'section 7\'s first row, which reads type 4 at the writer before any key client exists',
@@ -236,8 +249,8 @@ const MUTATIONS = {
   },
 
   'operator-reconnect-keeps-old-framing': {
-    file: 'web/main.js',
-    edits: [['    else sendProgramOutState();', '    // The mutation advertises only on request.']],
+    file: 'server/index.js',
+    edits: [['  sendOutput(ws);', '  // The mutation omits restoration.']],
     fails: 'the socket reconnect and operator reload rows in section 9',
   },
 
@@ -527,7 +540,7 @@ const start = async (extra = []) => {
     const grabber = `${join(WORK, 'tools/fake-grabber.mjs')} --source ${SOURCE} --fps 30 --hd `
       + `--key --emit-log ${EMIT_LOG}`;
     const child = spawn(process.execPath, [
-      join(WORK, 'server/index.js'), '--port', String(PORT),
+      join(WORK, 'server/index.js'), '--standby-after', '0', '--port', String(PORT),
       '--captures', join(WORK, 'takes'), '--grabber', grabber, ...extra,
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
     servers.push(child);
@@ -1085,6 +1098,42 @@ try {
       ok('while a pose that is one still reaches it, so the refusal is a gate rather than the mirror switched off',
         Math.abs(moved[0] - 1.5) < 1e-3 && Math.abs(moved[2] - 2.5) < 1e-3, moved.map((v) => v.toFixed(3)).join(', '));
 
+      await page.evaluate(() => __kinect.applyProgramOut({ preset: {
+        version: __kinect.library.PROJECT_VERSION, requires: [], values: { exposure: 1.8 },
+      } }));
+      ok('a source applies a preset through the stored-preset door',
+        await page.evaluate('__kinect.params.get("exposure")') === 1.8);
+
+      // What an OBS restart looks like: the source reconnects on its own schedule and an operator who
+      // has stopped moving sends nothing more, because a still camera sends nothing at all. The
+      // operator is moved and left still, so only what the server holds can answer the page that
+      // arrives next, and the answer is compared against the operator rather than a constant.
+      await operator.evaluate('(() => { const k = globalThis.__kinect;'
+        + ' k.freeCamera.position.set(2.4, 1.2, -3.1); k.controls.update(16); })()');
+      await operator.waitForTimeout(1500);
+      const held = await operator.evaluate('__kinect.freeCamera.position.toArray()');
+      const late = await browser.newPage({ viewport: { width: 900, height: 600 } });
+      const lateErrors = [];
+      late.on('pageerror', (err) => lateErrors.push(err.message));
+      await late.goto(`http://127.0.0.1:${PORT}/program`);
+      await late.waitForTimeout(2500);
+      const adopted = await late.evaluate(`(() => ({
+        position: globalThis.__kinect.freeCamera.position.toArray(),
+        readout: document.getElementById('programOutReadout').textContent,
+      }))()`);
+      const off = Math.hypot(...adopted.position.map((v, i) => v - held[i]));
+      ok('a source that connects while the operator is still draws where the operator left the camera',
+        off < 1e-2 && adopted.readout.includes('mirror'),
+        `${(off * 1000).toFixed(1)} mm off, ${adopted.readout.trim()}`);
+      ok('and the page that arrived late has no error of its own', lateErrors.length === 0, lateErrors.slice(0, 2).join(' | '));
+      await late.close();
+
+      await operator.reload();
+      await operator.waitForFunction(() => globalThis.__kinect?.params.get('pointSize') === 4.2, null, { timeout: 5000 }).catch(() => {});
+      ok('record boot adopts the server output mode and size',
+        await operator.inputValue('#progMode') === 'mirror' && await operator.inputValue('#progSize') === '1280x720'
+        && await operator.evaluate('__kinect.params.get("pointSize")') === 4.2);
+
       await browser.close();
       await stopAll();
     }
@@ -1311,8 +1360,8 @@ try {
       await operator.goto(`http://127.0.0.1:${PORT}/record`);
       await operator.waitForFunction(() => Boolean(globalThis.__kinect?.params));
 
-      // Opened second, so its request for the whole program-out state reaches the operator rather
-      // than being broadcast into an empty socket population.
+      // Opened second so its frames arrive at a page that is already watching, and so the operator's
+      // socket is one of the clients the server can broadcast to while this one is being driven.
       const page = await browser.newPage({ viewport: { width: 900, height: 600 } });
       const pageErrors = [];
       page.on('pageerror', (err) => pageErrors.push(err.message));
@@ -1411,16 +1460,16 @@ try {
           globalThis.__proofSocket.close();
           globalThis.__kinect.params.set('far', 4);
         });
-        const resynced = await page.waitForFunction(() => __key.faces().far === 4, null, { timeout: 5000 })
+        const resynced = await operator.waitForFunction(() => __kinect.params.get('far') === 2, null, { timeout: 5000 })
           .then(() => true, () => false);
-        ok('socket reconnect advertises a framing change made while disconnected', resynced,
-          `key far ${await page.evaluate('__key.faces().far')}, operator far 4`);
+        ok('socket reconnect restores the server framing over an unsent local edit', resynced && await page.evaluate('__key.faces().far === 2'),
+          `key far ${await page.evaluate('__key.faces().far')}, server far 2`);
         await operator.reload();
-        await operator.waitForFunction(() => Boolean(globalThis.__kinect?.params));
+        await operator.waitForFunction(() => globalThis.__kinect?.params.get('far') === 2, null, { timeout: 5000 }).catch(() => {});
         const ownerFar = await operator.evaluate('__kinect.params.get("far")');
         const reloaded = await page.waitForFunction((far) => __key.faces().far === far, ownerFar, { timeout: 5000 })
           .then(() => true, () => false);
-        ok('operator reload replaces the keyed framing with the operator registry', reloaded,
+        ok('operator reload adopts the framing held by the server', reloaded && ownerFar === 2,
           `key far ${await page.evaluate('__key.faces().far')}, operator far ${ownerFar}`);
 
         await setFaces({ far: 2 });

@@ -419,7 +419,7 @@ async function main() {
   // "opens the Kinect". The path carries no spaces: the flag is space-split into a binary
   // and its arguments.
   server = spawn(process.execPath, [
-    join(ROOT, 'server/index.js'), '--port', String(PORT), '--captures', work,
+    join(ROOT, 'server/index.js'), '--standby-after', '0', '--port', String(PORT), '--captures', work,
     '--projects', join(work, 'projects'),
     '--grabber', join(work, 'no-grabber-in-a-boot-check'),
   ], {

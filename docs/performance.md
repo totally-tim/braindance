@@ -550,3 +550,60 @@ behind its number.
 | accept a depth frame missing only sub-image 9, which the depth solve never reads | +12.9% on the degraded topology, 12.82 to 14.48 fps, and inert on a healthy one | 6.8% of discarded frames were missing nothing else. Interleaved with both paths in one binary behind a switch, every new-path run beating every old-path run |
 | thread registration's occlusion filter | 2.07 ms of registration's 5.76 ms p50 at four threads on an M2 Max, and p90 from 6.69 to 4.59 ms | the offline A/B harness, interleaved A/B/A/B/A/B against upstream's scatter, three rounds, about 1000 frames per arm after 60 of warmup, all six arms at 30.03 to 30.04 fps. The default is two threads, because a Pi 5 measures four as the worst threaded setting there is: two holds 29.56–29.75 fps at 11.87 ms, three registers fastest at 10.03 ms and drops frames in 3 of 3 rounds, four is slower at 13.10 ms. The constrained machine decides |
 | ignore two USB link setup calls on Apple Silicon that `Freenect2DeviceImpl::open` otherwise treats as must-succeed | no throughput number: without it the sensor never opens, because the controller does not implement U1/U2 link power states and `enablePowerStates()` answers `LIBUSB_ERROR_PIPE` | both calls are still made and still log through `CHECK_LIBUSB_RESULT`. `failed to enable power states U1!` is harmless and the U2 form is not, so grep the startup log before reading packet loss on a Mac as a topology problem |
+
+## Standby timing
+
+Ten warm-USB standby/wake cycles on an Apple M2 Max, macOS 26.6.2 (25G83),
+2026-09-17, use the current native build and the macOS preset's OpenCL (`cl`) pipeline.
+The macOS preset does not build the issue's proposed `gl` pipeline. The input is a real
+Kinect v2 with color enabled, not a synthetic capture.
+
+One loopback monitor stays connected throughout. After the first depth frame, discard
+10 seconds of startup warmup, then retain all ten cycles. Each cycle measures POST standby
+to receipt of the server's grabber-exit log, waits 2 seconds in standby, measures POST wake
+to the first type-2 depth payload on that socket, and runs live for 5 seconds. The clock is
+monotonic; page cache is not flushed and is irrelevant to live USB latency.
+
+| Cycle | Standby to clean exit (s) | Wake to depth frame (s) |
+| --- | ---: | ---: |
+| 1 | 4.400 | 0.961 |
+| 2 | 4.376 | 1.160 |
+| 3 | 4.375 | 1.070 |
+| 4 | 4.363 | 0.970 |
+| 5 | 4.394 | 1.018 |
+| 6 | 4.351 | 6.304 |
+| 7 | 4.405 | 1.069 |
+| 8 | 4.374 | 1.035 |
+| 9 | 4.380 | 1.020 |
+| 10 | 4.360 | 1.344 |
+
+The medians are 4.375 seconds to exit and 1.052 seconds to the first depth frame.
+Every exit reports code 0 and signal null, and every old child PID is gone before wake.
+The final health counters report ten wakes, zero respawns and zero restarts. A final
+standby leaves no grabber running. The operator visually confirms that the red emitter
+lights are off after this final stop; emitter darkness is not timed per cycle.
+
+A second set of ten cycles, same host, macOS build, native build and method, with the sensor
+on a USB 3.0 hub rather than a direct port, gives medians of 4.402 seconds to exit and 0.984
+seconds to the first depth frame. Every sample falls inside the table's spread and none wakes
+slowly, so across twenty cycles the 6.304-second sample stands alone. Each live dwell of that
+set delivers 29.6 to 30.0 fps, so its timings are not starvation artifacts.
+
+The first colour picture is measured as an MJPEG consumer attaching at wake, the way an OBS
+source arrives, and timed to the first JPEG part on that response, with the same warmup
+discarded. Five cycles give a median of 1.504 seconds, ranging 1.487 to 1.557. Depth arrives
+at a median of 0.948 seconds in the same cycles (0.925 to 1.001), so the colour encoder costs
+about half a second over the depth path and asking for colour does not slow depth.
+
+With the last consumer gone the idle timer stands the sensor down by itself. At
+`--standby-after 5` that takes 9.4 to 14.1 seconds from the departure: one tick has to notice
+the idle, the window has to fill, and the next tick fires it, so the worst case is about twice
+the setting plus a tick rather than the setting.
+
+The standby grace remains 15 seconds, above the 4.434-second maximum of the twenty cycles.
+The MJPEG first-frame hold remains 45 seconds. The worst arrival it covers is the 6.304-second
+slow wake plus the half second the encoder adds, about 6.8 seconds, so the hold is around seven
+times what this host has asked for, where three times the median depth wake would have missed
+the slow wake. These are conservative bounds, not measured platform limits. Pi timing remains
+unmeasured. Repeat the ten-cycle method on the Pi with its `gl` pipeline before reducing either
+bound for both platforms.

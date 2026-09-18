@@ -115,7 +115,7 @@ const ok = (label, pass, detail = '') => {
 
 const servers = [];
 const start = (args) => new Promise((resolve, reject) => {
-  const child = spawn(process.execPath, [join(WORK, 'server/index.js'), '--port', String(PORT), ...args], {
+  const child = spawn(process.execPath, [join(WORK, 'server/index.js'), '--standby-after', '0', '--port', String(PORT), ...args], {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   servers.push(child);

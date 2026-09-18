@@ -3492,6 +3492,20 @@ function showCamera(state) {
 colorCamEl.addEventListener('change', () => sendCamera({ color: colorCamEl.checked }));
 lowLightEl.addEventListener('change', () => sendCamera({ lowLight: lowLightEl.checked }));
 
+const sensorStandbyEl = document.getElementById('sensorStandby');
+let sensorOnStandby = false;
+sensorStandbyEl.addEventListener('click', async () => {
+  sensorStandbyEl.disabled = true;
+  try {
+    const res = await fetch(`/sensor/${sensorOnStandby ? 'wake' : 'standby'}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error);
+  } catch (err) { showTimelineError(err); }
+  finally { sensorStandbyEl.disabled = false; }
+});
+
 const monDivisorEl = document.getElementById('monDivisor');
 const monStrideEl = document.getElementById('monStride');
 const monAcceptCostEl = document.getElementById('monAcceptCost');
@@ -3555,25 +3569,30 @@ let programOutFps = 0;
 let programOutLastAt = 0;
 let programOutSince = 0;
 
+let adoptingOutput = false;
 const progModeEl = document.getElementById('progMode');
 const progSizeEl = document.getElementById('progSize');
 const progNoteEl = document.getElementById('progNote');
 
 /** Send a patch to whatever program-out sources are listening. Operator side. */
 function sendProgramOut(patch) {
-  if (PROGRAM_OUT) return; // a source does not tell other sources what to draw
+  if (PROGRAM_OUT || adoptingOutput) return; // a source does not tell other sources what to draw
   if (socket?.readyState !== WebSocket.OPEN) return;
   socket.send(JSON.stringify({ programOut: patch }));
 }
 
-/** The operator's whole state, sent when a source connects or the operator changes mode. */
-function sendProgramOutState() {
-  sendProgramOut({
-    mode: programOutMode,
-    size: programOutSize,
-    params: params.values(),
-    view: cameraPose(freeCamera),
-  });
+async function writeOutput(patch) {
+  try {
+    const res = await fetch('/output', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error);
+    applyProgramOut(body);
+  } catch (err) {
+    applyProgramOut({ mode: programOutMode, size: programOutSize });
+    showTimelineError(err);
+  }
 }
 
 function cameraPose(cam) {
@@ -3584,9 +3603,15 @@ function cameraPose(cam) {
   };
 }
 
-/** Apply a patch. Source side. */
+/** Adopt output without relaying the resulting registry writes. */
 function applyProgramOut(patch) {
-  if (!PROGRAM_OUT) return;
+  adoptingOutput = true;
+  try { adoptProgramOut(patch); }
+  finally { adoptingOutput = false; }
+}
+
+function adoptProgramOut(patch) {
+  if (EDITING) return;
   // Normalised before any field is applied: a refusal after a mode switch is not a refusal.
   const mode = patch.mode === 'mirror' || patch.mode === 'camera' ? patch.mode : programOutMode;
   let view = null;
@@ -3597,6 +3622,15 @@ function applyProgramOut(patch) {
       console.error(`[program-out] ${err.message}`);
       return;
     }
+  }
+  if (patch.preset && typeof patch.preset === 'object') {
+    try {
+      refusePresetBody('output', patch.preset);
+      // A replaced output preset starts from the same defaults as a newly connected source.
+      params.apply(Object.fromEntries(presetValueNames().map((name) => [name, PARAMS[name].def])));
+      applyStoredPreset({ name: 'output', body: patch.preset });
+    }
+    catch (err) { console.error(`[program-out] ${err.message}`); return; }
   }
   if (patch.params) {
     try {
@@ -3609,12 +3643,13 @@ function applyProgramOut(patch) {
   if (patch.size && Number.isInteger(patch.size.w) && Number.isInteger(patch.size.h)
       && patch.size.w > 0 && patch.size.h > 0) {
     programOutSize = { w: patch.size.w, h: patch.size.h };
-    outputSize = { ...programOutSize };
-    resize();
+    if (PROGRAM_OUT) { outputSize = { ...programOutSize }; resize(); }
+    if (progSizeEl) progSizeEl.value = `${programOutSize.w}x${programOutSize.h}`;
   }
   if (patch.mode === 'mirror' || patch.mode === 'camera') {
     programOutMode = patch.mode;
-    setViewCamera(programOutMode === 'mirror' ? freeCamera : programCamera);
+    if (PROGRAM_OUT) setViewCamera(programOutMode === 'mirror' ? freeCamera : programCamera);
+    if (progModeEl) progModeEl.value = programOutMode;
   }
   if (view) {
     freeCamera.position.fromArray(view.position);
@@ -3662,8 +3697,7 @@ function paintProgramOutReadout() {
 /** The operator's two controls, and the URLs to paste into OBS. Not wired on a source. */
 if (!PROGRAM_OUT && progModeEl) {
   progModeEl.addEventListener('change', () => {
-    programOutMode = progModeEl.value;
-    sendProgramOutState();
+    writeOutput({ mode: progModeEl.value });
   });
   progSizeEl.addEventListener('change', () => {
     const m = /^\s*([1-9][0-9]*)\s*x\s*([1-9][0-9]*)\s*$/.exec(progSizeEl.value);
@@ -3671,9 +3705,7 @@ if (!PROGRAM_OUT && progModeEl) {
       progSizeEl.value = `${programOutSize.w}x${programOutSize.h}`;
       return;
     }
-    programOutSize = { w: Number(m[1]), h: Number(m[2]) };
-    progSizeEl.value = `${programOutSize.w}x${programOutSize.h}`;
-    sendProgramOut({ size: programOutSize });
+    writeOutput({ size: { w: Number(m[1]), h: Number(m[2]) } });
   });
   const copyPaths = {
     ready: 'M7 7h9v9H7zM4 13V4h9v3',
@@ -3735,9 +3767,6 @@ function connect() {
   ws.onopen = () => {
     sensorLabel = 'waiting for sensor…';
     setStatus();
-    // Asked for rather than waited for: OBS reconnects a browser source on its own schedule.
-    if (PROGRAM_OUT) ws.send(JSON.stringify({ programOut: { hello: true } }));
-    else sendProgramOutState();
   };
 
   ws.onmessage = (event) => {
@@ -3745,6 +3774,8 @@ function connect() {
       const msg = JSON.parse(event.data);
 
       if (msg.status) {
+        sensorOnStandby = msg.status === 'standby';
+        sensorStandbyEl.textContent = sensorOnStandby ? 'Wake sensor' : 'Standby';
         sensorState = {
           live: '', starting: 'sensor starting…', lost: 'sensor lost — restarting',
           // Not a fault to wait out: this is the editing station and the
@@ -3776,13 +3807,9 @@ function connect() {
         return;
       }
 
-      // What the operator wants drawn. Ignored on any page that is not a source.
+      // Server-owned output, adopted by the operator and the source.
       if (msg.programOut) {
-        if (msg.programOut.hello) {
-          if (!PROGRAM_OUT) sendProgramOutState();
-        } else {
-          applyProgramOut(msg.programOut);
-        }
+        applyProgramOut(msg.programOut);
         return;
       }
 
@@ -6373,7 +6400,8 @@ function requestRepaint() {
 
 paramWritten = (name, tag) => {
   // Every parameter write reaches the program-out source through here.
-  sendProgramOut({ params: { [name]: params.get(name) } });
+  sendProgramOut({ params: { [name]: params.get(name) },
+    tags: { [name]: presetCarriesLookName(name, PARAMS[name].group) ? tag : 'composition' } });
   if (tag === 'view' || transportWriting) return;
   requestRepaint();
 };
@@ -11456,7 +11484,8 @@ if (EDITING && !REQUESTED_TAKE && !REQUESTED_PROJECT && !REQUESTED_NEW) {
   renderProgramFrame(0);
 } else {
   // Opened here, because `handleFrame` pushes into the pair source above.
-  connect();
+  fetch('/output').then((res) => res.json()).then((state) => applyProgramOut({ mode: state.mode, size: state.size }))
+    .catch((err) => showTimelineError(err)).finally(connect);
   renderer.setAnimationLoop(liveLoop);
   chromeOn = true;
   placeChrome();
