@@ -214,7 +214,7 @@ async function describeTake(dir, file, recording) {
   };
 }
 
-export async function scanTakes(dir, recordingPath = null) {
+export async function scanTakes(dir, owns = () => false) {
   let files;
   try {
     files = (await readdir(dir)).filter(isKnct).sort();
@@ -225,7 +225,7 @@ export async function scanTakes(dir, recordingPath = null) {
   const unreadable = [];
   for (const file of files) {
     try {
-      takes.push(await describeTake(dir, file, recordingPath !== null && join(dir, file) === recordingPath));
+      takes.push(await describeTake(dir, file, owns(join(dir, file))));
     } catch (err) {
       unreadable.push({ id: captureIdFor(file), file, error: err.message });
     }
@@ -592,9 +592,9 @@ export async function removeTake(dir, id, { hash, verifiedElsewhere = null }) {
 /**
  * Renames a take and everything filed beside it. Safe because nothing here goes by name: projects,
  * the reconciliation and the menu all reference footage by content hash. The take being recorded is
- * refused, because `scanTakes` decides which take is open by path and a renamed one stops matching.
+ * refused, because the recorder names the files it owns by path and a renamed one stops matching.
  */
-export async function renameTake(dir, id, requested, { hash, recordingPath = null }) {
+export async function renameTake(dir, id, requested, { hash, owns = () => false }) {
   if (!VALID_ID.test(id)) throw new Error(`unusable take id ${id}`);
   const to = String(requested ?? '').trim().replace(/\.knct$/i, '');
   if (!VALID_ID.test(to)) {
@@ -613,7 +613,7 @@ export async function renameTake(dir, id, requested, { hash, recordingPath = nul
       throw new Error(`refusing to rename outside ${root}`);
     }
   }
-  if (recordingPath !== null && resolve(from) === resolve(recordingPath)) {
+  if (owns(from)) {
     throw new Error(`${id} is being recorded right now: stop the take before renaming it`);
   }
 

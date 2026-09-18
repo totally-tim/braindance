@@ -313,7 +313,7 @@ const MUTATIONS = {
       "  { path: '/library/writes', pattern: /^\\/library\\/writes$/, read: serveWriteCounts },\n"
       + "  { path: '/library/sweep-probe', pattern: /^\\/library\\/sweep-probe$/, read: (req, res) => {\n"
       + "    const victim = readdirSync(CAPTURES_DIR).find((f) => f.endsWith('.knct')\n"
-      + '      && join(CAPTURES_DIR, f) !== recorder.openPath);\n'
+      + '      && !recorder.owns(join(CAPTURES_DIR, f)));\n'
       + '    if (victim) unlinkSync(join(CAPTURES_DIR, victim));\n'
       + '    sendJson(res, { removed: victim ?? null });\n'
       + '  } },'],
@@ -371,10 +371,17 @@ const MUTATIONS = {
     'grabberRestarts++;\n        spawnTimer = setTimeout(() => { spawnTimer = null; spawnGrabber(); }, delay);',
   ]] },
 
-  // `openPath` goes back to answering only for the take currently being written.
-  'openpath-drops-at-the-stop': { file: 'server/recorder.js', edits: [[
-    'return this.take?.path ?? this.finalizing?.path ?? null;',
-    'return this.take?.path ?? null;',
+  // The recorder goes back to owning only the take currently being written, so a stopped take is
+  // anybody's while its close is still running.
+  'ownership-drops-at-the-stop': { file: 'server/recorder.js', edits: [[
+    '[this.take, ...this.closing]',
+    '[this.take]',
+  ]] },
+  // The shipped shape: one owned take, the open one when there is one. A grabber restart opens the
+  // next take while the last is still closing, and the closing one is anybody's for the overlap.
+  'open-take-shadows-the-closing-one': { file: 'server/recorder.js', edits: [[
+    '[this.take, ...this.closing]',
+    '[this.take ?? [...this.closing].at(-1) ?? null]',
   ]] },
 
   // The library's poll goes back to a first tick that cannot disagree with anything.
@@ -792,7 +799,7 @@ const MUTATIONS = {
   },
   // The take being recorded becomes renameable.
   'rename-during-a-shoot': { file: 'server/library.js', edits: [[
-    '  if (recordingPath !== null && resolve(from) === resolve(recordingPath)) {',
+    '  if (owns(from)) {',
     '  if (false) {',
   ]] },
 
@@ -3269,7 +3276,7 @@ async function runChecks() {
       for (const p of servers.filter((sv) => sv.port === MAC_PORT + 15)) p.child.kill('SIGKILL');
     }
 
-    // `scanTakes` decides which take is open by comparing paths against `recorder.openPath`.
+    // `scanTakes` decides which take is open by asking `recorder.owns` about each path.
     const shootDir = join(WORK, 'rename-shooting');
     rmSync(shootDir, { recursive: true, force: true });
     mkdirSync(shootDir, { recursive: true });
@@ -4978,6 +4985,117 @@ async function runChecks() {
     check(afterStop?.recording === false && afterStop.hash === stopped?.hash && afterStop.frames === stopped?.frames,
       'the listing then carries the hash and the frame count the scan produced');
     for (const p of servers.filter((sv) => sv.port === MAC_PORT + 12)) p.child.kill('SIGKILL');
+  }
+
+  console.log('\n[library] a take stays the recorder\'s until its close finishes, after a restart has opened the next');
+  {
+    // The window: a colour toggle restarts the grabber, `split()` closes take A unawaited, and the
+    // replacement's hello opens take B about 250ms later while A's index is still being built. The
+    // index build is a full read plus sha256, so the window scales with A, and A is sized by frames:
+    // 5000 frames of the synthetic sample is about 2.2 GB, read back warm because it was just
+    // written. B opens about 0.45s after the restart; at 3000 frames A's close ran 0.73s, which
+    // left 0.28s of overlap, too little to sample on a contended machine.
+    const OVERLAP_FRAMES = 5000;
+    const INSIDE_FLOOR = 5;
+    // A sample counts as inside only if it started this long before A's "closed" line landed here:
+    // the line crosses a pipe, so a request fired just before it may be answered after the close.
+    const MARGIN_MS = 50;
+    const overlapDir = join(WORK, 'restart-overlap');
+    rmSync(overlapDir, { recursive: true, force: true });
+    mkdirSync(overlapDir, { recursive: true });
+    const overlapUrl = await startServer(root, [
+      '--captures', overlapDir, '--name', 'restarting', '--record', '--no-color',
+      '--grabber', `${join(REPO, 'tools/fake-grabber.mjs')} --source ${SAMPLE} --fps 400`,
+    ], MAC_PORT + 17);
+    // Timed where each line lands in this process, which is the clock the samples are timed on.
+    const began = Date.now();
+    const clock = () => Date.now() - began;
+    const opened = new Map();
+    const closed = new Map();
+    let partial = '';
+    servers.find((sv) => sv.port === MAC_PORT + 17).child.stdout.on('data', (chunk) => {
+      const lines = (partial + chunk.toString()).split('\n');
+      partial = lines.pop();
+      for (const line of lines) {
+        const m = /\[recorder\] take (\S+) (open|closed)/.exec(line);
+        if (m) (m[2] === 'open' ? opened : closed).set(m[1], { at: clock(), line });
+      }
+    });
+
+    let shooting = null;
+    for (let i = 0; i < 600; i++) {
+      await new Promise((done) => { setTimeout(done, 50); });
+      shooting = await getJson(`${overlapUrl}/record/state`);
+      if (shooting.recording && shooting.frames >= OVERLAP_FRAMES) break;
+    }
+    check(shooting?.recording === true && shooting.frames >= OVERLAP_FRAMES,
+      `a take of at least ${OVERLAP_FRAMES} frames is open, which is what gives its close a window to sample`,
+      `${shooting?.takeId}: ${shooting?.frames} frames, ${((shooting?.bytes ?? 0) / 1e9).toFixed(2)} GB`);
+    const takeA = shooting?.takeId;
+
+    // Every `:id` route that answers GET, off the table the server publishes, so a route added later
+    // is asked by existing. The write routes are not driven: with the guard broken they would act on
+    // the take mid-close, and the ones refusing an open take read the listing's `recording` flag,
+    // which a row below asserts directly.
+    const idReads = (await getJson(`${overlapUrl}/library/routes`)).routes
+      .filter((r) => r.read && !r.live && r.path.includes(':id'))
+      .map((r) => r.path.replace(':id', encodeURIComponent(takeA)).replace(':a-:b', '0-1').replace(':n', '0'))
+      .filter((path) => !path.includes(':'));
+    const routeAnswers = () => Promise.all(idReads.map(async (path) => {
+      const res = await fetch(`${overlapUrl}${path}`);
+      await res.body?.cancel().catch(() => {});
+      return `${path.replace(encodeURIComponent(takeA), ':id')} ${res.status}`;
+    }));
+    const whileOpen = await routeAnswers();
+
+    // Fired without waiting on the last: under a broken guard a request inside the window blocks
+    // in a second full scan of A, and a sampler waiting on it stops sampling the window it measures.
+    const samples = [];
+    const inflight = [];
+    let walk = null;
+    await post(`${overlapUrl}/sensor/camera`, { color: true });
+    const giveUp = Date.now() + 30000;
+    while (!closed.has(takeA) && Date.now() < giveUp) {
+      const started = clock();
+      if (walk === null && [...opened.keys()].some((id) => id !== takeA)) {
+        walk = { started, answers: null };
+        inflight.push(routeAnswers().then((answers) => { walk.answers = answers; }));
+      }
+      inflight.push(getJson(`${overlapUrl}/library/takes`).then((listed) => {
+        const t = listed.takes.find((x) => x.id === takeA);
+        samples.push({ started, recording: t?.recording ?? null, hash: t?.hash ?? null });
+      }));
+      await new Promise((done) => { setTimeout(done, 25); });
+    }
+    await Promise.all(inflight);
+    // B goes on recording at 400fps, so it is stopped before anything else reads this disk.
+    await post(`${overlapUrl}/record/stop`);
+    const takeB = [...opened.keys()].find((id) => id !== takeA) ?? null;
+    const bAt = takeB ? opened.get(takeB).at : null;
+    const aAt = closed.get(takeA)?.at ?? null;
+    const inWindow = (t) => bAt !== null && aAt !== null && t >= bAt && t <= aAt - MARGIN_MS;
+    const inside = samples.filter((s) => inWindow(s.started));
+    check(inside.length >= INSIDE_FLOOR && walk !== null && inWindow(walk.started),
+      'the restart opened the next take while this one was still closing, and the check sampled inside that overlap - which is what makes the two rows below readings from inside the window rather than ones that missed it',
+      `${takeB ?? 'no next take'} open at ${bAt}ms, ${takeA} closed at ${aAt}ms (${aAt - bAt}ms overlap), `
+        + `${inside.length} listings and ${walk && inWindow(walk.started) ? 'the route walk' : 'no route walk'} started inside it`);
+    const wrong = inside.filter((s) => s.recording !== true || s.hash !== null);
+    check(inside.length > 0 && wrong.length === 0,
+      'every listing inside the overlap says the closing take is being recorded, with no hash - it is still the recorder\'s, so the gallery offers nothing to open, download, rename or remove',
+      wrong.length ? `${wrong.length} of ${inside.length} said recording ${wrong[0].recording} with hash ${String(wrong[0].hash).slice(0, 15)}`
+        : `${inside.length} of ${inside.length}`);
+    const differs = (walk?.answers ?? []).filter((a, i) => a !== whileOpen[i]);
+    check(walk?.answers !== null && walk?.answers !== undefined && differs.length === 0,
+      'and every `:id` route answering GET answers the closing take exactly as it answered the open one',
+      differs.length ? `open vs closing: ${differs.map((d) => `${whileOpen[walk.answers.indexOf(d)]} -> ${d.split(' ').pop()}`).join(', ')}`
+        : `${whileOpen.length} routes: ${whileOpen.join(', ')}`);
+    const settled = (await getJson(`${overlapUrl}/library/takes`)).takes.find((t) => t.id === takeA);
+    const closedHash = /sha256:[0-9a-f]{64}/.exec(closed.get(takeA)?.line ?? '')?.[0] ?? null;
+    check(settled?.recording === false && closedHash !== null && settled.hash === closedHash,
+      'and once the close finishes the take is a library entry carrying the hash the close computed',
+      `${String(settled?.hash).slice(7, 19)} listed, ${String(closedHash).slice(7, 19)} closed`);
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 17)) p.child.kill('SIGKILL');
+    rmSync(overlapDir, { recursive: true, force: true });
   }
 
   console.log('\n[library] a node with no captures directory makes one and says so');

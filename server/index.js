@@ -153,11 +153,11 @@ function capturePathFor(id) {
 // same decoder the same input; a run is the file's own slice, framing included, because
 // concatenated payloads have no boundaries left to parse back.
 
-// The take the recorder has open is refused through this API until it closes: a scan of a growing
-// file is a full read plus sha256 against the disk being written to, and the hash it would carry
-// names a take that no longer exists a frame later.
+// A take the recorder still owns is refused through this API until its close finishes: a scan of
+// a growing file is a full read plus sha256 against the disk being written to, and the hash it
+// would carry names a take that no longer exists a frame later.
 function beingRecorded(path) {
-  return path !== null && path === recorder.openPath;
+  return path !== null && recorder.owns(path);
 }
 
 async function withOpenCapture(res, id, fn) {
@@ -430,8 +430,8 @@ function readBody(req) {
   });
 }
 
-// The take being written is named on the way in, so the manifest can describe it without scanning.
-const localTakes = () => scanTakes(CAPTURES_DIR, recorder.openPath);
+// The takes the recorder still owns are named on the way in, so the manifest describes them unscanned.
+const localTakes = () => scanTakes(CAPTURES_DIR, (path) => recorder.owns(path));
 
 // Per request rather than per server, because the answer is about the socket: Reveal opens a window
 // on the machine running this process, which is only the operator's when the browser is on it.
@@ -491,7 +491,7 @@ async function serveRename(req, res, [id]) {
   try {
     const done = await renameTake(CAPTURES_DIR, id, body.to, {
       hash: body.hash,
-      recordingPath: recorder.openPath,
+      owns: (path) => recorder.owns(path),
     });
     sendJson(res, done);
   } catch (err) {
