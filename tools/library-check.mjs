@@ -13,7 +13,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, mkdirSync, readdirSync, rmSync, symlinkSync, existsSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, readdirSync, renameSync, rmSync, symlinkSync, existsSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { createConnection } from 'node:net';
 import { createServer } from 'node:http';
@@ -4565,11 +4565,13 @@ async function runChecks() {
     // The descriptor is what says the hash has begun; before it, the removal would hash the take
     // renamed in and be refused by the hash rather than by the question this section asks.
     const opened = !heldBefore && holding();
-    // A removal that settles first has already unlinked the take, and the rename then throws.
+    // Renamed from outside the server, the way a file manager renames: `renameTake` takes the
+    // take's lock and waits for the removal, so the only rename that can land inside the hash is
+    // one no lock sees, and that is the rename this re-check is for.
     let renameRefused = null;
     try {
-      await lib.renameTake(raceDir, 'asked-to-go', 'moved-away', { hash: asked.hash });
-      await lib.renameTake(raceDir, 'never-named', 'asked-to-go', { hash: stranger.hash });
+      renameSync(join(raceDir, 'asked-to-go.knct'), join(raceDir, 'moved-away.knct'));
+      renameSync(join(raceDir, 'never-named.knct'), join(raceDir, 'asked-to-go.knct'));
     } catch (err) {
       renameRefused = err.message;
     }
