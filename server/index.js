@@ -14,7 +14,7 @@ import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
 import {
   VALID_ID, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, downloadTake,
   downloadsInFlight, hashFile, markWriteCount, readMarkLog, readMarks, reconcile, remaining,
-  removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes,
+  removeTake, renameTake, resolveMarks, revealSupport, revealTake, sameTake, scanTakes, takeIdentity,
 } from './library.js';
 import { EffectStore } from './effect-store.js';
 import { RESERVED_EFFECT_IDS, doorRefusal, forkRefusal } from './effect-door.js';
@@ -315,17 +315,7 @@ function serveTakeFile(req, res, [id]) {
 }
 
 // Marks are a sidecar beside the take, and a write is an append - so moving, renaming and
-// deleting a mark are one operation and the two-machine merge is concatenate-and-resolve. `dev`
-// and `ino` rather than the path, because a later take renamed into a freed id is a different take.
-const takeIdentity = (path) => {
-  try {
-    const st = statSync(path ?? '');
-    return { dev: st.dev, ino: st.ino };
-  } catch {
-    return null;
-  }
-};
-const sameTake = (a, b) => a !== null && b !== null && a.dev === b.dev && a.ino === b.ino;
+// deleting a mark are one operation and the two-machine merge is concatenate-and-resolve.
 const takeIsHere = (path) => {
   try {
     return takeIdentity(path) !== null;
