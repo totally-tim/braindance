@@ -115,12 +115,14 @@ export class Recorder {
 
   /** Whether `path` is a file this recorder is still writing: the open take, or one still closing. */
   owns(path) {
-    const owned = this.ownedTakes();
-    if (!path || owned.length === 0) return false;
     // The file rather than the name: an id is joined into a path as given, and a volume that folds
     // case opens one take under many spellings of it.
-    const here = takeIdentity(path);
-    return here !== null && owned.some((take) => sameTake(here, take.identity));
+    return Boolean(path) && this.ownedTakes().length > 0 && this.ownsFile(takeIdentity(path));
+  }
+
+  /** The same question about a file already opened, by its `dev` and `ino`. */
+  ownsFile(identity) {
+    return identity !== null && this.ownedTakes().some((take) => sameTake(identity, take.identity));
   }
 
   // Refuses when the disk cannot hold a sensible minimum, because with manual-only deletion the

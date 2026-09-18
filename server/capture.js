@@ -72,11 +72,14 @@ export const captureIdFor = (capturePath) => basename(capturePath).replace(/\.kn
 // Numbers each scan's scratch sidecar, taken on the tick the scan writes so no two in flight share one.
 let indexWrites = 0;
 
-/** One sequential pass that produces the index and the content hash together. */
-export async function buildIndex(capturePath) {
+/**
+ * One sequential pass that produces the index and the content hash together. With `handle`, the
+ * pass reads that open file and never the name, which can have been given to another file since.
+ */
+export async function buildIndex(capturePath, handle = null) {
   // Stamped before the read: a pre-scan mtime no longer matches on the next load if the capture
   // is written to meanwhile, where an after-scan stamp would certify the race.
-  const before = await stat(capturePath);
+  const before = handle ? await handle.stat() : await stat(capturePath);
   const hash = createHash('sha256');
   const offset = [];
   const stampMs = [];
@@ -108,7 +111,10 @@ export async function buildIndex(capturePath) {
     need = HEADER_BYTES;
   };
 
-  for await (const chunk of createReadStream(capturePath, { highWaterMark: SCAN_CHUNK })) {
+  const chunks = handle
+    ? handle.createReadStream({ start: 0, highWaterMark: SCAN_CHUNK, autoClose: false })
+    : createReadStream(capturePath, { highWaterMark: SCAN_CHUNK });
+  for await (const chunk of chunks) {
     hash.update(chunk);
     let i = 0;
     while (i < chunk.length) {
@@ -210,8 +216,9 @@ function indexDescribes(cached, size) {
   return true;
 }
 
-export async function loadIndex(capturePath) {
-  const st = await stat(capturePath);
+/** The sidecar when it still describes the file, else a scan. `handle` as for `buildIndex`. */
+export async function loadIndex(capturePath, handle = null) {
+  const st = handle ? await handle.stat() : await stat(capturePath);
   try {
     // The sidecar is three orders of magnitude smaller than the take, so this is the one read
     // here that can safely be a whole-file read.
@@ -224,7 +231,7 @@ export async function loadIndex(capturePath) {
     }
   } catch {
   }
-  return buildIndex(capturePath);
+  return buildIndex(capturePath, handle);
 }
 
 export class Capture {

@@ -392,8 +392,8 @@ const MUTATIONS = {
   // A download stops asking whether the name it probes is the take being recorded here, so the
   // probe's full read plus sha256 runs against the file the recorder is writing.
   'download-probes-the-open-take': { file: 'server/library.js', edits: [[
-    '  const shooting = [plain, suffixed].find((path) => owns(path));',
-    '  const shooting = null;',
+    '      if (ownsFile(await held.stat())) {',
+    '      if (false) {',
   ]] },
   // Every scan of a take writes its sidecar through one scratch name again, so two scans of one
   // file under ids differing only in case race one rename and the second fails.
@@ -404,8 +404,8 @@ const MUTATIONS = {
   // The recorder compares paths as strings again, so an id spelled in another case names the take
   // being recorded on a volume that folds case and walks past every refusal that asks.
   'owns-compares-names': { file: 'server/recorder.js', edits: [[
-    '    return here !== null && owned.some((take) => sameTake(here, take.identity));',
-    '    return owned.some((take) => take.path === path);',
+    '    return Boolean(path) && this.ownedTakes().length > 0 && this.ownsFile(takeIdentity(path));',
+    '    return this.ownedTakes().some((take) => take.path === path);',
   ]] },
   // The marks sync goes back to joining on the bare hash field and stops refusing the take being
   // recorded. Two edits, both in index.js: with the refusal alone gone the guarded join still

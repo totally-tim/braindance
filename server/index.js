@@ -756,7 +756,7 @@ async function serveDownload(req, res, [id]) {
     return;
   }
   try {
-    const path = await downloadTake(node, take, CAPTURES_DIR, { owns: (p) => recorder.owns(p) });
+    const path = await downloadTake(node, take, CAPTURES_DIR, { ownsFile: (identity) => recorder.ownsFile(identity) });
     sendJson(res, { downloaded: basename(path), hash: take.hash, bytes: take.bytes });
   } catch (err) {
     sendJson(res, { error: err.message }, 502);
