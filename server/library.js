@@ -215,12 +215,7 @@ async function describeTake(dir, file, recording) {
 }
 
 export async function scanTakes(dir, recordingPath = null) {
-  let files;
-  try {
-    files = (await readdir(dir)).filter(isKnct).sort();
-  } catch {
-    return { takes: [], unreadable: [] };
-  }
+  const files = (await directoryNames(dir, { what: 'captures directory' })).filter(isKnct);
   const takes = [];
   const unreadable = [];
   for (const file of files) {
@@ -727,18 +722,25 @@ export async function revealTake(dir, id, { program = null } = {}) {
 
 
 /**
- * The JSON documents in a directory, and the one place that decides a missing directory may read as
- * an empty one. Only `ENOENT` is an absence: `EACCES` turned into `[]` answers 200 with no reason.
+ * The names in a directory, sorted, and the one place that decides a missing directory may read as
+ * an empty one. Only `ENOENT` is an absence. `EACCES`, `EIO`, `ENOTDIR` or `EMFILE` turned into `[]`
+ * answers 200 with no reason, and a captures directory answering that way tells the machine asking
+ * it that the node holds no second copy, which is the answer delete's refusal rests on.
  */
-export async function listJsonNames(dir, { required = false, what = 'directory' } = {}) {
+export async function directoryNames(dir, { required = false, what = 'directory' } = {}) {
   try {
-    return (await readdir(dir)).filter((f) => f.endsWith('.json')).sort();
+    return (await readdir(dir)).sort();
   } catch (err) {
     if (required || err?.code !== 'ENOENT') {
       throw new Error(`the ${what} ${dir} cannot be read: ${err.message}`);
     }
     return [];
   }
+}
+
+/** The JSON documents in a directory, under the rule `directoryNames` keeps. */
+export async function listJsonNames(dir, { required = false, what = 'directory' } = {}) {
+  return (await directoryNames(dir, { required, what })).filter((f) => f.endsWith('.json'));
 }
 
 /** The revision of a name nothing is filed under: what a write says when it expects to create. */
