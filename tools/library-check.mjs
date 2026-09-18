@@ -5238,6 +5238,48 @@ async function runChecks() {
     for (const p of servers.filter((sv) => sv.port === MAC_PORT + 17 || sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
   }
 
+  console.log('\n[library] a marks sync says what the node answered, and nothing else');
+  {
+    // The node is a stub, so what it answers is decided here. Its port is the one the section
+    // above used, so that server has to be gone first rather than merely signalled.
+    const exited = (port) => Promise.all(servers.filter((sv) => sv.port === port)
+      .map((sv) => (sv.child.exitCode !== null || sv.child.signalCode !== null ? null
+        : new Promise((done) => { sv.child.once('exit', done); }))));
+    await exited(MAC_PORT + 17);
+    await exited(MAC_PORT + 18);
+    let stubTakes = () => ({ status: 500, body: { error: 'the stub cannot read its captures directory' } });
+    const stub = createServer((req, res) => {
+      const answer = req.url.startsWith('/library/takes') ? stubTakes()
+        : req.url.startsWith('/record/state') ? { status: 200, body: { recording: false, takeId: null, writingIds: [] } }
+          : { status: 404, body: { error: 'not a stub route' } };
+      res.writeHead(answer.status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(answer.body));
+    });
+    await new Promise((done) => { stub.listen(MAC_PORT + 17, '127.0.0.1', done); });
+    const syncDir = join(WORK, 'syncing-mac');
+    rmSync(syncDir, { recursive: true, force: true });
+    mkdirSync(syncDir, { recursive: true });
+    cpSync(SAMPLE, join(syncDir, 'sync-stub-take.knct'));
+    try {
+      const syncUrl = await startServer(root, [
+        '--captures', syncDir, '--name', 'mac-syncing',
+        '--node', `http://127.0.0.1:${MAC_PORT + 17}`, '--node-name', 'stub-node',
+      ], MAC_PORT + 18);
+
+      const unasked = await fetch(`${syncUrl}/library/sync-marks/sync-stub-take`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const unaskedBody = await unasked.json().catch(() => null);
+      check(!unasked.ok && /could not be asked/.test(unaskedBody?.error ?? '') && /500/.test(unaskedBody?.error ?? '')
+        && unaskedBody?.merged === undefined,
+        'a marks sync against a node that could not be reached says so rather than saying the node does not hold the take',
+        `HTTP ${unasked.status}: ${JSON.stringify(unaskedBody).slice(0, 120)}`);
+      for (const p of servers.filter((sv) => sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
+    } finally {
+      stub.close();
+    }
+  }
+
   console.log('\n[library] a node with no captures directory makes one and says so');
   {
     const fresh = join(WORK, 'never-existed', 'captures');

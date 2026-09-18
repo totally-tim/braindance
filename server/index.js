@@ -898,19 +898,16 @@ async function serveMarkSync(req, res, [id]) {
     // nothing whenever the two named the same footage differently, which is the ordinary case.
     const here = (await localTakes()).takes.find((t) => t.id === id);
     const theirTakes = await node.takes(left);
-    const match = here && (theirTakes ?? []).find((t) => t.hash === here.hash);
+    // A node that could not be asked throws here and the catch names why: it is not a node that
+    // does not hold this take.
+    const match = here ? copyOnNode(node, theirTakes, here.hash) : null;
     if (!match) {
       sendJson(res, { merged: 0, marks: await readMarks(path), note: `${node.name} does not hold this take` });
       return;
     }
     const theirs = await node.fetchJson(`/capture/${encodeURIComponent(match.id)}/marks/log`, { signal: left });
-    const mine = await readMarkLog(path);
-    // Appended rather than rewritten, which is what makes this safe to run twice and
-    // from both machines.
-    const known = new Set(mine.map((r) => `${r.id}@${r.at}`));
-    const fresh = (theirs.log ?? []).filter((r) => !known.has(`${r.id}@${r.at}`));
-    await appendMarks(path, fresh);
-    sendJson(res, { merged: fresh.length, marks: await readMarks(path) });
+    const merged = await mergeMarkLog(path, theirs.log ?? []);
+    sendJson(res, { merged, marks: await readMarks(path) });
   } catch (err) {
     sendJson(res, { error: err.message }, 502);
   }
