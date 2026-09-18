@@ -32,6 +32,7 @@ npm test                      # syntax check, unit tests, supply-chain gate; no 
 node tools/module-check.mjs   # the import graph in web/; CI runs this too
 node tools/cpp-check.mjs      # both C++ files; needs a C++ compiler and turbojpeg's headers
 node tools/<tool>-check.mjs   # one proof tool; most need a running server, a GPU browser or a sensor
+node tools/suite.mjs          # every proof tool that needs no sensor or native build, with its server and fixtures
 ```
 
 CI runs `syntax-check`, `module-check`, `npm run test:unit`, `cpp-check` and

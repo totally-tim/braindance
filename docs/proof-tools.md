@@ -75,6 +75,62 @@ Four tables are too large to reproduce here — `editor-check` declares 202, `li
 `registry-check` 54 and `effect-check` 42. Their sections give the count and the enumerate
 command prints the names.
 
+## `suite`
+
+Every tool that needs no sensor and no native build, once each, with one verdict line per tool.
+
+```
+node tools/suite.mjs
+node tools/suite.mjs --port 8431 --logs /tmp/suite-logs
+```
+
+| needs | |
+| --- | --- |
+| ports | every port the tools below bind, and 8431 (`--port`) for the server it starts |
+| fixtures | none: it builds the ones that are missing |
+| browser | a GPU browser |
+| binaries | a C++ compiler and turbojpeg's headers, ffmpeg and ffprobe, and the npm registry |
+
+It builds the missing fixtures first, each with the tool that makes it: `captures/sample.knct`,
+`fixture-1g` (8 loops), `fixture-large` (18 loops, past 2 GiB, for `index-check`) and
+`fixture-2x` (2 loops), which makes the four openable takes `editor-check` needs. Then three
+stages:
+
+1. `syntax-check`, `module-check`, `cpp-check`, the unit tests, `release-gate-check` and
+   `vendor-check`, side by side.
+2. The nine tools that start their own servers on ports no other tool binds — `guard`, `boot`,
+   `monitor`, `level`, `vcam`, `cli`, `jobs`, `effect` and `library` — all at once.
+3. A server of its own on `--port`, with the fake grabber and its stores in a temporary
+   directory, and against it, one after another, `registry`, `timeline`, `keyframe`, `export`,
+   `editor`, `preview`, `effect-conformance`, `determinism`, `sensor-view` and `index`. The tools
+   that need a long take get `fixture-1g`. The server is stopped at the end.
+
+Each line carries the verdict, failed/total assertions and seconds, and for a run that did not
+finish, the reason. A tool whose port already answers is not started, and its line names the port.
+Each tool's whole output is kept in the log directory, `--logs` or a new one under the system
+temporary directory, which the first and the last line name.
+
+The verdict is read one way for every tool. FAIL is a finished run with at least one failed
+assertion, PASS a finished run with none, and DID NOT RUN everything else: exit 2, a signal, no
+assertion count, or exit 1 with nothing failed, which is a crash. A run finished when it exited 0
+or 1 and printed its count. The count is the tool's own count line where it prints one, and its
+`PASS` and `FAIL` rows where it prints a verdict alone (`registry-check`, `keyframe-check`,
+`index-check`, `release-gate-check`). `determinism-check` prints no count, so its total reads `?`.
+The suite exits 0 when every tool passed, 1 when any failed, and 2 when none failed and any did not
+run. The known reds each tool's section names come through as they are, and on a machine with no
+sensor and no `vendor/prefix`, `sensor-view-check` and `vendor-check` exit 2.
+
+Stage 2 lasts as long as `library-check`, and `editor-check` and `preview-check` are most of stage
+3.
+
+It leaves out `hd-encoder-check`, `decoder-check` and `registration-check`, which need a native
+build, a built library or a corpus, and `sweep-all`, which runs mutations. A `*-check.mjs` it
+neither runs nor leaves out by name comes back DID NOT RUN, so a new tool is placed in a stage or
+named as left out.
+
+Stage 2 puts nine tools and their browsers on the machine at once. Two suites, or a suite beside
+one of its own tools, collide on the fixed ports, so run one at a time.
+
 ## `determinism-check`
 
 The same program time produces the same image.
