@@ -600,6 +600,10 @@ const MUTATIONS = {
   'faint-fixed-in-one-page': { file: 'web/library.html', edits: [[
     '    --faint: #828c99;', '    --faint: #6d7683;',
   ]] },
+  // A second declaration of the token in the same block, which is the one the browser renders.
+  'faint-declared-twice': { file: 'web/library.html', edits: [[
+    '    --faint: #828c99;', '    --faint: #828c99;\n    --faint: #6d7683;',
+  ]] },
 
   'namespaces-hardcoded': { file: 'server/index.js', edits: [[
     'export const OWNED_NAMESPACES = new Set(ROUTES.map((r) => {',
@@ -6612,7 +6616,10 @@ async function runChecks() {
     };
     // The floor WCAG AA sets for body text, and these are 9px readouts.
     const AA = 4.5;
-    const tokenIn = (css, name) => (css.match(new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{6})`)) ?? [])[1] ?? null;
+    // Every declaration of a token, comments aside. The browser takes the last one in a block, so
+    // a reading of the first measures a value the page may not render.
+    const declarationsOf = (css, name) => [...css.replace(/\/\*[\s\S]*?\*\//g, '')
+      .matchAll(new RegExp(`(?<![\\w-])--${name}\\s*:\\s*([^;}]*)`, 'g'))].map((m) => m[1].trim());
 
     // The build under test, which on a mutated run is not the repo's own tree.
     const sourceOf = (rel) => readFileSync(join(root, rel), 'utf8');
@@ -6620,16 +6627,21 @@ async function runChecks() {
     const pages = readdirSync(join(REPO, 'web')).filter((f) => f.endsWith('.html')).sort();
     const declaring = pages
       .map((file) => ({ file, css: sourceOf(`web/${file}`) }))
-      .filter((p) => tokenIn(p.css, 'faint') !== null);
+      .map((p) => ({ ...p, faints: declarationsOf(p.css, 'faint') }))
+      .filter((p) => p.faints.length > 0);
     check(declaring.length >= 3,
       `every page declaring --faint is measured rather than three being named (${pages.length} pages in web/, ${declaring.length} declaring it)`,
       declaring.map((p) => p.file).join(' '));
 
-    for (const { file, css } of declaring) {
-      const faint = tokenIn(css, 'faint');
+    for (const { file, css, faints } of declaring) {
+      check(faints.length === 1 && /^#[0-9a-fA-F]{6}$/.test(faints[0]),
+        `${file}: declares --faint exactly once, as a colour this can measure`,
+        faints.join(', '));
+      // The one that renders, which is the last whatever the row above found.
+      const faint = faints.at(-1);
       const surfaces = [...css.matchAll(/--(paper(?:-\d)?):\s*(#[0-9a-fA-F]{6})/g)]
         .map((m) => ({ name: m[1], hex: m[2] }));
-      const measured = surfaces.map((s) => ({ ...s, ratio: ratio(faint, s.hex) }));
+      const measured = /^#[0-9a-fA-F]{6}$/.test(faint) ? surfaces.map((s) => ({ ...s, ratio: ratio(faint, s.hex) })) : [];
       const worst = measured.reduce((a, b) => (a.ratio <= b.ratio ? a : b), measured[0]);
       check(measured.length >= 2 && worst.ratio >= AA,
         `${file}: --faint clears ${AA}:1 against every surface the page declares`,
@@ -6637,14 +6649,15 @@ async function runChecks() {
     }
 
     // And the restating itself, which is the finding the contrast is a symptom of.
-    const values = new Set(declaring.map((p) => tokenIn(p.css, 'faint')));
+    const values = new Set(declaring.map((p) => p.faints.at(-1)));
     check(values.size === 1,
       'and every page declares the same value, because nav.css reads the token without declaring one and cannot be right on two pages that disagree',
-      declaring.map((p) => `${p.file} ${tokenIn(p.css, 'faint')}`).join(', '));
+      declaring.map((p) => `${p.file} ${p.faints.at(-1)}`).join(', '));
     const navCss = sourceOf('web/nav.css');
-    check(/var\(--faint\)/.test(navCss) && tokenIn(navCss, 'faint') === null,
+    const navFaints = declarationsOf(navCss, 'faint');
+    check(/var\(--faint\)/.test(navCss) && navFaints.length === 0,
       'which is not a hypothetical: the shared stylesheet uses the token and declares none',
-      `nav.css reads it, declares ${tokenIn(navCss, 'faint') ?? 'nothing'}`);
+      `nav.css reads it, declares ${navFaints.join(', ') || 'nothing'}`);
   }
 
   // Every server this run started, and a row saying so.
