@@ -752,7 +752,9 @@ const MUTATIONS = {
     '    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? [], { identity: kept });',
     '    const marksMerged = 0;',
   ]],
-    fails: 'the row saying a reclaim brings the node\'s marks onto the kept copy, and no other',
+    // Two rows, because the merge is also where the kept copy's identity is asked: a merge that
+    // never runs never refuses a copy renamed under it.
+    fails: 'the row saying a reclaim brings the node\'s marks onto the kept copy, and the reclaim-race refusal',
   },
   // A reclaim treats a node marks log it could not read as an empty one and goes on to delete.
   'reclaim-ignores-an-unread-log': { file: 'server/index.js', edits: [[
