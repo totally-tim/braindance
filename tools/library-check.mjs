@@ -364,6 +364,11 @@ const MUTATIONS = {
     'grabberRestarts++; ', '',
   ]] },
 
+  // A launch that never made a process counts as a grabber the sensor went through.
+  'respawns-count-a-failed-launch': { file: 'server/index.js', edits: [
+    ["    proc.on('spawn', () => { grabberSpawns++; });\n", ''],
+    ['    const grabberArgs = buildArgs();', '    grabberSpawns++;\n    const grabberArgs = buildArgs();'],
+  ] },
   // The requested restart is counted where it is learned rather than beside the spawn it
   // excuses, which is where it used to be.
   'respawns-dip-before-the-spawn': { file: 'server/index.js', edits: [[
@@ -5882,9 +5887,13 @@ async function runChecks() {
     check(health.dropped === undefined,
       'and nothing on it is called `dropped` unqualified, since the only count here is monitors failing to keep up with the output rather than the sensor failing to deliver',
       `dropped=${JSON.stringify(health.dropped)}, monitorDropped=${health.monitorDropped}`);
-    check(['lost', 'absent', 'starting'].includes(health.state) && health.respawns >= 1,
-      'a server with no sensor says so and counts the grabbers it has been through, which is the flapping question the backoff\'s own counter cannot answer',
-      `state ${health.state}, ${health.respawns} respawns`);
+    // The staged tree has no `native/`, so every launch on this server fails before a process exists.
+    const macLog = servers.find((sv) => sv.port === MAC_PORT).log.join('');
+    const refusedLaunches = macLog.split('\n').filter((l) => l.includes('[server] grabber could not start')).length;
+    const grabberExits = macLog.split('\n').filter((l) => l.includes('[server] grabber exited')).length;
+    check(['lost', 'absent'].includes(health.state) && refusedLaunches >= 2 && grabberExits === 0 && health.respawns === 0,
+      'a server whose grabber cannot even be launched says the sensor is lost and counts no respawns, because a launch that made no process is not a sensor that dropped',
+      `state ${health.state}, ${health.respawns} respawns, over ${refusedLaunches} launches refused and ${grabberExits} grabbers exited`);
 
     // The window that closed last, on a server where no window has ever carried a frame.
     let closed = null;

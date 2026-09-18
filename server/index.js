@@ -2085,9 +2085,6 @@ function startLive() {
 
   const spawnGrabber = () => {
     if (standby || shuttingDown || child || spawnTimer) return;
-    // Counted here rather than in the backoff, because every road to a running grabber ends at
-    // this function, so a path added later is counted by going through it.
-    grabberSpawns++;
     const grabberArgs = buildArgs();
     console.log(`[server] starting grabber: ${bin} ${grabberArgs.join(' ')}`);
     setSensorState('starting');
@@ -2095,6 +2092,10 @@ function startLive() {
     const parser = new MessageParser();
     // stdin is a pipe, so settings that need no restart reach the running grabber.
     const proc = spawn(bin, grabberArgs, { stdio: ['pipe', 'pipe', 'inherit'] });
+    // Counted when a process exists: a binary that is missing or built for another machine never
+    // emits `spawn`, and counting the attempt reads each backoff retry as the sensor flapping.
+    // Here rather than in the backoff, so a path to a running grabber added later is counted too.
+    proc.on('spawn', () => { grabberSpawns++; });
     child = proc;
     child.stdin.on('error', () => { /* the grabber can exit mid-write */ });
     // A grabber that cannot be spawned at all arrives as an `error` rather than an exit, and an

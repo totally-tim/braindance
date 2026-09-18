@@ -810,7 +810,7 @@ route with a write method goes through the three checks under
 | `/effects/:id/file/:name` | GET | One chunk's own bytes, as `text/plain`. |
 | `/effect-refusals` | POST | Sets aside packages a page could not compile. |
 | `/camera.mjpg` | GET | The colour camera as MJPEG. The one embeddable route. |
-| `/sensor/health` | GET | Sensor state, rates, respawns, requested restarts, `wakes` and consumer counts. Standby rates are zero. |
+| `/sensor/health` | GET | Sensor state, rates, respawns, requested restarts, `wakes` and consumer counts. Standby rates are zero. A launch that starts no process is not a respawn. |
 | `/sensor/standby` | POST | Enter standby after the grabber exits; 409 while armed or recording, or in replay. |
 | `/sensor/wake` | POST | Wake from standby; 409 in replay. |
 | `/sensor/camera` | GET, POST | Camera booleans, availability and reason; writes return whether a restart was requested. |
