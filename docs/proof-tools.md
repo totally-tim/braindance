@@ -1162,7 +1162,10 @@ discontinuities:
 
 `tools/fake-grabber.mjs` stands in for the sensor when a tool needs a live stream. It honours
 `--no-color` and `--no-low-light`, rewriting each payload at load so the declared lengths still
-describe it. `--pipeline`, `--log`, `--quality`, `--min-depth` and `--max-depth` are accepted and
+describe it. `--hd` sends one 1920x1080 colour frame over and over; with `--hd-counter` frame n
+carries n mod 256 as eight black and white squares below the scene, most significant bit on the
+left, over a row holding the complement, so a reader can name the frame it holds.
+`test/fake-grabber-counter.test.mjs` decodes them at 480x270. `--pipeline`, `--log`, `--quality`, `--min-depth` and `--max-depth` are accepted and
 ignored, and anything else gets one line on stderr and is not refused.
 
 ## The supply-chain gate
