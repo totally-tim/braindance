@@ -13,16 +13,19 @@ count only, `cli-check` prints `N passed, M failed`, and `syntax-check` counts f
 assertions. A run with zero failed assertions and a non-zero exit is a crash to investigate, not a
 catch to record.
 
-`tools/mutation-verdict.mjs` is the one reading of a tool's run: `sweep-all` grades every mutation
-with it, CI runs its mutations through `sweep-all`, and `suite` reads every tool with it. A run is
-**CAUGHT** when the tool printed its count line, exited 0 or 1, and at least one assertion failed;
-**NOT CAUGHT** when it finished with none failed, or printed `NOT CAUGHT` because a required row
-stayed green; and **DID NOT RUN** otherwise: no count line, exit 2, or killed. A `FAIL` row printed
-on the way to a crash is not a catch, so a tool that crashes after its rows fired exits 2 or dies
-without its count line, never with the crash counted as an assertion. For the tools with no count
-line it reads what they print once they finish instead: `cli-check`'s tally, the unit tests'
-`tests` and `fail` summary, and a verdict line alone, whose total is the tool's `PASS` and `FAIL`
-rows. A row never decides a verdict.
+`tools/mutation-verdict.mjs` holds the two readings of a tool's run, over one count. `verdictOf`
+reads a mutation run: `sweep-all` grades every mutation with it, and CI runs its mutations through
+`sweep-all`. `runVerdictOf` reads a run with nothing mutated, and `suite` reads every tool with it:
+**FAIL** and **PASS** are a finished run with and without a failed assertion, none failed on exit 1
+is **READ THE LOG**, a crash or a printed miss rather than a pass, and **DID NOT RUN** is as below.
+A mutation run is **CAUGHT** when the tool printed its count line, exited 0 or 1, and at least one
+assertion failed; **NOT CAUGHT** when it finished with none failed, or printed `NOT CAUGHT` because
+a required row stayed green; and **DID NOT RUN** otherwise: no count line, exit 2, or killed. A
+`FAIL` row printed on the way to a crash is not a catch, so a tool that crashes after its rows
+fired exits 2 or dies without its count line, never with the crash counted as an assertion. For
+the tools with no count line both readings read what they print once they finish instead:
+`cli-check`'s tally, the unit tests' `tests` and `fail` summary, and a verdict line alone, whose
+total is the tool's `PASS` and `FAIL` rows. A row never decides a verdict.
 
 The tools disagree about what a caught mutation exits. Four exit **0** on a catch and 1 on a miss
 — `registry-check`, `vendor-check`, `registration-check` and `release-gate-check` — so anything
@@ -143,14 +146,14 @@ finish, the reason. A tool whose port already answers is not started, and its li
 Each tool's whole output is kept in the log directory, `--logs` or a new one under the system
 temporary directory, which the first and the last line name.
 
-Every run is read by `verdictOf` in `tools/mutation-verdict.mjs`, the reading `sweep-all` grades
-mutations by: CAUGHT prints as FAIL, NOT CAUGHT as PASS, and DID NOT RUN as it is.
-`determinism-check` prints no rows, so its total reads `?`. `vendor-check`'s exit 2 with
-`PASS on the source, with the artifact untested here` is its full answer on a machine with no
-`vendor/prefix`, as CI takes it, so it reads as a finished run and its line says so. Every other
-exit 2 is DID NOT RUN, `sensor-view-check`'s without a sensor among them. The suite exits 0 when
-every tool passed, 1 when any failed, and 2 when none failed and any did not run. The known reds
-each tool's section names come through as they are.
+Every run is read by `runVerdictOf` in `tools/mutation-verdict.mjs`: PASS, FAIL, READ THE LOG for
+none failed on exit 1, or DID NOT RUN. `determinism-check` prints no rows, so its total reads `?`.
+`vendor-check`'s exit 2 with `PASS on the source, with the artifact untested here` is its full
+answer on a machine with no `vendor/prefix`, as CI takes it, so it reads as a finished run and its
+line says so. Every other exit 2 is DID NOT RUN, `sensor-view-check`'s without a sensor among
+them. The suite exits 0 when every tool passed, 1 when any failed or read READ THE LOG, and 2 when
+the rest passed and any did not run. The known reds each tool's section names come through as
+they are.
 
 Stage 2 lasts as long as `library-check`, and `editor-check` and `preview-check` are most of stage
 3.

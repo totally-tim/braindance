@@ -1,6 +1,7 @@
-// The one reading of a tool's run, which sweep-all grades every mutation by and suite every tool by.
-// A run is CAUGHT when the tool finished with at least one failed assertion, NOT CAUGHT when it
-// finished with none, and DID NOT RUN otherwise. Finished means the tool printed its assertion
+// The two readings of a tool's run, over one count. `verdictOf` reads a mutation run, which sweep-all
+// grades every mutation by: CAUGHT when the tool finished with at least one failed assertion, NOT
+// CAUGHT when it finished with none, and DID NOT RUN otherwise. `runVerdictOf` reads a run with
+// nothing mutated, which suite grades every tool by. Finished means the tool printed its assertion
 // count and exited 0 or 1: a `FAIL` row printed on the way to a crash is not a verdict, and exit 2
 // is a tool declining.
 import { spawn } from 'node:child_process';
@@ -13,6 +14,9 @@ export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const CAUGHT = 'CAUGHT';
 export const NOT_CAUGHT = 'NOT CAUGHT';
 export const DID_NOT_RUN = 'DID NOT RUN';
+export const PASS = 'PASS';
+export const FAIL = 'FAIL';
+export const READ_THE_LOG = 'READ THE LOG';
 
 // The count line a tool prints once it reaches its verdict: `[tool] N assertions, M failed`, with
 // an optional label and trailing clause. syntax-check counts files where the others count
@@ -67,6 +71,21 @@ export function verdictOf({ code, signal, out }) {
   if (failed === 0) return read(NOT_CAUGHT, 'every assertion stayed green');
   if (MISS.test(out)) return read(NOT_CAUGHT, 'the tool says its required row stayed green');
   return read(CAUGHT, `${failed} failed`);
+}
+
+/**
+ * What one run of a tool with nothing mutated says. FAIL and PASS are a finished run with and
+ * without a failed assertion. Where a mutation run takes a finished run with none failed as a miss
+ * whatever it exited, here none failed on exit 1 is its own verdict: a crash or a printed miss, to
+ * read in the log rather than to count as a pass.
+ */
+export function runVerdictOf(run) {
+  const read = verdictOf(run);
+  if (read.verdict === DID_NOT_RUN) return read;
+  const verdict = (name, why) => ({ ...read, verdict: name, why });
+  if (read.failed > 0) return verdict(FAIL, `${read.failed} failed`);
+  if (run.code !== 0) return verdict(READ_THE_LOG, `0 failed, exit ${run.code}: read the log`);
+  return verdict(PASS, 'every assertion stayed green');
 }
 
 /** The mutation names a tool declares, read off its refusal of `--mutate __enumerate__`. */

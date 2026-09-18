@@ -1,4 +1,5 @@
-// The controls for the one mutation verdict, the one sweep-all reads. Each stub is a real process,
+// The controls for the two readings of a run, the one sweep-all grades mutations by and the one suite
+// grades plain runs by. Each stub is a real process,
 // run through the same `runTool` the sweep uses, so the verdict is asked of an exit and an output
 // that came from Node rather than of a string written to look like one.
 
@@ -8,7 +9,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  CAUGHT, DID_NOT_RUN, NOT_CAUGHT, namesIn, runTool, verdictOf,
+  CAUGHT, DID_NOT_RUN, FAIL, NOT_CAUGHT, PASS, READ_THE_LOG, namesIn, runTool, runVerdictOf, verdictOf,
 } from '../tools/mutation-verdict.mjs';
 
 const dir = mkdtempSync(join(tmpdir(), 'braindance-verdict-'));
@@ -165,6 +166,20 @@ test('and a row is never a verdict: rows with no verdict line did not run, howev
   const declined = read(2, ['  FAIL  no hello', '[sensor-view] 86 assertions, 1 failed', '[sensor-view] DID NOT RUN - no sensor']);
   assert.equal(declined.verdict, DID_NOT_RUN, 'exit 2 declines whatever it counted');
   assert.equal(counted(declined), '1/86');
+});
+
+test('none failed on exit 1 is a miss in a mutation run and a log to read in a plain one', () => {
+  const run = { code: 1, signal: null, out: '  PASS  a row\n[stub] 1 assertions, 0 failed\n' };
+  assert.equal(verdictOf(run).verdict, NOT_CAUGHT);
+  const plain = runVerdictOf(run);
+  assert.equal(plain.verdict, READ_THE_LOG);
+  assert.equal(plain.why, '0 failed, exit 1: read the log');
+  // The other plain verdicts, on the same count shapes.
+  assert.equal(runVerdictOf({ ...run, code: 0 }).verdict, PASS);
+  assert.equal(runVerdictOf({ code: 0, signal: null, out: '[stub] 3 assertions, 2 failed\n' }).verdict, FAIL);
+  // A plain run that printed NOT CAUGHT with a row red is still a FAIL: no mutation is being missed.
+  assert.equal(runVerdictOf({ code: 1, signal: null, out: '[stub] 3 assertions, 1 failed\n[stub] NOT CAUGHT\n' }).verdict, FAIL);
+  assert.equal(runVerdictOf({ code: 2, signal: null, out: '[stub] 3 assertions, 0 failed\n' }).verdict, DID_NOT_RUN);
 });
 
 test('every refusal shape lists the names a tool declares', () => {

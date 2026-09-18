@@ -6,7 +6,8 @@
 //
 //   node tools/suite.mjs [--port 8431] [--logs <dir>] [--help]
 //
-// Exit 0 when every tool passed, 1 when any failed, 2 when none failed and any did not run.
+// Exit 0 when every tool passed, 1 when any failed or exited 1 with none failed, 2 when the rest
+// passed and any did not run.
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { Socket } from 'node:net';
@@ -14,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
-import { CAUGHT, DID_NOT_RUN, NOT_CAUGHT, verdictOf } from './mutation-verdict.mjs';
+import { DID_NOT_RUN, FAIL, PASS, READ_THE_LOG, runVerdictOf } from './mutation-verdict.mjs';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -87,20 +88,18 @@ function saidOf(out) {
     ?? lines.filter((l) => !/^Node\.js v/.test(l)).at(-1) ?? 'no output';
 }
 
-const SAID = { [CAUGHT]: 'FAIL', [NOT_CAUGHT]: 'PASS', [DID_NOT_RUN]: 'DID NOT RUN' };
-
 /**
- * The run as `verdictOf` reads it: FAIL where it caught something, PASS where nothing failed. A tool
- * whose exit 2 is its full answer here has that answer read as a finished run.
+ * The run as `runVerdictOf` reads it. A tool whose exit 2 is its full answer here has that answer
+ * read as a finished run.
  */
 function judge(entry, run) {
   const answered = run.code === 2 && entry.answersWithExit2 && run.out.includes(entry.answersWithExit2);
-  const read = verdictOf(answered ? { ...run, code: 0 } : run);
+  const read = runVerdictOf(answered ? { ...run, code: 0 } : run);
   const why = answered ? `exit 2: ${entry.answersWithExit2}`
     : run.timedOut ? `killed after ${TOOL_TIMEOUT_MS / 60_000} minutes`
       : read.verdict === DID_NOT_RUN ? `${read.why}: ${saidOf(run.out)}`
-        : run.code !== 0 ? `exit ${run.code}` : '';
-  return { verdict: SAID[read.verdict], failed: read.failed, total: read.total, why };
+        : read.verdict === READ_THE_LOG ? read.why : '';
+  return { verdict: read.verdict, failed: read.failed, total: read.total, why };
 }
 
 /** Whether something accepts a connection on this loopback port. */
@@ -161,7 +160,7 @@ async function runStage(title, entries, { together }) {
   const one = async (entry) => {
     const port = await heldPort(entry);
     if (port !== null) {
-      report({ name: entry.name, verdict: 'DID NOT RUN', failed: null, total: null, seconds: 0,
+      report({ name: entry.name, verdict: DID_NOT_RUN, failed: null, total: null, seconds: 0,
         why: `port ${port} already has a listener` });
       return;
     }
@@ -258,7 +257,7 @@ console.log(`\n[suite] a server on ${PORT} for the tools that share one`);
 const serverFailure = await startServer().then(() => null, (err) => err);
 if (serverFailure) {
   for (const entry of ON_ONE_SERVER) {
-    report({ name: entry.name, verdict: 'DID NOT RUN', failed: null, total: null, seconds: 0,
+    report({ name: entry.name, verdict: DID_NOT_RUN, failed: null, total: null, seconds: 0,
       why: serverFailure.message.split('\n')[0] });
   }
 } else {
@@ -269,11 +268,11 @@ await stopServer();
 
 if (unknown.length || Object.keys(LEFT_OUT).length) console.log('\n[suite] not in the suite');
 for (const name of unknown) {
-  report({ name, verdict: 'DID NOT RUN', failed: null, total: null, seconds: 0, why: 'tools/suite.mjs does not name it' });
+  report({ name, verdict: DID_NOT_RUN, failed: null, total: null, seconds: 0, why: 'tools/suite.mjs does not name it' });
 }
 for (const [name, why] of Object.entries(LEFT_OUT)) console.log(`  ${'left out'.padEnd(11)}  ${name.padEnd(25)} ${why}`);
 
 const tally = (v) => results.filter((r) => r.verdict === v).length;
-console.log(`\n[suite] ${results.length} tools: ${tally('PASS')} PASS, ${tally('FAIL')} FAIL, ${tally('DID NOT RUN')} DID NOT RUN, `
-  + `in ${((Date.now() - t0) / 1000).toFixed(0)}s; logs in ${LOGS}`);
-process.exit(tally('FAIL') ? 1 : tally('DID NOT RUN') ? 2 : 0);
+const tallies = [PASS, FAIL, READ_THE_LOG, DID_NOT_RUN].map((v) => `${tally(v)} ${v}`).join(', ');
+console.log(`\n[suite] ${results.length} tools: ${tallies}, in ${((Date.now() - t0) / 1000).toFixed(0)}s; logs in ${LOGS}`);
+process.exit(tally(FAIL) || tally(READ_THE_LOG) ? 1 : tally(DID_NOT_RUN) ? 2 : 0);

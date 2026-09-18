@@ -162,7 +162,7 @@ node tools/fake-grabber.mjs        # a grabber that needs no sensor, for driving
 node tools/make-sample.mjs         # a synthetic capture, so a clone with no Kinect has one to loop
 node tools/make-fixture.js         # loops one short capture into an arbitrarily long one
 node tools/sweep-all.mjs           # every mutation of --tools a,b; with none, the five browser tools, which need a server and hours
-tools/mutation-verdict.mjs         # the one reading of a run, for sweep-all and suite: CAUGHT, NOT CAUGHT or DID NOT RUN
+tools/mutation-verdict.mjs         # the two readings of a run: a mutation run for sweep-all, a plain run for suite
 node tools/suite.mjs               # the proof tools in three stages, one verdict line per tool
 node tools/settle-probe.mjs        # does settle()'s drain scale with the take or the ceiling
 node tools/prof-summary.mjs        # reads grabber --profile output, flags contended runs
