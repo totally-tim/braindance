@@ -34,7 +34,7 @@ Per tool, read from the source:
 | `library-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `PASS WITH CLAIMS UNPROVEN`, or a held port |
 | `boot-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8391 held, a crash |
 | `monitor-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8341 held, a crash |
-| `sensor-view-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no sensor hello, a stale anchor, no browser |
+| `sensor-view-check` | pass | a failed assertion, a catch, or a miss | `UNTESTED`: no sensor hello; `DID NOT RUN`: a stale anchor, no browser |
 | `level-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8377 held, no GPU browser |
 | `vcam-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`, or section 6 unproven without an IPv4 |
 | `guard-check` | pass | a failed assertion, a catch, or a miss | `PASS, with claims untested here`: no non-internal IPv4 |
@@ -608,12 +608,12 @@ node tools/sensor-view-check.mjs --url http://localhost:8080
 | --- | --- |
 | server | `--url`, default `http://localhost:8080`, plus port 8131 for the section with its own capture |
 | fixture | a capture in `captures/` for the private server on 8131; it throws naming the path without one |
-| sensor | the record arm needs one; without it the tool exits 2 |
+| sensor | the record arm needs a sensor hello, which `tools/fake-grabber.mjs` also sends |
 | browser | a GPU browser |
 
-Without a sensor the record arm gets no hello and the tool exits 2, which is the sensorless
-baseline. Arm C is anamorphic, so `fx` and `fy` differ and a substitution
-between them is visible.
+With no grabber the record arm gets no hello, its seven rows go unasked, and the tool exits 2
+`UNTESTED`, which is the sensorless baseline. Arm C is anamorphic, so `fx` and `fy` differ and a
+substitution between them is visible.
 
 - **`fov-hardcoded`** — the vertical angle becomes a constant, which is right for this rig, so
   only the synthetic arms see it.
