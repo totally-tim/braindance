@@ -1206,9 +1206,11 @@ node tools/cli-check.mjs --no-browser
 the fake grabber's HD stream, ffmpeg and a GPU browser. `--no-browser` omits the UI rows.
 The rows walk verbs against routes in both directions, check clean child exit and wake counters,
 exercise auto-standby and MJPEG demand, hold a consumer that can never be served out of both the
-wake and the idle count, keep `--wait` polling through a retry, stop a take that cannot be finalised
-from abandoning the owned grabber, drive recorder and camera controls,
-restore output to new sockets, refuse incompatible presets, and drive the record and program pages.
+wake and the idle count, and retract that refusal when a camera change makes the source servable,
+keep `--wait` polling through a retry, stop a take that cannot be finalised from abandoning the owned
+grabber, drive recorder and camera controls,
+restore output to new sockets, refuse incompatible and unknown presets by name, and drive the record
+and program pages.
 Replay and absent-sensor cases use separate server instances. The final line reports passed and
 failed assertions; a crash is exit 2, never a caught mutation.
 
@@ -1223,6 +1225,10 @@ Mutation controls (`node tools/cli-check.mjs --mutate NAME`):
 - `camera-route-bypasses-applyCamera`: an HTTP write misses the broadcast and restart.
 - `wake-for-an-unserveable-source`: a request answered with a permanent 503 starts the grabber.
 - `idle-counts-an-unservable-key`: a key page that can never be fed keeps the sensor running.
+- `preset-refusal-names-a-path`: a preset name with no file is refused with the filesystem's
+  sentence and the server's absolute path.
+- `colour-return-leaves-the-old-refusal`: switching colour back on keeps the refusal colour put
+  there, so the request that could now be served is refused without waking.
 - `wait-gives-up-on-a-single-lost`: `sensor wake --wait` quits on one `lost` sample.
 - `shutdown-abandons-a-stubborn-grabber`: a take that cannot be finalised ends the process before
   the grace period ends, leaving a grabber that ignored SIGTERM holding the sensor.

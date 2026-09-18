@@ -2160,6 +2160,12 @@ function startLive() {
         stopGrabber();
         return true;
       }
+      // Colour coming back with nothing running has no grabber to tell, and the refusal the colour
+      // left behind reads as permanent, so a request that this change just made servable would be
+      // refused on a reason that no longer holds - and refused without waking, which strands it for
+      // good. The refusal describes the camera and the sensor state together, so it is re-derived
+      // from both rather than edited here.
+      if (camera.color) setSensorState(sensorState);
       return false;
     }
     // Colour off means there is no exposure to set, but the flag is remembered for when it returns.
@@ -2232,8 +2238,12 @@ function startLive() {
       stopGrabber({ holdProcessOpen: true, grace: STANDBY_GRACE_MS }),
       recorder.close('server stopped'),
     ]);
-    const failed = [take, grabber].filter((r) => r.status === 'rejected');
-    for (const f of failed) console.error(`[server] ${f.reason?.message ?? f.reason}`);
+    // Named rather than dumped: an operator reading this over ssh needs to know which half of the
+    // way out failed, and the two halves fail with messages that look alike in a log.
+    const failed = [['the take', take], ['the grabber', grabber]].filter(([, r]) => r.status === 'rejected');
+    for (const [what, r] of failed) {
+      console.error(`[server] shutdown: ${what} did not finish: ${r.reason?.message ?? r.reason}`);
+    }
     process.exit(failed.length ? 1 : 0);
   };
   process.on('SIGINT', shutdown);

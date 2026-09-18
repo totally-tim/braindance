@@ -71,7 +71,12 @@ export class Output {
       if (typeof patch.preset !== 'string' || !patch.preset.trim()) refuse('preset must be a name');
       let doc;
       try { doc = await this.presets.read(patch.preset); }
-      catch (err) { refuse(err.message, err.code === 'ENOENT' ? 404 : 400); }
+      catch (err) {
+        // The store's word for a name with no file rather than the filesystem's: this sentence lands
+        // in the operator's readout, and a preset name is the only thing an operator can act on.
+        if (err?.code === 'ENOENT') refuse(`no preset named ${patch.preset}`, 404);
+        refuse(err.message, 400);
+      }
       if (doc.body?.version !== this.version) {
         refuse(`preset ${patch.preset} is version ${doc.body?.version}; this build reads version ${this.version}`, 409);
       }

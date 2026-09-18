@@ -107,9 +107,10 @@ Output state lasts for the server process. A source receives mode and size, then
 then parameter edits, then the last operator pose whenever the mode is mirror. Mirror with no pose
 ever relayed uses the source's default pose. Parameter names and values are validated by the
 browser registry; an invalid parameter patch is refused as a whole by that browser. The server
-stores those values without registry validation. A `view` is the one field the server shapes,
-because it hands that pose to every source connecting afterwards: three position numbers, four
-quaternion terms and a finite field of view, and the whole patch goes with it.
+stores those values without registry validation, and a stored value lasts until something
+overwrites it. Of the fields it writes, `view` is the one whose numbers the server checks, because
+it hands that pose to every source connecting afterwards: three position numbers, four quaternion
+terms and a finite field of view, and a patch whose pose is not that shape is refused as a whole.
 
 ## Viewer and timeline controls
 

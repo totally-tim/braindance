@@ -43,6 +43,12 @@ const MUTATIONS = {
   'wake-for-an-unserveable-source': { file: 'server/index.js', edits: [[
     '    if (webcam.unavailable === null || webcam.transient) wakeSensor?.();', '    wakeSensor?.();',
   ]] },
+  // The refusal colour leaves behind is kept after colour returns, so the request that the colour
+  // change just made servable is refused on a reason that no longer holds, and refused without
+  // waking - which strands the consumer that retries.
+  'colour-return-leaves-the-old-refusal': { file: 'server/index.js', edits: [[
+    '      if (camera.color) setSensorState(sensorState);', '      // the refusal the colour left behind',
+  ]] },
   'idle-counts-an-unservable-key': { file: 'server/index.js', edits: [[
     'keyStream.demandCount === 0', 'keyStream.count === 0',
   ]] },
@@ -52,6 +58,12 @@ const MUTATIONS = {
   'output-forgets-on-connect': { file: 'server/index.js', edits: [['  sendOutput(ws);', '  // output omitted']] },
   'preset-skips-requires': { file: 'server/output.js', edits: [[
     '      for (const requirement of doc.body.requires) {', '      for (const requirement of []) {',
+  ]] },
+  // The filesystem's sentence, absolute path and all, in place of the store's word for a name with
+  // no file. That text is what the record page shows an operator.
+  'preset-refusal-names-a-path': { file: 'server/output.js', edits: [[
+    "        if (err?.code === 'ENOENT') refuse(`no preset named ${patch.preset}`, 404);",
+    "        if (err?.code === 'ENOENT') refuse(err.message, 404);",
   ]] },
   'verb-without-a-route': { file: 'bin/verbs.js', edits: [["route: '/sensor/standby'", "route: '/sensor/missing'"]] },
 };
@@ -211,15 +223,18 @@ async function main() {
     await until(() => fresh.messages.filter((msg) => msg.programOut).length >= 3);
     check(JSON.stringify(fresh.messages.filter((msg) => msg.programOut).slice(0, 3).map((msg) => Object.keys(msg.programOut)))
       === JSON.stringify([['mode', 'size'], ['preset'], ['params']]), 'connect restores output in three ordered messages');
-    for (const [name, status, text] of [['unknown', 404, null], ['old', 409, String(PROJECT_VERSION)], ['missing', 409, 'absent-effect']]) {
+    for (const [name, status, text] of [['unknown', 404, 'no preset named unknown'], ['old', 409, String(PROJECT_VERSION)], ['missing', 409, 'absent-effect']]) {
       const result = await json('/output', { preset: name });
-      check(result.status === status && (!text || result.body.error.includes(text)), `preset refusal: ${name}`);
+      // The refusal is the store's sentence rather than the filesystem's, and it carries no path:
+      // this text is what an operator reads on the record page.
+      check(result.status === status && (!text || result.body.error.includes(text))
+        && !result.body.error.includes(WORK), `preset refusal: ${name}`, result.body.error);
     }
     monitor.ws.send(JSON.stringify({ programOut: { params: { exposure: 2.3 }, tags: { exposure: 'look' } } }));
     check(await until(async () => (await json('/output')).body.params.exposure === 2.3), 'operator write is remembered');
     for (const words of [['presets'], ['takes'], ['jobs']]) check((await cli(...words)).code === 0, `CLI lists ${words[0]}`);
 
-    if (['output-forgets-on-connect', 'preset-skips-requires'].includes(mutation)) return;
+    if (['output-forgets-on-connect', 'preset-skips-requires', 'preset-refusal-names-a-path'].includes(mutation)) return;
     if (!args.includes('--no-browser') && (!mutation || mutation === 'partial-preset-retains-old-look')) {
       const { chromium } = await import('playwright');
       browser = await chromium.launch({ headless: true, args: ['--use-angle=metal'] });
@@ -318,8 +333,8 @@ async function main() {
     const waitedMs = Date.now() - stoppedAt;
     check(Boolean(stuckTake) && !new RegExp(`take ${stuckTake} closed`).test(log),
       'the take really could not be finalised', stuckTake ?? 'no take was open');
-    const named = log.match(/\[server\][^\n]*(stream desync|not a Kinect capture)[^\n]*/);
-    check(Boolean(named), 'the shutdown reports the take it could not close', named?.[0] ?? 'nothing was reported');
+    const named = log.match(/\[server\] shutdown: the take did not finish:[^\n]*/);
+    check(Boolean(named), 'the shutdown names the take it could not close', named?.[0] ?? 'nothing was reported');
     check(waitedMs > 12000, 'the shutdown grace runs out before the process leaves', `${waitedMs} ms`);
     let orphan = false;
     try { process.kill(Number(stubborn), 0); orphan = true; } catch {}
@@ -369,6 +384,27 @@ async function main() {
   check(await state('standby', 16000), 'a key page nothing can serve does not hold the sensor awake');
   check((await health()).consumers.key === 1, 'and it stays attached through a standby it is not the reason for');
   if (['wake-for-an-unserveable-source', 'idle-counts-an-unservable-key'].includes(mutation)) return;
+  // Turning colour back on is the one change that makes a refused source servable while nothing is
+  // running: there is no grabber to tell, so the refusal the colour left behind has to follow the
+  // setting. A stale refusal reads as permanent, and a permanent refusal is refused without waking,
+  // which strands the consumer that retries - the one this route exists for.
+  const colourBack = await cli('camera', 'color', 'on');
+  check(colourBack.code === 0, 'colour turns back on with the sensor standing down',
+    colourBack.err || colourBack.out || String(colourBack.code));
+  const revivedWakes = (await health()).wakes;
+  const revived = await fetch(`${url}/camera.mjpg`, { signal: AbortSignal.timeout(20000) });
+  const revivedFirst = revived.status === 200
+    ? await Promise.race([revived.body.getReader().read(), sleep(12000).then(() => ({ done: true }))])
+    : { done: true, note: (await revived.text()).trim() };
+  const served = revived.status === 200 && !revivedFirst.done
+    && Buffer.from(revivedFirst.value).includes(Buffer.from('image/jpeg'));
+  const revivedHealth = await health();
+  check(served, 'the request colour just made servable is served rather than refused on the old reason',
+    `${revived.status} ${revivedFirst.note ?? 'jpeg bytes'}`);
+  check(revivedHealth.state === 'live' && revivedHealth.wakes > revivedWakes,
+    'and that request is what woke the sensor', `state ${revivedHealth.state}, wakes ${revivedWakes} to ${revivedHealth.wakes}`);
+
+  if (mutation === 'colour-return-leaves-the-old-refusal') return;
   await start(['--grabber', '/missing-braindance-grabber', '--standby-after', '20'], false);
   check(await state('lost'), 'failed spawn enters retry');
   await json('/sensor/standby', {});

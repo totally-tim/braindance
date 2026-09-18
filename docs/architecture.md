@@ -71,11 +71,13 @@ A five-second tick checks monitors, webcam clients, feedable key clients and the
 and `lost` keeps the deadline it already has, because a link that flaps is otherwise set back often
 enough that it never stands down. A socket arriving wakes a sensor standing down, a key page with
 the rest, because a consumer arriving is a reason to look. What does not hold the sensor awake is a
-consumer that cannot be served at all: `GET /camera.mjpg` is refused without waking when there is no
-colour this server will ever have, and a key page attached while there is no colour to key is a
-socket waiting for a reason rather than demand. MJPEG holds transient outages for up to 45 seconds
-and refuses permanent unavailability with 503. SIGINT and SIGTERM wait for grabber teardown and
-recorder close whichever of the two fails, and name what failed.
+consumer that waking cannot serve: `GET /camera.mjpg` is refused without waking while colour is off
+and nothing is running to turn it on, and `applyCamera` re-derives that refusal when the camera
+changes, so a request made servable by switching colour on is not refused on the reason it was
+refused before. A key page attached while there is no colour to key is a socket waiting for a reason
+rather than demand. MJPEG holds transient outages for up to 45 seconds and refuses permanent
+unavailability with 503. SIGINT and SIGTERM wait for grabber teardown and recorder close whichever of
+the two fails, and say which of the two failed.
 
 `server/output.js` owns output state for the server process. Preset reads and patches are
 serialized in arrival order. The record page writes mode and size through HTTP and parameter
