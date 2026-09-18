@@ -40,8 +40,10 @@ if (MUTATE) {
   if (MUTATIONS[MUTATE] !== null) writeFileSync(join(cwd, '.npmrc'), MUTATIONS[MUTATE]);
 }
 
+let checked = 0;
 let failed = 0;
 const ok = (label, pass, detail = '') => {
+  checked++;
   if (!pass) failed++;
   console.log(`  ${pass ? 'PASS' : 'FAIL'}  ${label}${detail ? `  ${detail}` : ''}`);
 };
@@ -134,7 +136,7 @@ ok('and a directory with no .npmrc draws no cutoff at all, so the one above came
 
 rmSync(scratch, { recursive: true, force: true });
 
-console.log(`\n${failed} failed`);
+console.log(`\n${checked} assertions, ${failed} failed`);
 if (MUTATE) {
 if (MUTATIONS[MUTATE]?.fails) console.log(`[release-gate] it should redden: ${MUTATIONS[MUTATE].fails}`);
   if (failed === 0) { console.log(`NOT CAUGHT - ${MUTATE} passed a check that exists to reject it`); process.exit(1); }

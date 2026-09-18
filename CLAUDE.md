@@ -159,7 +159,8 @@ node tools/build-native.mjs        # builds libfreenect2 into vendor/prefix, the
 node tools/fake-grabber.mjs        # a grabber that needs no sensor, for driving the server
 node tools/make-sample.mjs         # a synthetic capture, so a clone with no Kinect has one to loop
 node tools/make-fixture.js         # loops one short capture into an arbitrarily long one
-node tools/sweep-all.mjs           # every mutation of four tools; needs a server and hours
+node tools/sweep-all.mjs           # every mutation of --tools a,b; with none, the five browser tools, which need a server and hours
+tools/mutation-verdict.mjs         # the one reading of a mutation run: CAUGHT, NOT CAUGHT or DID NOT RUN
 node tools/settle-probe.mjs        # does settle()'s drain scale with the take or the ceiling
 node tools/prof-summary.mjs        # reads grabber --profile output, flags contended runs
 node tools/render-worker.mjs       # renders one queued job; jobs-check drives it

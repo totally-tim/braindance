@@ -50,13 +50,14 @@ const WORK = flag('--work') ?? join(REPO, '.library-check');
 
 let failures = 0;
 let assertions = 0;
+const fired = [];
 // Claims this run could not make a fixture for, named in the verdict: a check that quietly
 // drops an assertion is a check reporting coverage it does not have.
 const skipped = [];
 const check = (ok, label, detail = '') => {
   assertions++;
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? `  ${detail}` : ''}`);
-  if (!ok) failures++;
+  if (!ok) { failures++; fired.push(label); }
   return ok;
 };
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -1620,24 +1621,29 @@ await requireMutationDelivered(macUrl);
 const { chromium } = await loadPlaywright();
 const browser = await chromium.launch({ headless: !HEADED, args: ['--use-gl=angle', '--use-angle=default'] });
 
+// A crash is recorded apart from the assertions: counted as a failed one, a run that died
+// before it tested anything reads to sweep-all as a caught mutation.
+let crashed = null;
 try {
   await runChecks();
 } catch (err) {
-    // Recorded rather than thrown: an exception out of here used to end the process with no
-    // verdict line and no assertion count, which reads as a caught mutation to a caller.
-  console.log(`\n  FAIL  the run did not finish: ${err.message}`);
-  assertions++;
-  failures++;
+  crashed = err;
 } finally {
   await browser.close();
   stopServers();
 }
 
+if (crashed) {
+  console.log(`\n[library] DID NOT RUN - ${crashed.message}`);
+  console.log(`[library] ${assertions} assertions ran, ${failures} failed before the crash`);
+  if (fired.length) console.log(`[library] rows that had already fired: ${fired.join('; ')}`);
+  process.exit(2);
+}
+
 // The verdict, and a skipped claim reaches all three of it: the count line, the word, and the
 // status this process exits with.
 const note = skipped.length ? `, ${skipped.length} claim${skipped.length === 1 ? '' : 's'} unproven here (${skipped.join(', ')})` : '';
-if (failures) console.log(`\n[library] ${assertions} assertions, ${failures} failed${note}`);
-else console.log(`\n[library] ${assertions} assertions, none failed${note}`);
+console.log(`\n[library] ${assertions} assertions, ${failures} failed${note}`);
 const verdict = failures ? `FAIL (${failures})`
   : skipped.length ? `PASS WITH ${skipped.length} CLAIM${skipped.length === 1 ? '' : 'S'} UNPROVEN HERE (${skipped.join('; ')})`
     : 'PASS';

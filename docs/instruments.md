@@ -53,6 +53,10 @@ and nothing about sample placement has been put to that build. A throw sets `cra
 verdict is DID NOT RUN at exit 2, and it is decided before the mutation verdict and before
 UNTESTED. A proof tool may not count its own crash as a finding in either direction.
 
+A caller grading a run holds to the same rule. A `FAIL` row printed on the way to a crash reads,
+to anything counting rows, exactly like a catch, so `tools/mutation-verdict.mjs` reads only the
+count line a tool prints once it reaches its verdict, and a run without one did not run.
+
 ## Place a probe where its answer would differ
 
 Ask what a build with the defect would agree with, and stand somewhere it cannot. A set of arms

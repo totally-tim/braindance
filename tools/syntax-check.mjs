@@ -587,8 +587,16 @@ const declaredMutations = new Map();
 {
   const DECLARATION = /^const MUTATIONS = \{$/m;
   const REGISTRATION = 'third_party/libfreenect2/src/registration.cpp';
-  // One name reused for every extraction, so a crash leaks at most one file.
-  const PROBE = join(ROOT, 'tools', '.mutation-table-probe.mjs');
+  // Outside the checkout, so a concurrent run's walk of `tools/` never meets a probe. A cut's
+  // relative imports and `import.meta.url` are pointed back at the tool, so they resolve as there.
+  const PROBES = mkdtempSync(join(tmpdir(), 'syntax-check-tables-'));
+  const inPlace = (cut, name) => {
+    const self = pathToFileURL(join(ROOT, 'tools', name)).href;
+    return cut
+      .replace(/^(import\s[^;]*?from\s+')(\.{1,2}\/[^']+)(';)$/gm,
+        (line, head, spec, tail) => `${head}${new URL(spec, self).href}${tail}`)
+      .replaceAll('import.meta.url', JSON.stringify(self));
+  };
 
   // The declaration alone, with the whole prefix only as a fallback: the prefix makes this row
   // need what the tool needs, a `ws` import CI has not installed or a top-level `git log`.
@@ -723,19 +731,16 @@ const declaredMutations = new Map();
       withoutPackages(source.slice(0, end + 3)),
     ];
     for (const [attempt, cut] of cuts.entries()) {
+      const probe = join(PROBES, `${name}.${attempt}.mjs`);
       try {
-        writeFileSync(PROBE, `${cut}\nexport { MUTATIONS };\n`);
-        // Cache-busted, because sixteen tools import through one filename and Node would
-        // otherwise hand back the first tool's table fifteen more times.
-        ({ MUTATIONS: table } = await import(`file://${PROBE}?tool=${encodeURIComponent(name)}&cut=${attempt}`));
+        writeFileSync(probe, `${inPlace(cut, name)}\nexport { MUTATIONS };\n`);
+        ({ MUTATIONS: table } = await import(pathToFileURL(probe).href));
         break;
       } catch (err) {
         if (attempt === cuts.length - 1) {
           unreadable++;
           fail(`${name}: its MUTATIONS table could not be read - ${String(err.message).split('\n')[0]}`);
         }
-      } finally {
-        rmSync(PROBE, { force: true });
       }
     }
     if (!table) continue;
@@ -805,6 +810,7 @@ const declaredMutations = new Map();
     }
     if (carriesAnchors) tablesWithAnchors++;
   }
+  rmSync(PROBES, { recursive: true, force: true });
 
   for (const { name, why } of anchorless) {
     console.log(`  anchors/ ${name} declares ${why} rather than source anchors, so it has none to check`);
