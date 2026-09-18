@@ -16,7 +16,7 @@ The tools disagree about what a caught mutation exits. Four exit **0** on a catc
 — `registry-check`, `vendor-check`, `registration-check` and `release-gate-check` — so anything
 gating on "non-zero means caught" reads a genuine miss by these four as a catch. Twelve exit 1 on
 a catch *and* 1 on a miss, so the code carries no information and only the printed sentence
-separates them. Six carry no miss branch at all and exit on the failure count, so a mutation they
+separates them. Seven carry no miss branch at all and exit on the failure count, so a mutation they
 fail to catch exits 0 and reads as a clean pass.
 
 Per tool, read from the source:
@@ -44,6 +44,7 @@ Per tool, read from the source:
 | `module-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a stale anchor |
 | `syntax-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor |
 | `cpp-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor, no compiler or headers |
+| `decoder-check` | pass, or a missed mutation | a failed assertion, a catch, or a probe that will not build or run | `DID NOT RUN`: no compiler, no built library or grabber, a stale anchor, a failed rebuild, or a mutated rebuild that changed nothing |
 | `vendor-check` | pass, or a **catch** | a failed assertion, a miss, or a stale anchor | `PASS on the source, with the artifact untested` |
 | `registration-check` | pass, or a **catch** | a failed assertion, or a miss | a build or tooling failure |
 | `release-gate-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: no registry |
