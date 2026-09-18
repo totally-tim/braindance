@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Parses every JavaScript file this repo ships and asks the questions that need no server,
-// browser or sensor: every tool documented, every citation resolving, the decoder spec
+// browser or sensor: every tool documented, every check tool run by CI or listed as not run,
+// every citation resolving, the decoder spec
 // agreeing with its module, the grabber's hello matching the wire format, and every shell id
 // declared by the page that draws it.
 //
@@ -121,6 +122,20 @@ const MUTATIONS = {
       + 'declares',
   },
 
+  'ci-forgets-a-tool': {
+    file: '.github/workflows/checks.yml',
+    edits: [['registration registry', 'registry']],
+    fails: 'and a check tool CI neither runs nor lists as not run, so nobody can tell whether it '
+      + 'was left out on purpose',
+  },
+
+  'ci-runs-a-tool-it-lists-as-not-run': {
+    file: '.github/workflows/checks.yml',
+    edits: [['registration registry', 'registration registry syntax']],
+    fails: 'and a tool on both sides of the ledger, which makes the not-run list a claim nobody '
+      + 'can read',
+  },
+
   'doc-line-ends-in-whitespace': {
     file: 'docs/proof-tools.md',
     edits: [['Per tool, read from the source:', 'Per tool, read from the source: ']],
@@ -239,6 +254,36 @@ if (!existsSync(DOC)) {
     fail(`CLAUDE.md never mentions ${undocumented.join(', ')} - a tool nobody documented is a tool nobody runs`);
   } else {
     console.log(`  tools/  all ${shipped.length} named in CLAUDE.md`);
+  }
+}
+
+// Every `tools/*-check.mjs` is run by CI or named on the workflow's `# not-run:` lines, never
+// neither and never both, asked of the directory so a tool added next year is asked by existing.
+{
+  const rel = '.github/workflows/checks.yml';
+  const workflow = sourceWithMutation(rel);
+  const tools = readdirSync(join(ROOT, 'tools'))
+    .map((f) => /^(.+)-check\.mjs$/.exec(f)?.[1])
+    .filter(Boolean)
+    .sort();
+  if (workflow === null) {
+    fail(`${rel} is missing, so nothing says which proof tools CI runs`);
+  } else if (tools.length === 0) {
+    fail('tools/ yielded no check tools, so the CI ledger was asked of nothing');
+  } else {
+    const lines = workflow.split('\n');
+    const code = lines.filter((line) => !/^\s*#/.test(line)).join('\n');
+    const run = new Set([...code.matchAll(/tools\/([\w-]+)-check\.mjs/g)].map((m) => m[1]));
+    const notRun = lines.flatMap((line) => /^# not-run:(.*)$/.exec(line)?.[1].trim().split(/\s+/).filter(Boolean) ?? []);
+    const neither = tools.filter((t) => !run.has(t) && !notRun.includes(t));
+    const both = tools.filter((t) => run.has(t) && notRun.includes(t));
+    const unknown = [...new Set([...run, ...notRun])].filter((t) => !tools.includes(t));
+    if (neither.length) fail(`${rel} neither runs nor lists as not-run: ${neither.join(', ')}`);
+    if (both.length) fail(`${rel} runs and also lists as not-run: ${both.join(', ')}`);
+    if (unknown.length) fail(`${rel} names ${unknown.join(', ')}, which tools/ does not hold`);
+    if (!neither.length && !both.length && !unknown.length) {
+      console.log(`  ci/     all ${tools.length} check tools accounted for: ${run.size} run, ${notRun.length} listed as not run`);
+    }
   }
 }
 

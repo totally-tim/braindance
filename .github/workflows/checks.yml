@@ -1,43 +1,15 @@
-# What CI can honestly run here, which is less than the suite and says so.
+# The proof tools a hosted runner can run: nothing here has a server, a GPU browser or a
+# sensor. Every tools/*-check.mjs is run below or named on a `not-run:` line at the foot,
+# and syntax-check fails when one is neither. CLAUDE.md's proof-tools table says what each
+# tool needs.
 #
-# Almost every proof tool in this repo needs something a hosted runner does not have:
-# a running server, a GPU browser, ffmpeg, a built libfreenect2 prefix, or a Kinect on
-# the USB bus. Wiring those in would produce a workflow that is red from the first push
-# and ignored by the second, so they are named at the bottom rather than attempted.
-#
-# One of the four jobs installs a dependency of this repo, and it is worth saying which
-# and why rather than leaving the reader to infer it. `syntax-check` and `module-check`
-# both need nothing, which is why they share the first job; the gate job reaches the
-# registry on purpose, asking npm to resolve a package so it
-# can read the refusal - which replaced a version-dependent config reading that passed
-# locally and failed on the runner while the gate was armed the whole time. The unit job
-# now runs `npm ci`, because four of the modules extracted out of `web/main.js` return
-# three.js types and a node test of them cannot resolve `three` out of source alone. The
-# comment on that job carries the measurement that forced it. The C++ job installs a system
-# package rather than anything this tree declares - turbojpeg's headers, which the grabber
-# includes and no lockfile can supply.
-#
-# The list at the foot is the other half of this comment and has to be read as a claim:
-# every proof tool in `tools/` is either run above or named down there with what it would
-# need. `module-check` was in neither for one commit, which is how a tool that could run
-# on every push came to run on none of them.
-#
-# `npm ci` installs clean from a directory holding nothing but package.json, the lockfile
-# and .npmrc, and the lockfile is the reason it is `ci` rather than `install`: it takes
-# the versions this tree declares instead of resolving fresh ones, which is what keeps
-# the `.npmrc` release gate meaningful on a machine nobody owns.
-#
-# The actions are pinned by commit rather than by tag, because a tag is mutable and this
-# tree enforces a 48-hour release age on everything else it pulls in. The tag each SHA
-# stood for is in the comment beside it, so bumping one is a deliberate edit.
+# Actions are pinned by commit because a tag can move; the comment names the tag.
 name: checks
 
 on:
   push:
   pull_request:
 
-# Read-only. Nothing here publishes, comments or writes a ref, and a token scoped wider
-# than the job needs is the part of a compromised action that does the damage.
 permissions:
   contents: read
 
@@ -50,70 +22,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 26
-      # Its own canary runs first and refuses the whole run if `node --check` has stopped
-      # detecting broken files - which it silently does on a tree whose package.json has
-      # no "type", measured on v26.0.0. So a green tick here is the mechanism having been
-      # shown to work on this runner rather than an assumption that it does.
       - run: node tools/syntax-check.mjs
-      # **The other proof tool that needs nothing, and it was left out of both lists.**
-      # `module-check` reads `web/` off disk - no port, no browser, no install, no sensor -
-      # because every failure it is about is a failure to *boot*, and an instrument that
-      # needs the page running cannot see one. It was neither run here nor named at the
-      # bottom as deliberately excluded, which is the worst of the two: a reader of this
-      # file could conclude the suite had been accounted for. So an import cycle, an import
-      # naming a file or an exported name that is not there, state crossing a boundary as a
-      # writable object, or a name only one end wanted could all pass every hosted check
-      # and wait for somebody to run it locally.
-      #
-      # It goes in this job rather than its own because the job is the checks that need
-      # nothing, which is why the job's name is that rather than the parse it started as.
       - run: node tools/module-check.mjs
-      # Broken on purpose, thirty-three ways, every run - the same posture the two jobs
-      # below take, and it is late here for the reason `module-check` itself was late:
-      # both tools carry falsification controls that need no port, no browser, no install
-      # and no sensor, and neither had ever been run against one on a push. So a control
-      # could go stale against an anchor somebody moved, or a rule could quietly stop
-      # catching what it names, and the only thing that would have said so was a person
-      # running it by hand while leaning on it.
-      #
-      # **The names are enumerated off each tool's own refusal rather than written here.**
-      # A list in this file is a third copy of the two tables, and it is the copy nobody
-      # opens - `sweep-all` already takes its names this way and says why. So a mutation
-      # added next year is run by existing. The floor under the parse is what stops that
-      # becoming a way to test nothing: a parse yielding no names runs zero mutations and
-      # the step goes green, which is exactly what `syntax-check` refuses when it declines
-      # to pass on finding no files.
-      #
-      # **Neither loop below is the shape to copy here, and that was measured rather than
-      # reasoned about.** `module-check` prints `caught, as required` and `NOT CAUGHT` and
-      # exits **1 for both**, so the cpp job's "non-zero means caught" test scores a
-      # genuine miss as a catch - run against a stub that misses, it printed `caught` and
-      # exited 0. `syntax-check` has no verdict branch at all and exits `failed ? 1 : 0`,
-      # so a caught mutation exits 1 where a missed one exits 0, and the gate job's
-      # `set -e` would fail this step on all thirty-three of the runs that work. What
-      # discriminates on both is the number each already prints in its own summary line -
-      # `65 JavaScript files, 0 failed` and `[module] 61 assertions, 0 failed` - which is
-      # this repo's rule about counting failed assertions rather than exit codes, arriving
-      # in a workflow.
-      #
-      # Exit 2 is kept apart from a miss deliberately. A stale anchor, a name the tool does
-      # not know and a file nothing in the run read all answer 2 having asserted nothing,
-      # and folding those into "not caught" would report a control that never ran as a rule
-      # that has gone blind - which is the one confusion this whole step exists to refuse.
       - name: and both of them reject every tree their own tables call broken
         run: |
-          # **`set +e` explicitly, and it is the whole reason this step failed its first
-          # push.** Actions runs a `run:` block as `bash -e {0}`, so errexit is already on
-          # before the first line - and every command here is *expected* to exit non-zero:
-          # the enumeration asks each tool for a name it does not know and reads the refusal,
-          # which is exit 2, and a caught mutation is exit 1. So the step died on its own
-          # first command with the tools working perfectly. `set -uo pipefail` does not
-          # unset `-e`, which is what made it look handled.
-          #
-          # It passed locally because a script run as `bash script.sh` has no errexit, so
-          # the shipped text had been run - just never under the shell CI uses. That is this
-          # repo's own rule about re-running in the conditions the failure happens in,
-          # arriving one layer out: the *text* was verified and the *shell* was not.
+          # Actions runs this under `bash -e`, and a caught mutation exits non-zero.
           set +e -uo pipefail
           bad=0
           for tool in syntax module; do
@@ -152,31 +65,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 26
-      # `test:unit` rather than `npm test`, which chains `release-gate-check`; the job
-      # below runs that one.
-      #
-      # **It needs an install now, and the extraction is what changed that.** When this
-      # job was written the whole of `test/` was two files importing `node:test` and the
-      # tree's own arithmetic, so the tick was worth having partly because it depended on
-      # nothing. Four of the modules pulled out of `main.js` reach three.js for a type
-      # they exist to return - `world-tilt` a Quaternion, `plan-geometry` a Vector3,
-      # `gpu-textures` a DataTexture, `bloom-pass` a Pass - and a test of those cannot
-      # resolve `three` out of a tree that holds only source. Measured rather than
-      # predicted: the first push after the extraction went red on all four arms with
-      # `ERR_MODULE_NOT_FOUND: Cannot find package 'three'`, 47 tests, 4 failed.
-      #
-      # `npm ci` rather than `npm install`, because the lockfile is the point: it installs
-      # the versions this tree declares instead of resolving fresh ones, which is what
-      # keeps the `.npmrc` release gate meaningful on a runner. The comment at the head of
-      # this file recorded that `npm ci` works here and was left out only because nothing
-      # needed it; something needs it.
+      # `ci` rather than `install`: the lockfile's versions are the ones the .npmrc gate vetted.
       - run: npm ci
-      # And it arrives with its own falsification control -
-      # `test/runner-control.test.mjs` plants a failing test, runs the real runner on it
-      # in a directory of its own, and reddens if the run comes back green or unnamed. So
-      # a tick here is the runner having been shown to report failures on this machine
-      # rather than an assumption that it does, which is the same thing `syntax-check`'s
-      # canary buys the job above.
       - run: npm run test:unit
 
   cpp:
@@ -187,56 +77,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 26
-      # Its own job rather than a step in "the checks that need nothing", and the apt
-      # line is the whole reason: `cpp-check` needs turbojpeg's headers, so folding it in
-      # would make that job's name false - and that name is a claim a reader uses to
-      # decide what a fresh clone can answer. It needs no libfreenect2 prefix and no
-      # sensor, which is what lets it run on a hosted runner at all.
       - run: sudo apt-get update && sudo apt-get install -y libturbojpeg0-dev
-      # **The gap this closes is that there was no gate.** 64 JavaScript files get
-      # `node --check` above; `native/grabber.cpp` is 855 lines, is
-      # the only writer of the one artifact this program produces that cannot be shot
-      # again, and until this job a typo in it was found by whoever next rebuilt on a
-      # machine with a Kinect on the bus. What the tick means is stated in the tool
-      # rather than implied here: it parses and typechecks, it does not link and nothing
-      # runs, over the four combinations of the two macros the file branches on.
       - run: node tools/cpp-check.mjs
-      # Broken on purpose, five ways, every run - the same posture as the gate job below,
-      # and for the same reason: a parse check nobody has tried to slip past is a green
-      # tick of unknown sensitivity. Two of the five are the ones that matter here, and
-      # they are the branch pair: each plants a name that does not exist inside one
-      # `#ifdef` arm, so a gate that had quietly collapsed to a single configuration
-      # would report one of them green. Caught is a non-zero exit for this tool, which is
-      # why the loop is an explicit `if` and deliberately not `set -e`: `set -e` here would
-      # end the step on the first mutation that *worked*. This comment said the opposite
-      # for a while, having been copied off the gate job below where caught is exit 0 and
-      # `set -e` is right - a sentence that named the wrong mechanism while sitting above
-      # code doing the correct one, which is the thing a reader checks instead of the code.
-      #
-      # **The exit code is read three ways rather than two, because the tool has three
-      # answers and an `if` can only hear two.** `cpp-check` exits 1 for a failed assertion,
-      # 0 for a clean parse - and 2 for `cannotRun`, which is the tool declining: no
-      # compiler, no turbojpeg headers, or a mutation whose anchor has stopped matching
-      # exactly once. The last of those is the dangerous one and it is the one a bare `if`
-      # cannot see. An anchor rots when the source under it is edited, which is a normal
-      # thing to do to `grabber.cpp`, and a loop that folds 2 into "non-zero, so caught"
-      # then prints `caught` for a mutation that was never applied - all five falsification
-      # controls can go quiet together while this job stays green. That is CLAUDE.md's
-      # "count failed assertions, never exit codes" reaching the one place in CI that was
-      # still counting exit codes. An earlier version of this comment argued the tool had
-      # no such path; it has had one since it was written, at `cannotRun`.
-      #
-      # Still deliberately not `set -e`: caught is a non-zero exit here, so `set -e` would
-      # end the step on the first mutation that worked. The gate job below is the opposite
-      # convention and `set -e` is right there.
       - name: and it rejects the five ways the source could be wrong
         run: |
-          # `set +e` for the reason the enumeration step above states at length: Actions runs
-          # a `run:` block as `bash -e {0}`, and `set -uo pipefail` does not unset `-e`. It
-          # did not matter while the tool ran inside an `if` condition, which errexit exempts;
-          # reading the exit code needs the command bare, and a bare command exiting 1 is
-          # exactly what this loop is here to see. Measured: without this line the step dies
-          # on the first mutation, which is the first one that *worked*.
+          # Caught is exit 1 here and 2 is cpp-check declining, so neither may pass for the other.
           set +e -uo pipefail
           for m in grabber-syntax-error grabber-type-error opencl-branch-broken \
                    opengl-branch-broken harness-syntax-error; do
@@ -261,54 +106,16 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          # The npm Node 26 bundles knows `min-release-age`; the check names its version.
           node-version: 26
-      - name: .npmrc gate
-        run: node tools/release-gate-check.mjs
-      # Broken on purpose, three ways, every run. A gate check nobody has tried to slip
-      # past is a green tick of unknown sensitivity. Note that only two of the three are
-      # silent - a missing file is no opinion, and an npm too old for the key ignores it
-      # without a word. A wrong unit is loud: measured on 11.12.1, 11.16.0 and 12.0.2,
-      # `min-release-age=2d` stops the install with `Invalid time value`. The silent
-      # value is the one npm accepts and nobody meant, which is what the bounds rows are
-      # for - `0` puts the cutoff at this instant and warns about nothing.
-      # Caught is exit 0 for this tool, NOT CAUGHT is exit 1 - so `set -e` is what makes
-      # a miss in the middle of the loop fail the step rather than being overwritten by
-      # the next iteration's success.
+      - run: node tools/release-gate-check.mjs
       - name: and it rejects the three ways it could be wrong
         run: |
+          # Caught is exit 0 for this tool, so `-e` fails the step on a miss.
           set -euo pipefail
           for m in wrong-unit no-gate absent; do
             node tools/release-gate-check.mjs --mutate "$m"
           done
 
-# Not run here, and what each would need. `tools/` holds 21 `*-check` proof tools; five run
-# above and the sixteen below are the rest, and the arithmetic is written down because a list
-# nobody adds up is how this one came to be missing three of them at once - `module-check`,
-# which needed nothing and is now run, and the two directly below, which had been in neither
-# list since they were written.
-#
-#   determinism, index, registry, timeline, keyframe, export, library, editor, monitor,
-#   jobs, sensor-view   a running server and a GPU browser; export also needs ffmpeg and
-#                       ffprobe, and jobs needs a real Chromium rather than the bundled
-#                       headless shell, which it refuses to substitute for
-#   boot-check          a GPU browser, and its own server on 8391. It needs no capture and
-#                       no sensor - it drives the recorder, which builds all 80 parameter
-#                       controls against a server with an empty captures directory - so a
-#                       runner with a browser could run it, and the browser is the only
-#                       reason it is down here rather than in the first job
-#   level-check         a GPU browser, but no server and no sensor - it spawns its own on
-#                       8377 and plants analytic planes straight into the depth texture,
-#                       which is what lets it grade the plane fit against a normal it chose
-#   vcam-check          a GPU browser, and its own server on 8361. What it proves is about
-#                       the bytes leaving for OBS, so there is nothing to assert without one
-#   guard-check         no browser, but it spawns servers that import ws out of
-#                       node_modules, and it needs a non-internal IPv4 to prove the bind -
-#                       so it needs the install this workflow deliberately does not do
-#   vendor-check        no server, no browser, no network, and it belongs here. Left out
-#                       only because it answers exit 2 - "source proven, artifact
-#                       untested" - on a clone with no vendor/prefix, which wants a
-#                       deliberate exit-code contract rather than a plain run step
-#   registration-check  builds two libfreenect2 prefixes and reads a corpus dumped off a
-#                       real sensor
-#   monitor-cost-ab     a capture node with a Kinect attached
+# not-run: boot cli determinism editor effect effect-conformance export guard hd-encoder
+# not-run: index jobs keyframe level library monitor preview registration registry
+# not-run: sensor-view timeline vcam vendor

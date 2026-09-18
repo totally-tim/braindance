@@ -121,7 +121,7 @@ Read the assertion count, never the exit code.
 | `module-check.mjs` | the boundaries in `web/`: the import graph, what crosses it | nothing |
 | `preview-check.mjs` | rendered previews, camera identity, cancellation, and live fallback | `--url`, a take of at least 9s, a GPU browser |
 | `cli-check.mjs` | CLI, standby, demand wake, camera and server-owned output | port 8401 free, a synthetic capture, ffmpeg and a GPU browser |
-| `syntax-check.mjs` | every shipped file parses, the cross-language constants agree, the citations resolve, every tool is named here | nothing |
+| `syntax-check.mjs` | every shipped file parses, the cross-language constants agree, the citations resolve, every tool is named here, every check tool is run by CI or listed as not run | nothing |
 | `hd-encoder-check.mjs` | native pairing under encoder backlog, held colour, key range and RGBX | a C++ compiler and TurboJPEG |
 | `cpp-check.mjs` | both C++ files parse and typecheck, in all four pipeline configurations | a C++ compiler and turbojpeg's headers |
 | `vendor-check.mjs` | `third_party` is upstream v0.2.1 plus declared edits | nothing |

@@ -989,7 +989,8 @@ with no dot in front of it, reads as a use of any import of the same name. `gpuT
 ## `syntax-check`
 
 Every shipped JavaScript file parses, the constants the two languages cannot share agree, the
-citations resolve, and every tool is named in `CLAUDE.md`.
+citations resolve, every tool is named in `CLAUDE.md`, and every `tools/*-check.mjs` is either run
+by `.github/workflows/checks.yml` or named on one of its `# not-run:` lines, never both.
 
 ```
 node tools/syntax-check.mjs
@@ -1028,6 +1029,8 @@ name.
   bullet naming one nothing declares.
 - **`doc-line-ends-in-whitespace`** — a prose line ending in a space, which is invisible on the
   page and invisible to a clean `git diff --check`.
+- **`ci-forgets-a-tool`** — a check tool the workflow neither runs nor lists as not run.
+- **`ci-runs-a-tool-it-lists-as-not-run`** — a tool on both sides of the workflow's ledger.
 
 ## `cpp-check`
 

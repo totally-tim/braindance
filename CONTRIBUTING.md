@@ -37,10 +37,11 @@ node tools/<tool>-check.mjs   # one proof tool; most need a running server, a GP
 ```
 
 CI runs `syntax-check`, `module-check`, `npm run test:unit`, `cpp-check` and
-`release-gate-check`, plus every mutation of the four check tools. `release-gate-check` needs an
-npm that knows `min-release-age` (npm 11 or newer, which Node 26 bundles) and access to the
-registry. The Chromium
-install and the fixtures are for the proof tools, which CI does not run.
+`release-gate-check`, plus every mutation of the four check tools. `.github/workflows/checks.yml`
+names every other check tool on a `not-run:` line, and `syntax-check` fails when a tool is in
+neither place. `release-gate-check` needs an npm that knows `min-release-age` (npm 11 or newer,
+which Node 26 bundles) and access to the registry. The Chromium install and the fixtures are for
+the proof tools CI does not run.
 
 `CLAUDE.md` lists every proof tool with what it proves and what it needs.
 [docs/proof-tools.md](docs/proof-tools.md) has the invocation, the fixtures and the mutation
