@@ -1,7 +1,7 @@
 # libfreenect2, vendored
 
 `libfreenect2/` is upstream's source at **v0.2.1**
-(`fd64c5d9b214df6f6a55b4419357e51083f15d93`), committed in full, plus the three
+(`fd64c5d9b214df6f6a55b4419357e51083f15d93`), committed in full, plus the five
 local edits below. `node tools/vendor-check.mjs` proves that offline.
 
 ## Why the tree is committed
@@ -15,9 +15,12 @@ longer vouch for.
 
 ## What we changed
 
-Three files. Each carries a notice of modification in its header, as Apache-2.0
+Five files. Each carries a notice of modification in its header, as Apache-2.0
 section 4(b) requires, and `vendor-check` pins the notice with the content, so
 stripping it fails the check.
+
+**This fork needs `-DENABLE_CXX11=ON`**, because the colour decoder edit declares a
+scoped enum. `tools/build-native.mjs` passes it on both presets.
 
 ### `src/registration.cpp`: thread the occlusion filter
 
@@ -101,20 +104,69 @@ problem, grep the startup log: `failed to enable power states U1!` is harmless a
 `vendor/prefix` predates the edit runs a grabber without it, and only `npm run build:native`
 fixes that.
 
+### `include/libfreenect2/packet_pipeline.h` and `src/packet_pipeline.cpp`: name the colour decoder
+
+Upstream picks the colour decoder inside `getDefaultRgbPacketProcessor` and gives the
+caller no say in it. On Linux it takes VAAPI first and substitutes TurboJPEG only when
+VAAPI fails to *initialise*. An AMD RX 9070 XT on Mesa 26 (gfx1201) initialises VAAPI,
+decodes about 150 frames, then loses the amdgpu context and takes the grabber down with
+`SIGABRT`. Initialisation is the wrong moment to judge a decoder that dies later, and
+there is nothing to route around it with.
+
+The header declares `enum class ColorDecoder`. Each enumerator is gated on the same
+`LIBFREENECT2_WITH_*_SUPPORT` macro that gates the processor behind it, so a decoder that
+can be named is a decoder that can be constructed. `defaultColorDecoder()` reads the
+build's own pick, and every pipeline class gains one constructor overload taking a
+`ColorDecoder`. An overload rather than a default argument, which would bake today's
+default into every caller's object file, and a scoped enum so it cannot promote to `int`
+and bind to `OpenCLPacketPipeline(const int deviceId)`.
+
+`src/packet_pipeline.cpp` replaces `getDefaultRgbPacketProcessor` with
+`defaultColorDecoder` and `createRgbPacketProcessor`. The default order is VideoToolbox,
+TurboJPEG, TegraJPEG, VAAPI. TurboJPEG decodes on the CPU and cannot lose a device context,
+and it comes ahead of the two that can, so on a build carrying it TegraJPEG and VAAPI are
+reached only by asking for them. VideoToolbox leads on Apple's builds, which is upstream's
+order kept. **Nothing substitutes**, because a stream that changes decoder
+under the operator hides the fault it should be reporting.
+
+Only two of the four report whether they started. VAAPI and TegraJPEG track their device's
+health in `good()`, and a VAAPI that failed to start hands out no buffers at all, so every
+colour transfer reaches the parser with a null buffer and logs — hundreds of lines a second
+— while depth streams on and the sensor reads healthy. `PacketPipeline::colorDecoderStarted`
+reports `good()` without naming `RgbPacketProcessor`, whose declaration is not installed, and
+the grabber refuses on it before opening the sensor. `PacketPipeline::colorDecoderName` reports
+that processor's `name()` the same way, so a caller names the decoder it was given rather than
+the one it asked for.
+
+VideoToolbox and TurboJPEG leave `good()` at the base class's `true` whatever happened to
+them, so the refusal cannot see either, and they fail differently from each other. A TurboJPEG
+whose decompressor never opened logs the reason once and then delivers no frame at all, so the
+grabber's colour count stays at zero; one that fails on a single frame logs and decodes the next.
+VideoToolbox discards the status of its session and of every frame, logs none of it, and delivers
+the frame anyway with `status` 0 and no pixel buffer behind `Frame::data`. `Registration::apply`
+checks the dimensions and not the pointer, so a VideoToolbox decode failure is a null read rather
+than a missing frame. That is the failure mode of the decoder Apple builds default to.
+
+The grabber picks a decoder with `--color-decoder` and defaults from `defaultColorDecoder()`,
+so one build cannot disagree with itself about which decoder it will use.
+
 ## How the proof works
 
 `third_party/libfreenect2.manifest` records the mode and git blob hash of all 140
 files as upstream published them. `tools/vendor-check.mjs` asserts six things:
 
-1. Every upstream file is present and unchanged except the three declared above.
+1. Every upstream file is present and unchanged except the five declared above.
 2. The set that differs is exactly the declared set, in both directions.
 3. Each declared file matches the exact content that was reviewed. Differing from
    upstream is not enough, because a reverted fix with its comment left in place
    still differs.
 4. No file exists that upstream did not ship.
 5. The harness oracle beside the tree is upstream's own `registration.cpp` byte for
-   byte, and the library at `vendor/prefix` carries `LIBFREENECT2_REG_THREADS`, so
-   a stale prefix cannot pass as a build of this tree.
+   byte, and the library at `vendor/prefix` carries both `LIBFREENECT2_REG_THREADS`
+   and `defaultColorDecoder`'s mangled symbol, so a stale prefix cannot pass as a
+   build of this tree. Three of the five edits change no exported name and carry no
+   marker: the two `src/` edits that alter behaviour inside existing functions, and the
+   header, whose declarations leave nothing in the library on their own.
 6. The manifest is upstream's. Its lines rebuild into git tree objects whose root
    must be `8ac8ee52388586e8b1763f7a76531a299c3b8969`, the tree of upstream's v0.2.1
    commit, read from upstream. The first five take the manifest as upstream, so

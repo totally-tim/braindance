@@ -17,7 +17,8 @@ const UPSTREAM_TREE = '8ac8ee52388586e8b1763f7a76531a299c3b8969';
 
 // Each entry pins the blob hash our patched file must have, because "differs from
 // upstream" is not "contains our change". `marker` is a string the edit leaves in the
-// compiled library; only the registration edit has one.
+// compiled library, which is what catches a stale vendor/prefix; an edit whose change
+// leaves no symbol or literal behind cannot have one.
 const DECLARED_EDITS = new Map([
   ['src/depth_packet_stream_parser.cpp', {
     why: 'accept depth frames missing only the unused 10th sub-image',
@@ -33,6 +34,20 @@ const DECLARED_EDITS = new Map([
     why: 'let the two USB link setup calls fail without failing the open, on macOS only',
     ours: 'a89572d9bed79becdea8c61e398803c536b1b6ee',
     marker: null,
+  }],
+  ['include/libfreenect2/packet_pipeline.h', {
+    why: 'declare ColorDecoder, defaultColorDecoder and a decoder overload per pipeline',
+    ours: '404105f9600688293ec5a214487a15e029df99de',
+    marker: null,
+  }],
+  ['src/packet_pipeline.cpp', {
+    why: 'pick the colour decoder by name, prefer software decode, and never substitute',
+    ours: 'aaec04d76bc8ed4cacca4130bfb553cf7c70719c',
+    // The mangled name of the one symbol this edit exports. Unlike the macOS edit, which leaves
+    // no symbol behind and so cannot be pinned, this proves vendor/prefix was rebuilt from our
+    // source rather than left stale. Mach-O prefixes another underscore, so the substring holds
+    // on both platforms.
+    marker: '_ZN12libfreenect219defaultColorDecoderEv',
   }],
 ]);
 
@@ -87,8 +102,11 @@ function rootTree(manifest) {
 }
 
 const MUTATIONS = {
+  // Anchored on a file no declared edit touches, so what it proves is assertion 2's
+  // "undeclared change" arm. Planted in a declared file it would still redden, but through the
+  // hash comparison instead, and the control would no longer test what it is named for.
   'undeclared-edit': (tree) => {
-    const f = join(tree, 'src', 'packet_pipeline.cpp');
+    const f = join(tree, 'src', 'frame_listener_impl.cpp');
     writeFileSync(f, readFileSync(f, 'utf8') + '\n// not upstream\n');
   },
   'revert-local-edit': (tree) => {
@@ -106,9 +124,10 @@ const MUTATIONS = {
     writeFileSync(f, s.replace('filter_width_half(2)', 'filter_width_half(4)'));
   },
   // The quickest way to silence an undeclared-change FAIL: edit the file, then paste its new hash
-  // over its manifest line.
+  // over its manifest line. On a file no declared edit touches, because a declared file relabelled
+  // also reads as a reverted edit, and the control would stop separating the manifest row.
   'manifest-relabel': (tree, _oracle, manifestFile) => {
-    const path = 'src/packet_pipeline.cpp';
+    const path = 'src/frame_listener_impl.cpp';
     const f = join(tree, path);
     writeFileSync(f, readFileSync(f, 'utf8') + '\n// not upstream\n');
     const lines = readFileSync(manifestFile, 'utf8').split('\n');
