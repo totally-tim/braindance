@@ -5721,7 +5721,9 @@ async function runChecks() {
     }
     cpSync(SAMPLE, join(byContentNode, 'shot-x.knct'));
     cpSync(SAMPLE, join(byContentNode, 'other.knct'));
-    appendFileSync(join(byContentNode, 'other.knct'), Buffer.from('a different take'));
+    // Under a message header's twelve bytes, so the scan reads it as a torn tail and hashes a
+    // different take rather than refusing a desynced one.
+    appendFileSync(join(byContentNode, 'other.knct'), Buffer.from('other'));
     cpSync(SAMPLE, join(byContentMac, 'shared.knct'));
     const markA = { id: 'm-on-a', sourceMs: 10, label: 'on the shared take', at: 1 };
     const markB = { id: 'm-on-b', sourceMs: 20, label: 'on the other take', at: 2 };
@@ -5754,16 +5756,22 @@ async function runChecks() {
       const onNode = (await getJson(`${nodeUrlHere}/library/takes`)).takes;
       const takeA = onNode.find((t) => t.id === 'shot-x');
       const takeB = onNode.find((t) => t.id === 'other');
+      if (!takeA || !takeB || takeA.hash === takeB.hash) {
+        throw new Error(`the node lists ${onNode.map((t) => t.id).join(', ') || 'nothing'}, not two different takes to rename`);
+      }
       const macLog = () => (existsSync(join(byContentMac, 'shared.marks.jsonl'))
         ? readFileSync(join(byContentMac, 'shared.marks.jsonl'), 'utf8') : '');
       // The node renames the shared take away and the other take into its name while the log
       // request is held, then puts them back.
+      // Each arm starts from an empty log here, so each one's reading is its own.
       const renamedWhileHeld = async (kind) => {
+        rmSync(join(byContentMac, 'shared.marks.jsonl'), { force: true });
         heldLogs.hold = true;
         let settled = false;
         const asked = fetch(`${macUrlHere}/library/${kind}/shared`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
-        }).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }))
+        }).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }),
+          (err) => ({ status: null, body: { error: err.message } }))
           .finally(() => { settled = true; });
         for (let i = 0; i < 200 && heldLogs.length === 0; i++) await new Promise((done) => { setTimeout(done, 50); });
         const away = await post(`${nodeUrlHere}/library/rename/shot-x`, { hash: takeA.hash, to: 'shot-y' });
@@ -5790,6 +5798,7 @@ async function runChecks() {
         && eq(reclaimed.nodeHolds, ['shot-x', 'shot-y']),
         'and a reclaim in that window merges nothing and removes nothing: both takes are still on the node',
         `HTTP ${reclaimed.answer.status}; node holds ${reclaimed.nodeHolds.join(' ')}; log here: ${macLog().trim() || '(none)'}`.slice(0, 200));
+      rmSync(join(byContentMac, 'shared.marks.jsonl'), { force: true });
       const plain = await post(`${macUrlHere}/library/sync-marks/shared`);
       check(plain.merged === 1 && /m-on-a/.test(macLog()) && !/m-on-b/.test(macLog()),
         'and with nothing renamed the same sync brings the shared take\'s mark across, so the refusals above were about the rename',
