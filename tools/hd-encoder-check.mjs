@@ -40,6 +40,11 @@ const MUTATIONS = {
     edits: [['    std::memcpy(p, &colourTs, 8);   p += 8;', '    std::memcpy(p, &ts, 8);         p += 8;']],
     fails: 'the slow-colour identity row',
   },
+  'encoder-has-no-destructor': {
+    file: 'native/grabber.cpp',
+    edits: [['  ~HdEncoder() { stop(); }\n', '']],
+    fails: 'the early-return row: the implicit destructor destroys a joinable thread, and the child aborts',
+  },
 };
 const fail = (reason) => { console.error(`[hd-encoder] DID NOT RUN: ${reason}`); process.exit(2); };
 if (MUTATE && !MUTATIONS[MUTATE]) fail(`unknown mutation ${MUTATE} - have ${Object.keys(MUTATIONS).join(', ')}`);

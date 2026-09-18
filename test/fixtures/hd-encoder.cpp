@@ -10,6 +10,7 @@
 #include <chrono>
 #include <memory>
 #include <unistd.h>
+#include <sys/wait.h>
 #include <turbojpeg.h>
 
 struct Message { uint32_t type; std::vector<uint8_t> payload; };
@@ -192,6 +193,28 @@ int main() {
     encoder.submitDepth(depth.data(), depth.size(), 43);
     check(waitMessages(TYPE_KEY, 43), "valid colour recovers after unsupported input");
     encoder.stop();
+  }
+
+  // The grabber's corpus writer returns from `main` with the encoder running and never reaches
+  // `stop()`. Asked in a child, because the defect is `std::terminate`, which would take this
+  // process and its count with it. Forked here, after every encoder above has been joined.
+  clearMessages();
+  {
+    std::fflush(stdout);
+    const pid_t child = fork();
+    if (child == 0) {
+      {
+        HdEncoder encoder(80); encoder.setKeyHeader(1000, 1000, 960, 540, 9); encoder.start();
+        encoder.submitColour(red.data(), red.size(), 50);
+        encoder.submitDepth(depth.data(), depth.size(), 50);
+      }
+      _exit(0);
+    }
+    int status = 0;
+    const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+    check(waited && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+      "an encoder still running when its scope ends is joined rather than terminated");
+    if (waited && WIFSIGNALED(status)) std::printf("  the child died on signal %d\n", WTERMSIG(status));
   }
   std::printf("\n[hd-encoder] %d assertions, %d failed\n", checked, failed);
   return failed ? 1 : 0;

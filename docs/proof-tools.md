@@ -14,7 +14,7 @@ a catch to record.
 
 The tools disagree about what a caught mutation exits. Four exit **0** on a catch and 1 on a miss
 — `registry-check`, `vendor-check`, `registration-check` and `release-gate-check` — so anything
-gating on "non-zero means caught" reads a genuine miss by these four as a catch. Twelve exit 1 on
+gating on "non-zero means caught" reads a genuine miss by these four as a catch. Thirteen exit 1 on
 a catch *and* 1 on a miss, so the code carries no information and only the printed sentence
 separates them. Six carry no miss branch at all and exit on the failure count, so a mutation they
 fail to catch exits 0 and reads as a clean pass.
@@ -44,6 +44,7 @@ Per tool, read from the source:
 | `module-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a stale anchor |
 | `syntax-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor |
 | `cpp-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor, no compiler or headers |
+| `grabber-args-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no `vendor/prefix`, no cmake, a failed build, a stale anchor |
 | `vendor-check` | pass, or a **catch** | a failed assertion, a miss, or a stale anchor | `PASS on the source, with the artifact untested` |
 | `registration-check` | pass, or a **catch** | a failed assertion, or a miss | a build or tooling failure |
 | `release-gate-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: no registry |
@@ -695,6 +696,13 @@ is NOT CAUGHT even though it exits 1.
 - **`rgbx-read-as-bgrx`** — the packed format is read BGRX, so the red/blue row swaps.
 - **`held-colour-gets-depth-time`** — a held colour is stamped with the depth frame's time, and
   the slow-colour identity row fails.
+- **`encoder-has-no-destructor`** — the class goes back to the implicit destructor, which destroys a
+  joinable thread. The early-return row runs in a forked child and fails when that child aborts.
+
+The early-return row is the part of the grabber's failed corpus write that runs without a sensor:
+an encoder left running when its scope ends is joined. The write itself happens after the device
+starts, so the grabber's exit 1 on a short write needs a sensor and a filesystem that fills during
+the dump, and no tool here reaches it.
 
 ## `vcam-check`
 
@@ -1055,6 +1063,38 @@ again — had no compile gate.
 - **`opengl-branch-broken`** — a break inside the Pi's arm, which is why the matrix exists: a gate
   parsing one configuration reports this green. It reddens 2 of the 4 grabber rows.
 - **`harness-syntax-error`** — a break in `native/harness/reg-runner.cpp`.
+
+## `grabber-args-check`
+
+The grabber refuses a `--min-depth`/`--max-depth` it cannot read exactly, or a pair with no depth
+between the two planes, and exits 2 before it looks for a device.
+
+```
+node tools/grabber-args-check.mjs
+```
+
+| needs | |
+| --- | --- |
+| binaries | cmake and a C++ compiler |
+| prefix | libfreenect2 in `vendor/prefix`, from `node tools/build-native.mjs`; without it the tool exits 2 naming it |
+| everything else | no sensor, no server, no fixture |
+
+It builds the grabber from this tree's `native/` into a scratch directory on every run, with the
+mutation applied to that copy, because `native/build/grabber` can be older than the source beside
+it. A refused row asks for exit 2, the sentence that names the flag and quotes the text as typed,
+and no sign of device enumeration. An accepted row asks for the device stage: `no Kinect v2 found`
+on a machine without a sensor, or a hello on one with a sensor, where the tool stops the grabber at
+that hello. A pair refusal prints the two values as parsed, at three decimals, not as typed. The
+no-flags, defaults, `--quality 0` and missing-value rows stay green under every mutation, which
+confines each control to the rule it breaks.
+
+- **`clip-accepts-inverted-range`** — the pair rule is gone, so a swapped or equal pair reaches the
+  device. The four pair rows fail.
+- **`depth-takes-a-numeric-prefix`** — `std::atof`'s behaviour: the leading number is kept and the
+  rest dropped. The comma-decimal, trailing-unit and trailing-space rows fail.
+- **`depth-accepts-non-finite`** — `inf` reaches the device and `nan` is refused only by the pair
+  rule, in the pair rule's sentence. The nan and inf rows fail.
+- **`depth-accepts-zero-or-negative`** — the zero and negative rows fail.
 
 ## `vendor-check`
 
