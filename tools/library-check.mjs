@@ -5142,7 +5142,7 @@ async function runChecks() {
     const inWindow = (t) => bAt !== null && aAt !== null && t >= bAt && t <= aAt - MARGIN_MS;
     const inside = samples.filter((s) => inWindow(s.started));
     check(inside.length >= INSIDE_FLOOR && walk !== null && inWindow(walk.started),
-      'the restart opened the next take while this one was still closing, and the check sampled inside that overlap - which is what makes the two rows below readings from inside the window rather than ones that missed it',
+      'the restart opened the next take while this one was still closing, and the check sampled inside that overlap - which is what makes the rows below readings from inside the window rather than ones that missed it',
       `${takeB ?? 'no next take'} open at ${bAt}ms, ${takeA} closed at ${aAt}ms (${aAt - bAt}ms overlap), `
         + `${inside.length} listings and ${walk && inWindow(walk.started) ? 'the route walk' : 'no route walk'} started inside it`);
     const wrong = inside.filter((s) => s.recording !== true || s.hash !== null);
