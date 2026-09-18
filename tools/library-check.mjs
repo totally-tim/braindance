@@ -13,7 +13,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, mkdirSync, readdirSync, renameSync, rmSync, symlinkSync, existsSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
+import { chmodSync, cpSync, linkSync, mkdirSync, readdirSync, renameSync, rmSync, symlinkSync, existsSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { createConnection } from 'node:net';
 import { createServer } from 'node:http';
@@ -734,7 +734,8 @@ const MUTATIONS = {
   // action carries the weaker check. Anchored on the descriptor's hash since `removeTake` stopped
   // hashing by name.
   'delete-trusts-sidecar': { file: 'server/library.js', edits: [[
-    '    actual = await hashOpenFile(handle);', '    actual = (await cachedIndex(path)).hash;',
+    '  const { identity: hashed, hash: actual } = await hashThrough(path);',
+    '  const hashed = takeIdentity(path);\n  const actual = (await cachedIndex(path)).hash;',
   ]] },
   // Removal goes back to leaving the marks log under the freed name, where the next take given that
   // name finds it.
@@ -913,6 +914,54 @@ const MUTATIONS = {
       ],
       ['    await unlink(from);', '    /* mutation: rename moved it already */'],
     ],
+  },
+  // A second name for one hash goes back to being written over the first, so one name vanishes.
+  'second-name-overwrites-the-first': { file: 'server/library.js', edits: [[
+    '    if (held) {\n      held.names.push(take.id);\n      continue;\n    }\n',
+    '',
+  ]],
+    fails: 'the two-names listing row, the gallery flag row and the press row. The one-name row, the '
+      + 'refusals and the copy row stay green, because the route reads the directory rather than the listing',
+  },
+  // Removing a name goes back to trusting that the two names are one file.
+  'remove-name-trusts-the-name': { file: 'server/library.js', edits: [[
+    '    const sameFile = sameTake(dropping, keeping);', '    const sameFile = true;',
+  ]],
+    fails: 'the stranger-name refusal, the swapped-name refusal, and the copy row, whose answer then '
+      + 'reports one file where there are two',
+  },
+  // Two files with one name each go back to losing one without either being hashed.
+  'remove-name-skips-the-rehash': { file: 'server/library.js', edits: [[
+    '        if (actual !== hash) {\n          throw new Error(`${name} is ${actual} here',
+    '        if (false) {\n          throw new Error(`${name} is ${actual} here',
+  ]],
+    fails: 'the stranger-name refusal and the swapped-name refusal, and no other',
+  },
+  // Removing a name stops asking whether the recorder owns either one.
+  'remove-name-during-a-shoot': { file: 'server/library.js', edits: [[
+    '  if (owns(path) || owns(kept)) throw', '  if (false) throw',
+  ]],
+    fails: 'the mid-shoot second-name row, and the row after it: the refusal is gone and the kept '
+      + 'name is scanned, which writes the index of the growing take',
+  },
+  // Delete goes back to removing one name of a take that has another.
+  'delete-ignores-a-second-name': { file: 'server/index.js', edits: [[
+    '  if (alsoNamed.length) {', '  if (false) {',
+  ]],
+    fails: 'the two-names delete refusal, and the press row, whose kept name the delete took',
+  },
+  // The gallery stops saying a take has a second name.
+  'second-name-unflagged': { file: 'web/library.js', edits: [[
+    '  if (secondNames(take).length) {\n    out.push({', '  if (false) {\n    out.push({',
+  ]],
+    fails: 'the gallery flag row, and no other',
+  },
+  // The gallery stops offering to remove a second name.
+  'second-name-cannot-be-removed': { file: 'web/library.js', edits: [[
+    '    ...(secondNames(take).length ? take.names : []).map((name) => ({',
+    '    ...[].map((name) => ({',
+  ]],
+    fails: 'the gallery flag row and the press row',
   },
   // The take being recorded becomes renameable.
   'rename-during-a-shoot': { file: 'server/library.js', edits: [[
@@ -3420,6 +3469,13 @@ async function runChecks() {
     check(existsSync(join(shootDir, `${shooting.takeId}.knct`))
       && !existsSync(join(shootDir, 'renamed-mid-shoot.knct')),
       'and it is still at the name the recorder has open', readdirSync(shootDir).sort().join(' '));
+    // A second name for the open take: asking which take it holds would scan the growing file.
+    linkSync(join(shootDir, `${shooting.takeId}.knct`), join(shootDir, 'second-name-mid-shoot.knct'));
+    const unnamed = await post(`${shootUrl}/library/remove-name/second-name-mid-shoot`,
+      { hash: openTake?.hash ?? null, keep: shooting.takeId });
+    check(/being recorded right now/.test(unnamed.error ?? '') && existsSync(join(shootDir, 'second-name-mid-shoot.knct')),
+      'and a second name for it is not removed while it records', (unnamed.error ?? 'ACCEPTED').slice(0, 60));
+    rmSync(join(shootDir, 'second-name-mid-shoot.knct'), { force: true });
     await fetch(`${shootUrl}/library/all`).catch(() => {});
     check(!existsSync(join(shootDir, `${shooting.takeId}.idx`)),
       'and the manifest still describes it without scanning it - no sidecar, which is what a full read of a growing take would leave',
@@ -3434,6 +3490,104 @@ async function runChecks() {
       'and the take it refused to rename closes as one continuous stream',
       stopped.error ? String(stopped.error).slice(0, 80) : `${stopped.stopped?.frames} frames`);
     for (const p of servers.filter((sv) => sv.port === MAC_PORT + 16)) p.child.kill('SIGKILL');
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 14)) p.child.kill('SIGKILL');
+  }
+
+  console.log('\n[library] a take under two names shows both, and either name can be taken away');
+  {
+    const namesDir = join(WORK, 'two-names');
+    rmSync(namesDir, { recursive: true, force: true });
+    mkdirSync(namesDir, { recursive: true });
+    // A rename that died between its link and its unlink leaves one file under two names; a copy
+    // made outside this program leaves two files with one hash. Distinct frame counts, distinct hashes.
+    writeTake(namesDir, 'linked-first', { frames: 5 });
+    linkSync(join(namesDir, 'linked-first.knct'), join(namesDir, 'linked-second.knct'));
+    writeTake(namesDir, 'copied-first', { frames: 6 });
+    cpSync(join(namesDir, 'copied-first.knct'), join(namesDir, 'copied-second.knct'));
+    writeTake(namesDir, 'swapped-first', { frames: 7 });
+    linkSync(join(namesDir, 'swapped-first.knct'), join(namesDir, 'swapped-second.knct'));
+    writeTake(namesDir, 'unrelated', { frames: 8 });
+    const namesUrl = await startServer(root, ['--captures', namesDir, '--name', 'two-names',
+      '--projects', join(WORK, 'names-projects'), '--presets', join(WORK, 'names-presets')], MAC_PORT + 14);
+    const entries = async () => (await getJson(`${namesUrl}/library/all`)).takes;
+    const onDisk = () => readdirSync(namesDir).filter((f) => f.endsWith('.knct')).sort().join(' ');
+    // Off the files, so a listing that loses a name cannot also lose the rows asking about it.
+    const hashOf = (id) => `sha256:${createHash('sha256').update(readFileSync(join(namesDir, `${id}.knct`))).digest('hex')}`;
+    const linked = { id: 'linked-first', hash: hashOf('linked-first') };
+    const copied = { id: 'copied-first', hash: hashOf('copied-first') };
+    const swapped = { id: 'swapped-first', hash: hashOf('swapped-first') };
+    const unrelated = { id: 'unrelated', hash: hashOf('unrelated') };
+    let listed = await entries();
+    const entryOf = (hash) => listed.find((t) => t.hash === hash);
+    check(eq([...(entryOf(linked.hash)?.names ?? [])].sort(), ['linked-first', 'linked-second'])
+      && listed.filter((t) => t.hash === linked.hash).length === 1,
+    'one file under two names is one entry that lists both names, rather than one name written over the other',
+    listed.map((t) => `${t.id}[${(t.names ?? []).join(',')}]`).join(' '));
+    check(eq(entryOf(unrelated.hash)?.names, ['unrelated']),
+      'and a take under one name lists that one name', JSON.stringify(entryOf(unrelated.hash)?.names ?? null));
+
+    const { page, errors } = await openPage(browser, libraryPage(namesUrl));
+    await page.waitForSelector(`.tile[data-hash="${linked.hash}"]`, { timeout: 20000 }).catch(() => {});
+    const tileOf = (hash) => page.evaluate((h) => {
+      const tile = document.querySelector(`.tile[data-hash="${h}"]`);
+      return tile ? {
+        flags: [...tile.querySelectorAll('.flag')].map((f) => f.dataset.flag),
+        menu: globalThis.__library.openMenu(h).items,
+        del: [...tile.querySelectorAll('.acts .act')].find((b) => b.dataset.act === 'delete')?.disabled ?? null,
+      } : null;
+    }, hash);
+    const linkedTile = await tileOf(linked.hash);
+    const removable = (linkedTile?.menu ?? []).filter((i) => i.item.startsWith('remove-name:') && !i.disabled)
+      .map((i) => i.item).sort();
+    check(linkedTile?.flags.includes('names')
+      && eq(removable, ['remove-name:linked-first', 'remove-name:linked-second']) && linkedTile.del === true,
+    'the gallery flags that take as having a second name, offers to remove either, and holds Delete down',
+    JSON.stringify(linkedTile));
+    const plainTile = await tileOf(unrelated.hash);
+    check(plainTile !== null && !plainTile.flags.includes('names')
+      && !plainTile.menu.some((i) => i.item.startsWith('remove-name:')) && plainTile.del === false,
+    'while a take with one name carries no flag and no such item', JSON.stringify(plainTile));
+
+    const deleted = await post(`${namesUrl}/library/delete/${linked.id}`, { hash: linked.hash, confirm: true });
+    check(/also filed here as/.test(deleted.error ?? '') && onDisk().includes('linked-first.knct'),
+      'a delete of a take with a second name is refused, because it would remove one name and leave the take',
+      (deleted.error ?? JSON.stringify(deleted)).slice(0, 90));
+
+    // A request built against a listing, naming the kept take's hash and a name that is not that take.
+    const stranger = await post(`${namesUrl}/library/remove-name/unrelated`, { hash: linked.hash, keep: 'linked-first' });
+    check(Boolean(stranger.error) && onDisk().includes('unrelated.knct'),
+      'removing a name that holds a different take than the kept one is refused, and nothing is unlinked',
+      (stranger.error ?? JSON.stringify(stranger)).slice(0, 90));
+    // The second name is given to another take after the listing was read, outside this program.
+    rmSync(join(namesDir, 'swapped-second.knct'));
+    writeTake(namesDir, 'swapped-second', { frames: 9 });
+    const swap = await post(`${namesUrl}/library/remove-name/swapped-second`, { hash: swapped.hash, keep: 'swapped-first' });
+    check(Boolean(swap.error) && onDisk().includes('swapped-second.knct'),
+      'and so is a name that stopped holding the take after the listing was read: the other take under it survives',
+      (swap.error ?? JSON.stringify(swap)).slice(0, 90));
+    const copy = await post(`${namesUrl}/library/remove-name/copied-first`, { hash: copied.hash, keep: 'copied-second' });
+    const keptHash = `sha256:${createHash('sha256').update(readFileSync(join(namesDir, 'copied-second.knct'))).digest('hex')}`;
+    check(copy.removed === 'copied-first.knct' && copy.sameFile === false && !onDisk().includes('copied-first.knct')
+      && keptHash === copied.hash,
+    'two files with one hash lose the named one once both are hashed, and the kept file still has those bytes',
+    copy.error ? copy.error.slice(0, 90) : onDisk());
+
+    // Caught, because a build with no such item throws here and that is the row below reddening.
+    await page.evaluate((h) => globalThis.__library.clickMenuItem(h, 'remove-name:linked-second'), linked.hash)
+      .catch(() => {});
+    for (let i = 0; i < 60 && onDisk().includes('linked-second.knct'); i++) await new Promise((r) => { setTimeout(r, 100); });
+    await page.waitForFunction((h) => {
+      const tile = document.querySelector(`.tile[data-hash="${h}"]`);
+      return tile && ![...tile.querySelectorAll('.flag')].some((f) => f.dataset.flag === 'names');
+    }, linked.hash, { timeout: 10000 }).catch(() => {});
+    listed = await entries();
+    const afterTile = await tileOf(linked.hash);
+    check(!onDisk().includes('linked-second.knct') && onDisk().includes('linked-first.knct')
+      && eq(entryOf(linked.hash)?.names, ['linked-first']) && afterTile?.flags.includes('names') === false,
+    'pressing Remove the name takes that name away from the gallery and the disk, and the take stays under the other',
+    `${onDisk()}; flags ${JSON.stringify(afterTile?.flags ?? null)}`);
+    check(errors.length === 0, 'and the gallery raised no page error through any of it', errors.join(' | ').slice(0, 120));
+    await page.close();
     for (const p of servers.filter((sv) => sv.port === MAC_PORT + 14)) p.child.kill('SIGKILL');
   }
 

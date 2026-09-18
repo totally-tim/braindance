@@ -400,7 +400,14 @@ export function reconcile(localTakes, nodeTakes) {
   // still being written cannot be reconciled with anything.
   const keyOf = (take, side) => take.hash ?? `${side}:${take.id}`;
   for (const take of localTakes) {
-    byHash.set(keyOf(take, 'local'), { ...take, state: 'local', local: take, remote: null });
+    // A second name for one hash is listed on the entry the first made, and never written over
+    // it: the gallery flags it, and `removeName` is the way to take it away.
+    const held = byHash.get(keyOf(take, 'local'));
+    if (held) {
+      held.names.push(take.id);
+      continue;
+    }
+    byHash.set(keyOf(take, 'local'), { ...take, names: [take.id], state: 'local', local: take, remote: null });
   }
   for (const take of nodeTakes ?? []) {
     const held = byHash.get(keyOf(take, 'remote'));
@@ -409,7 +416,7 @@ export function reconcile(localTakes, nodeTakes) {
       held.remote = take;
       continue;
     }
-    byHash.set(keyOf(take, 'remote'), { ...take, state: 'remote', local: null, remote: take });
+    byHash.set(keyOf(take, 'remote'), { ...take, names: [], state: 'remote', local: null, remote: take });
   }
   const out = [...byHash.values()];
   out.sort((a, b) => b.capturedAt - a.capturedAt);
@@ -685,19 +692,25 @@ export async function removeTake(dir, id, { hash, verifiedElsewhere = null }) {
   return withTakeLock([path], () => removeHeld(id, path, { hash, verifiedElsewhere }));
 }
 
+/**
+ * The content hash of the file a name holds, and which file that was. Through one descriptor,
+ * because a removal unlinks by name and has to ask the name again before it does.
+ */
+async function hashThrough(path) {
+  const handle = await open(path, 'r');
+  try {
+    const identity = await handle.stat();
+    return { identity, hash: await hashOpenFile(handle) };
+  } finally {
+    await handle.close();
+  }
+}
+
 // `removeTake` once it holds the take's lock.
 async function removeHeld(id, path, { hash, verifiedElsewhere }) {
   // Hashed through one descriptor and unlinked by name, so the name is asked again before the
   // unlink: a rename landing during the hash can free this id and move another take into it.
-  const handle = await open(path, 'r');
-  let hashed;
-  let actual;
-  try {
-    hashed = await handle.stat();
-    actual = await hashOpenFile(handle);
-  } finally {
-    await handle.close();
-  }
+  const { identity: hashed, hash: actual } = await hashThrough(path);
   if (actual !== hash) {
     throw new Error(
       `${id} is ${actual} here, not the ${hash} this removal named: `
@@ -728,6 +741,56 @@ async function removeHeld(id, path, { hash, verifiedElsewhere }) {
   await unlink(indexPathFor(path)).catch(() => {});
   forgetCapture(path);
   return { removed: `${id}.knct`, hash: actual };
+}
+
+/**
+ * Takes one name away from a take filed under two, keeping `keep`. Refused unless both names
+ * still hold the take `hash` names: one file, or two files each hashed here to those bytes.
+ */
+export async function removeName(dir, id, { keep, hash, owns = () => false }) {
+  for (const name of [id, keep]) {
+    if (!VALID_ID.test(String(name ?? ''))) throw new Error(`unusable take id ${name}`);
+  }
+  // Case-folded, because on this volume `Take-1` and `take-1` are one name for one file.
+  if (id.toLowerCase() === keep.toLowerCase()) {
+    throw new Error(`${id} and ${keep} are one name, so removing it would leave the take no name at all`);
+  }
+  const path = join(dir, `${id}.knct`);
+  const kept = join(dir, `${keep}.knct`);
+  // Asking which take a name holds reads the file, and the take being written has no hash yet.
+  if (owns(path) || owns(kept)) throw new Error(`${owns(path) ? id : keep} is being recorded right now: stop the take first`);
+  return withTakeLock([path, kept], async () => {
+    const dropping = takeIdentity(path);
+    const keeping = takeIdentity(kept);
+    if (dropping === null) throw new Error(`${id} is not in ${resolve(dir)}, so there is no name to remove`);
+    if (keeping === null) {
+      throw new Error(`${keep} is not in ${resolve(dir)}, so ${id} is this take's only name and removing it would delete the take`);
+    }
+    const sameFile = sameTake(dropping, keeping);
+    if (sameFile) {
+      const held = (await cachedIndex(kept)).hash;
+      if (held !== hash) {
+        throw new Error(`${keep} is ${held} here, not the ${hash} this request named: nothing was removed`);
+      }
+    } else {
+      // Two files, so the one under `id` goes and its bytes with it: both are hashed, as delete
+      // hashes, and each name is asked again after its hash.
+      for (const [name, at] of [[id, path], [keep, kept]]) {
+        const { identity, hash: actual } = await hashThrough(at);
+        if (actual !== hash) {
+          throw new Error(`${name} is ${actual} here, not the ${hash} this request named: `
+            + `${id} and ${keep} are not one take, and nothing was removed`);
+        }
+        if (!sameTake(identity, takeIdentity(at))) {
+          throw new Error(`${name} was renamed or replaced while it was being hashed, and nothing was removed`);
+        }
+      }
+    }
+    await unlink(path);
+    await unlink(indexPathFor(path)).catch(() => {});
+    forgetCapture(path);
+    return { removed: `${id}.knct`, kept: `${keep}.knct`, hash, sameFile };
+  });
 }
 
 /**
@@ -778,7 +841,7 @@ export async function renameTake(dir, id, requested, { hash, owns = () => false 
 
     // Linked then unlinked, never renamed: the `stat` loop above is check-then-act and `rename(2)`
     // replaces silently, where `link(2)` fails EEXIST atomically. The window it admits is a take
-    // under both names, which the reconciliation folds by hash.
+    // under both names, which the gallery flags as a second name and `removeName` takes away.
     const linkInto = async (source, dest) => {
       try {
         await link(source, dest);

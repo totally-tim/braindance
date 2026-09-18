@@ -14,7 +14,7 @@ import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
 import {
   VALID_ID, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, copyOnNode, downloadTake,
   downloadsInFlight, hashFile, markLogFor, markLogPath, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
-  removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeIdentity,
+  removeName, removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeIdentity,
 } from './library.js';
 import { EffectStore } from './effect-store.js';
 import { RESERVED_EFFECT_IDS, doorRefusal, forkRefusal } from './effect-door.js';
@@ -507,6 +507,20 @@ async function serveRename(req, res, [id]) {
   }
 }
 
+// A take filed under a second name, which `reconcile` lists and a rename that did not finish leaves.
+async function serveRemoveName(req, res, [id]) {
+  const body = await readBody(req);
+  try {
+    sendJson(res, await removeName(CAPTURES_DIR, id, {
+      keep: body.keep,
+      hash: body.hash,
+      owns: (path) => recorder.owns(path),
+    }));
+  } catch (err) {
+    sendJson(res, { error: err.message }, err.code === 'ENOENT' ? 404 : 409);
+  }
+}
+
 // `requireMutation` has already asked whether this came from this program's page; what is left is
 // whether the window would open where the person asking is, which `isLoopback`
 // reads off the socket.
@@ -628,6 +642,15 @@ async function serveRemoval(req, res, [id], kind) {
   }
   if (!mine) {
     sendJson(res, { error: `${id} is not on this machine` }, 404);
+    return;
+  }
+  // Delete promises the last copy, and a second name here is the same take staying behind.
+  const alsoNamed = here.takes.filter((t) => t.hash !== null && t.hash === mine.hash && t.id !== id);
+  if (alsoNamed.length) {
+    sendJson(res, {
+      error: `${id} is also filed here as ${alsoNamed.map((t) => t.id).join(', ')}: delete would remove one name `
+        + 'and leave the take under the other, so remove the extra name first',
+    }, 409);
     return;
   }
   // `verifiedElsewhere` is what a reclaim from the other machine carries, and it turns this route
@@ -1299,6 +1322,7 @@ const ROUTES = [
   { path: '/library/reclaim/:id', pattern: /^\/library\/reclaim\/([^/]+)$/, write: { methods: ['POST'], run: (req, res, args) => serveRemoval(req, res, args, 'reclaim') } },
   { path: '/library/sync-marks/:id', pattern: /^\/library\/sync-marks\/([^/]+)$/, write: { methods: ['POST'], run: serveMarkSync } },
   { path: '/library/rename/:id', pattern: /^\/library\/rename\/([^/]+)$/, write: { methods: ['POST'], run: serveRename } },
+  { path: '/library/remove-name/:id', pattern: /^\/library\/remove-name\/([^/]+)$/, write: { methods: ['POST'], run: serveRemoveName } },
   // A `write` although no byte of the library moves, because the slot declares "this route makes
   // something happen" and this is the one route in the program that starts a process.
   { path: '/library/reveal/:id', pattern: /^\/library\/reveal\/([^/]+)$/, write: { methods: ['POST'], run: serveReveal } },

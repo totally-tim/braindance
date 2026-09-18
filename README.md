@@ -114,7 +114,7 @@ node.](media/library.png)
 Every take is a tile with its poster, duration, size, frame count, mark count and date. Skim a
 poster to scrub it. Tap to open it large, then arrow keys step a frame and up and down move
 between takes. The **⋯** menu holds **rename**, **show in the file manager** and **reclaim on
-node**. Started with `--node http://<capture-node>:8080`, the library also lists that node's
+node**. A take flagged **2 names** is one take filed under two names; its menu removes either one. Started with `--node http://<capture-node>:8080`, the library also lists that node's
 takes, and the filter row splits it into *local*, *node only* and *both*.
 
 ### 3. Start a project
