@@ -767,7 +767,7 @@ route with a write method goes through the three checks under
 | `/library/download/:id` | POST | Pulls a take from the linked node. |
 | `/library/delete/:id` | POST | Deletes a take. |
 | `/library/reclaim/:id` | POST | Deletes the local copy of a take the node still holds. |
-| `/library/sync-marks/:id` | POST | Pushes marks to the node. |
+| `/library/sync-marks/:id` | POST | Merges the node's marks for this take into its log here. |
 | `/library/rename/:id` | POST | Renames a take. |
 | `/library/reveal/:id` | POST | Starts the file manager on the take. |
 | `/projects/all` | GET | Lists project documents. |
