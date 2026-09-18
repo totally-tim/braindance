@@ -10,6 +10,27 @@ export function integerMidpoint(lo, hi, upper = false) {
   return lo + Math.floor((hi - lo + (upper ? 1 : 0)) / 2);
 }
 
+/** A take's frame stamps as source seconds from its first frame, which is what a mark counts in. */
+export function sourceTimes(stampMs) {
+  return stampMs.map((s) => (s - stampMs[0]) / 1000);
+}
+
+/**
+ * The last frame at or before `sourceSec`, searched over `times[0..last]`. A time before the
+ * first frame answers 0. The editor's bracket and the library's skim both resolve a time here,
+ * so a mark lands on one frame whichever surface pressed it.
+ */
+export function frameAtOrBefore(times, sourceSec, last = times.length - 1) {
+  let lo = 0;
+  let hi = last;
+  while (lo < hi) {
+    const mid = integerMidpoint(lo, hi, true);
+    if (times[mid] <= sourceSec) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
 /** Counts the union of inclusive frame ranges requested from each take. */
 export function frameLoadByTake(spans) {
   const ranges = new Map();

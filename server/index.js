@@ -687,6 +687,68 @@ async function serveRemoteFrame(req, res, [id, n], query) {
   res.end(body);
 }
 
+// An index measured 23 bytes a frame on fixture-1g, so this is about a day of a take at 30fps.
+const MAX_REMOTE_INDEX_BYTES = 64 * 1024 * 1024;
+
+// A node-only take's index, for its frame stamps: the library resolves a mark through them, so a
+// take on the node lands a mark on the frame a take here would. Passed through untouched, under
+// the same guards as a frame; the page checks the hash against the listing.
+async function serveRemoteIndex(req, res, [id]) {
+  if (!node || !VALID_ID.test(id)) {
+    res.writeHead(404).end('not found');
+    return;
+  }
+  let upstream;
+  try {
+    upstream = await fetch(`${node.url}/capture/${encodeURIComponent(id)}/index`, { signal: untilCallerLeaves(res) });
+  } catch {
+    if (!res.writableEnded) res.writeHead(502).end('the node did not answer for that index');
+    return;
+  }
+  if (!upstream.ok) {
+    res.writeHead(upstream.status).end('the node could not serve that index');
+    return;
+  }
+  const declared = Number(upstream.headers.get('content-length') ?? NaN);
+  if (Number.isFinite(declared) && declared > MAX_REMOTE_INDEX_BYTES) {
+    upstream.body?.cancel().catch(() => { /* the node may already be gone */ });
+    res.writeHead(502).end(`the node offered ${declared} bytes for one index, past the ${MAX_REMOTE_INDEX_BYTES} allowed`);
+    return;
+  }
+  let body;
+  try {
+    const reader = upstream.body?.getReader();
+    if (!reader) {
+      res.writeHead(502).end('the node answered that index with no body at all');
+      return;
+    }
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_REMOTE_INDEX_BYTES) {
+        await reader.cancel().catch(() => {});
+        res.writeHead(502).end(`the node sent past the ${MAX_REMOTE_INDEX_BYTES} bytes allowed for one index,`
+          + ' and was cut off rather than buffered');
+        return;
+      }
+      chunks.push(value);
+    }
+    body = Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)), total);
+  } catch {
+    if (!res.writableEnded) res.writeHead(502).end('the index stopped arriving from the node');
+    return;
+  }
+  res.writeHead(200, {
+    'Content-Type': MIME['.json'],
+    'Content-Length': body.length,
+    'Cache-Control': 'no-cache',
+  });
+  res.end(body);
+}
+
 async function serveDownload(req, res, [id]) {
   if (!node) {
     sendJson(res, { error: 'no capture node is linked, so there is nothing to download from' }, 409);
@@ -1229,6 +1291,7 @@ const ROUTES = [
   // A frame of a node-only take, fetched through here rather than by the browser reaching across:
   // one origin for the page, and the decimation decision stays on the side that knows the link.
   { path: '/library/remote-frame/:id/:n', pattern: /^\/library\/remote-frame\/([^/]+)\/([^/]+)$/, read: serveRemoteFrame },
+  { path: '/library/remote-index/:id', pattern: /^\/library\/remote-index\/([^/]+)$/, read: serveRemoteIndex },
 
   // ---- the library, written
   { path: '/library/download/:id', pattern: /^\/library\/download\/([^/]+)$/, write: { methods: ['POST'], run: serveDownload } },

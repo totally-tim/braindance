@@ -413,12 +413,20 @@ guards take ids, which nothing types, and allows no space. Document names get
 name joins to, up to `MAX_DOCUMENT_NAME_BYTES`.
 
 **A project shows a picture, and dragging it walks the cut.** The listing hands the whole document
-body over, so only frames are fetched. The finger moves through program time: the clip covering
-that second is found by its `start` and `length`, its `speed` and `sourceStart` map it into source
-time, and the skim changes capture at a cut. Nothing here holds the grade, the effects or the
-camera, so the skim is raw geometry. `web/take-draw.js` draws it — a take, a canvas and an index
-in, a frame out, the capture free to change between draws — and the library page and the clip
-picker are its other callers.
+body over, so only frames and each take's stamps are fetched. The finger moves through program
+time: the clip covering that second is found by its `start` and `length`, its `speed` and
+`sourceStart` map it into source time, and the skim changes capture at a cut. Nothing here holds
+the grade, the effects or the camera, so the skim is raw geometry. `web/take-draw.js` draws it — a
+take, a canvas and a source second or a frame index in, a frame out, the capture free to change
+between draws — and the library page and the clip picker are its other callers.
+
+**A source second finds its frame through the take's stamps, on every surface.** A take's frames
+are unevenly spaced wherever the link dropped some, so the skim reads the stamps from the take's
+index, or from the node's copy through `/library/remote-index/:id`, and resolves a second with
+`frameAtOrBefore`, the search the editor's bracket runs. A mark lands on one frame whichever
+surface pressed it. The bar under a skim is the take's time, so a tick and the playhead stopped on
+it agree. A skim moves only once it has the stamps; a take whose stamps do not arrive stays on its
+first frame, and the library viewer draws its marks as labels and says why.
 
 **A project whose footage is not on this machine says so on its row, and the control goes to the
 library.** The loader refuses a document naming a take no local capture hashes, so reclaiming one
