@@ -3669,7 +3669,7 @@ function adoptProgramOut(patch) {
   if (patch.size && Number.isInteger(patch.size.w) && Number.isInteger(patch.size.h)
       && patch.size.w > 0 && patch.size.h > 0) {
     programOutSize = { w: patch.size.w, h: patch.size.h };
-    if (PROGRAM_OUT) { outputSize = { ...programOutSize }; resize(); }
+    if (PROGRAM_OUT) { outputSize = programOutDrawSize(); resize(); }
     if (progSizeEl) progSizeEl.value = `${programOutSize.w}x${programOutSize.h}`;
   }
   if (patch.mode === 'mirror' || patch.mode === 'camera') {
@@ -3685,6 +3685,18 @@ function adoptProgramOut(patch) {
       freeCamera.updateProjectionMatrix();
     }
   }
+}
+
+/**
+ * The size the source draws at: the setting, scaled down whole to the largest target this context
+ * allocates. Never cropped, because a smaller picture of the shot beats a black one.
+ */
+function programOutDrawSize() {
+  const scale = Math.min(1, renderTargetCaps().maxSize / Math.max(programOutSize.w, programOutSize.h));
+  return {
+    w: Math.max(1, Math.floor(programOutSize.w * scale)),
+    h: Math.max(1, Math.floor(programOutSize.h * scale)),
+  };
 }
 
 /** Draw one output frame, called when a depth frame arrives rather than on a clock. */
@@ -3715,8 +3727,11 @@ function paintProgramOutReadout() {
   const decim = monitorState && (monitorState.divisor > 1 || monitorState.stride > 1)
     ? `  ÷${monitorState.divisor} ×${monitorState.stride}`
     : '';
+  const drawn = programOutDrawSize();
+  const capped = drawn.w !== programOutSize.w || drawn.h !== programOutSize.h
+    ? ` capped to ${drawn.w}x${drawn.h}` : '';
   programOutReadout.textContent = `PROGRAM OUT  ${programOutMode}  `
-    + `${programOutSize.w}x${programOutSize.h}  ${programOutFps.toFixed(1)} fps  `
+    + `${programOutSize.w}x${programOutSize.h}${capped}  ${programOutFps.toFixed(1)} fps  `
     + `${programOutMissed} missed${decim}`;
 }
 
@@ -11500,7 +11515,7 @@ if (EDITING && !REQUESTED_TAKE && !REQUESTED_PROJECT && !REQUESTED_NEW) {
   // `resize()` ran before this branch added program-out, so the canvas sat below no appbar.
   renderer.domElement.style.top = '0px';
   renderer.domElement.style.left = '0px';
-  outputSize = { ...programOutSize };
+  outputSize = programOutDrawSize();
   resize();
   setViewCamera(programCamera);
 

@@ -72,7 +72,7 @@ A mutated run prints the expected failure row when its entry carries a `fails:` 
 For other entries, read the catch from the assertions that fired.
 
 Four tables are too large to reproduce here — `editor-check` declares 202, `library-check` 114,
-`registry-check` 58 and `effect-check` 42. Their sections give the count and the enumerate
+`registry-check` 59 and `effect-check` 42. Their sections give the count and the enumerate
 command prints the names.
 
 ## `determinism-check`
@@ -136,7 +136,7 @@ node tools/registry-check.mjs --url http://localhost:8080
 `--before` and `--against` drive the cross-build arm, which finds its revision by a content
 marker instead of a hash, so a rewritten history does not move it.
 
-58 controls, one per look term or per rule about how a term reaches the pixels.
+59 controls, one per look term or per rule about how a term reaches the pixels.
 `node tools/registry-check.mjs --mutate __enumerate__` prints the names. Read the fired rows and
 not the total.
 
@@ -151,12 +151,15 @@ arm also counts each draw and clear that lands in a framebuffer that cannot comp
 | no `EXT_color_buffer_float` | hides that one | Blackwall and Ghost |
 | no `EXT_color_buffer_half_float` | hides that one, which is Firefox's own list | Blackwall and Ghost |
 
-The cap arm is Firefox's `privacy.resistFingerprinting`, which LibreWolf turns on by default. The
-section's four controls, each with the rows it reddened:
+The cap arm is Firefox's `privacy.resistFingerprinting`, which LibreWolf turns on by default. It
+also opens `/program` set to 3840x2160 and asks that Blackwall draws there inside the cap. The
+section's five controls, each with the rows it reddened:
 
 - **`targets-ignore-the-size-cap`** — `resize` stops capping the pixel ratio. Ten rows of the cap
   arm: its buffer row, its eight composer presets, which draw black, and its incomplete-framebuffer
   row. The four direct presets stay lit, which is the reporter's picture.
+- **`program-out-ignores-the-size-cap`** — `/program` draws at its setting whatever the limit.
+  The cap arm's `/program` row alone.
 - **`chain-assumes-half-float`** — the chain takes half-float without asking. Eleven rows of the
   no-extension arm: its decision row, its eight composer presets, its incomplete-framebuffer row,
   and its warning row, which loses the 8-bit clause.

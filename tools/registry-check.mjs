@@ -800,6 +800,15 @@ const MUTATIONS = {
       + 'composer presets drawing black, and its incomplete-framebuffer row. The four direct '
       + 'presets stay lit, which is the shape of the report',
   },
+  'program-out-ignores-the-size-cap': {
+    file: 'web/main.js',
+    edits: [[
+      '  const scale = Math.min(1, renderTargetCaps().maxSize / Math.max(programOutSize.w, programOutSize.h));',
+      '  const scale = 1;',
+    ]],
+    fails: 'the 2048-cap arm\'s /program row alone: black at 3840x2160, with its buffer past the cap '
+      + 'and its draws landing in framebuffers that cannot complete',
+  },
   'chain-assumes-half-float': {
     file: 'web/post-chain.js',
     edits: [[
@@ -1488,6 +1497,7 @@ async function openPage({
   viewportSize = VIEW,
   comparisonShell = false,
   within = context,
+  at = RECORDER_PATH,
 } = {}) {
   const page = await within.newPage();
   if (viewportSize.width !== VIEW.width || viewportSize.height !== VIEW.height) {
@@ -1514,7 +1524,7 @@ async function openPage({
     // out of its own HTML, so pairing the old module with the new markup would boot it on
     // whatever a range input defaults to. The predicate and the `goto` below read one
     // constant rather than each spelling the path.
-    await page.route((url) => url.pathname === RECORDER_PATH,
+    await page.route((url) => url.pathname === at,
       (route) => { servedHtml = true; return route.fulfill({ contentType: 'text/html; charset=utf-8', body: source.html }); });
     await page.route((url) => url.pathname === MAIN_PATH, (route) => route.fulfill({
       contentType: 'text/javascript; charset=utf-8', body: source.js,
@@ -1538,7 +1548,7 @@ async function openPage({
     }));
   }
 
-  await page.goto(URL_BASE + RECORDER_PATH, { waitUntil: 'load' });
+  await page.goto(URL_BASE + at, { waitUntil: 'load' });
   // Proof the interception held. A predicate that stopped matching would pair the old module
   // with today's markup, which throws at boot and arrives as a timeout naming nothing.
   if (source && !servedHtml) {
@@ -4535,6 +4545,36 @@ console.log('\n[registry] every shipped preset draws on a context that renders l
       })()`);
       check(drawn.lit > 0.001, `${preset.name} draws under ${arm.name}`,
         `${(100 * drawn.lit).toFixed(2)}% lit, ${drawn.post ? 'through the post chain' : 'straight to the canvas'}`);
+    }
+
+    if (arm.cap) {
+      // The OBS source at a 4K setting, which has no bar to say anything: it draws the whole shot
+      // smaller rather than a black frame.
+      const source = await openPage({ pin: true, viewportSize: arm.viewport, within, at: '/program' });
+      const drawn = await source.page.evaluate(`(async () => {
+        const k = globalThis.__kinect;
+        k.drive.pin(await (await fetch('/__pinned.bin')).arrayBuffer());
+        k.applyProgramOut({ size: { w: 3840, h: 2160 } });
+        k.applyPreset(${JSON.stringify(shipped.find((p) => p.name === 'blackwall').body.values)});
+        k.drive.reset();
+        k.drive.stepTo(0.2);
+        k.drive.stepTo(0.4);
+        const px = k.drive.readPixels();
+        let lit = 0;
+        for (let i = 0; i < px.length; i += 4) if (Math.max(px[i], px[i + 1], px[i + 2]) > 16) lit++;
+        return {
+          lit: lit / (px.length / 4),
+          buffer: k.renderCaps().buffer,
+          source: document.body.classList.contains('program-out'),
+          incomplete: globalThis.__incomplete.incomplete,
+        };
+      })()`);
+      check(drawn.source && drawn.lit > 0.001 && drawn.incomplete === 0 && Math.max(...drawn.buffer) <= arm.cap
+        && Math.abs(drawn.buffer[0] / drawn.buffer[1] - 16 / 9) < 0.01,
+      `and /program set to 3840x2160 draws Blackwall under ${arm.name}, scaled whole to fit`,
+      `${(100 * drawn.lit).toFixed(2)}% lit, buffer ${drawn.buffer.join('x')}, `
+        + `${drawn.incomplete} draws into an incomplete framebuffer${drawn.source ? '' : ', not the source page'}`);
+      await source.page.close();
     }
 
     const counted = await armPage.evaluate('globalThis.__incomplete');

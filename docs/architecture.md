@@ -478,6 +478,9 @@ framebuffer and not read off extension names, because Firefox renders half-float
   look that skips the chain draws, and a look through it draws black.
 - **An export is refused, not capped.** Its size is the deliverable's, so `exportClip` refuses
   one larger than the limit before it starts and names the limit.
+- **`/program` is capped, not refused.** It is a live source with no bar, so
+  `programOutDrawSize` scales its whole frame down to the limit and its readout names both
+  sizes, as in `3840x2160 capped to 2048x1152`.
 
 ## Frame interpolation
 
