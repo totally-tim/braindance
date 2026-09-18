@@ -250,6 +250,7 @@ through the full renderer.
 | mark | Plants a mark at the playhead, or takes away the one already there. |
 | speed | The selected clip's rate, 0.1x to 4x. The travel is logarithmic, with a detent at 1.00x. |
 | clip: `delete clip`, `move`, `rotate`, `key` | Removes the selected clip, arms its move or turn handles in the viewport, and keyframes its placement at the playhead. |
+| clip: `copy look`, `paste look` | Copies the selected clip's look, and applies the copied look to the selected clip. |
 | `+` below the last clip row | Opens the media library's takes. |
 | camera: eye, diamond | Looks through the program camera, and keyframes it at the playhead. |
 | Camera tab: `add key`, `delete key` | Writes a camera key at the playhead, and removes the one under it. |
@@ -628,6 +629,13 @@ that is not about the reading. Everything in between is refused.
 whole-look save sheds an ordinary effect sitting wholly at its own defaults, because a
 whole-look apply restores it to those defaults anyway; the three reading packages stay whole
 even at their defaults, and a subset save sheds nothing.
+
+**`paste look` applies a preset nobody saved.** `copy look` takes what a save with every box
+ticked would write from the selected clip, and the stamp that clip wears. Pasting applies it
+the way the picker applies a whole look: the post-chain values land on the project; framing,
+placement, timing and tracks stay; a keyed parameter goes on following its track; and the clip
+claims the stamp the source wore, or none. One paste is one undo step. The open page holds the
+copy until it reloads.
 
 **Saving over a shipped name forks it**: the write lands in your library and shadows the
 built-in, and deleting the fork brings the shipped look back. `export` writes the look on

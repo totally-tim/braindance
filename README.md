@@ -93,8 +93,10 @@ carries the project, the export and the OBS status, and is the same on every sur
 
 The **Effects** tab's preset picker holds the twelve shipped looks. Pick one to apply it.
 Shipped presets cannot be overwritten. **save** writes your own to `presets/`, and **export**
-and **import** move presets between machines as JSON. Every slider underneath stays
-adjustable, and a changed row grows a **↺** that resets just that one.
+and **import** move presets between machines as JSON. To put one clip's look on another clip,
+select the first, press **copy look** in the clip controls, then select the other and press
+**paste look**. Every slider underneath stays adjustable, and a changed row grows a **↺** that
+resets just that one.
 [Presets](docs/reference.md#presets) lists the twelve.
 
 ![The same surface with the Effects tab open. The Preset picker is expanded over the
