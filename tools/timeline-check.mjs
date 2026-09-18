@@ -595,6 +595,11 @@ for (let attempt = 0; attempt < 12; attempt++) {
     .then((handle) => handle.jsonValue()).catch(() => 'timeout');
   if (landed === 'target') break;
 }
+// The stage lands seconds after the take opens, with the open's garbage still uncollected, and a
+// collection that falls inside a `page.evaluate` loses its promise: `Resulting promise was garbage
+// collected`, after the page has finished the work. One forced collection here, measured on
+// section 1b: 5 of 8 runs died without it, 0 of 8 with it.
+await (await page.context().newCDPSession(page)).send('HeapProfiler.collectGarbage');
 await page.evaluate(INSTALL);
 
 const gpu = await page.evaluate(() => {
