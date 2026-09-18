@@ -672,10 +672,20 @@ const MUTATIONS = {
     '  /* mutation: the captures directory is assumed */',
   ]] },
   // Delete goes back to trusting the sidecar where reclaim re-hashes, so the irreversible
-  // action carries the weaker check.
+  // action carries the weaker check. Anchored on the descriptor's hash since `removeTake` stopped
+  // hashing by name.
   'delete-trusts-sidecar': { file: 'server/library.js', edits: [[
-    '  const actual = await hashFile(path);', '  const actual = (await cachedIndex(path)).hash;',
+    '    actual = await hashOpenFile(handle);', '    actual = (await cachedIndex(path)).hash;',
   ]] },
+  // Delete goes back to unlinking whatever the name holds once the hash is done, so a rename during
+  // the hash that moves another take into the name loses that take.
+  'delete-unlinks-under-a-race': { file: 'server/library.js', edits: [[
+    '  if (!sameTake(hashed, takeIdentity(path))) {', '  if (false) {',
+  ]],
+    fails: 'the delete-race refusal and the row saying the take renamed into the name is still on '
+      + 'disk. The row saying the named take survives under its new name stays green, and so does '
+      + 'every other delete row',
+  },
   // The decimation path stops checking that a frame's two declared lengths describe the frame,
   // so an overstated colour length returns the uninitialised tail of an `allocUnsafe` buffer.
   'decimate-skips-length-check': { file: 'server/capture.js', edits: [[
@@ -4329,6 +4339,66 @@ async function runChecks() {
       'delete removes the last copy, and it is the file that goes');
     check(!(await getJson(`${macUrl}/library/all`)).takes.some((t) => t.id === 'one-frame-take'),
       'and the library no longer lists it');
+  }
+
+  console.log('\n[library] delete unlinks the file it hashed, not whatever holds the name once the hash is done');
+  {
+    // The staged module rather than a route, so a mutated run tests the mutated code and the race
+    // is two renames this process lands, not a request's timing across a socket.
+    const lib = await import(pathToFileURL(join(root, 'server/library.js')).href);
+    const { fstatSync } = await import('node:fs');
+    const raceDir = join(WORK, 'delete-race');
+    rmSync(raceDir, { recursive: true, force: true });
+    mkdirSync(raceDir, { recursive: true });
+    // Sized by frames so the hash outlasts two renames, about 200MB of the sample.
+    writeTake(raceDir, 'asked-to-go', { frames: 400 });
+    writeTake(raceDir, 'never-named', { frames: 5 });
+    // The listing the delete is pressed from, which also builds both indexes: `renameTake` reads
+    // `cachedIndex`, and a cold one is a full parse that would outlast the hash it races.
+    const listed = await lib.scanTakes(raceDir);
+    const asked = listed.takes.find((t) => t.id === 'asked-to-go');
+    const stranger = listed.takes.find((t) => t.id === 'never-named');
+    const inode = statSync(join(raceDir, 'asked-to-go.knct'));
+    // Whether this process holds the take open, read off its own descriptor table.
+    const holding = () => readdirSync('/dev/fd').some((n) => {
+      try {
+        const st = fstatSync(Number(n));
+        return st.dev === inode.dev && st.ino === inode.ino;
+      } catch {
+        return false;
+      }
+    });
+    const heldBefore = holding();
+    let settled = false;
+    const pending = lib.removeTake(raceDir, 'asked-to-go', { hash: asked.hash })
+      .then((done) => ({ done }), (err) => ({ error: err.message }))
+      .finally(() => { settled = true; });
+    for (let i = 0; i < 2000 && !holding() && !settled; i++) await new Promise((r) => { setImmediate(r); });
+    // The descriptor is what says the hash has begun; before it, the removal would hash the take
+    // renamed in and be refused by the hash rather than by the question this section asks.
+    const opened = !heldBefore && holding();
+    await lib.renameTake(raceDir, 'asked-to-go', 'moved-away', { hash: asked.hash });
+    await lib.renameTake(raceDir, 'never-named', 'asked-to-go', { hash: stranger.hash });
+    const inside = opened && !settled;
+    const outcome = await pending;
+    const hashOf = async (id) => (existsSync(join(raceDir, `${id}.knct`))
+      ? lib.hashFile(join(raceDir, `${id}.knct`)) : null);
+    if (!inside) {
+      skipped.push('the delete-race refusal, whose renames did not land inside the hash');
+      console.log(`  ...   the renames did not land inside the hash (${heldBefore ? 'the take was already held open'
+        : opened ? 'the removal settled first' : 'the removal never opened the take'}), so the race was not entered`);
+    } else {
+      check(/renamed or replaced while it was being hashed/.test(outcome.error ?? ''),
+        'a delete is refused when its take is renamed away, and another renamed into its name, while it hashes',
+        (outcome.error ?? `REMOVED ${JSON.stringify(outcome.done)}`).slice(0, 100));
+      check(await hashOf('asked-to-go') === stranger.hash,
+        'and the take renamed into that name is still on disk, which is the footage an unlink by name takes',
+        `asked-to-go.knct now hashes ${String(await hashOf('asked-to-go')).slice(7, 19)}, the stranger ${stranger.hash.slice(7, 19)}`);
+      check(await hashOf('moved-away') === asked.hash,
+        'while the take the delete named survives under its new name, because nothing was removed',
+        String(await hashOf('moved-away')).slice(7, 19));
+    }
+    rmSync(raceDir, { recursive: true, force: true });
   }
 
   console.log('\n[library] every route that changes something requires its method, its type and its origin');

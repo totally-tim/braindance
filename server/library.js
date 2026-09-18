@@ -3,8 +3,8 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createReadStream, createWriteStream, statSync } from 'node:fs';
-import { readdir, readFile, writeFile, appendFile, stat, unlink, rename, link, mkdir, statfs } from 'node:fs/promises';
+import { createWriteStream, statSync } from 'node:fs';
+import { readdir, readFile, writeFile, appendFile, stat, unlink, rename, link, mkdir, open, statfs } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -584,13 +584,23 @@ export const takeIdentity = (path) => {
 /** Whether two identities are one file. Anything carrying `dev` and `ino` compares, a `Stats` too. */
 export const sameTake = (a, b) => a !== null && b !== null && a.dev === b.dev && a.ino === b.ino;
 
-/** The content hash of a file, streamed. Nothing here ever holds a capture whole. */
-export async function hashFile(path) {
+/** The content hash of an open file, streamed from its first byte. The caller closes the handle. */
+async function hashOpenFile(handle) {
   const hash = createHash('sha256');
-  for await (const chunk of createReadStream(path, { highWaterMark: 4 * 1024 * 1024 })) {
+  for await (const chunk of handle.createReadStream({ start: 0, highWaterMark: 4 * 1024 * 1024, autoClose: false })) {
     hash.update(chunk);
   }
   return `sha256:${hash.digest('hex')}`;
+}
+
+/** The content hash of a file, streamed. Nothing here ever holds a capture whole. */
+export async function hashFile(path) {
+  const handle = await open(path, 'r');
+  try {
+    return await hashOpenFile(handle);
+  } finally {
+    await handle.close();
+  }
 }
 
 /**
@@ -600,7 +610,17 @@ export async function hashFile(path) {
 export async function removeTake(dir, id, { hash, verifiedElsewhere = null }) {
   if (!VALID_ID.test(id)) throw new Error(`unusable take id ${id}`);
   const path = join(dir, `${id}.knct`);
-  const actual = await hashFile(path);
+  // Hashed through one descriptor and unlinked by name, so the name is asked again before the
+  // unlink: a rename landing during the hash can free this id and move another take into it.
+  const handle = await open(path, 'r');
+  let hashed;
+  let actual;
+  try {
+    hashed = await handle.stat();
+    actual = await hashOpenFile(handle);
+  } finally {
+    await handle.close();
+  }
   if (actual !== hash) {
     throw new Error(
       `${id} is ${actual} here, not the ${hash} this removal named: `
@@ -614,6 +634,14 @@ export async function removeTake(dir, id, { hash, verifiedElsewhere = null }) {
       + 'would be deleting the last copy of both',
     );
   }
+  if (!sameTake(hashed, takeIdentity(path))) {
+    throw new Error(
+      `${id} was renamed or replaced while it was being hashed: the file under that name now is not `
+      + 'the one whose bytes were checked, and nothing was removed',
+    );
+  }
+  // `unlink` takes a name, so a rename can still land between the check above and this line. That
+  // remainder is a few microtasks, where the window it replaces was a streaming sha256 of the take.
   await unlink(path);
   await unlink(indexPathFor(path)).catch(() => {});
   forgetCapture(path);
