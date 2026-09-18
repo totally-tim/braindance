@@ -540,6 +540,9 @@ async function downloadClaimed(node, take, dir, ownsFile) {
 async function downloadToPath(node, take, dir, targetIn) {
   let target = targetIn;
   const temp = `${target}.part`;
+  // The file installed, taken off `temp`, the name only this download uses: `target` is a name, and
+  // once its lock is released a rename can give it another take before the marks are written.
+  let installed = null;
   // Refused against the volume before a byte moves, because the ceiling below only holds the node
   // to its claim. The margin is a minute of recording: a take may be landing on this disk now.
   const space = await remaining(dir);
@@ -624,6 +627,7 @@ async function downloadToPath(node, take, dir, targetIn) {
       );
     }
     target = claimed;
+    installed = await stat(temp);
     await unlink(temp);
     forgetCapture(target);
   } catch (err) {
@@ -634,9 +638,6 @@ async function downloadToPath(node, take, dir, targetIn) {
     stall.stop();
   }
 
-  // The file installed, because fetching the log is a round trip and `target` is a name: a rename in
-  // that window would leave this appending beside a take that moved.
-  const installed = await stat(target).catch(() => null);
   try {
     const log = await node.fetchJson(markLogPath(take), { signal: AbortSignal.timeout(MARKS_MS) });
     if (!await appendMarks(target, log.log ?? [], { identity: installed })) {
