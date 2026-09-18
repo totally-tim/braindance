@@ -5033,6 +5033,12 @@ async function runChecks() {
     for (const p of servers.filter((sv) => sv.port === MAC_PORT + 12)) p.child.kill('SIGKILL');
   }
 
+  // A server this run SIGKILLed is gone once it has exited, not once it was signalled, and the
+  // next section to bind its port before then finds the port held.
+  const exitedOn = (port) => Promise.all(servers.filter((sv) => sv.port === port)
+    .map((sv) => (sv.child.exitCode !== null || sv.child.signalCode !== null ? null
+      : new Promise((done) => { sv.child.once('exit', done); }))));
+
   console.log('\n[library] a take stays the recorder\'s until its close finishes, after a restart has opened the next');
   {
     // The window: a colour toggle restarts the grabber, `split()` closes take A unawaited, and the
@@ -5068,8 +5074,9 @@ async function runChecks() {
       }
     });
 
+    // 12.5s at the nominal rate; the ceiling is for a contended machine where the grabber falls short.
     let shooting = null;
-    for (let i = 0; i < 600; i++) {
+    for (let i = 0; i < 1800; i++) {
       await new Promise((done) => { setTimeout(done, 50); });
       shooting = await getJson(`${overlapUrl}/record/state`);
       if (shooting.recording && shooting.frames >= OVERLAP_FRAMES) break;
@@ -5226,6 +5233,7 @@ async function runChecks() {
     ];
     writeFileSync(join(shootNodeDir, `${take2}.marks.jsonl`), orphaned.map((r) => `${JSON.stringify(r)}\n`).join(''));
     const grabbing = `${join(REPO, 'tools/fake-grabber.mjs')} --source ${SAMPLE} --fps 40`;
+    await exitedOn(MAC_PORT + 17);
     const shootNodeUrl = await startServer(root, [
       '--captures', shootNodeDir, '--name', 'pi-shooting', '--record', '--no-color', '--grabber', grabbing,
     ], MAC_PORT + 17);
@@ -5295,13 +5303,9 @@ async function runChecks() {
 
   console.log('\n[library] a marks sync says what the node answered, and nothing else');
   {
-    // The node is a stub, so what it answers is decided here. Its port is the one the section
-    // above used, so that server has to be gone first rather than merely signalled.
-    const exited = (port) => Promise.all(servers.filter((sv) => sv.port === port)
-      .map((sv) => (sv.child.exitCode !== null || sv.child.signalCode !== null ? null
-        : new Promise((done) => { sv.child.once('exit', done); }))));
-    await exited(MAC_PORT + 17);
-    await exited(MAC_PORT + 18);
+    // The node is a stub, so what it answers is decided here, on the port the section above used.
+    await exitedOn(MAC_PORT + 17);
+    await exitedOn(MAC_PORT + 18);
     // `stubTakes` answers `/library/takes`, or returns null to hold the request in `heldTakes`.
     let stubTakes = () => ({ status: 500, body: { error: 'the stub cannot read its captures directory' } });
     const heldTakes = [];
