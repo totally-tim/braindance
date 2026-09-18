@@ -18,7 +18,7 @@ the checkout.
 | `--replay PATH` | none | Loops a recorded capture instead of reading a sensor. |
 | `--pipeline NAME` | the grabber's own pick | Depth processor: `gl`, `cl` or `cpu`. Handed to the grabber. |
 | `--no-color` | colour on | Depth only. Handed to the grabber. |
-| `--grabber "BIN ARGS"` | none | The grabber binary and its own arguments, as one space-separated string. |
+| `--grabber "BIN ARGS"` | none | The grabber binary and its own arguments, as one space-separated string. Double quotes keep a path containing a space whole. |
 | `--captures DIR` | `captures/` | Where takes are recorded and read back. |
 | `--projects DIR` | `projects/` | Where project documents live. |
 | `--presets DIR` | `presets/` | The writable preset library. |
@@ -30,7 +30,7 @@ the checkout.
 | `--node URL` | none | A capture node this instance links to, so its takes appear in the library here. |
 | `--node-name NAME` | `node` | The label that node is listed under. |
 | `--name NAME` | `mac` when `--node` is given, else `node` | The name this instance reports as. |
-| `--reveal-with PROG` | the platform file manager | The program `POST /library/reveal/:id` starts. |
+| `--reveal-with "PROG ARGS"` | the platform file manager | The program `POST /library/reveal/:id` starts, and the arguments it leads with, split as `--grabber` is. The file manager's own arguments follow them. |
 
 **The two effect roots are the fork mechanism.** Nothing writes into `--builtin-effects`, an
 install lands in `--effects`, and an id present in both resolves from there. A server whose

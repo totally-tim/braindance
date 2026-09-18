@@ -932,6 +932,11 @@ const MUTATIONS = {
   // The path is dropped from the arguments, so the file manager is started on nothing - a route
   // that answers 200 having done something that is not what it says.
   'reveal-drops-the-path': { file: 'server/library.js', edits: [REVEAL_EDIT] },
+  // `--reveal-with` keeps its program and loses the arguments it leads with, so a recorder run by
+  // `node` is never named and `node` is handed the file manager's arguments instead.
+  'reveal-drops-the-prefix': { file: 'server/library.js', edits: [[
+    'const child = spawn(bin, [...prefix, ...args],', 'const child = spawn(bin, args,',
+  ]] },
   // The library page goes back to composing its own refusal.
   'open-decides-its-own-reason': { file: 'web/library.js', edits: [[
     "const cannotOpen = (take) => take.openRefusals[0]?.why ?? '';",
@@ -3278,9 +3283,12 @@ async function runChecks() {
       markLine({ id: 'r1', sourceMs: 40, label: 'the moment', at: 1000 }));
 
     const revealLog = join(WORK, 'reveal-argv.log');
-    const fakeOpener = join(WORK, 'fake-file-manager.sh');
-    writeFileSync(fakeOpener, `#!/bin/sh\nprintf '%s\\n' "$@" >> ${JSON.stringify(revealLog)}\n`);
-    chmodSync(fakeOpener, 0o755);
+    // A script run by this process's own `node`, which starts on every platform the server spawns
+    // on without a shell, where a shebang script cannot start on Windows at all.
+    const recorder = join(WORK, 'fake-file-manager.mjs');
+    writeFileSync(recorder, "import { appendFileSync } from 'node:fs';\n"
+      + `appendFileSync(${JSON.stringify(revealLog)}, process.argv.slice(2).map((a) => \`\${a}\\n\`).join(''));\n`);
+    const fakeOpener = `"${process.execPath}" "${recorder}"`;
     const argvSeen = () => (existsSync(revealLog) ? readFileSync(revealLog, 'utf8').trim().split('\n') : []);
 
     const renameUrl = await startServer(root, [
