@@ -1,7 +1,8 @@
 // Proves that one registry drives the renderer and that the panel is a view on it:
 // every value lands where the renderer reads it, the panel moves the registry and
-// follows it back, a serialised set restores to the same pixels, and nothing moved
-// against the revision before the registry existed.
+// follows it back, a serialised set restores to the same pixels, each reading answers
+// its own terms and draws what a planted room says it draws, and the boot state has not
+// moved against the revision before the registry existed.
 
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -29,6 +30,9 @@ const CAPTURE = flag('--capture') ?? join(REPO, 'captures/sample.knct');
 // moves every hash after the first rewritten commit, where a marker is content and
 // survives one. The refusal below is the control on the search.
 const BEFORE_REV = flag('--before') ?? revBeforeMarker('const PARAMS');
+// A server running another build, which the readings are rendered against as well. Only on
+// request: a standing comparison against a fixed revision forbids every intentional change.
+const BEFORE_URL = flag('--before-url');
 
 function revBeforeMarker(marker) {
   const introduced = execFileSync(
@@ -788,6 +792,16 @@ const MUTATIONS = {
       + 'reach the picture with the lattice raised and this is the compensation failing to be '
       + 'one rather than a parameter going dark',
   },
+  // An entanglement planted on purpose: the ghost reads the contour's spacing.
+  'ghost-answers-contour-bands': {
+    file: 'effects-builtin/ghost/ghost.frag.glsl',
+    edits: [[
+      '    col += mix(vec3(0.20, 0.45, 0.75) * (ghostFill + lum), vec3(0.75, 0.95, 1.0), rim) * ghost;',
+      '    col += mix(vec3(0.20, 0.45, 0.75) * (ghostFill + lum), vec3(0.75, 0.95, 1.0), rim) * ghost'
+        + ' * (1.0 + 0.25 * fract(contourBands / 7.0));',
+    ]],
+    fails: 'MEASURE-ME',
+  },
 };
 
 const MUTATE = flag('--mutate');
@@ -1442,6 +1456,7 @@ async function openPage({
   pin = false,
   viewportSize = VIEW,
   comparisonShell = false,
+  base = URL_BASE,
 } = {}) {
   const page = await context.newPage();
   if (viewportSize.width !== VIEW.width || viewportSize.height !== VIEW.height) {
@@ -1492,7 +1507,7 @@ async function openPage({
     }));
   }
 
-  await page.goto(URL_BASE + RECORDER_PATH, { waitUntil: 'load' });
+  await page.goto(base + RECORDER_PATH, { waitUntil: 'load' });
   // Proof the interception held. A predicate that stopped matching would pair the old module
   // with today's markup, which throws at boot and arrives as a timeout naming nothing.
   if (source && !servedHtml) {
@@ -1789,145 +1804,59 @@ if (beforeArm.errors.length || afterArm.errors.length) {
   failures++;
 }
 
-const AGAINST_REV = flag('--against')
-  ?? (execFileSync('git', ['log', '-S', 'readBlackwall', '--format=%H', '--', 'web/main.js'],
-    { cwd: REPO, encoding: 'utf8', maxBuffer: 1 << 26 }).trim()
-    ? revBeforeMarker('readBlackwall')
-    : 'HEAD');
-
-// Each reading, and the mode it was. The old build selects by writing the integer uniform
-// rather than by clicking its button: `setMode` applied a twelve-value preset on the way
-// past, and what is under test is the reading.
-const READING_WAS = {
-  readRgb: 0,
-  readDepth: 1,
-  'ghost.amount': 2,
-  'contour.amount': 3,
-  'blackwall.amount': 4,
-};
-
-console.log(`\n[registry] each reading renders what its mode rendered, at ${AGAINST_REV}`);
-
-{
-  const againstSource = {
-    js: execFileSync('git', ['show', `${AGAINST_REV}:web/main.js`], { cwd: REPO, encoding: 'utf8', maxBuffer: 1 << 26 }),
-    html: execFileSync('git', ['show', `${AGAINST_REV}:web/index.html`], { cwd: REPO, encoding: 'utf8', maxBuffer: 1 << 26 }),
-  };
-  // The mirror of section 1's refusal: serving today's page into both arms would print five
-  // matching hashes under a heading claiming they came from different code.
-  if (againstSource.js.includes('readBlackwall')) {
-    throw new Error(`${AGAINST_REV}:web/main.js already contains the readings - pass an earlier rev with --against`);
-  }
-  if (!againstSource.js.includes('uniforms.mode.value')) {
-    throw new Error(`${AGAINST_REV}:web/main.js has no mode uniform to compare against`);
-  }
-
-  // The old arm is the old readings, not the old geometry. The unprojection's x sign changed
-  // after this rev, so left alone the pinned build draws the room reflected and every row
-  // below reports a difference that has nothing to do with a reading. Guarded the way the
-  // mutations are: the text has to appear exactly once or this refuses to run.
-  const OLD_UNPROJECT_X = '     (pixel.x + 0.5 - center.x) / focal.x * z,';
-  const MIRRORED_UNPROJECT_X = '    -(pixel.x + 0.5 - center.x) / focal.x * z,';
-  const xHits = againstSource.js.split(OLD_UNPROJECT_X).length - 1;
-  if (xHits !== 1) {
-    throw new Error(`${AGAINST_REV}:web/main.js states the unprojection's x ${xHits} times, expected exactly 1`
-      + ' - refusing to compare a mirrored build against an unmirrored one and report it as a reading');
-  }
-  againstSource.js = againstSource.js.replace(OLD_UNPROJECT_X, MIRRORED_UNPROJECT_X);
-
-  // The second intentional divergence. The zero-alpha discard is an approved change to the picture
-  // and the old arm has no such discard, so the patch hands it the same rule in its own source
-  // rather than letting the approved movement arrive as a finding about the readings.
-  const OLD_FRAG_OUTPUT = '  fragColor = vec4(col * exposure, alpha * falloff);';
-  const DISCARDED_FRAG_OUTPUT = '  if (softEdge == 0 && alpha * falloff <= 0.0) discard;\n'
-    + '  fragColor = vec4(col * exposure, alpha * falloff);';
-  const outHits = againstSource.js.split(OLD_FRAG_OUTPUT).length - 1;
-  if (outHits !== 1) {
-    throw new Error(`${AGAINST_REV}:web/main.js states the fragment output ${outHits} times, expected exactly 1`
-      + ' - refusing to compare an arm with the zero-alpha discard against one without it and report it as a reading');
-  }
-  againstSource.js = againstSource.js.replace(OLD_FRAG_OUTPUT, DISCARDED_FRAG_OUTPUT);
-
-  // Both arms are pinned to the same frames and the same camera, so the only thing that
-  // differs between them is the shader. `params.reset()` first on each, because a reading has
-  // to be measured against the same defaults the other arm booted with.
-  const hashesFor = async (opts, select, cases = READING_WAS, extra = '') => {
-    const { page: p, errors } = await openPage({ ...opts, pin: true });
+// Each reading at 1.0, and the raster at the shipped look's 0.35, rendered by another build on the
+// same GPU against the same pinned frames and camera. On request only: a refactor that claims to
+// leave the picture alone points this at a server running the commit before itself.
+if (BEFORE_URL) {
+  console.log(`\n[registry] each reading renders what the build at ${BEFORE_URL} renders`);
+  // Each case is a reading raised alone and a look over it, named in this build's vocabulary. A
+  // build that lacks one of those names answers null for the case rather than a picture.
+  const RASTER_LOOK = { 'raster.amount': 0.35, 'vignette.amount': 0.55 };
+  const framesFor = async (opts, cases, look = {}) => {
+    const { page: p, errors } = await openPage({ ...opts, pin: true, viewportSize: COMPARISON_VIEW, comparisonShell: true });
     await p.evaluate(async () => {
       const buffer = await (await fetch('/__pinned.bin')).arrayBuffer();
       globalThis.__kinect.drive.pin(buffer);
     });
-    const at = await p.evaluate(`(() => {
-      const times = globalThis.__kinect.drive.times();
-      return times.slice(0, ${SOURCE_FRAMES});
-    })()`);
-    const meta = await p.evaluate(`(() => {
-      const k = globalThis.__kinect;
-      const gl = k.renderer.getContext();
-      const box = k.renderer.domElement.getBoundingClientRect();
-      return {
-        window: [innerWidth, innerHeight],
-        canvas: [gl.drawingBufferWidth, gl.drawingBufferHeight],
-        css: [box.x, box.y, box.width, box.height],
-        composer: [k.composer.renderTarget1.width, k.composer.renderTarget1.height],
-        afterimage: [k.afterimage._textureComp.width, k.afterimage._textureComp.height],
-        cameraAspect: k.freeCamera.aspect,
-        bufferHeight: k.uniforms.bufferHeight.value,
-      };
-    })()`);
+    const at = await p.evaluate(`globalThis.__kinect.drive.times().slice(0, ${SOURCE_FRAMES})`);
     const out = {};
-    for (const [reading, mode] of Object.entries(cases)) {
+    for (const reading of cases) {
+      // The frames themselves, base64 so the bridge carries a string: the comparison is a
+      // measurement, and a digest answers only "same or not".
       out[reading] = await p.evaluate(`(async () => {
         ${PAGE_HELPERS}
+        const reading = ${JSON.stringify(reading)};
+        const look = ${JSON.stringify(look)};
+        const names = k.params.names();
+        const lacks = [reading, ...Object.keys(look)].filter((n) => !names.includes(n));
+        if (lacks.length) return { lacks };
         k.params.reset();
-        ${select}
-        ${extra}
+        k.readings().forEach((n) => k.params.set(n, 0));
+        k.params.set(reading, 1);
+        k.params.apply(look);
         k.drive.reset();
         pinCamera(k.freeCamera);
-        // The frames themselves rather than digests of them, because the comparison
-        // downstream is a measurement and a hash answers only "same or not". Base64 so
-        // the bridge carries a string: five readings by six frames of 640x360 RGBA is
-        // about 37MB per arm, which node holds without complaint and which buys the row
-        // the ability to say *how* two builds differ rather than only that they do.
-        // Chunked into the encoder because a single spread of a million-element typed
-        // array overflows the argument list.
         const frames = [];
         for (const t of ${JSON.stringify(at)}) {
           k.drive.stepTo(t);
           const px = k.drive.readPixels();
           let bin = '';
-          for (let i = 0; i < px.length; i += 0x8000) {
-            bin += String.fromCharCode.apply(null, px.subarray(i, i + 0x8000));
-          }
+          for (let i = 0; i < px.length; i += 0x8000) bin += String.fromCharCode.apply(null, px.subarray(i, i + 0x8000));
           frames.push(btoa(bin));
         }
-        return frames;
-      })()`.replace(/\$MODE/g, String(mode)).replace(/\$READING/g, JSON.stringify(reading)));
+        return { frames };
+      })()`);
     }
     await p.close();
-    return { out, errors, meta };
+    return { out, errors };
   };
-
-  const oldArm = await hashesFor(
-    { source: againstSource, viewportSize: COMPARISON_VIEW, comparisonShell: true },
-    'k.uniforms.mode.value = $MODE;',
-  );
-  const newArm = await hashesFor(
-    { viewportSize: COMPARISON_VIEW, comparisonShell: true },
-    'k.readings().forEach((n) => k.params.set(n, 0)); k.params.set($READING, 1);',
-  );
-  console.log(`  comparison geometry old ${JSON.stringify(oldArm.meta)} new ${JSON.stringify(newArm.meta)}`);
-
-  // The two arms are independently compiled shaders, so asking them for identical bytes asks
-  // two compilations to agree. Measured noise at this frame size is 1 byte at delta 1, and the
-  // smallest true positive this row has to catch moves about 17% of the frame at deltas of 47
-  // to 52. Two conditions rather than one, because a defect can be loud in either dimension.
+  // Two compilations of one shader need not agree to the byte: 1 byte at a delta of 1 is the
+  // measured noise at this frame size, and a true positive moves thousands of bytes by tens.
   const TOLERATED_BYTES = 64;
-  const framePixels = (s) => Buffer.from(s, 'base64');
   const frameDelta = (x, y) => {
-    const A = framePixels(x);
-    const B = framePixels(y);
-    if (A.length !== B.length) return { bytes: Infinity, max: Infinity, sized: [A.length, B.length] };
+    const A = Buffer.from(x, 'base64');
+    const B = Buffer.from(y, 'base64');
+    if (A.length !== B.length) return { bytes: Infinity, max: Infinity, of: A.length };
     let bytes = 0;
     let max = 0;
     for (let i = 0; i < A.length; i++) {
@@ -1936,77 +1865,39 @@ console.log(`\n[registry] each reading renders what its mode rendered, at ${AGAI
     }
     return { bytes, max, of: A.length };
   };
-
-  for (const [reading, mode] of Object.entries(READING_WAS)) {
-    const a = oldArm.out[reading];
-    const b = newArm.out[reading];
+  const agree = (label, ours, theirs) => {
+    if (!ours.frames || !theirs.frames) {
+      check(false, label, `${ours.frames ? 'that' : 'this'} build lacks ${(ours.lacks ?? theirs.lacks).join(', ')}`);
+      return;
+    }
+    const a = ours.frames;
+    const b = theirs.frames;
     const deltas = a.map((frame, i) => frameDelta(frame, b[i]));
-    const moved = deltas
-      .map((d, i) => ({ ...d, frame: i }))
-      .filter((d) => d.bytes > TOLERATED_BYTES || d.max > 1);
+    const moved = deltas.map((d, i) => ({ ...d, frame: i })).filter((d) => d.bytes > TOLERATED_BYTES || d.max > 1);
     const touched = deltas.filter((d) => d.bytes > 0).length;
-    check(moved.length === 0,
-      `${reading.padEnd(13)} at 1.0 renders the same picture as mode ${mode} at ${AGAINST_REV}`,
-      moved.length === 0
-        ? `${a.length} frames${touched ? `, ${touched} within tolerance `
-          + `(worst ${Math.max(...deltas.map((d) => d.bytes))} bytes of ${deltas[0].of}, `
-          + `delta ${Math.max(...deltas.map((d) => d.max))})` : ''}`
-        : `${moved.length} of ${a.length} frames differ beyond ${TOLERATED_BYTES} bytes or 1 step: `
-          + moved.map((d) => `f${d.frame} ${d.bytes} bytes of ${d.of} max ${d.max}`).join(', '));
-  }
+    check(moved.length === 0, label, moved.length === 0
+      ? `${a.length} frames, ${a.length - touched} bit-identical${touched ? `, worst ${Math.max(...deltas.map((d) => d.bytes))} bytes of ${deltas[0].of}` : ''}`
+      : `${moved.length} of ${a.length} frames differ beyond ${TOLERATED_BYTES} bytes or 1 step: `
+        + moved.map((d) => `f${d.frame} ${d.bytes} bytes of ${d.of} max ${d.max}`).join(', '));
+  };
 
-  // The grade term whose default is not zero, at the value `presets-builtin/blackwall.json`
-  // uses: the five rows above render at defaults, where the whole raster block sits behind
-  // `if (scanlines > 0.0)`. Blackwall rather than colour, so no reading's mutation can switch
-  // this probe off, and the two arms are handed different values on purpose - the pinned build
-  // bakes its corner falloff into the pass where this one reads `vignette.amount`.
-  const RASTER_OLD_LOOK = "k.params.set('scanlines', 0.35);";
-  const RASTER_NEW_LOOK = "k.params.set('raster.amount', 0.35); k.params.set('vignette.amount', 0.55);";
-  {
-    const rasterOld = await hashesFor(
-      { source: againstSource, viewportSize: COMPARISON_VIEW, comparisonShell: true },
-      'k.uniforms.mode.value = $MODE;',
-      { 'blackwall.amount': 4 },
-      RASTER_OLD_LOOK,
-    );
-    const rasterNew = await hashesFor(
-      { viewportSize: COMPARISON_VIEW, comparisonShell: true },
-      'k.readings().forEach((n) => k.params.set(n, 0)); k.params.set($READING, 1);',
-      { 'blackwall.amount': 4 },
-      RASTER_NEW_LOOK,
-    );
-    const a = rasterOld.out['blackwall.amount'];
-    const b = rasterNew.out['blackwall.amount'];
-    const first = a.findIndex((h, i) => h !== b[i]);
-    check(eq(a, b),
-      `and the raster at the shipped look's 0.35 is bit-identical to the one line it replaced, at ${AGAINST_REV}`,
-      first < 0
-        ? `${a.length} frames, angle 0 pitch 1.3 hardness 0`
-        : `${a.filter((h, i) => h !== b[i]).length} of ${a.length} frames differ, first at `
-          + `${first}: ${a[first].slice(0, 12)} vs ${b[first].slice(0, 12)}`);
-    const flat = rasterNew.out['blackwall.amount'];
-    const lit = (await hashesFor(
-      { viewportSize: COMPARISON_VIEW, comparisonShell: true },
-      'k.readings().forEach((n) => k.params.set(n, 0)); k.params.set($READING, 1);',
-      { 'blackwall.amount': 4 },
-      "k.params.set('raster.amount', 0.0); k.params.set('vignette.amount', 0.55);",
-    )).out['blackwall.amount'];
-    check(!eq(flat, lit),
-      'and the raster is actually drawing at that value, so the equality above is about something',
-      `${flat.filter((h, i) => h !== lit[i]).length} of ${flat.length} frames differ with the master off`);
+  const readings = await (async () => {
+    const { page: p } = await openPage();
+    const names = await p.evaluate('globalThis.__kinect.readings()');
+    await p.close();
+    return names;
+  })();
+  const theirs = await framesFor({ source: null, base: BEFORE_URL }, readings);
+  const ours = await framesFor({}, readings);
+  for (const reading of readings) {
+    agree(`${reading.padEnd(16)} at 1.0 renders what it renders at ${BEFORE_URL}`, ours.out[reading], theirs.out[reading]);
   }
-
-  for (const [armName, arm] of [['old', oldArm], ['new', newArm]]) {
-    const distinct = new Set(Object.values(arm.out).map((hs) => hs.join('|'))).size;
-    check(distinct === Object.keys(READING_WAS).length,
-      `and the ${armName} arm's five readings are five different images`,
-      `${distinct} distinct of ${Object.keys(READING_WAS).length}`);
-  }
-
-  if (oldArm.errors.length || newArm.errors.length) {
-    console.log(`  page errors: ${[...oldArm.errors, ...newArm.errors].join(' | ')}`);
-    failures++;
-  }
+  const theirRaster = await framesFor({ source: null, base: BEFORE_URL }, ['blackwall.amount'], RASTER_LOOK);
+  const ourRaster = await framesFor({}, ['blackwall.amount'], RASTER_LOOK);
+  agree(`and the raster at the shipped look's 0.35 over blackwall renders what it renders at ${BEFORE_URL}`,
+    ourRaster.out['blackwall.amount'], theirRaster.out['blackwall.amount']);
+  const errors = [...theirs.errors, ...ours.errors, ...theirRaster.errors, ...ourRaster.errors];
+  check(errors.length === 0, 'and neither build raised a page error while rendering them', errors.slice(0, 3).join(' | '));
 }
 
 const main = await openPage({ pin: true });
@@ -2258,6 +2149,15 @@ console.log('\n[registry] every parameter round-trips to where the renderer read
     .filter((n) => !eq(landing[n], EXPECT[n](values[n], values)))
     .map((n) => `${n}=${show(landing[n])}`);
   check(together.length === 0, 'and all of them at once', together.join('; '));
+
+  // The defaults land the same way, after a reset and at boot.
+  const reset = await probe({});
+  const unlanded = (landed) => Object.keys(SCRAMBLE)
+    .filter((n) => !eq(landed[n], EXPECT[n](reset.values[n], reset.values)))
+    .map((n) => `${n}=${show(landed[n])} want ${show(EXPECT[n](reset.values[n], reset.values))}`);
+  check(unlanded(reset.landing).length === 0, 'and a reset lands every default', unlanded(reset.landing).join('; '));
+  check(unlanded(afterArm.out.boot.landing).length === 0, 'and so does boot',
+    unlanded(afterArm.out.boot.landing).join('; '));
 }
 
 console.log('\n[registry] the side effects that are not a uniform write');
@@ -2630,6 +2530,94 @@ console.log('\n[registry] the readings mix as a ratio, so their scale cancels');
   check(sameAsSolo.length === 0,
     'and the mix is none of the readings it is made of',
     sameAsSolo.length ? `identical to ${sameAsSolo.join(', ')} alone` : 'distinct from all five');
+}
+
+console.log('\n[registry] each reading answers its own terms and nothing else');
+{
+  // Every look term under each reading alone, read off the registry rather than listed here, so a
+  // term added later is asked by existing. A reading's own terms are all raised to their
+  // scrambled values and dropped back one at a time, because one of them can gate another - the
+  // sweep does nothing while the scan is at 0. Every other term is raised one at a time. Two
+  // images per run, far enough apart for the pinned pair to have moved between them.
+  const readings = await page.evaluate('globalThis.__kinect.readings()');
+  const terms = Object.keys(declared).filter((n) => declared[n].tag === 'look' && !readings.includes(n));
+  // Which reading a term belongs to, where the registry says: a package's term names the master
+  // it sits under, and a reading is a master.
+  const ownerOf = (n) => (readings.includes(declared[n].under) ? declared[n].under : null);
+  const own = Object.fromEntries(readings.map((r) => [r, terms.filter((n) => ownerOf(n) === r)]));
+  const at = [positions[1], positions[positions.length - 2]];
+  const answered = await page.evaluate(`(async ({ readings, terms, own, values, at }) => {
+    ${PAGE_HELPERS}
+    const shot = async (vals) => {
+      k.params.reset();
+      k.params.apply(vals);
+      k.drive.reset();
+      pinCamera(k.freeCamera);
+      let joined = '';
+      for (const t of at) {
+        k.drive.stepTo(t);
+        joined += await sha256(k.drive.readPixels());
+      }
+      return joined;
+    };
+    const out = { images: {}, moved: {} };
+    for (const r of readings) {
+      const alone = Object.fromEntries(readings.map((n) => [n, n === r ? 1 : 0]));
+      out.images[r] = await shot(alone);
+      const raised = { ...alone, ...Object.fromEntries(own[r].map((n) => [n, values[n]])) };
+      const base = await shot(raised);
+      out.moved[r] = [];
+      for (const n of terms) {
+        const vals = { ...raised };
+        if (own[r].includes(n)) delete vals[n];
+        else vals[n] = values[n];
+        if ((await shot(vals)) !== base) out.moved[r].push(n);
+      }
+    }
+    return out;
+  })(${JSON.stringify({ readings, terms, own, values: SCRAMBLE, at })})`);
+
+  const distinct = new Set(Object.values(answered.images)).size;
+  check(distinct === readings.length,
+    `the ${readings.length} readings alone at 1.0 are ${readings.length} different images`,
+    `${distinct} distinct of ${readings.length}`);
+
+  const answeredBy = (n) => readings.filter((r) => answered.moved[r].includes(n));
+  const owned = terms.filter((n) => ownerOf(n) !== null);
+  const strays = owned
+    .filter((n) => !eq(answeredBy(n), [ownerOf(n)]))
+    .map((n) => `${n} (under ${ownerOf(n)}) moved ${answeredBy(n).join('+') || 'nothing'}`);
+  check(owned.length > 0 && strays.length === 0,
+    'a term under a reading moves that reading and no other',
+    strays.length ? strays.join('; ') : `${owned.length} terms: ${owned.join(' ')}`);
+  // A term no reading owns can still feed several of them through what they share - the clip
+  // range reaches every reading of depth, the edge tolerance every reading of an edge - so its
+  // spread is printed and not judged.
+  const shared = terms.filter((n) => ownerOf(n) === null)
+    .map((n) => [n, answeredBy(n)])
+    .filter(([, by]) => by.length > 0 && by.length < readings.length)
+    .map(([n, by]) => `${n}->${by.join('+')}`);
+  console.log(`  terms no reading owns that move some readings and not others: ${shared.join(' ') || 'none'}`);
+}
+
+{
+  // The raster at the shipped look's 0.35 over blackwall, against the same look with it off.
+  const shot = (raster) => page.evaluate(`(async () => {
+    ${PAGE_HELPERS}
+    k.params.reset();
+    k.readings().forEach((n) => k.params.set(n, 0));
+    k.params.set('blackwall.amount', 1);
+    k.params.set('raster.amount', ${raster});
+    k.params.set('vignette.amount', 0.55);
+    k.drive.reset();
+    pinCamera(k.freeCamera);
+    k.drive.stepTo(${positions[positions.length - 2]});
+    return sha256(k.drive.readPixels());
+  })()`);
+  const lit = await shot(0.35);
+  const flat = await shot(0);
+  check(lit !== flat, 'and the raster at the shipped look\'s 0.35 reaches the pixels',
+    lit === flat ? `identical, ${lit.slice(0, 12)}` : `${lit.slice(0, 12)} against ${flat.slice(0, 12)} with it off`);
 }
 
 console.log('\n[registry] the falsification control: each parameter left out of the restore in turn');
@@ -4349,6 +4337,178 @@ console.log('\n[registry] the two masters are exactly absent at zero, and so is 
   moves('snappedFine', 'snappedCoarse',
     'while with the lattice raised the same two cell sizes do move it',
     'the cell size reaches nothing at all');
+}
+
+console.log('\n[registry] what each reading draws, against a room planted off-centre');
+{
+  // Every planted point is read at the screen pixel the unprojection puts it on, so a mirrored or
+  // displaced cloud reads the wrong colour there. The points are sparse and their sprites large
+  // enough that none overlaps another and each one's centre pixel is at full falloff, over a
+  // black background: what comes back is the fragment's colour times its alpha, which the
+  // shader's own formulas, evaluated here, predict to the byte.
+  const planted = await page.evaluate(`(async () => {
+    ${PAGE_HELPERS}
+    ${FIELD_HELPERS}
+    const gl = k.renderer.getContext();
+    const background = k.scene.background.clone();
+    k.scene.background.set(0x000000);
+    const W = gl.drawingBufferWidth;
+    const H = gl.drawingBufferHeight;
+    let points = null;
+    k.scene.traverse((o) => { if (o.isPoints && o.material === k.material) points = o; });
+    const mul = (m, v) => [0, 1, 2, 3].map((i) => m[i] * v[0] + m[4 + i] * v[1] + m[8 + i] * v[2] + m[12 + i] * v[3]);
+    // The sensor's own convention: a low column is the room's right, a low row is up.
+    const screenOf = (col, row, mm) => {
+      const z = mm / 1000;
+      const f = k.uniforms.focal.value;
+      const c = k.uniforms.center.value;
+      points.updateMatrixWorld(true);
+      k.freeCamera.updateMatrixWorld(true);
+      const room = [-((col + 0.5 - c.x) / f.x) * z, -((row + 0.5 - c.y) / f.y) * z, -z, 1];
+      const clip = mul(k.freeCamera.projectionMatrix.elements,
+        mul(k.freeCamera.matrixWorldInverse.elements, mul(points.matrixWorld.elements, room)));
+      return [Math.floor((clip[0] / clip[3] * 0.5 + 0.5) * W), Math.floor((clip[1] / clip[3] * 0.5 + 0.5) * H)];
+    };
+    // The brightest each channel reaches within a pixel of where a point lands: its sprite's centre.
+    const peak = (px, [x, y]) => {
+      const out = [0, 0, 0];
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const i = ((y + dy) * W + x + dx) * 4;
+          for (let ch = 0; ch < 3; ch++) out[ch] = Math.max(out[ch], px[i + ch]);
+        }
+      }
+      return out;
+    };
+    // One point every 24 texels in each axis, at a depth the fixture chooses per point.
+    const GRID = 24;
+    const dots = (mmAt) => {
+      const a = new Uint16Array(512 * 424);
+      for (let r = GRID / 2; r < 424; r += GRID) for (let c = GRID / 2; c < 512; c += GRID) a[r * 512 + c] = mmAt(c, r);
+      return a;
+    };
+    const at = (i, j) => [GRID / 2 + GRID * i, GRID / 2 + GRID * j];
+    // A colour image at the sensor's own resolution, so every point reads exactly one texel.
+    const paint = (rgbAt) => {
+      const a = new Uint8Array(512 * 424 * 4);
+      for (let r = 0; r < 424; r++) {
+        for (let c = 0; c < 512; c++) a.set([...rgbAt(c, r), 255], (r * 512 + c) * 4);
+      }
+      k.drive.plantColor(a, 512, 424);
+    };
+    const QUIET = { fade: 0, wake: 0, denoise: false, additive: false, opacity: 1, pointSize: 60, near: 0.5, far: 4 };
+    const read = (px, cases) => cases.map(([col, row, mm, what]) => ({
+      col, row, mm, what, at: screenOf(col, row, mm), got: peak(px, screenOf(col, row, mm)),
+    }));
+    const out = {};
+
+    // Four colours, one per quadrant of the sensor's image, through an off-centre eye.
+    const QUAD = [[220, 40, 30], [30, 200, 60], [40, 60, 220], [200, 190, 40]];
+    const quadrant = (c, r) => (r < 212 ? 0 : 2) + (c < 256 ? 0 : 1);
+    paint((c, r) => QUAD[quadrant(c, r)]);
+    let px = field({ look: { ...QUIET, readRgb: 1, exposure: 1 }, depth: dots(() => 1800), eye: [0.3, 0.25, 1.2], at: [0.15, 0.05, -1.8] });
+    out.colour = read(px, [[2, 2], [17, 3], [4, 14], [15, 15], [9, 6]]
+      .map(([i, j]) => [...at(i, j), 1800, quadrant(...at(i, j))]));
+
+    // Black on the sensor's left half, white on its right. A point with no neighbour has no edge,
+    // so the ghost's rim is 0 and its alpha is its luminance term alone. The exposure keeps the
+    // white under 1, where the framebuffer would clamp it.
+    paint((c) => (c < 256 ? [0, 0, 0] : [255, 255, 255]));
+    px = field({ look: { ...QUIET, readRgb: 0, 'ghost.amount': 1, exposure: 0.9 }, depth: dots(() => 1800) });
+    out.ghost = read(px, [[3, 4, 1800, 0], [7, 12, 1800, 0], [14, 5, 1800, 1], [18, 13, 1800, 1]]
+      .map(([i, j, mm, lum]) => [...at(i, j), mm, lum]));
+    out.fill = k.params.get('ghost.fill');
+
+    // A near block off to one side of a far wall, read through the depth ramp.
+    paint(() => [128, 128, 128]);
+    const inBlock = (c, r) => c >= 300 && c < 420 && r >= 50 && r < 150;
+    px = field({ look: { ...QUIET, readRgb: 0, readDepth: 1, exposure: 1 }, depth: dots((c, r) => (inBlock(c, r) ? 1200 : 2600)) });
+    out.depth = read(px, [[13, 2], [15, 5], [3, 12], [8, 15]]
+      .map(([i, j]) => { const [c, r] = at(i, j); return [c, r, inBlock(c, r) ? 1200 : 2600, null]; }));
+
+    // Two patches on a wall, one planted at the depth of a contour line and one between two, then
+    // the spacing changed so that the two swap.
+    const patch = (c, r) => (c < 170 && r >= 240 ? 1625 : c >= 320 && r < 150 ? 1500 : 2400);
+    const contourAt = (bands) => {
+      const shot = field({ look: { ...QUIET, readRgb: 0, 'contour.amount': 1, 'contour.bands': bands, exposure: 1 },
+        depth: dots(patch) });
+      return read(shot, [at(3, 12), at(16, 3)].map(([c, r]) => [c, r, patch(c, r), null]));
+    };
+    out.contour = { four: contourAt(4), five: contourAt(5) };
+
+    // Blackwall on points near and far, and on near points whose right-hand neighbour is a step
+    // away: that neighbour sits past the far plane, so it is never drawn and is still read.
+    const stepped = dots((c, r) => (inBlock(c, r) ? 1200 : 2400));
+    for (let r = GRID / 2; r < 424; r += GRID) {
+      for (let c = GRID / 2; c < 512; c += GRID) if (inBlock(c, r) && c > 360) stepped[r * 512 + c + 1] = 5000;
+    }
+    px = field({ look: { ...QUIET, readRgb: 0, 'blackwall.amount': 1, 'blackwall.scan': 0, exposure: 1 }, depth: stepped });
+    out.blackwall = read(px, [[13, 2, 1200, 0], [3, 12, 2400, 0], [16, 3, 1200, 1], [16, 5, 1200, 1]]
+      .map(([i, j, mm, edge]) => [...at(i, j), mm, edge]));
+    out.rim = k.params.get('rim');
+    k.scene.background.copy(background);
+    return out;
+  })()`);
+
+  const linear = (v) => { const c = v / 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+  const byte = (x) => Math.round(255 * Math.min(1, x));
+  const TOL = 2;
+  const near = (got, want) => got.every((v, i) => Math.abs(v - want[i]) <= TOL);
+  const rows = (cases, want, show) => {
+    const wrong = cases.filter((p) => !near(p.got, want(p)));
+    return {
+      ok: cases.length > 0 && wrong.length === 0,
+      detail: (wrong.length ? wrong : cases)
+        .map((p) => `${show(p)} at sensor ${p.col},${p.row} -> screen ${p.at}: ${p.got} want ${want(p)}`).join('; '),
+    };
+  };
+
+  {
+    const QUAD = [[220, 40, 30], [30, 200, 60], [40, 60, 220], [200, 190, 40]];
+    const r = rows(planted.colour, (p) => QUAD[p.what].map((v) => byte(linear(v))), (p) => `quadrant ${p.what}`);
+    check(r.ok, 'the colour reading draws each planted colour opaque, at the pixel the mirrored unprojection puts it on', r.detail);
+  }
+  {
+    // Colour (fill + lum) times alpha (0.25 + 0.25 lum) at a rim of 0.
+    const fill = planted.fill;
+    const r = rows(planted.ghost,
+      (p) => [0.20, 0.45, 0.75].map((v) => byte(v * (fill + p.what) * 0.9 * (0.25 + 0.25 * p.what))),
+      (p) => (p.what ? 'white' : 'black'));
+    check(r.ok, 'the ghost\'s alpha rises with the luminance of the surface it lights', r.detail);
+  }
+  {
+    const ramp = (t) => {
+      const a = [0.06, 0.10, 0.28]; const b = [0.15, 0.72, 0.78]; const c = [0.98, 0.78, 0.32]; const d = [0.96, 0.29, 0.42];
+      const mix = (x, y, u) => x.map((v, i) => v + (y[i] - v) * u);
+      return t < 0.33 ? mix(a, b, t / 0.33) : t < 0.66 ? mix(b, c, (t - 0.33) / 0.33) : mix(c, d, (t - 0.66) / 0.34);
+    };
+    const r = rows(planted.depth, (p) => ramp(1 - (p.mm / 1000 - 0.5) / 3.5).map(byte), (p) => `${p.mm}mm`);
+    check(r.ok, 'the depth reading colours a planted block and the wall behind it by their own depths', r.detail);
+  }
+  {
+    const { four, five } = planted.contour;
+    const white = (p) => p.got.every((v) => v >= 250);
+    const dim = (p) => p.got.every((v) => v < 40);
+    check(white(four[0]) && dim(four[1]) && dim(five[0]) && white(five[1]),
+      'a contour line sits at the depth its spacing puts it: a patch planted on a line at 4 a metre is between two at 5',
+      `at 4: ${four[0].got} on 1.625m, ${four[1].got} on 1.5m; at 5: ${five[0].got} and ${five[1].got}`);
+  }
+  {
+    const deep = [0.28, 0.010, 0.035];
+    const hot = [1.00, 0.115, 0.140];
+    const burn = [0.95, 0.34, 0.22];
+    const lum = linear(128);
+    const rim = planted.rim;
+    const want = (p) => {
+      const t = (p.mm / 1000 - 0.5) / 3.5;
+      const bw = deep.map((v, i) => v + (hot[i] - v) * (1 - t) ** 1.6)
+        .map((v, i) => v + (burn[i] - v) * p.what * rim);
+      const alpha = 0.30 + 0.70 * p.what * rim;
+      return bw.map((v) => byte(v * (0.55 + 0.75 * lum) * alpha));
+    };
+    const r = rows(planted.blackwall, want, (p) => `${p.mm}mm${p.what ? ' on a step' : ''}`);
+    check(r.ok, 'blackwall runs hotter near than far, and hottest on a step', r.detail);
+  }
 }
 
 if (main.errors.length) {
