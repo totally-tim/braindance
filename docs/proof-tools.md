@@ -1128,10 +1128,11 @@ node tools/grabber-args-check.mjs
 
 It builds the grabber from this tree's `native/` into a scratch directory on every run, with the
 mutation applied to that copy, because `native/build/grabber` can be older than the source beside
-it. A refused row asks for exit 2, the sentence that names the flag and quotes the text as typed,
-and no sign of device enumeration. An accepted row asks for the device stage: `no Kinect v2 found`
-on a machine without a sensor, or a hello on one with a sensor, where the tool stops the grabber at
-that hello. A pair refusal prints the two values as parsed, at three decimals, not as typed. The
+it. Every vector leads with the grabber's `--check`, which runs the argument pass and exits before
+enumeration, so a machine with a sensor answers exactly as one without. A refused row asks for exit
+2 and the sentence that names the flag and quotes the text as typed. An accepted row asks for exit
+0 and `--check`'s `arguments accepted` line. A pair refusal prints the two values as parsed, at
+three decimals, not as typed. The
 no-flags, defaults, `--quality 0` and missing-value rows stay green under every mutation, which
 confines each control to the rule it breaks.
 

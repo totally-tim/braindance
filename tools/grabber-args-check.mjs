@@ -6,24 +6,22 @@
 // Builds the grabber from this tree's `native/` into a scratch directory, with the mutation applied
 // to that copy, then runs it with argument vectors and reads the exit code and stderr. The binary
 // under test is always the one this source builds: `native/build/grabber` can be older than the
-// source beside it. Needs libfreenect2 in `vendor/prefix` (`node tools/build-native.mjs`), cmake and
-// a C++ compiler. No sensor, no server, no fixture.
+// source beside it. Every vector leads with `--check`, which runs the argument pass and exits before
+// enumeration, so no row touches a device on a machine that has one. Needs libfreenect2 in
+// `vendor/prefix` (`node tools/build-native.mjs`), cmake and a C++ compiler. No sensor, no server,
+// no fixture.
 //
 // Exit 0 pass, 1 a failed assertion or a mutation run (caught or NOT CAUGHT), 2 did not run.
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MessageParser, TYPE_HELLO } from '../server/protocol.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
 const MUTATE = argv.includes('--mutate') ? argv[argv.indexOf('--mutate') + 1] : null;
 const PREFIX = join(REPO, 'vendor/prefix');
-// Long enough for a sensor-attached run to reach its hello, which is the answer an accepted row
-// waits for on a capture node.
-const RUN_MS = 15000;
 
 const MUTATIONS = {
   // The pair rule, and only it: every value still parses, and an inverted range reaches the device.
@@ -103,33 +101,11 @@ if (help.status !== 0) didNotRun(`the built grabber will not run --help: ${(help
 console.log(`\n[grabber-args] ${MUTATE ? `mutation ${MUTATE}` : 'unmutated'}, built from native/ in `
   + `${((Date.now() - started) / 1000).toFixed(1)}s\n`);
 
-/**
- * One run of the grabber. Stops at the first hello, because an accepted vector on a machine with a
- * sensor opens it and streams; SIGKILL after the grace, because a grabber can hang in `dev->stop()`.
- */
-const run = (args) => new Promise((resolve) => {
-  const child = spawn(GRABBER, args, { stdio: ['pipe', 'pipe', 'pipe'] });
-  const parser = new MessageParser();
-  let stderr = '';
-  let hello = false;
-  let timedOut = false;
-  child.stderr.on('data', (c) => { stderr += c.toString(); });
-  child.stdout.on('data', (c) => {
-    try {
-      if (!hello && parser.push(c).some((m) => m.type === TYPE_HELLO)) {
-        hello = true;
-        child.kill('SIGTERM');
-      }
-    } catch { /* a desynced stream is not a hello */ }
-  });
-  const kill = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, RUN_MS);
-  const force = setTimeout(() => child.kill('SIGKILL'), RUN_MS + 8000);
-  child.on('close', (code, signal) => {
-    clearTimeout(kill);
-    clearTimeout(force);
-    resolve({ code, signal, stderr, hello, timedOut });
-  });
-});
+/** One run of the grabber's argument pass. `--check` leads, so no vector can take it as a value. */
+const run = async (args) => {
+  const r = spawnSync(GRABBER, ['--check', ...args], { encoding: 'utf8', timeout: 15000 });
+  return { code: r.status, signal: r.signal, stderr: r.stderr ?? '' };
+};
 
 let checked = 0, failed = 0;
 const ok = (label, pass, detail = '') => {
@@ -140,15 +116,13 @@ const ok = (label, pass, detail = '') => {
 const lastLine = (r) => r.stderr.trim().split('\n').at(-1) ?? '';
 const said = (r) => `exit ${r.code ?? r.signal}: ${lastLine(r)}`;
 
-// What any refusal prints, and what only a run that got past the arguments prints.
-const REFUSAL = /\[grabber\] (--[a-z-]+ must be|unknown argument)/;
-const DEVICE_STAGE = /\[grabber\] (no Kinect v2 found|failed to open device|device start failed)|\[Freenect2Impl\]/;
+// What `--check` prints when the whole argument pass let the vector through.
+const ACCEPTED = /\[grabber\] arguments accepted: /;
 
-/** Refused before anything was attempted, with this sentence. */
-const refused = (r, sentence) => r.code === 2 && sentence(r.stderr) && !DEVICE_STAGE.test(r.stderr) && !r.hello;
-/** Got past every argument check: it went looking for a sensor, and found none or found one. */
-const accepted = (r) => r.code !== 2 && !REFUSAL.test(r.stderr) && !r.timedOut
-  && (r.hello || /\[grabber\] (no Kinect v2 found|failed to open device|device start failed)/.test(r.stderr));
+/** Refused in the argument pass, with this sentence. */
+const refused = (r, sentence) => r.code === 2 && sentence(r.stderr) && !ACCEPTED.test(r.stderr);
+/** Through every argument check, which only `--check`'s own line says. */
+const accepted = (r) => r.code === 0 && ACCEPTED.test(r.stderr);
 
 const parseRefusal = (flag, raw) => (stderr) => stderr.includes(`[grabber] ${flag} must be a positive finite number of metres, got '${raw}'`);
 // The pair sentence reports the values that survived the parse, at %.3f.
@@ -172,7 +146,7 @@ try {
   ];
   for (const [flag, raw, what] of unreadable) {
     const r = await run([flag, raw]);
-    ok(`refused before any device: ${flag} '${raw}', ${what}`, refused(r, parseRefusal(flag, raw)), said(r));
+    ok(`refused in the argument pass: ${flag} '${raw}', ${what}`, refused(r, parseRefusal(flag, raw)), said(r));
   }
 
   console.log('\n2. a pair that leaves no depth between the two planes is refused');
@@ -200,7 +174,7 @@ try {
   }
 
   // The positive twins: a check built only out of refusals passes a grabber that refuses everything.
-  console.log('\n4. a range the sensor can honour gets past the arguments to the device');
+  console.log('\n4. a range the sensor can honour gets through the argument pass');
   const honoured = [
     [[], 'no depth flags at all'],
     [['--min-depth', '0.05', '--max-depth', '9.0'], 'the shipped defaults typed out'],
@@ -211,7 +185,7 @@ try {
   ];
   for (const [args, what] of honoured) {
     const r = await run(args);
-    ok(`accepted: ${what}`, accepted(r), `${args.join(' ') || '(none)'} -> ${said(r)}${r.hello ? ', hello on stdout' : ''}`);
+    ok(`accepted: ${what}`, accepted(r), `${args.join(' ') || '(none)'} -> ${said(r)}`);
   }
 } catch (err) {
   // Not a FAIL line: a crash counted as a failed assertion reads as a catch under --mutate.
