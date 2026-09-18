@@ -29,6 +29,9 @@ const scratch = mkdtempSync(join(tmpdir(), 'release-gate-'));
 const MASK = ['--userconfig', join(scratch, 'user'), '--globalconfig', join(scratch, 'global')];
 writeFileSync(MASK[1], '');
 writeFileSync(MASK[3], '');
+// Under `npm test` the calling npm exports its config as `npm_config_*`, which a nested npm reads
+// as command-line flags, so the machine's own config would reach every probe past MASK.
+const ENV = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^npm_config_/i.test(key)));
 
 let cwd = REPO;
 if (MUTATE) {
@@ -63,12 +66,12 @@ ok('and it names min-release-age, which is the only key npm turns into a cutoff'
 const known = (() => {
   try {
     return /^\s*min-release-age\s*=/m.test(execFileSync('npm', ['config', 'ls', '-l', ...MASK],
-      { cwd: scratch, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+      { cwd: scratch, env: ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
   } catch { return false; }
 })();
 const npmVersion = (() => {
   try {
-    return execFileSync('npm', ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    return execFileSync('npm', ['--version'], { env: ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   } catch { return 'unknown'; }
 })();
 ok('this npm knows min-release-age at all - it arrived in npm 11, and an older one ignores the file entirely while reporting nothing',
@@ -84,7 +87,7 @@ function resolveUnderGate(from) {
   }
   try {
     execFileSync('npm', ['install', PROBE, '--dry-run', '--no-audit', '--no-fund', ...MASK],
-      { cwd: from, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      { cwd: from, env: ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     return '';
   } catch (err) {
     return `${err.stdout ?? ''}${err.stderr ?? ''}`;
