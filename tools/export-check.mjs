@@ -887,6 +887,12 @@ async function openPage(viewport, base = URL_BASE) {
   await page.waitForFunction(() => !globalThis.__kinect.takeOpened || globalThis.__kinect.takeOpened(),
     null, { timeout: 60000 });
   await page.evaluate(INSTALL);
+  // A build that cannot be told its output size cannot be staged at the arms' sizes.
+  if (!ours && !(await page.evaluate('typeof globalThis.__kinect.setOutputSize === "function"'))) {
+    console.log(`\n[export] DID NOT RUN - the build at ${base} publishes no setOutputSize, so its stage cannot `
+      + 'be sized to the arms this build is compared at');
+    process.exit(2);
+  }
   await setStage(page, viewport);
   const gpu = await page.evaluate(() => {
     const gl = globalThis.__kinect.renderer.getContext();

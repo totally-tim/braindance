@@ -85,7 +85,10 @@ cp -R node_modules /tmp/rev/ && mkdir /tmp/rev/captures && cp captures/sample.kn
 node tools/export-check.mjs --url http://localhost:8080 --before-url http://localhost:8081
 ```
 
-`export-check` exits 2 when the two servers hold the take under different hashes.
+`export-check` exits 2 when the two servers hold the take under different hashes, or when the other
+build publishes no `setOutputSize`, which it does from `d9b5d9e` on. `registry-check` names each
+reading by its registry name, so a build from before the dotted names fails those rows and names
+what it lacks.
 
 Four tables are too large to reproduce here — `editor-check` declares 202, `library-check` 114,
 `registry-check` 55 and `effect-check` 42. Their sections give the count and the enumerate
