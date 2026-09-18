@@ -36,8 +36,10 @@ node tools/cpp-check.mjs      # both C++ files; needs a C++ compiler and turbojp
 node tools/<tool>-check.mjs   # one proof tool; most need a running server, a GPU browser or a sensor
 ```
 
-CI runs `syntax-check`, `module-check`, `npm run test:unit`, `cpp-check` and
-`release-gate-check`, plus every mutation of the four check tools. `.github/workflows/checks.yml`
+CI runs `syntax-check`, `module-check`, `vendor-check`, `npm run test:unit`, `guard-check`,
+`cpp-check`, `hd-encoder-check` and `release-gate-check`, plus every mutation of `syntax-check`,
+`module-check`, `cpp-check` and `release-gate-check`. `vendor-check` exits 2 there, because a
+runner has no built prefix to check the library against. `.github/workflows/checks.yml`
 names every other check tool on a `not-run:` line, and `syntax-check` fails when a tool is in
 neither place. `release-gate-check` needs an npm that knows `min-release-age` (npm 11 or newer,
 which Node 26 bundles) and access to the registry. The Chromium install and the fixtures are for

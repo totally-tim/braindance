@@ -1075,7 +1075,8 @@ node tools/vendor-check.mjs
 Each declared edit pins the blob hash the patched file must have, because "differs from upstream"
 is not "contains our change". A declared edit that has quietly reverted fails too: that is what a
 careless re-vendor looks like. Its mutations are delivered as functions over a staged tree rather
-than as anchored text.
+than as anchored text. Every mutation needs `vendor/prefix` as well: without one each exits 2,
+`DID NOT RUN`, the source mutations included, which is why CI runs this tool unmutated only.
 
 - **`undeclared-edit`** — an edit nothing declares.
 - **`revert-local-edit`** — a declared edit quietly put back to upstream.

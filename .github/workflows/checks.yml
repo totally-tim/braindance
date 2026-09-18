@@ -24,6 +24,9 @@ jobs:
           node-version: 26
       - run: node tools/syntax-check.mjs
       - run: node tools/module-check.mjs
+      # Exit 2 is its full answer on a runner: the source proven, and no built prefix to hold
+      # the library to. A failed assertion or a crash exits 1.
+      - run: node tools/vendor-check.mjs || [ $? -eq 2 ]
       - name: and both of them reject every tree their own tables call broken
         run: |
           # Actions runs this under `bash -e`, and a caught mutation exits non-zero.
@@ -58,7 +61,7 @@ jobs:
           exit "$bad"
 
   unit:
-    name: the scalar maths, called directly
+    name: the unit tests and the socket guard
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -68,9 +71,13 @@ jobs:
       # `ci` rather than `install`: the lockfile's versions are the ones the .npmrc gate vetted.
       - run: npm ci
       - run: npm run test:unit
+      # guard-check replays captures/sample.knct and needs a non-internal IPv4, which the runner
+      # has; without one it exits 2 with the bind rows unproven. Thirty frames is all it reads.
+      - run: mkdir -p captures && node tools/make-sample.mjs captures/sample.knct --frames 30
+      - run: node tools/guard-check.mjs
 
   cpp:
-    name: the C++ parses and typechecks
+    name: the C++ parses, typechecks and encodes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -79,6 +86,7 @@ jobs:
           node-version: 26
       - run: sudo apt-get update && sudo apt-get install -y libturbojpeg0-dev
       - run: node tools/cpp-check.mjs
+      - run: node tools/hd-encoder-check.mjs
       - name: and it rejects the five ways the source could be wrong
         run: |
           # Caught is exit 1 here and 2 is cpp-check declining, so neither may pass for the other.
@@ -116,6 +124,5 @@ jobs:
             node tools/release-gate-check.mjs --mutate "$m"
           done
 
-# not-run: boot cli determinism editor effect effect-conformance export guard hd-encoder
-# not-run: index jobs keyframe level library monitor preview registration registry
-# not-run: sensor-view timeline vcam vendor
+# not-run: boot cli determinism editor effect effect-conformance export index jobs keyframe
+# not-run: level library monitor preview registration registry sensor-view timeline vcam
