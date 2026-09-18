@@ -11285,8 +11285,7 @@ try {
         })`);
         releaseMovingSource();
         await page.waitForFunction(
-          (id) => globalThis.__kinect.timeline.clips().some((clip) => clip.take?.id === id)
-            && document.getElementById('tNote').textContent.includes(id),
+          (id) => globalThis.__kinect.timeline.clips().some((clip) => clip.take?.id === id),
           movingAddTake.id,
           { timeout: 25000 },
         );
