@@ -7,7 +7,7 @@ How the program is put together, and the coordinate decisions everything else fo
 Kinect v2 ──USB3──▶ native/grabber ──framed stdout──▶ server/index.js ──WebSocket──▶ web/main.js
                     (libfreenect2 +                   (fan-out, drop-to-latest)     (GPU unprojection,
                      OpenCL depth,                                                   217,088 points +
-                     TurboJPEG colour)                                               surface memory)
+                     TurboJPEG encode)                                               surface memory)
 ```
 
 A native grabber pulls depth and registered colour from
@@ -19,8 +19,12 @@ editor, an effect store the shaders are assembled out of, and a render queue.
 ## The grabber
 
 `native/grabber.cpp` opens the device, solves depth on the processor its libfreenect2 was built
-with — OpenCL where the build has it, else OpenGL, else the CPU, and `--pipeline` overrides —
-and encodes colour with TurboJPEG. Depth and colour arrive on separate listeners. The colour camera
+with — OpenCL where the build has it, else OpenGL, else the CPU, and `--pipeline` overrides — and
+encodes the registered frame it sends onward with TurboJPEG. Colour passes through two JPEG steps,
+and only the second is always TurboJPEG: libfreenect2 decodes the
+camera's own JPEG packets with whichever decoder `--color-decoder` names, and the grabber then
+re-encodes what came out of registration. Depth and colour arrive on separate listeners. The
+colour camera
 halves to 15fps in dim light while depth stays at 30, so depth runs at its own rate and reuses the
 last colour frame that arrived, with no age check on it. A synced listener would drop every other
 depth frame.
@@ -498,7 +502,7 @@ exactly as the grabber framed them:
 
 type 1  hello  UTF-8 JSON, once, before any frame:
                { format, serial, firmware, width, height, fx, fy, cx, cy,
-                 color, minDepth, maxDepth, lowLight, startedAt }
+                 color, minDepth, maxDepth, lowLight, decoder, startedAt }
 type 2  frame  [u32 depthBytes][u32 colorBytes][u64 timestampMs]
                [u16 depth[512*424] millimetres, 0 = no reading]
                [JPEG of the registered 512x424 colour image]
@@ -542,6 +546,13 @@ ordering silently becomes when a take was last copied, with `describeTake` repor
 `dateSource: 'mtime'` and no error. `minDepth` and `maxDepth` say how much of the world the
 file was allowed to contain, and the editor paints its preview range from them. `lowLight` says
 whether the colour camera was run long-exposure.
+
+**`decoder` is a record and nothing reads it.** It names which decoder turned the camera's JPEG
+packets into images for this take — `VideoToolbox`, `TurboJPEG`, `TegraJPEG` or `VAAPI` — so a
+take whose colour looks wrong can be told apart from one shot through another decoder. The
+grabber's `--color-decoder` picks it by its lower-case flag name, and the value here is what
+libfreenect2 answers when asked which processor it built, so it is the decoder that ran rather
+than the one that was asked for. The same name goes on the `[grabber] streaming` line on stderr.
 
 **`startedAt` means one thing on the wire and a narrower thing in a file.** The grabber says hello
 once per process, so the wire's value is when the grabber came up and would date a session's takes

@@ -40,14 +40,6 @@ npm run build:native      # one-time; needs the packages listed under Building t
 npm start                 # opens the menu on http://localhost:8080
 ```
 
-If your gpu has issues with your JPEG decoding, you might need to disable VAAPI entirely via an environment variable.
-```bash
-npm install
-npm run build:native
-LIBVA_DRIVER_NAME=none npm start   # 
-```
-
-
 Skip the native build if you have no sensor.
 
 The menu offers three things: record a take, open your projects, or browse the media library.
