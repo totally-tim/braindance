@@ -103,10 +103,10 @@ Read the assertion count, never the exit code.
 | --- | --- | --- |
 | `determinism-check.mjs` | same program time, same image | a capture |
 | `index-check.mjs` | the index, the hash, the frame API | `--url`, and a fixture past 2 GiB |
-| `registry-check.mjs` | one registry, sliders as views of it, every look term live | `--url` |
+| `registry-check.mjs` | one registry, sliders as views of it, every look term live, every preset drawing on a context that renders less | `--url` |
 | `timeline-check.mjs` | seek equals playback | `--url`, a take of ≥12s |
 | `keyframe-check.mjs` | tracks, undo | `--url`, a take of ≥24s |
-| `export-check.mjs` | resolution, export, the file | `--url`, ffmpeg and ffprobe |
+| `export-check.mjs` | resolution, export, the file, the size door | `--url`, ffmpeg and ffprobe |
 | `editor-check.mjs` | the editor's controls exist, and pressing them changes something | `--url`, a take of ≥32s |
 | `library-check.mjs` | the library, the recorder, the routes | a free port span |
 | `boot-check.mjs` | after boot, every control shows the value the registry holds for the selected clip; the document door adopts a whole document or none; the undo stack is the session's and the file is the document's | port 8391 free |

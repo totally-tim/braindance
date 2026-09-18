@@ -197,6 +197,8 @@ foot.](media/export.png)
 | PNG sequence | one file per frame in a directory | compositing |
 
 The render runs in the page and lands in its own directory under `exports/` on the server.
+LibreWolf, and Firefox with `privacy.resistFingerprinting` on, refuse an export larger than 2048
+pixels on a side. Export those from another browser.
 **save a copy…** puts the file anywhere through the browser's file picker. It is disabled in a
 browser without one, and for a PNG sequence, which is a directory.
 
