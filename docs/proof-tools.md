@@ -90,6 +90,11 @@ node tools/determinism-check.mjs --clock --before HEAD~1
 | fixture | a capture; `--capture` names it |
 | browser | a GPU browser |
 
+Each page's live socket is accepted and never connected upstream, so no sensor hello and no output
+state from the server reaches a pinned run, and the verdict requires both pages to hold the page's
+own default focal of 366 and every value of the applied look. Connected, the hello lands whenever
+the grabber answers, and a server in standby wakes on the first page after its run is pinned.
+
 `--frames`, `--stride` and `--substeps` size the run; `--headed` shows it. `--clock` is the
 before-half and reads `uniforms.time` off an untouched `git show <rev>` page, so it refuses a rev
 whose `web/main.js` already contains the transport. This tool declares no mutations.
