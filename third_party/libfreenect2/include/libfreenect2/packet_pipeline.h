@@ -24,6 +24,16 @@
  * either License.
  */
 
+/*
+ * NOTICE OF MODIFICATION. This file is not upstream libfreenect2. It was
+ * changed by Tim Kraus on 2026-09-09, on top of upstream v0.2.1, for the
+ * Braindance project: the colour decoder became a caller's choice. A
+ * ColorDecoder enum and a defaultColorDecoder() reader are declared here, and
+ * every pipeline class gained a constructor overload taking one. Every altered
+ * region below is marked "LOCAL EDIT"; third_party/UPSTREAM.md carries the
+ * reasoning.
+ */
+
 /** @file packet_pipeline.h Packet pipe line definitions. */
 
 #ifndef PACKET_PIPELINE_H_
@@ -48,6 +58,46 @@ class PacketPipelineComponents;
  */
 ///@{
 
+// LOCAL EDIT: the colour decoder, named so a caller can pick one.
+/** Which decoder turns the colour camera's JPEG packets into images.
+ *
+ * An enumerator exists only where this build can construct that decoder, so a value naming a
+ * decoder is always a decoder the pipeline will use. Nothing substitutes.
+ *
+ * VAAPI and TegraJPEG hold a device and report its health through good(). A failed start, or a
+ * context lost mid-stream, leaves good() false, and the pipeline delivers no further colour for
+ * the rest of the run. A VAAPI that did not start also hands out no buffers, so every colour
+ * transfer reaches the parser with a null one. colorDecoderStarted() reports that, and is worth
+ * asking after constructing a pipeline.
+ *
+ * VideoToolbox and TurboJPEG leave good() at the base class's true whatever happens to them, so
+ * colorDecoderStarted() says nothing about either, and they fail differently from each other.
+ * TurboJPEG logs a frame it could not read and decodes the next; one whose decompressor never
+ * opened logs once and delivers nothing for the rest of the run. VideoToolbox discards the status
+ * of its session and of every frame, logs none of it, and delivers the frame anyway with status 0
+ * and no pixel buffer behind Frame::data. A consumer that trusts status and the dimensions reads
+ * that null pointer, which is what Registration::apply does.
+ */
+enum class ColorDecoder
+{
+#ifdef LIBFREENECT2_WITH_VT_SUPPORT
+  VideoToolbox,
+#endif
+#ifdef LIBFREENECT2_WITH_TURBOJPEG_SUPPORT
+  TurboJPEG,
+#endif
+#ifdef LIBFREENECT2_WITH_TEGRAJPEG_SUPPORT
+  TegraJPEG,
+#endif
+#ifdef LIBFREENECT2_WITH_VAAPI_SUPPORT
+  VAAPI,
+#endif
+};
+
+// LOCAL EDIT: what a pipeline constructed without a decoder will use.
+/** The decoder a pipeline constructed without one uses. */
+LIBFREENECT2_API ColorDecoder defaultColorDecoder();
+
 /** Base class for other pipeline classes.
  * Methods in this class are reserved for internal use.
  */
@@ -64,6 +114,13 @@ public:
 
   virtual RgbPacketProcessor *getRgbPacketProcessor() const;
   virtual DepthPacketProcessor *getDepthPacketProcessor() const;
+
+  // LOCAL EDIT: whether the colour decoder came up, and which one it is, both asked without
+  // naming RgbPacketProcessor - its declaration is not installed, so a caller outside this
+  // library can reach neither good() nor name(). colorDecoderName() is the decoder that was
+  // built, so a caller reports what it got rather than what it asked for.
+  virtual bool colorDecoderStarted() const;
+  virtual const char *colorDecoderName() const;
 protected:
   PacketPipelineComponents *comp_;
 };
@@ -87,6 +144,9 @@ class LIBFREENECT2_API CpuPacketPipeline : public PacketPipeline
 {
 public:
   CpuPacketPipeline();
+  // LOCAL EDIT: an overload rather than a default argument, which would bake today's default
+  // into every caller's object file.
+  CpuPacketPipeline(ColorDecoder decoder);
   virtual ~CpuPacketPipeline();
 };
 
@@ -99,6 +159,8 @@ protected:
   bool debug_;
 public:
   OpenGLPacketPipeline(void *parent_opengl_context = 0, bool debug = false);
+  // LOCAL EDIT: see CpuPacketPipeline.
+  OpenGLPacketPipeline(void *parent_opengl_context, bool debug, ColorDecoder decoder);
   virtual ~OpenGLPacketPipeline();
 };
 #endif // LIBFREENECT2_WITH_OPENGL_SUPPORT
@@ -111,6 +173,9 @@ protected:
   const int deviceId;
 public:
   OpenCLPacketPipeline(const int deviceId = -1);
+  // LOCAL EDIT: see CpuPacketPipeline. ColorDecoder is scoped, so it cannot promote to int and
+  // bind to the deviceId overload above.
+  OpenCLPacketPipeline(const int deviceId, ColorDecoder decoder);
   virtual ~OpenCLPacketPipeline();
 };
 
@@ -126,6 +191,8 @@ protected:
   const int deviceId;
 public:
   OpenCLKdePacketPipeline(const int deviceId = -1);
+  // LOCAL EDIT: see CpuPacketPipeline.
+  OpenCLKdePacketPipeline(const int deviceId, ColorDecoder decoder);
   virtual ~OpenCLKdePacketPipeline();
 };
 #endif // LIBFREENECT2_WITH_OPENCL_SUPPORT
@@ -137,6 +204,8 @@ protected:
   const int deviceId;
 public:
   CudaPacketPipeline(const int deviceId = -1);
+  // LOCAL EDIT: see CpuPacketPipeline.
+  CudaPacketPipeline(const int deviceId, ColorDecoder decoder);
   virtual ~CudaPacketPipeline();
 };
 
@@ -152,6 +221,8 @@ protected:
   const int deviceId;
 public:
   CudaKdePacketPipeline(const int deviceId = -1);
+  // LOCAL EDIT: see CpuPacketPipeline.
+  CudaKdePacketPipeline(const int deviceId, ColorDecoder decoder);
   virtual ~CudaKdePacketPipeline();
 };
 #endif // LIBFREENECT2_WITH_CUDA_SUPPORT
