@@ -102,16 +102,22 @@ export class Recorder {
       buffered: take ? take.stream.writableLength : 0,
       cannotRecord: this.cannotRecord(),
       // A longer window than `recording`: a library tile may not offer Download or Remove until
-      // the index and the hash exist. An id, so a surface can compare it against what it drew.
-      writingId: take?.id ?? [...this.closing].at(-1)?.id ?? null,
+      // the index and the hash exist. Every owned take, because a restart owns two and a tile has
+      // to repaint when either close finishes; sorted, so a surface compares it as a set.
+      writingIds: this.ownedTakes().map((owned) => owned.id).sort(),
     };
+  }
+
+  /** The open take and every take whose close is still running. */
+  ownedTakes() {
+    return [this.take, ...this.closing].filter((take) => take !== null);
   }
 
   /** Whether `path` is a file this recorder is still writing: the open take, or one still closing. */
   owns(path) {
     if (!path) return false;
     const wanted = resolve(path);
-    return [this.take, ...this.closing].some((take) => take !== null && resolve(take.path) === wanted);
+    return this.ownedTakes().some((take) => resolve(take.path) === wanted);
   }
 
   // Refuses when the disk cannot hold a sensible minimum, because with manual-only deletion the

@@ -871,11 +871,11 @@ async function refreshNow(mine, bound) {
 
 // Off `local` and `remote`, because the reconciled record is whichever side won the spread.
 const believedFromLibrary = () => ({
-  writingId: library.takes.find((t) => t.local?.recording)?.local.id ?? null,
+  writingIds: library.takes.filter((t) => t.local?.recording).map((t) => t.local.id).sort(),
   node: library.node
     ? {
       reachable: library.node.reachable,
-      writingId: library.takes.find((t) => t.remote?.recording)?.remote.id ?? null,
+      writingIds: library.takes.filter((t) => t.remote?.recording).map((t) => t.remote.id).sort(),
     }
     : null,
 });

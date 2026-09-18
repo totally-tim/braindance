@@ -383,6 +383,12 @@ const MUTATIONS = {
     '[this.take, ...this.closing]',
     '[this.take ?? [...this.closing].at(-1) ?? null]',
   ]] },
+  // The recorder reports one take as being written, the newest, so a take whose close finishes
+  // while the next is open changes nothing a gallery compares, and its tile stays refused.
+  'writing-names-one-take': { file: 'server/recorder.js', edits: [[
+    'writingIds: this.ownedTakes().map((owned) => owned.id).sort(),',
+    'writingIds: this.ownedTakes().map((owned) => owned.id).sort().slice(-1),',
+  ]] },
 
   // The library's poll goes back to a first tick that cannot disagree with anything.
   'poll-first-tick-is-blind': { file: 'web/library.js', edits: [[
@@ -889,7 +895,7 @@ const MUTATIONS = {
     '      const older = takes.find((t) => !carriesRefusals(t));\n      if (false) {',
   ]] },
 
-  // The same gate on the other route goes away: a `/record/state` with no `writingId` in it is
+  // The same gate on the other route goes away: a `/record/state` with no `writingIds` in it is
   // read as a recorder that owns no take, which is what `??
   'node-admits-an-old-record-state': { file: 'server/library.js', edits: [[
     '      const missing = POLLED_NODE_FIELDS.filter((f) => body[f] === undefined);',
@@ -2006,7 +2012,7 @@ async function runChecks() {
       // Written out rather than derived by deleting a key from the current one.
       let served = { recording: false, takeId: null };
       const behind = await twoRoute(() => served);
-      const carries = await twoRoute(() => ({ recording: false, takeId: null, writingId: null }));
+      const carries = await twoRoute(() => ({ recording: false, takeId: null, writingIds: [] }));
       try {
         const blind = new NodeLink(behind.url, 'behind-node');
         check(Array.isArray(await blind.takes()),
@@ -2015,24 +2021,24 @@ async function runChecks() {
 
         const polled = await blind.recordState();
         check(polled.reachable === false,
-          'a recorder state with no writingId in it is refused rather than read as a node that owns no take',
-          `reachable ${polled.reachable}, writingId ${JSON.stringify(polled.writingId)}`);
+          'a recorder state with no writingIds in it is refused rather than read as a node that owns no take',
+          `reachable ${polled.reachable}, writingIds ${JSON.stringify(polled.writingIds)}`);
         const refused = await blind.takes();
-        check(refused === null && /older build/.test(blind.lastError ?? '') && /writingId/.test(blind.lastError ?? ''),
+        check(refused === null && /older build/.test(blind.lastError ?? '') && /writingIds/.test(blind.lastError ?? ''),
           'and the refusal reaches the listing, which is the only one of the two routes that draws anything',
           `${refused === null ? 'null' : `${refused.length} takes`}, ${JSON.stringify(blind.lastError)}`);
 
         // The other arm, and the rows above are unfalsifiable without it.
         const well = new NodeLink(carries.url, 'carrying-node');
         const wellPolled = await well.recordState();
-        check(wellPolled.reachable === true && wellPolled.writingId === null,
+        check(wellPolled.reachable === true && eq(wellPolled.writingIds, []),
           'a node carrying the field and simply not writing is not refused for it, so the gate reads absence rather than an idle recorder',
-          `reachable ${wellPolled.reachable}, writingId ${JSON.stringify(wellPolled.writingId)}`);
+          `reachable ${wellPolled.reachable}, writingIds ${JSON.stringify(wellPolled.writingIds)}`);
         check(Array.isArray(await well.takes()),
           'and its takes still list, so this is a version band rather than the poll switched off',
           `${well.lastError === null ? 'no error' : well.lastError}`);
 
-        served = { recording: false, takeId: null, writingId: null };
+        served = { recording: false, takeId: null, writingIds: [] };
         await blind.recordState();
         const healed = await blind.takes();
         check(healed !== null && blind.lastError === null,
@@ -5061,13 +5067,16 @@ async function runChecks() {
         walk = { started, answers: null };
         inflight.push(routeAnswers().then((answers) => { walk.answers = answers; }));
       }
-      inflight.push(getJson(`${overlapUrl}/library/takes`).then((listed) => {
-        const t = listed.takes.find((x) => x.id === takeA);
-        samples.push({ started, recording: t?.recording ?? null, hash: t?.hash ?? null });
-      }));
+      inflight.push(Promise.all([getJson(`${overlapUrl}/library/takes`), getJson(`${overlapUrl}/record/state`)])
+        .then(([listed, state]) => {
+          const t = listed.takes.find((x) => x.id === takeA);
+          samples.push({ started, recording: t?.recording ?? null, hash: t?.hash ?? null, writing: state.writingIds });
+        }));
       await new Promise((done) => { setTimeout(done, 25); });
     }
     await Promise.all(inflight);
+    // Asked before B stops, so the answer is about A's close finishing and not about B's.
+    const afterA = await getJson(`${overlapUrl}/record/state`);
     // B goes on recording at 400fps, so it is stopped before anything else reads this disk.
     await post(`${overlapUrl}/record/stop`);
     const takeB = [...opened.keys()].find((id) => id !== takeA) ?? null;
@@ -5089,6 +5098,13 @@ async function runChecks() {
       'and every `:id` route answering GET answers the closing take exactly as it answered the open one',
       differs.length ? `open vs closing: ${differs.map((d) => `${whileOpen[walk.answers.indexOf(d)]} -> ${d.split(' ').pop()}`).join(', ')}`
         : `${whileOpen.length} routes: ${whileOpen.join(', ')}`);
+    // The gallery repaints when this list changes, so it has to change at each close, not only at B's.
+    const bothWriting = [takeA, takeB].sort();
+    const unlike = inside.filter((s) => !eq(s.writing, bothWriting));
+    check(inside.length > 0 && unlike.length === 0 && eq(afterA.writingIds, [takeB]) && afterA.takeId === takeB,
+      'the recorder reports both takes as being written for the whole overlap, and only the open one once the closing one is done - so a gallery following it repaints the finished take instead of refusing it until the next stop',
+      `${inside.length - unlike.length} of ${inside.length} inside said ${JSON.stringify(bothWriting)}`
+        + `${unlike.length ? ` (one said ${JSON.stringify(unlike[0].writing)})` : ''}, afterwards ${JSON.stringify(afterA.writingIds)}`);
     const settled = (await getJson(`${overlapUrl}/library/takes`)).takes.find((t) => t.id === takeA);
     const closedHash = /sha256:[0-9a-f]{64}/.exec(closed.get(takeA)?.line ?? '')?.[0] ?? null;
     check(settled?.recording === false && closedHash !== null && settled.hash === closedHash,
@@ -5489,9 +5505,9 @@ async function runChecks() {
       `painted mid-write ${paintedMidWrite}, ${heldTicks.length} /record/state held`);
     await post(`${liveUrl}/record/stop`);
     const restedAfter = await getJson(`${liveUrl}/record/state`);
-    check(restedAfter.writingId === null,
+    check(eq(restedAfter.writingIds, []),
       'and the take finished underneath it - index, hash and all - before the tick was let go, so the tick answers about a world that moved while it waited',
-      `writingId ${restedAfter.writingId}, recording ${restedAfter.recording}`);
+      `writingIds ${JSON.stringify(restedAfter.writingIds)}, recording ${restedAfter.recording}`);
     releaseTicks = true;
     for (const route of heldTicks) await route.continue().catch(() => {});
     const cameBack = await blind.waitForFunction(

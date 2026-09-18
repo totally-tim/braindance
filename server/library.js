@@ -294,25 +294,25 @@ export class NodeLink {
   async recordState() {
     try {
       const body = await this.fetchJson('/record/state', { signal: AbortSignal.timeout(3000) });
-      // Absent and not-writing are two facts and only one may be spelled `null`, or the
-      // fingerprint never moves. Asked of `POLLED_NODE_FIELDS`, so a field added there tightens it.
+      // Absent and not-writing are two facts, spelled `undefined` and `[]`, or the fingerprint
+      // never moves. Asked of `POLLED_NODE_FIELDS`, so a field added there tightens it.
       const missing = POLLED_NODE_FIELDS.filter((f) => body[f] === undefined);
       this.buildRefusal = missing.length === 0 ? null
-        : 'it is running an older build whose recorder state carries no '
-          + `${missing.join(', ')} - the library cannot follow a recorder it cannot ask, `
-          + 'so its takes are not listed here. Upgrade the node to this build.';
+        : `it is running an older build whose recorder state carries no ${missing.join(', ')}, `
+          + 'so this library cannot tell which of its takes are still being written, and its takes '
+          + 'are not listed here. Upgrade the node to this build.';
       if (this.buildRefusal) {
-        return { name: this.name, reachable: false, recording: false, takeId: null, writingId: null };
+        return { name: this.name, reachable: false, recording: false, takeId: null, writingIds: [] };
       }
       return {
         name: this.name,
         reachable: true,
         recording: Boolean(body.recording),
         takeId: body.takeId ?? null,
-        writingId: body.writingId ?? null,
+        writingIds: body.writingIds,
       };
     } catch {
-      return { name: this.name, reachable: false, recording: false, takeId: null, writingId: null };
+      return { name: this.name, reachable: false, recording: false, takeId: null, writingIds: [] };
     }
   }
 }
