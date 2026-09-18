@@ -63,8 +63,9 @@ at any output size. A build scaling by `bufferWidth / 1728` instead of `bufferHe
 out bit-identical on four arms that are all aspect ratio 1.6, because at 1.6 those two expressions
 are the same number, while it draws 11.1% too large at every size the menu offers. The swept arms
 shared one ratio and the shipped list does not: `web/export-sizes.js` groups its sizes under
-16:9, 1.90:1 DCI, 4:3, 1:1 and 65:24, and none of them is 1.6. The check reads that list off the
-page, and a cross-build arm at 1920x1080 separates the two builds.
+16:9, 1.90:1 DCI, 4:3, 1:1 and 65:24, and none of them is 1.6. The check renders one pose at
+1920x1080 and at 1440x1080, one height and two widths, where the narrow frame is the wide frame's
+centre only while every size follows the height.
 
 ## Look for the object every observation skips
 
@@ -154,7 +155,7 @@ is the normal state.
 - A tool holding its own copy of a layout constant fails looking exactly like a product regression;
   ask the page for the number and read the drawing buffer back until it is the size you asked for.
 - Wait for the take to open and resize events to run before accepting that size. `export-check`
-  records the settled buffer and refuses every frame read after it moves, including cross-build pages.
+  records the settled buffer and refuses every frame read after it moves, on either build's page.
 - Writing `.value` by hand stops meaning what it says the moment a control's scale changes, and it
   fails in the passing direction, so check the quantity that came out against the one that went in.
 - `camera.project()` answers in canvas coordinates and `page.mouse` takes viewport ones; they are

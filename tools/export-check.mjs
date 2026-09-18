@@ -24,26 +24,13 @@ const URL_BASE = flag('--url', 'http://localhost:8080');
 const BLACKWALL_LOOK = JSON.parse(
   readFileSync(new URL('../presets-builtin/blackwall.json', import.meta.url), 'utf8'),
 ).values;
-// The editor. Named once because the page is opened at it and the cross-build arm's
-// markup is intercepted by it, and those two have to agree or the interception misses.
 const EDITOR_PATH = '/edit';
 const TAKE = flag('--take', 'sample');
 const HEADED = argv.includes('--headed');
 const MUTATE = flag('--mutate');
-// Not HEAD: the moment this step is committed HEAD contains the reference scaling and the
-// control arm would be the same build twice. A marker survives a history rewrite.
-const BEFORE = flag('--before') ?? revBeforeMarker('bufferHeight / 1080.0');
-
-function revBeforeMarker(marker) {
-  const introduced = execFileSync(
-    'git', ['-C', REPO, 'log', '-S', marker, '--format=%H', '--reverse', '--', 'web/main.js'],
-    { encoding: 'utf8', maxBuffer: 1 << 26 },
-  ).split('\n')[0].trim();
-  if (!introduced) {
-    throw new Error(`no commit in this history introduces ${JSON.stringify(marker)} to web/main.js`);
-  }
-  return `${introduced}^`;
-}
+// A server running another build, which the resolution arms are rendered against as well. Only on
+// request: a standing comparison against a fixed revision forbids every intentional change.
+const BEFORE_URL = flag('--before-url');
 // Bare names, resolved through PATH, because an absolute Homebrew default is a macOS path
 // on a project that also ships to Linux and the Pi, and `jobs-check` spawns a bare ffprobe.
 const FFMPEG = flag('--ffmpeg', 'ffmpeg');
@@ -62,22 +49,14 @@ const SMALL = { width: 960, height: 600 };
 const BIG = { width: 1920, height: 1200 };
 const REF = { width: 1728, height: 1080 };
 
-// The one arm that is not 1.6, and the aspect is the whole reason it is here: at 1.6 a
+// Two widths at one height, and the aspect is the whole reason they are here: at 1.6 a
 // reference taken from the width over 1728 and one taken from the height over 1080 are the
-// same number, so every other arm is blind by construction to the wrong one.
+// same number, so every 1.6 arm is blind by construction to the wrong one.
 const HD = { width: 1920, height: 1080 };
 const NON_169 = { width: 1440, height: 1080 };
 const HD_POINT_SIZE = 8;
 
 const AT_SEC = 4;
-// What `pointSize` was multiplied by when it became pixels at 1080p: the reference
-// height over the 600-tall buffer the two presets were graded against.
-const GRADED_HEIGHT = 600;
-const POINT_SIZE_REBASE = 1080 / GRADED_HEIGHT;
-
-const REBASE_LOOK = { far: 2.8, near: 0.05 };
-
-const REBASE_FULL_LOOK = { ...REBASE_LOOK, bloom: 0 };
 const EXPORT_FRAMES = 8;
 const EXPORT_FPS = 30;
 
@@ -620,6 +599,20 @@ const INSTALL = `(() => {
       return { w: W, h: H };
     },
 
+    // The centre W columns of a frame, full height: what a narrower frame at the same height and
+    // the same vertical lens shows.
+    centreColumns(label, out, W) {
+      const { px, w, h } = this.shots.get(label);
+      const x0 = (w - W) / 2;
+      if (!Number.isInteger(x0) || x0 < 0) throw new Error('cannot centre ' + W + ' columns in ' + w);
+      const dst = new Uint8Array(W * h * 4);
+      for (let y = 0; y < h; y++) {
+        dst.set(px.subarray((y * w + x0) * 4, (y * w + x0 + W) * 4), y * W * 4);
+      }
+      this.shots.set(out, { px: dst, w: W, h });
+      return { w: W, h };
+    },
+
     // Mean luminance and how much of the frame is lit at all. These are the two the
     // document's failure is described in - the cloud goes sparse and dark - and
     // they survive the resampling that a per-pixel comparison cannot.
@@ -769,55 +762,23 @@ const INSTALL = `(() => {
 const RES_ARM = `async ({ label, look, at, resLook, camera }) => {
   const k = globalThis.__kinect;
   const ex = globalThis.__ex;
-  // Blackwall, and the graded look it comes with rather than the reading alone. This
-  // was k.setMode(4), which did both at once: it selected the shading *and* applied
-  // twelve hardcoded values, and the note further down about arms inheriting "whatever
-  // the previous one left" is about exactly that write. The readings are registry
-  // parameters now and the look is a document, so the two halves are spelled out - and
-  // reaching for the reading alone would have left bloom, trails, rgbSplit, scanlines
-  // and grain at zero, which is every term the grade rows below are trying to measure.
-  //
-  // **Each build gets its own Blackwall, and that is the whole point of the branch.**
-  // The obvious version of this merges today's look into every arm and lets the
-  // unknown-name filter drop the readings on the older module. It is wrong, and wrong
-  // in the units this file exists to be careful about: pointSize is pixels at 1080p
-  // here and was pixels at the drawing buffer at the revision the cross-build arm
-  // plays, so 8.1 written into that build is not the same size, it is 1.8 times too
-  // big. Measured - the old arm drew 1.82..3.8px where it should draw 1.02..2.1px, and
-  // the two rebase rows came back at luminance ratio 0.342 against an expected 1.0,
-  // which reads as the entire look having failed to rebase. The build that still has
-  // setMode has its own graded values and must be left to apply them.
-  if (k.setMode) k.setMode(4);
-  else k.params.apply(${JSON.stringify(BLACKWALL_LOOK)});
-  // Only what the build in front of us declares. The cross-build arm plays an older
-  // module, and today's OFF names parameters that build has never heard of - applying
-  // them throws "unknown parameter noise" from inside the registry's own door, which is
-  // the door doing its job. Dropped names are *returned* rather than swallowed: on the
-  // current build the list must be empty, so a typo in a look still surfaces here
-  // instead of being quietly skipped on every arm.
+  // Only what the build in front of us declares, because a --before-url build may predate a
+  // name. Dropped names are returned rather than swallowed: on this build the list must be
+  // empty, so a typo in a look still surfaces instead of being skipped on every arm.
   const known = new Set(k.params.names());
-  // Every arm starts with the region switched off unless its own look says otherwise.
-  // Spelled out here rather than left to the rows because two of them - nobloom and
-  // full - deliberately carry no OFF spread, since they are Blackwall entire; they
-  // would inherit whatever the previous arm set, and the arms that render 1728x1080
-  // and 1920x1200 run after the region rows have already been through. Measured with
-  // this line absent: the two cross-build rows came back at luminance ratio 0.364 with
-  // a worst tile of 48.7/255, which reads as the rebase having broken and was a mask
-  // still fading the cloud. Zero is the default for all four, so this changes nothing
-  // for any row that was here before.
-  //
-  // **The smear is here for the same reason and it is the sharper case**, because the rows that
-  // inherit it are the rebase ones, whose whole job is to keep Blackwall's own values rather than
-  // spreading an OFF. The row that raises the smear runs last in each size's pass, so without
-  // this line every arm after it rendered through a MoshPass nobody asked for: measured the first
-  // time as eighteen rows red at a luminance ratio of 1.87, and nine more after putting it in the
-  // pipeline looks alone, where the rebase arms never see it.
+  // Blackwall's whole graded look under every arm, because the reading alone leaves bloom,
+  // trails and the grade at zero, which is every term the rows below measure.
+  const blackwall = ${JSON.stringify(BLACKWALL_LOOK)};
+  k.params.apply(Object.fromEntries(Object.entries(blackwall).filter(([n]) => known.has(n))));
+  // Every arm starts with the region, the smear and the glyph field off unless its own look
+  // says otherwise: nobloom and full spread no OFF, and would inherit whatever the arm before
+  // them raised - a mask still fading the cloud, or a MoshPass nobody asked for.
   const REGION_BASE = {
     'noise.amount': 0, 'push.amount': 0, 'noise.region': 0, 'mask.amount': 0, 'datamosh.amount': 0,
     'glyph.amount': 0,
   };
   const merged = { ...REGION_BASE, ...resLook, ...look };
-  const dropped = Object.keys(merged).filter((n) => !known.has(n));
+  const dropped = [...new Set([...Object.keys(blackwall), ...Object.keys(merged)])].filter((n) => !known.has(n));
   k.params.apply(Object.fromEntries(Object.entries(merged).filter(([n]) => known.has(n))));
   ex.pinCamera(camera);
   await k.timeline.settled();
@@ -825,19 +786,16 @@ const RES_ARM = `async ({ label, look, at, resLook, camera }) => {
   await t.seek(at);
   const size = ex.grab(label);
   const gl = k.renderer.getContext();
-  // Read off the page rather than computed from the drawing buffer, so an arm
-  // reports the reference the build in front of it *has* instead of the one this
-  // tool assumes it has - the difference is the whole of the 16:9 arm below, where
-  // a build referencing width puts 1200 in this uniform at an 1080-tall buffer. The
-  // build at HEAD has no such uniform at all, which is the point of the control: its
-  // k is 1 at every size.
-  const kScale = k.uniforms.bufferHeight ? k.uniforms.bufferHeight.value / 1080 : 1;
+  // Read off the page rather than computed from the drawing buffer, so an arm reports the
+  // reference the build in front of it has: a build referencing width puts 1200 in this
+  // uniform at a 1080-tall buffer.
+  const kScale = k.uniforms.bufferHeight.value / 1080;
   return {
     size,
     dropped,
     lum: ex.lum(label),
     kScale,
-    refHeight: k.uniforms.bufferHeight ? k.uniforms.bufferHeight.value : null,
+    refHeight: k.uniforms.bufferHeight.value,
     pointSize: k.uniforms.pointSize.value,
     // The lens as the shader reads it and the cell the glyph field tiles, for modelling the
     // glyph branch's sprite the way drawnPointSizes models the plain one.
@@ -847,20 +805,11 @@ const RES_ARM = `async ({ label, look, at, resLook, camera }) => {
     latticeCell: k.uniforms.latticeCell ? k.uniforms.latticeCell.value : null,
     sizes: ex.drawnPointSizes(kScale),
     tiles: ex.tiles(label, 8, 5),
+    sha: await ex.sha(ex.shots.get(label).px),
     pointRange: Array.from(gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)),
-    // **Which post passes actually ran, read off the composer rather than inferred
-    // from the look that was applied.** Two builds handed the same look can still
-    // render through different chains, because whether a pass runs is a *derived*
-    // fact - and the three cross-build rows were red for exactly that. gradeNeeded()
-    // gained a vignette term and a streak term; Blackwall carries vignette 0.55; the
-    // look those arms spread zeroes rgbSplit, scanlines and grain and nothing else,
-    // so the grade switched off on the pinned build and stayed on here, adding a
-    // vignette, a Reinhard and a toe that subtracts 0.018 linear from every pixel.
-    // That toe is what took the faint splat fringes under the lit threshold: 7.7% of
-    // the coverage at an identical drawn point size, which is the reading that says a
-    // reference cannot be the cause. A row comparing a ratio could only report the
-    // difference; a row comparing this names it, and names it for any pass anybody
-    // puts a derived gate on next.
+    // Which post passes actually ran, read off the composer: whether a pass runs is derived
+    // from a set of parameter names, so two builds handed one look can render through two
+    // chains, and a ratio is then all that difference would show as.
     passes: k.composer.passes.map((p) => p.constructor.name + ':' + (p.enabled ? 'on' : 'off')),
   };
 }`;
@@ -887,9 +836,11 @@ const pageErrors = [];
 /**
  * A page on the take, with its errors collected and its GPU vouched for. One browser per page
  * rather than one browser with several pages: a second page in the same browser reliably loses
- * its execution context while an export is reading pixels back.
+ * its execution context while an export is reading pixels back. A page on another server is
+ * another build, so a mutation never reaches it.
  */
-async function openPage(viewport, source = mutatedBody, html = null) {
+async function openPage(viewport, base = URL_BASE) {
+  const ours = base === URL_BASE;
   // The full chromium build rather than the headless shell: the shell can land on
   // SwiftShader, which has no EXT_color_buffer_float, and a run that silently fell
   // back to a software rasteriser would agree with itself for the wrong reason.
@@ -908,12 +859,7 @@ async function openPage(viewport, source = mutatedBody, html = null) {
     pageErrors.push(msg.text());
   });
   await page.route('**/favicon.ico', (route) => route.fulfill({ status: 204, body: '' }));
-  let servedHtml = false;
-  if (html) {
-    await page.route((url) => url.pathname === EDITOR_PATH,
-      (route) => { servedHtml = true; return route.fulfill({ contentType: 'text/html; charset=utf-8', body: html }); });
-  }
-  for (const mutant of otherMutants) {
+  for (const mutant of ours ? otherMutants : []) {
     const path = servedAt(mutant.file);
     await page.route((url) => url.pathname === path, (route) => {
       mutantServed++;
@@ -921,21 +867,14 @@ async function openPage(viewport, source = mutatedBody, html = null) {
       route.fulfill({ contentType: contentTypeFor(mutant.file), body: mutant.body });
     });
   }
-  if (source) {
-    const path = source === mutatedBody ? mutantPath : servedAt('web/main.js');
-    await page.route((url) => url.pathname === path, (route) => {
-      if (source === mutatedBody) {
-        mutantServed++;
-        mutantServedBy.set('web/main.js', mutantServedBy.get('web/main.js') + 1);
-      }
-      route.fulfill({ contentType: 'text/javascript; charset=utf-8', body: source });
+  if (ours && mutatedBody !== null) {
+    await page.route((url) => url.pathname === mutantPath, (route) => {
+      mutantServed++;
+      mutantServedBy.set('web/main.js', mutantServedBy.get('web/main.js') + 1);
+      route.fulfill({ contentType: 'text/javascript; charset=utf-8', body: mutatedBody });
     });
   }
-  await page.goto(`${URL_BASE}${EDITOR_PATH}?take=${encodeURIComponent(TAKE)}`, { waitUntil: 'load' });
-  if (html && !servedHtml) {
-    throw new Error(`the page markup was never intercepted - landed on ${new URL(page.url()).pathname}, `
-      + 'so the cross-build arm loaded the tree\'s own page');
-  }
+  await page.goto(`${base}${EDITOR_PATH}?take=${encodeURIComponent(TAKE)}`, { waitUntil: 'load' });
   await page.waitForFunction(() => !!globalThis.__kinect);
   await page.waitForFunction(() => !!globalThis.__kinect.timeline.transport(), null, { timeout: 20000 });
   // The transport exists before the take finishes building its timeline rows.
@@ -1072,7 +1011,7 @@ console.log('\n[1] the take carries its own intrinsics');
   }
 }
 
-console.log('\n[2] the look holds at a different output size, and did not before');
+console.log('\n[2] the look holds at a different output size');
 
 const LENS_CAMERA = { position: [0, 0.1, 1.6], quaternion: [0, 0, 0, 1] };
 const NEAR_CAMERA = { position: [0, 0.1, -0.2], quaternion: [0, 0, 0, 1], fov: 50 };
@@ -1082,14 +1021,6 @@ const REGION_OFF = { 'noise.amount': 0, 'push.amount': 0, 'noise.region': 0, 'ma
 const CROP_OPEN = { left: -7, right: 7, bottom: -7, top: 7 };
 const OFF = {
   bloom: 0, trails: 0, 'rgbsplit.amount': 0, 'raster.amount': 0, 'grain.amount': 0, ...REGION_OFF, ...CROP_OPEN,
-};
-
-const CROSS_BUILD_OFF = { ...OFF, 'vignette.amount': 0, rgbSplit: 0, scanlines: 0, grain: 0 };
-
-const asOldBuild = (look) => {
-  const out = { ...look };
-  for (const name of Object.keys(CROP_OPEN)) delete out[name];
-  return out;
 };
 
 /**
@@ -1109,7 +1040,8 @@ const REGION_AT_SUBJECT = {
   regionRound: 0.9, regionSoft: 0.6,
 };
 
-const HD_LOOK = { ...CROSS_BUILD_OFF, additive: false, pointSize: HD_POINT_SIZE };
+// The vignette is frame-space, so two widths shade one surface differently with it up.
+const HD_LOOK = { ...OFF, 'vignette.amount': 0, additive: false, pointSize: HD_POINT_SIZE };
 const PIPELINES = [
   ['points', { look: OFF }],
   ['splat', { look: { ...OFF, additive: true, pointSize: 7 }, camera: NEAR_CAMERA }],
@@ -1166,6 +1098,8 @@ const RES_TOLERANCE = {
   // ratio to 0.938, and either half alone catches it.
   datamosh: { on: 'coarse', mean: 4.0, ratio: 0.03 },
 };
+// The same frame at one height and two widths, compared pixel for pixel. MEASURE-ME.
+const ASPECT_TOLERANCE = { mean: 0.05, pct: 0.5 };
 
 const ARMS = [];
 
@@ -1231,20 +1165,6 @@ await main.page.evaluate(`globalThis.__kinect.params.apply(${JSON.stringify(CROP
     leaked.length ? leaked.join(' ') : `${after.size} arms, none dropped a name`);
 }
 
-const rebaseFullBig = await armAt(main.page, {
-  label: 'rebase-full-big', look: {}, resLook: REBASE_FULL_LOOK,
-});
-const rebaseGlowBig = await armAt(main.page, {
-  label: 'rebase-glow-big', look: {}, resLook: REBASE_LOOK,
-});
-await setStage(main.page, REF);
-const rebaseFullRef = await armAt(main.page, {
-  label: 'rebase-full-ref', look: {}, resLook: REBASE_FULL_LOOK,
-});
-const rebaseGlowRef = await armAt(main.page, {
-  label: 'rebase-glow-ref', look: {}, resLook: REBASE_LOOK,
-});
-
 {
   const bad = [];
   for (const [name] of PIPELINES) {
@@ -1289,153 +1209,106 @@ for (const [name, tol] of Object.entries(RES_TOLERANCE)) {
     + (tol.corr ? `, fine structure correlates ${fixed(m.corr, 4)} >= ${tol.corr}` : ''));
 }
 
-let rebaseOld = null;
-let rebaseFullOld = null;
-let rebaseGlowOld = null;
-let rebaseHdOld = null;
-let rebaseNon169Old = null;
+// The control, inside the build: the same two looks at 1920x1200 with the point size held in
+// framebuffer pixels, which is what a build without the reference draws there. The metric has to
+// call that a different image by a margin, or a resolution row passing says nothing about scaling.
 {
-  let src = execFileSync('git', ['-C', REPO, 'show', `${BEFORE}:web/main.js`], { encoding: 'utf8', maxBuffer: 1e9 });
-  if (src.includes('bufferHeight / 1080.0')) {
-    throw new Error(`${BEFORE} already has the resolution work: the control would be the same build twice`);
-  }
-  // The pinned build is the old point size, not the old geometry. The unprojection's x sign
-  // changed after this rev, so left alone the old arm draws the room reflected and the rows
-  // below disagree for two reasons at once.
-  const OLD_UNPROJECT_X = '     (pixel.x + 0.5 - center.x) / focal.x * z,';
-  const xHits = src.split(OLD_UNPROJECT_X).length - 1;
-  if (xHits !== 1) {
-    throw new Error(`${BEFORE}:web/main.js states the unprojection's x ${xHits} times, expected exactly 1`
-      + ' - refusing to compare a mirrored build against an unmirrored one and report it as point size');
-  }
-  src = src.replace(OLD_UNPROJECT_X, '    -(pixel.x + 0.5 - center.x) / focal.x * z,');
-  const beforeHtml = execFileSync('git', ['-C', REPO, 'show', `${BEFORE}:web/index.html`], { encoding: 'utf8', maxBuffer: 1e9 });
-  const before = await openPage(SMALL, src, beforeHtml);
-  const measured = await resolutionSweep(before.page, PIPELINES.filter(([n]) => n === 'points' || n === 'nobloom'));
-
-  await setStage(before.page, SMALL);
-  rebaseOld = await armAt(before.page, {
-    label: 'rebase-old', look: asOldBuild({ ...CROSS_BUILD_OFF, pointSize: RES_LOOK.pointSize }),
-  });
-  rebaseFullOld = await armAt(before.page, {
-    label: 'rebase-full-old', look: {}, resLook: REBASE_FULL_LOOK,
-  });
-  rebaseGlowOld = await armAt(before.page, {
-    label: 'rebase-glow-old', look: {}, resLook: REBASE_LOOK,
-  });
-  await setStage(before.page, HD);
-  rebaseHdOld = await armAt(before.page, {
-    label: 'rebase-hd-old', look: asOldBuild(HD_LOOK),
-  });
-  await setStage(before.page, NON_169);
-  rebaseNon169Old = await armAt(before.page, {
-    label: 'rebase-non169-old', look: asOldBuild(HD_LOOK),
-  });
-  await before.close();
+  await setStage(main.page, BIG);
+  const held = RES_LOOK.pointSize * (SMALL.height / BIG.height);
   for (const name of ['points', 'nobloom']) {
-    const m = measured.get(name);
-    note(`${BEFORE} ${name.padEnd(8)} ${fixed(m.fine.mean).padStart(9)} ${fixed(m.coarse.mean).padStart(13)} ${fixed(m.ratio, 4).padStart(11)} ${fixed(m.texture, 4).padStart(9)}`);
-  }
-  for (const name of ['points', 'nobloom']) {
-    const m = measured.get(name);
+    const spec = PIPELINES.find(([n]) => n === name)[1];
+    const arm = await armAt(main.page, {
+      label: `${name}-held`, look: { ...spec.look, pointSize: held }, camera: spec.camera ?? null,
+    });
+    const coarse = await main.page.evaluate(`((n) => {
+      const ex = globalThis.__ex;
+      ex.down(n + '-held', n + '-heldCoarse', 8);
+      return ex.diff(n + '-smallCoarse', n + '-heldCoarse');
+    })(${JSON.stringify(name)})`);
     const tol = RES_TOLERANCE[name];
-    const holds = m[tol.on].mean <= tol.mean && Math.abs(m.ratio - 1) <= tol.ratio;
-    const margin = Math.abs(m.ratio - 1) / tol.ratio;
-    check(!holds && margin >= CONTROL_MARGIN,
-      `the control fails the same assertion at ${name}: at ${BEFORE} the scene at 2x is a different image`,
-      `luminance ratio ${fixed(m.ratio, 4)} is ${margin.toFixed(1)}x the ${tol.ratio} tolerance, `
-      + `${tol.on} mean ${fixed(m[tol.on].mean)} against ${tol.mean}`);
+    const ratio = arm.lum.mean / after.get(name).small.lum.mean;
+    const margin = Math.abs(ratio - 1) / tol.ratio;
+    check(margin >= CONTROL_MARGIN,
+      `the control fails the same assertion at ${name}: a point size held in framebuffer pixels is a different image at 2x`,
+      `pointSize ${held} at 1920x1200 against ${RES_LOOK.pointSize} at 960x600: luminance ratio ${fixed(ratio, 4)} is `
+      + `${margin.toFixed(1)}x the ${tol.ratio} tolerance, coarse mean ${fixed(coarse.mean)} against ${tol.mean}`);
   }
 }
 
-for (const [label, arm, glow] of [
-  ['1728x1080', rebaseFullRef, rebaseGlowRef],
-  ['1920x1200', rebaseFullBig, rebaseGlowBig],
-]) {
-  const clear = [rebaseFullOld, arm].every((a) => a.sizes.smallest >= 1 && a.sizes.largest <= 64);
-  const ends = `old at 960x600 ${rebaseFullOld.sizes.smallest.toFixed(2)}..`
-    + `${rebaseFullOld.sizes.largest.toFixed(1)}px, new at ${label} `
-    + `${arm.sizes.smallest.toFixed(2)}..${arm.sizes.largest.toFixed(1)}px`;
-  const worstFull = Math.max(...arm.tiles.map((v, i) => Math.abs(v - rebaseFullOld.tiles[i])));
-  const ratioFull = arm.lum.mean / rebaseFullOld.lum.mean;
-  const chains = sameChain(arm, rebaseFullOld);
-  const worstGlow = Math.max(...glow.tiles.map((v, i) => Math.abs(v - rebaseGlowOld.tiles[i])));
-  const ratioGlow = glow.lum.mean / rebaseGlowOld.lum.mean;
-  check(clear && chains && Math.abs(ratioFull - 1) <= 0.02 && worstFull <= 2.0,
-    `and the whole look bar the glow rebases, not just the points: Blackwall at ${label} is Blackwall at 960x600`,
-    `${ends}; luminance ratio ${fixed(ratioFull, 5)}, worst of 40 tile means ${fixed(worstFull)}/255; `
-    + `chain ${chainOf(arm)} against ${chainOf(rebaseFullOld)}; bloom is left out because the `
-    + `pinned build's glow is three's pass and this one's is ours - with it up the same pair reads `
-    + `${fixed(ratioGlow, 5)} and ${fixed(worstGlow)}/255 through ${chainOf(glow)} against `
-    + `${chainOf(rebaseGlowOld)}`);
+// One height at two widths through one vertical lens: the narrow frame is the centre of the wide
+// one, sprite for sprite, only if every screen-space size follows the height. A reference taken
+// from the width draws the wide frame's sprites a third larger.
+const ASPECT_CAMERA = { position: [0.35, 0.25, 1.4], quaternion: [0, 0, 0, 1], fov: 50 };
+await setStage(main.page, HD);
+const aspectWide = await armAt(main.page, { label: 'aspect-wide', look: HD_LOOK, camera: ASPECT_CAMERA });
+await setStage(main.page, NON_169);
+const aspectNarrow = await armAt(main.page, { label: 'aspect-narrow', look: HD_LOOK, camera: ASPECT_CAMERA });
+{
+  const wide = aspectWide;
+  const narrow = aspectNarrow;
+  const d = await main.page.evaluate(`(() => {
+    const ex = globalThis.__ex;
+    ex.centreColumns('aspect-wide', 'aspect-wideCentre', ${NON_169.width});
+    return ex.diff('aspect-wideCentre', 'aspect-narrow');
+  })()`);
+  const clear = [wide, narrow].every((a) => a.sizes.smallest >= 1 && a.sizes.largest <= 64);
+  check(clear && d.mean <= ASPECT_TOLERANCE.mean && d.pct <= ASPECT_TOLERANCE.pct,
+    `and at one height the ${NON_169.width}-wide frame is the centre of the ${HD.width}-wide one, so the reference is the height`,
+    `references ${fixed(wide.refHeight, 1)} and ${fixed(narrow.refHeight, 1)}; drawn `
+    + `${wide.sizes.smallest.toFixed(2)}..${wide.sizes.largest.toFixed(1)}px wide against `
+    + `${narrow.sizes.smallest.toFixed(2)}..${narrow.sizes.largest.toFixed(1)}px narrow; `
+    + `mean ${fixed(d.mean)} <= ${ASPECT_TOLERANCE.mean}, ${fixed(d.pct)}% of pixels differ <= ${ASPECT_TOLERANCE.pct}, `
+    + `worst ${d.max}/255`);
 }
 
-{
-  await setStage(main.page, SMALL);
-  const newLook = await armAt(main.page, {
-    label: 'rebase-new',
-    look: { ...CROSS_BUILD_OFF, pointSize: RES_LOOK.pointSize * POINT_SIZE_REBASE },
-  });
-  const worst = Math.max(...newLook.tiles.map((v, i) => Math.abs(v - rebaseOld.tiles[i])));
-  const ratio = newLook.lum.mean / rebaseOld.lum.mean;
-  const twoBuilds = rebaseOld.kScale === 1 && newLook.kScale === SMALL.height / 1080
-    && rebaseOld.pointSize === RES_LOOK.pointSize
-    && newLook.pointSize === RES_LOOK.pointSize * POINT_SIZE_REBASE
-    && sameChain(newLook, rebaseOld);
-  check(twoBuilds && Math.abs(ratio - 1) <= 0.01 && worst <= 1.0,
-    `the 1080p-referred preset is the old preset, both drawn at 960x600: same size, same image`,
-    `pointSize ${rebaseOld.pointSize} with no reference at ${BEFORE} against ${newLook.pointSize} `
-    + `at k=${fixed(newLook.kScale, 4)} here: luminance ratio ${fixed(ratio, 5)}, `
-    + `worst of 40 tile means ${fixed(worst)}/255; chain ${chainOf(newLook)} against `
-    + `${chainOf(rebaseOld)}`);
-}
+// The on-demand comparison against another build, which a refactor claiming to leave the picture
+// alone points at the commit before itself. Every resolution arm and both aspect arms, rendered by
+// that build on the same GPU, the same pinned camera and the same take.
+if (BEFORE_URL) {
+  console.log(`\n[2b] the same arms, rendered by the build at ${BEFORE_URL}`);
+  const theirs = await (await fetch(`${BEFORE_URL}/capture/${encodeURIComponent(TAKE)}/index`)).json().catch(() => null);
+  if (theirs?.hash !== index.hash) {
+    console.log(`\n[export] DID NOT RUN - ${BEFORE_URL} serves ${TAKE} as ${theirs?.hash ?? 'nothing'}, `
+      + `not ${index.hash}, so the two builds would not be drawing the same frames`);
+    await main.close();
+    process.exit(2);
+  }
+  const other = await openPage(SMALL, BEFORE_URL);
+  const theirSweep = await resolutionSweep(other.page, PIPELINES);
+  await setStage(other.page, HD);
+  const theirWide = await armAt(other.page, { label: 'before-aspect-wide', look: HD_LOOK, camera: ASPECT_CAMERA });
+  await setStage(other.page, NON_169);
+  const theirNarrow = await armAt(other.page, { label: 'before-aspect-narrow', look: HD_LOOK, camera: ASPECT_CAMERA });
+  await other.close();
 
-{
-  await setStage(main.page, HD);
-  const hdNew = await armAt(main.page, {
-    label: 'rebase-hd-new', look: HD_LOOK,
-  });
-  const worst = Math.max(...hdNew.tiles.map((v, i) => Math.abs(v - rebaseHdOld.tiles[i])));
-  const ratio = hdNew.lum.mean / rebaseHdOld.lum.mean;
-  const litRatio = hdNew.lum.litPct / rebaseHdOld.lum.litPct;
-  // Both registries have to have taken the size they were asked for - the old
-  // build's step is 0.5 and this one's 0.1 - or this is a comparison about a snap.
-  const asked = hdNew.pointSize === HD_POINT_SIZE && rebaseHdOld.pointSize === HD_POINT_SIZE
-    && sameChain(hdNew, rebaseHdOld);
-  const clear = [hdNew, rebaseHdOld].every((a) => a.sizes.smallest >= 1 && a.sizes.largest <= 64);
-  check(asked && clear && Math.abs(litRatio - 1) <= 0.01 && Math.abs(ratio - 1) <= 0.01 && worst <= 1.0,
-    'and it holds at 16:9, where a width reference and a height reference are different numbers',
-    `the page's own reference is ${fixed(hdNew.refHeight, 1)} at a ${hdNew.size.w}x${hdNew.size.h} `
-    + `buffer, where a width-referenced build reads 1200; pointSize ${hdNew.pointSize} at `
-    + `k=${fixed(hdNew.kScale, 4)} against ${rebaseHdOld.pointSize} with no reference at ${BEFORE}, `
-    + `drawn ${hdNew.sizes.smallest.toFixed(2)}..${hdNew.sizes.largest.toFixed(1)}px; `
-    + `lit ${fixed(hdNew.lum.litPct, 4)}% against ${fixed(rebaseHdOld.lum.litPct, 4)}% is a ratio of `
-    + `${fixed(litRatio, 5)}, luminance ratio ${fixed(ratio, 5)}, `
-    + `worst of 40 tile means ${fixed(worst)}/255; chain ${chainOf(hdNew)} against `
-    + `${chainOf(rebaseHdOld)}`);
-}
-
-{
-  await setStage(main.page, NON_169);
-  const non169New = await armAt(main.page, {
-    label: 'rebase-non169-new', look: HD_LOOK,
-  });
-  const worst = Math.max(...non169New.tiles.map((v, i) => Math.abs(v - rebaseNon169Old.tiles[i])));
-  const ratio = non169New.lum.mean / rebaseNon169Old.lum.mean;
-  const litRatio = non169New.lum.litPct / rebaseNon169Old.lum.litPct;
-  const asked = non169New.pointSize === HD_POINT_SIZE && rebaseNon169Old.pointSize === HD_POINT_SIZE
-    && sameChain(non169New, rebaseNon169Old);
-  const clear = [non169New, rebaseNon169Old].every((a) => a.sizes.smallest >= 1 && a.sizes.largest <= 64);
-  check(asked && clear && Math.abs(litRatio - 1) <= 0.01 && Math.abs(ratio - 1) <= 0.01 && worst <= 1.0,
-    'and it holds at 4:3, where a width reference and a height reference are also different numbers',
-    `the page's own reference is ${fixed(non169New.refHeight, 1)} at a ${non169New.size.w}x${non169New.size.h} `
-    + `buffer, where a width-referenced build reads 900; pointSize ${non169New.pointSize} at `
-    + `k=${fixed(non169New.kScale, 4)} against ${rebaseNon169Old.pointSize} with no reference at ${BEFORE}, `
-    + `drawn ${non169New.sizes.smallest.toFixed(2)}..${non169New.sizes.largest.toFixed(1)}px; `
-    + `lit ${fixed(non169New.lum.litPct, 4)}% against ${fixed(rebaseNon169Old.lum.litPct, 4)}% is a ratio of `
-    + `${fixed(litRatio, 5)}, luminance ratio ${fixed(ratio, 5)}, `
-    + `worst of 40 tile means ${fixed(worst)}/255; chain ${chainOf(non169New)} against `
-    + `${chainOf(rebaseNon169Old)}`);
+  const pairs = [
+    ...PIPELINES.flatMap(([name]) => [
+      [`${name}@${SMALL.width}x${SMALL.height}`, after.get(name).small, theirSweep.get(name).small],
+      [`${name}@${BIG.width}x${BIG.height}`, after.get(name).big, theirSweep.get(name).big],
+    ]),
+    [`aspect@${HD.width}x${HD.height}`, aspectWide, theirWide],
+    [`aspect@${NON_169.width}x${NON_169.height}`, aspectNarrow, theirNarrow],
+  ];
+  let identical = 0;
+  for (const [label, ours, before] of pairs) {
+    if (ours.sha === before.sha) identical++;
+    const worst = Math.max(...ours.tiles.map((v, i) => Math.abs(v - before.tiles[i])));
+    const ratio = ours.lum.mean / before.lum.mean;
+    const comparable = before.dropped.length === 0 && sameChain(ours, before);
+    check(comparable && Math.abs(ratio - 1) <= 0.01 && worst <= 1.0,
+      `${label} renders what the build at ${BEFORE_URL} renders`,
+      ours.sha === before.sha ? 'bit-identical'
+        : `luminance ratio ${fixed(ratio, 5)}, worst of 40 tile means ${fixed(worst)}/255; chain ${chainOf(ours)} `
+          + `against ${chainOf(before)}${before.dropped.length ? `; that build lacks ${before.dropped.join(' ')}` : ''}`);
+  }
+  note(`${identical} of ${pairs.length} arms bit-identical across the two builds`);
+  // A chain that came back empty compares equal to another empty one, so the readback itself is
+  // asked, over every arm either build rendered.
+  const blind = ARMS.filter(([, a]) => chainOf(a) === '').map(([label]) => label);
+  check(ARMS.length > 0 && blind.length === 0,
+    'every arm published the chain it rendered through, so the rows comparing chains had chains',
+    blind.length ? `${blind.length} of ${ARMS.length} arms came back with no passes: ${blind.join(', ')}`
+      : `${ARMS.length} arms, each naming its passes`);
 }
 
 // Compare the same surface: the wide frame's centre against the long frame reduced by its zoom.
@@ -1547,6 +1420,42 @@ const glyphSpriteAt = (arm, d) => {
 
 console.log('\n[3] the crop box is editing furniture and cannot reach an exported pixel');
 
+/** A pose at `from` looking at `at`, upright, as the registry's camera value. */
+function lookFrom(from, at, fov) {
+  const norm = (v) => { const l = Math.hypot(...v); return v.map((x) => x / l); };
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const z = norm(from.map((v, i) => v - at[i]));
+  const x = norm(cross([0, 1, 0], z));
+  const y = cross(z, x);
+  const [m00, m01, m02, m10, m11, m12, m20, m21, m22] = [x[0], y[0], z[0], x[1], y[1], z[1], x[2], y[2], z[2]];
+  const tr = m00 + m11 + m22;
+  let q;
+  if (tr > 0) {
+    const w = Math.sqrt(tr + 1) * 2;
+    q = [(m21 - m12) / w, (m02 - m20) / w, (m10 - m01) / w, w / 4];
+  } else if (m00 > m11 && m00 > m22) {
+    const w = Math.sqrt(1 + m00 - m11 - m22) * 2;
+    q = [w / 4, (m01 + m10) / w, (m02 + m20) / w, (m21 - m12) / w];
+  } else if (m11 > m22) {
+    const w = Math.sqrt(1 + m11 - m00 - m22) * 2;
+    q = [(m01 + m10) / w, w / 4, (m12 + m21) / w, (m02 - m20) / w];
+  } else {
+    const w = Math.sqrt(1 + m22 - m00 - m11) * 2;
+    q = [(m02 + m20) / w, (m12 + m21) / w, w / 4, (m10 - m01) / w];
+  }
+  return { position: from, quaternion: q, fov };
+}
+
+// Every arm below draws the registry's default look through one pinned pose off the sensor's axis.
+// What the near plane removes can occlude what it kept only from a viewpoint the sensor did not
+// have, and without a pose and a look of its own this section drew whatever the lens rows left.
+const CROP_CAMERA = lookFrom([0.9, 0.35, 0.4], [0, 0, -1.55], 50);
+await main.page.evaluate(`(() => {
+  const k = globalThis.__kinect;
+  k.params.reset();
+  globalThis.__ex.pinCamera(${JSON.stringify(CROP_CAMERA)});
+})()`);
+
 {
   const arm = async (label, { box, chrome, near = 0.05, crop = true, wide = false }) => main.page.evaluate(`(async () => {
     const k = globalThis.__kinect;
@@ -1628,8 +1537,7 @@ console.log('\n[4] an exported frame is the frame the editor showed at that prog
 const EDITOR_ARM = `(async ({ frames, fps }) => {
   const k = globalThis.__kinect;
   const ex = globalThis.__ex;
-  // The graded look, not the reading alone - see BLACKWALL_LOOK. setMode(4) used to be
-  // both in one call, and this arm depended on the half it did not name.
+  // The graded look, not the reading alone: bloom, trails and the grade are in the preset.
   k.applyPreset(${JSON.stringify(BLACKWALL_LOOK)});
   ex.pinCamera();
   await k.timeline.settled();
@@ -2397,15 +2305,6 @@ console.log('\n[9] an edit is refused while a render runs, and the file is the d
           + `${JSON.parse(g.before).clips?.[0]?.params?.opacity}`);
     }
   }
-}
-
-{
-  const blind = ARMS.filter(([, a]) => chainOf(a) === '').map(([label]) => label);
-  check(ARMS.length > 0 && blind.length === 0,
-    'every arm published the chain it rendered through, so the rows comparing chains had chains',
-    blind.length
-      ? `${blind.length} of ${ARMS.length} arms came back with no passes: ${blind.join(', ')}`
-      : `${ARMS.length} arms, each naming its passes; ${ARMS.map(([l, a]) => `${l} ${chainOf(a)}`).join(', ')}`);
 }
 
 check(pageErrors.length === 0, 'no page errors', pageErrors.slice(0, 3).join(' | '));

@@ -29,7 +29,7 @@ Per tool, read from the source:
 | `timeline-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `DID NOT RUN`: a take under 12s |
 | `preview-check` | pass, or a **catch** | a failed assertion, a crash, or a miss | an unknown `--mutate` name |
 | `keyframe-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or the page stopped answering | `DID NOT RUN`: a take under 24s |
-| `export-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or a crash (it has no crash handler) | not used |
+| `export-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or a crash (it has no crash handler) | `DID NOT RUN`: a mutation the page never requested, a `--before-url` server holding the take under another hash |
 | `editor-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a take under 32s, a stale anchor |
 | `library-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `PASS WITH CLAIMS UNPROVEN`, or a held port |
 | `boot-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8391 held, a crash |
@@ -70,6 +70,22 @@ fixture, server or browser first (`timeline-check`, `keyframe-check`, `export-ch
 
 A mutated run prints the expected failure row when its entry carries a `fails:` field.
 For other entries, read the catch from the assertions that fired.
+
+## Comparing against another build
+
+`export-check` and `registry-check` take `--before-url`, a server running another build, and
+render their arms through both builds on one GPU, one pinned camera and one take. A change that
+claims to leave the picture alone points it at the commit before itself. Stand that build up from
+a clean extract of the revision, on a free port:
+
+```
+git archive <rev> | tar -x -C /tmp/rev
+cp -R node_modules /tmp/rev/ && mkdir /tmp/rev/captures && cp captures/sample.knct /tmp/rev/captures/
+(cd /tmp/rev && node server/index.js --port 8081 --grabber "$(which node) tools/fake-grabber.mjs")
+node tools/export-check.mjs --url http://localhost:8080 --before-url http://localhost:8081
+```
+
+`export-check` exits 2 when the two servers hold the take under different hashes.
 
 Four tables are too large to reproduce here — `editor-check` declares 202, `library-check` 114,
 `registry-check` 54 and `effect-check` 42. Their sections give the count and the enumerate
@@ -120,8 +136,8 @@ baseline in the conditions a mutated run failed in.
 
 ## `registry-check`
 
-One registry drives the renderer, the panel is a view on it, and every look term reaches the
-pixels.
+One registry drives the renderer, the panel is a view on it, every look term reaches the pixels,
+and each reading answers its own terms and draws what a planted room says it draws.
 
 ```
 node tools/registry-check.mjs --url http://localhost:8080
@@ -133,27 +149,24 @@ node tools/registry-check.mjs --url http://localhost:8080
 | fixture | a capture |
 | browser | a GPU browser |
 
-`--before` and `--against` drive the cross-build arm, which finds its revision by a content
-marker instead of a hash, so a rewritten history does not move it.
+The boot-state rows compare this build's boot against the commit before the registry, which
+`--before` overrides and a content marker finds otherwise. What they hold that no row inside the
+build holds is that the pre-registry defaults, the fog colour and the 1080/600 point-size rebase
+have not moved. `--before-url` adds the comparison in [Comparing against another build](#comparing-against-another-build):
+each reading at 1.0, and the raster at 0.35 over blackwall, against the other build's frames,
+within 64 bytes of 921,600 and a single step.
 
-54 controls, one per look term or per rule about how a term reaches the pixels.
+The wiring rows raise every look term the registry declares under each reading alone. A term
+declared under a reading's master has to move that reading and no other, and the terms no reading
+owns that move some readings and not others are printed. The planted rows draw sparse points,
+one every 24 texels, off-centre and through an off-centre eye, and read each point at the pixel
+the mirrored unprojection puts it on against the colour the reading's own formula gives it.
+
+55 controls, one per look term or per rule about how a term reaches the pixels.
 `node tools/registry-check.mjs --mutate __enumerate__` prints the names. Read the fired rows and
 not the total.
 
-Section 1b's `readGhost` row carries a two-sided tolerance: it absorbs up to 64 bytes of 921,600
-and a single step, and the passing line names what it absorbed. A clean run reads
-`6 frames, 1 within tolerance (worst 1 bytes of 921600, delta 1)`, so a red row there is a finding
-and so is that byte count climbing.
-
-**Known reds.** On a `make-sample` fixture the tool comes back FAIL (3) on a clean tree: the
-sweep reports `unexplained: bottom snapDelta`, the count lands at `92 of 97 parameters are proven
-to reach the pixels`, and the crop's second row reports `identical with only near/far authored`.
-
-| commit | rows | cause |
-| --- | --- | --- |
-| `3b7ab90` | 3, all crop and snap | the synthetic cloud sits inside the authored depth pair, so there is nothing to cut |
-
-A run that takes the count past three has moved something. On real footage all three pass.
+On a `make-sample` fixture a clean tree passes.
 
 ## `timeline-check`
 
@@ -343,7 +356,16 @@ node tools/export-check.mjs --url http://localhost:8080
 | binaries | ffmpeg and ffprobe, resolved through PATH; `--ffmpeg` and `--ffprobe` override |
 
 Section 9 drives refused edits on purpose and its refusals are DOM-only, so it needs no render.
-`--before` drives the cross-build arm.
+`--before-url` renders every resolution arm and both aspect arms through another build as well;
+see [Comparing against another build](#comparing-against-another-build).
+
+Two rows hold the resolution rows to account. The control renders `points` and `nobloom` at
+1920x1200 with the point size held in framebuffer pixels, and has to fail the same comparison by
+five times its tolerance. The aspect row renders one off-centre pose at 1920x1080 and at
+1440x1080 and requires the narrow frame to be the wide frame's centre columns, which holds only
+while every screen-space size follows the height. Section 3 draws the registry's default look
+through its own pose, off the sensor's axis, because the near plane can reveal only what a
+viewpoint the sensor did not have sees behind it.
 
 The lens rows compare the center half of a 50-degree frame with a full 26.25-degree frame
 reduced by two, both rendered at 1728x1080 at program time 4s. Bloom, trails and vignette are off.

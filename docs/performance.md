@@ -274,15 +274,9 @@ Only Blackwall is comparable across the two chains. Every other bloom-bearing lo
 duotone whose ramp width is in metres, so `ember` and `tearline` differ by 5.17% and 5.16% with
 the glow off, and `voxel` carries the glyph field's exposure regrade on top.
 
-`export-check` judges its two resolution-independence rows with bloom taken out, because the build
-they are pinned against imports `UnrealBloomPass` and always will. Isolated at 960x600, Blackwall
-at `bloom` 0.5 reads 7.1614 here against 17.3797 there — a ratio of 0.41205 and a worst tile of
-45.649 — where `bloom` 0 reads 5.0925 against 5.0581, 1.00679 and 0.337. The tool prints the
-bloom-up ratio beside the judged one on every run, and `docs/instruments.md` has the case file.
-
-No shipped row moves with `BLOOM_LEVELS`, so the level count has no picture control, and both
-tools build their earlier arm by serving `git show <rev>:web/main.js` into a second page load, so
-a look-affecting change here is argued from the rows it moves and never from a re-baseline.
+No shipped row moves with `BLOOM_LEVELS`, so the level count has no picture control. A
+look-affecting change here is argued from the rows it moves, and from `export-check
+--before-url` against a server running the commit before it, never from a re-baseline.
 
 ### Lens scaling and brightness
 
