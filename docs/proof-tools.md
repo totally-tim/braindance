@@ -44,7 +44,7 @@ Per tool, read from the source:
 | `module-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a stale anchor |
 | `syntax-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor |
 | `cpp-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor, no compiler or headers |
-| `grabber-args-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no `vendor/prefix`, no cmake, a failed build, a stale anchor |
+| `grabber-args-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no `vendor/prefix`, build-native failed, a mutation the binary did not change, a stale anchor |
 | `vendor-check` | pass, or a **catch** | a failed assertion, a miss, or a stale anchor | `PASS on the source, with the artifact untested` |
 | `registration-check` | pass, or a **catch** | a failed assertion, or a miss | a build or tooling failure |
 | `release-gate-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: no registry |
@@ -1122,18 +1122,22 @@ node tools/grabber-args-check.mjs
 
 | needs | |
 | --- | --- |
-| binaries | cmake and a C++ compiler |
+| binaries | what `tools/build-native.mjs` needs |
 | prefix | libfreenect2 in `vendor/prefix`, from `node tools/build-native.mjs`; without it the tool exits 2 naming it |
 | everything else | no sensor, no server, no fixture |
 
-It builds the grabber from this tree's `native/` into a scratch directory on every run, with the
-mutation applied to that copy, because `native/build/grabber` can be older than the source beside
-it. Every vector leads with the grabber's `--check`, which runs the argument pass and exits before
-enumeration, so a machine with a sensor answers exactly as one without. A refused row asks for exit
-2 and the sentence that names the flag and quotes the text as typed. An accepted row asks for exit
-0 and `--check`'s `arguments accepted` line. A pair refusal prints the two values as parsed, at
-three decimals, not as typed. The
-no-flags, defaults, `--quality 0` and missing-value rows stay green under every mutation, which
+It runs `tools/build-native.mjs` on every run, because `native/build/grabber` can be older than the
+source beside it. A mutation edits `native/grabber.cpp` in place, the way `decoder-check`'s edit
+the library source, and the source goes back and is rebuilt on every way out, so neither tool may
+run while the other, or an edit, is in flight in the same tree. The make on macOS compares
+timestamps to the second, so a source written in the second its object was built in is not
+recompiled: the tool writes after that second, and a mutated build whose binary hashes the same as
+the unmutated one is DID NOT RUN rather than NOT CAUGHT. Every vector leads with the
+grabber's `--check`, which runs the argument pass and exits before enumeration, so a machine with a
+sensor answers exactly as one without. A refused row asks for exit 2 and the sentence that names
+the flag and quotes the text as typed. An accepted row asks for exit 0 and `--check`'s `arguments
+accepted` line. A pair refusal prints the two values as parsed, at three decimals, not as typed.
+The no-flags, defaults, `--quality 0` and missing-value rows stay green under every mutation, which
 confines each control to the rule it breaks.
 
 - **`clip-accepts-inverted-range`** — the pair rule is gone, so a swapped or equal pair reaches the

@@ -125,7 +125,7 @@ Read the assertion count, never the exit code.
 | `hd-encoder-check.mjs` | native pairing under encoder backlog, held colour, key range and RGBX, and the join when an encoder's scope ends early | a C++ compiler and TurboJPEG |
 | `cpp-check.mjs` | both C++ files parse and typecheck, in eight pipeline and colour-decoder configurations, and each ColorDecoder enumerator exists only where its decoder does | a C++ compiler and turbojpeg's headers |
 | `decoder-check.mjs` | each `ColorDecoder` enumerator builds its own processor in the loaded library, and the grabber offers and defaults to what that library carries | a C++ compiler, `vendor/prefix` and the built grabber |
-| `grabber-args-check.mjs` | the built grabber refuses a depth-clip range it cannot read or that is empty, before it looks for a device | cmake, and libfreenect2 in `vendor/prefix` |
+| `grabber-args-check.mjs` | the built grabber refuses a depth-clip range it cannot read or that is empty, before it looks for a device | what build-native needs, and libfreenect2 in `vendor/prefix` |
 | `vendor-check.mjs` | `third_party` is upstream v0.2.1 plus declared edits | nothing |
 | `registration-check.mjs` | our registration equals upstream's, bit for bit | a corpus from `grabber --dump-corpus` |
 | `release-gate-check.mjs` | the `.npmrc` supply-chain gate is actually armed | the npm registry |

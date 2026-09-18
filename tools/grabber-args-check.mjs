@@ -3,18 +3,17 @@
 // it looks for a device. `--min-depth`/`--max-depth` clip before a frame is built, so a range the
 // grabber misreads records a normal-sized take with nothing in it.
 //
-// Builds the grabber from this tree's `native/` into a scratch directory, with the mutation applied
-// to that copy, then runs it with argument vectors and reads the exit code and stderr. The binary
-// under test is always the one this source builds: `native/build/grabber` can be older than the
-// source beside it. Every vector leads with `--check`, which runs the argument pass and exits before
-// enumeration, so no row touches a device on a machine that has one. Needs libfreenect2 in
-// `vendor/prefix` (`node tools/build-native.mjs`), cmake and a C++ compiler. No sensor, no server,
-// no fixture.
+// Builds the grabber through `tools/build-native.mjs` on every run, the one build `decoder-check`
+// and the server use, because `native/build/grabber` can be older than the source beside it. A
+// mutation edits `native/grabber.cpp` in place and is undone, and rebuilt, on every way out of the
+// process. Every vector leads with `--check`, which runs the argument pass and exits before
+// enumeration, so no row touches a device on a machine that has one. Needs what build-native needs,
+// and the libfreenect2 it installs into `vendor/prefix`. No sensor, no server, no fixture.
 //
 // Exit 0 pass, 1 a failed assertion or a mutation run (caught or NOT CAUGHT), 2 did not run.
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -22,6 +21,7 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
 const MUTATE = argv.includes('--mutate') ? argv[argv.indexOf('--mutate') + 1] : null;
 const PREFIX = join(REPO, 'vendor/prefix');
+const GRABBER = join(REPO, 'native/build/grabber');
 
 const MUTATIONS = {
   // The pair rule, and only it: every value still parses, and an inverted range reaches the device.
@@ -62,43 +62,69 @@ if (MUTATE && !MUTATIONS[MUTATE]) {
 if (!existsSync(join(PREFIX, 'include/libfreenect2/libfreenect2.hpp'))) {
   didNotRun(`no libfreenect2 build in ${PREFIX} - run node tools/build-native.mjs`);
 }
-if (spawnSync('cmake', ['--version'], { stdio: 'ignore' }).status !== 0) didNotRun('cmake is not on PATH');
 
-// Staged outside the checkout, so a mutation can never be left in the tree by a run that died.
-const STAGE = mkdtempSync(join(tmpdir(), 'grabber-args-'));
-process.on('exit', () => rmSync(STAGE, { recursive: true, force: true }));
+// build-native checks the binary it made answers `--help` with the pipelines and decoders it was
+// asked for, so a zero exit is a grabber that runs against this prefix.
+const rebuild = (why) => {
+  const r = spawnSync(process.execPath, [join(REPO, 'tools/build-native.mjs')], { encoding: 'utf8' });
+  if (r.status === 0) return true;
+  console.error(`[grabber-args] the rebuild ${why} did not complete:\n`
+    + `${(r.stderr || r.stdout || '').trim().split('\n').slice(-6).join('\n')}`);
+  return false;
+};
 
-cpSync(join(REPO, 'native'), join(STAGE, 'native'), {
-  recursive: true,
-  filter: (from) => from !== join(REPO, 'native/build'),
-});
-if (MUTATE) {
-  const { file, edits } = MUTATIONS[MUTATE];
-  const path = join(STAGE, file);
-  let source = readFileSync(path, 'utf8');
-  for (const [from, to] of edits) {
-    const hits = source.split(from).length - 1;
-    if (hits !== 1) didNotRun(`mutation ${MUTATE} matched ${hits} times in ${file}, expected exactly 1`);
-    source = source.replace(from, to);
+const binaryHash = () => (existsSync(GRABBER) ? createHash('sha256').update(readFileSync(GRABBER)).digest('hex') : null);
+
+// The make cmake drives here can compare timestamps to the second, so a source written in the second
+// the object was built in reads as up to date and the rebuild keeps the old binary: measured, as a
+// mutation NOT CAUGHT against a grabber built from the unmutated source. Written after that second.
+const writeSource = (file, text) => {
+  if (existsSync(GRABBER)) {
+    const after = (Math.floor(statSync(GRABBER).mtimeMs / 1000) + 1) * 1000 - Date.now();
+    if (after > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, after + 20);
   }
-  writeFileSync(path, source);
-}
+  writeFileSync(file, text);
+};
 
-const build = (args) => {
-  const r = spawnSync('cmake', args, { encoding: 'utf8' });
-  if (r.status !== 0) {
-    didNotRun(`cmake ${args.join(' ')} failed:\n${`${r.stdout}${r.stderr}`.trim().split('\n').slice(-15).join('\n')}`);
+// The mutated source goes back and is rebuilt on every way out, a refusal included, or the next
+// tool is handed a tree that reads clean and a binary that is not built from it.
+let pending = null;
+const restore = () => {
+  if (!pending) return;
+  const { file, text, mutated } = pending;
+  pending = null;
+  writeSource(file, text);
+  console.log(`[grabber-args] restored ${file.replace(`${REPO}/`, '')}, rebuilding`);
+  if (!rebuild('after restoring the source') || binaryHash() === mutated) {
+    console.error(`[grabber-args] ${file.replace(`${REPO}/`, '')} is back but native/build/grabber is`
+      + ' still the mutated build - run `npm run build:native` before trusting anything');
   }
 };
-const started = Date.now();
-build(['-S', join(STAGE, 'native'), '-B', join(STAGE, 'build'), `-DFREENECT2_ROOT=${PREFIX}`]);
-build(['--build', join(STAGE, 'build'), '--target', 'grabber']);
-const GRABBER = join(STAGE, 'build/grabber');
-// A binary that cannot load its library would fail every row for a reason none of them names.
-const help = spawnSync(GRABBER, ['--help'], { encoding: 'utf8' });
-if (help.status !== 0) didNotRun(`the built grabber will not run --help: ${(help.stderr || help.error?.message || '').trim()}`);
+process.on('exit', restore);
 
-console.log(`\n[grabber-args] ${MUTATE ? `mutation ${MUTATE}` : 'unmutated'}, built from native/ in `
+const started = Date.now();
+if (MUTATE) {
+  const { file: rel, edits } = MUTATIONS[MUTATE];
+  const file = join(REPO, rel);
+  const original = readFileSync(file, 'utf8');
+  let text = original;
+  for (const [from, to] of edits) {
+    const hits = text.split(from).length - 1;
+    if (hits !== 1) didNotRun(`mutation ${MUTATE} matched ${hits} times in ${rel}, expected exactly 1`);
+    text = text.replace(from, to);
+  }
+  // Built from the tree as it stands first, so the mutated build has a binary to differ from.
+  if (!rebuild('of this tree\'s source')) didNotRun('build-native failed');
+  const before = binaryHash();
+  pending = { file, text: original };
+  writeSource(file, text);
+  if (!rebuild('with the mutation applied')) didNotRun('build-native failed');
+  pending.mutated = binaryHash();
+  // A mutation that never reached the binary reads as NOT CAUGHT, the same line a blind row prints.
+  if (pending.mutated === before) didNotRun(`the rebuild with ${MUTATE} applied left native/build/grabber unchanged`);
+} else if (!rebuild('of this tree\'s source')) didNotRun('build-native failed');
+
+console.log(`\n[grabber-args] ${MUTATE ? `mutation ${MUTATE}` : 'unmutated'}, built by build-native in `
   + `${((Date.now() - started) / 1000).toFixed(1)}s\n`);
 
 /** One run of the grabber's argument pass. `--check` leads, so no vector can take it as a value. */
