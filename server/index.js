@@ -596,7 +596,7 @@ async function serveRemoval(req, res, [id], kind) {
       }, 502);
       return;
     }
-    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? [], { identity: kept });
+    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? [], { identity: kept, hash: mine.hash });
     if (marksMerged === null) {
       sendJson(res, {
         error: `${id} was renamed or replaced here while the reclaim ran, so ${node.name}'s marks were not `
@@ -937,7 +937,7 @@ async function serveMarkSync(req, res, [id]) {
       return;
     }
     const theirs = await node.fetchJson(markLogPath(match), { signal: left });
-    const merged = await mergeMarkLog(path, theirs.log ?? [], { identity: mergingInto });
+    const merged = await mergeMarkLog(path, theirs.log ?? [], { identity: mergingInto, hash: match.hash });
     if (merged === null) {
       sendJson(res, {
         error: `${id} changed underneath this request - it was renamed or replaced while the marks `

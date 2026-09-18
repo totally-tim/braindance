@@ -426,7 +426,7 @@ const MUTATIONS = {
   // The marks sync stops asking which file its path names before it appends, so a take renamed
   // while the node's answer was on its way gets a marks sidecar recreated under its old name.
   'sync-appends-under-a-race': { file: 'server/index.js', edits: [[
-    'mergeMarkLog(path, theirs.log ?? [], { identity: mergingInto })',
+    'mergeMarkLog(path, theirs.log ?? [], { identity: mergingInto, hash: match.hash })',
     'mergeMarkLog(path, theirs.log ?? [])',
   ]] },
   // A node serves a take's marks log by name whatever hash it was asked for, so a rename on the
@@ -749,7 +749,7 @@ const MUTATIONS = {
   },
   // A reclaim goes back to removing the node's copy without bringing its marks here first.
   'reclaim-drops-node-marks': { file: 'server/index.js', edits: [[
-    '    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? [], { identity: kept });',
+    '    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? [], { identity: kept, hash: mine.hash });',
     '    const marksMerged = 0;',
   ]],
     // Two rows, because the merge is also where the kept copy's identity is asked: a merge that
@@ -766,7 +766,7 @@ const MUTATIONS = {
   },
   // A reclaim goes back to appending the node's marks by name after an await a rename can land in.
   'reclaim-merges-under-a-race': { file: 'server/index.js', edits: [[
-    '    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? [], { identity: kept });',
+    '    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? [], { identity: kept, hash: mine.hash });',
     '    const marksMerged = await mergeMarkLog(keptPath, theirLog.log ?? []);',
   ]],
     fails: 'both reclaim-race rows: the refusal, and no marks log at the freed name',

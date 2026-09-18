@@ -142,12 +142,17 @@ export async function appendMarks(capturePath, records, { identity } = {}) {
 
 /**
  * Appends the records of another machine's log that this take's log lacks, and answers how many,
- * or null, writing nothing, when the name no longer holds `identity`. Appended rather than
- * rewritten, so both logs stay whole and a merge is safe to run twice.
+ * or null, writing nothing, when the name no longer holds `identity` or that file's content hash
+ * is not `hash`. Appended rather than rewritten, so both logs stay whole and a merge is safe to
+ * run twice.
  */
-export async function mergeMarkLog(capturePath, theirLog, { identity } = {}) {
+export async function mergeMarkLog(capturePath, theirLog, { identity, hash } = {}) {
   return withTakeLock([capturePath], async () => {
     if (!stillNames(capturePath, identity)) return null;
+    // The content as well as the file: a caller takes the identity when its request arrives and the
+    // hash when it reads the listing, and a rename away and back between the two ties them to two
+    // different takes.
+    if (hash !== undefined && (await cachedIndex(capturePath)).hash !== hash) return null;
     const known = new Set((await readMarkLog(capturePath)).map((r) => `${r.id}@${r.at}`));
     const fresh = theirLog.filter((r) => !known.has(`${r.id}@${r.at}`));
     await appendLines(capturePath, fresh);
