@@ -12,7 +12,7 @@ import { MessageParser, encodeMessage, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, TYPE_
 import { openCapture, withCapture, captureIdFor, openCaptureCount, decimatePayload, cloudExtent } from './capture.js';
 import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
 import {
-  VALID_ID, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, downloadTake,
+  VALID_ID, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, copyOnNode, downloadTake,
   downloadsInFlight, hashFile, markWriteCount, readMarkLog, readMarks, reconcile, remaining,
   removeTake, renameTake, resolveMarks, revealSupport, revealTake, sameTake, scanTakes, takeIdentity,
 } from './library.js';
@@ -538,13 +538,19 @@ async function serveRemoval(req, res, [id], kind) {
     return;
   }
   const there = node ? await node.takes(left) : null;
-  const theirs = (there ?? []).find((t) => t.hash === (mine?.hash ?? body.hash));
 
   if (kind === 'reclaim') {
     // The surviving copy is the local one, re-hashed rather than trusted: a file truncated since
     // the last listing would otherwise be treated as what makes this recoverable.
     if (!mine) {
       sendJson(res, { error: `${id} is not on this machine, so there is nothing here to keep` }, 409);
+      return;
+    }
+    let theirs;
+    try {
+      theirs = node ? copyOnNode(node, there, mine.hash) : null;
+    } catch (err) {
+      sendJson(res, { error: `${err.message}, so its copy of ${id} can be neither found nor removed` }, 409);
       return;
     }
     if (!theirs) {
@@ -586,12 +592,24 @@ async function serveRemoval(req, res, [id], kind) {
     return;
   }
   // `verifiedElsewhere` is what a reclaim from the other machine carries, and it turns this route
-  // into the recoverable action.
-  if (!body.verifiedElsewhere && theirs) {
-    sendJson(res, {
-      error: `${id} exists on ${node.name} as well: reclaim removes a copy, delete removes the last one`,
-    }, 409);
-    return;
+  // into the recoverable action. Without it, a node that could not be asked refuses the delete:
+  // the second-copy rule needs its answer, and an unlinked take cannot wait for the node to return.
+  if (!body.verifiedElsewhere && node) {
+    let theirs;
+    try {
+      theirs = copyOnNode(node, there, mine.hash);
+    } catch (err) {
+      sendJson(res, {
+        error: `${err.message}, so whether ${id} has a second copy there is unknown - delete is refused rather than guessed at`,
+      }, 409);
+      return;
+    }
+    if (theirs) {
+      sendJson(res, {
+        error: `${id} exists on ${node.name} as well: reclaim removes a copy, delete removes the last one`,
+      }, 409);
+      return;
+    }
   }
   try {
     const done = await removeTake(CAPTURES_DIR, id, {
