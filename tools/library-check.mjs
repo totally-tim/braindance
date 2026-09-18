@@ -4505,16 +4505,22 @@ async function runChecks() {
     // The descriptor is what says the hash has begun; before it, the removal would hash the take
     // renamed in and be refused by the hash rather than by the question this section asks.
     const opened = !heldBefore && holding();
-    await lib.renameTake(raceDir, 'asked-to-go', 'moved-away', { hash: asked.hash });
-    await lib.renameTake(raceDir, 'never-named', 'asked-to-go', { hash: stranger.hash });
-    const inside = opened && !settled;
+    // A removal that settles first has already unlinked the take, and the rename then throws.
+    let renameRefused = null;
+    try {
+      await lib.renameTake(raceDir, 'asked-to-go', 'moved-away', { hash: asked.hash });
+      await lib.renameTake(raceDir, 'never-named', 'asked-to-go', { hash: stranger.hash });
+    } catch (err) {
+      renameRefused = err.message;
+    }
+    const inside = opened && renameRefused === null && !settled;
     const outcome = await pending;
     const hashOf = async (id) => (existsSync(join(raceDir, `${id}.knct`))
       ? lib.hashFile(join(raceDir, `${id}.knct`)) : null);
     if (!inside) {
       skipped.push('the delete-race refusal, whose renames did not land inside the hash');
       console.log(`  ...   the renames did not land inside the hash (${heldBefore ? 'the take was already held open'
-        : opened ? 'the removal settled first' : 'the removal never opened the take'}), so the race was not entered`);
+        : !opened ? 'the removal never opened the take' : renameRefused ?? 'the removal settled first'}), so the race was not entered`);
     } else {
       check(/renamed or replaced while it was being hashed/.test(outcome.error ?? ''),
         'a delete is refused when its take is renamed away, and another renamed into its name, while it hashes',
