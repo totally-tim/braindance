@@ -40,6 +40,7 @@ const ARGUMENTS = {
   // teardown has to reach that force kill even when the other half of shutdown failed.
   '--stubborn': { value: false },
   '--pipeline': { value: true, ignored: true },
+  '--color-decoder': { value: true, ignored: true },
   '--log': { value: true, ignored: true },
   '--quality': { value: true, ignored: true },
   '--min-depth': { value: true, ignored: true },
