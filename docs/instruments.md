@@ -63,7 +63,8 @@ UNTESTED. A proof tool may not count its own crash as a finding in either direct
 
 A caller grading a run holds to the same rule. A `FAIL` row printed on the way to a crash reads,
 to anything counting rows, exactly like a catch, so `tools/mutation-verdict.mjs` reads only the
-count line a tool prints once it reaches its verdict, and a run without one did not run.
+line a tool prints once it reaches its verdict, its count or, for a tool with none, its tally or
+its `PASS` or `FAIL` line, and a run without one did not run.
 
 ## Place a probe where its answer would differ
 

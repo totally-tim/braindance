@@ -136,7 +136,8 @@ and 8211..8227 (`--mac-port`..`+16`), `index-check` 8251 under `--stage` or `--m
 `sensor-view-check` 8131 for the section needing its own capture. A stranger on the port answers
 the tool, and its green run proves nothing. `library-check`, `boot-check`, `effect-check` and
 `index-check` probe the port first and exit 2 naming what answers. Everywhere else, run
-`pgrep -f "tools/.*-check.mjs"` first.
+`pgrep -f "tools/.*-check.mjs"` first. `suite` probes every tool's ports before starting it, and
+8431 (`--port`) for the server it starts.
 
 `effect-check` and `jobs-check` write packages and keep their user root out of `effects/` and
 `jobs/`: `effect-check` passes both store roots under `.effect-check/` to its staged server by
@@ -161,7 +162,8 @@ node tools/fake-grabber.mjs        # a grabber that needs no sensor, for driving
 node tools/make-sample.mjs         # a synthetic capture, so a clone with no Kinect has one to loop
 node tools/make-fixture.js         # loops one short capture into an arbitrarily long one
 node tools/sweep-all.mjs           # every mutation of --tools a,b; with none, the five browser tools, which need a server and hours
-tools/mutation-verdict.mjs         # the one reading of a mutation run: CAUGHT, NOT CAUGHT or DID NOT RUN
+tools/mutation-verdict.mjs         # the two readings of a run: a mutation run for sweep-all, a plain run for suite
+node tools/suite.mjs               # the proof tools in three stages, one verdict line per tool
 node tools/settle-probe.mjs        # does settle()'s drain scale with the take or the ceiling
 node tools/prof-summary.mjs        # reads grabber --profile output, flags contended runs
 node tools/render-worker.mjs       # renders one queued job; jobs-check drives it

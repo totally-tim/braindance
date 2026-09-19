@@ -7,18 +7,25 @@ index of which tool proves what. `docs/instruments.md` carries the method behind
 ## Read the count, not the code
 
 Most tools print an assertion count and a failed count, `[tool] N assertions, M failed`, once they
-reach their verdict, and that pair is the verdict. Four do not: `determinism-check` prints `PASS`
+reach their verdict, and that pair is the verdict. Five do not: `determinism-check` prints `PASS`
 or `FAIL` alone, `index-check` and `registry-check` print `PASS` or `FAIL (n)` with the failed
-count only, and `syntax-check` counts files, not assertions. A run with zero failed assertions and
-a non-zero exit is a crash to investigate, not a catch to record.
+count only, `cli-check` prints `N passed, M failed`, and `syntax-check` counts files, not
+assertions. A run with zero failed assertions and a non-zero exit is a crash to investigate, not a
+catch to record.
 
-`tools/mutation-verdict.mjs` is the one reading of a mutation run: `sweep-all` grades every run
-with it, and CI runs its mutations through `sweep-all`. A run is **CAUGHT** when the tool printed
-its count line, exited 0 or 1, and at least one assertion failed; **NOT CAUGHT** when it finished
-with none failed, or printed `NOT CAUGHT` because a required row stayed green; and **DID NOT RUN**
-otherwise: no count line, exit 2, or killed. A `FAIL` row printed on the way to a crash is not a
-catch, so a tool that crashes after its rows fired exits 2 or dies without its count line, never
-with the crash counted as an assertion.
+`tools/mutation-verdict.mjs` holds the two readings of a tool's run, over one count. `verdictOf`
+reads a mutation run: `sweep-all` grades every mutation with it, and CI runs its mutations through
+`sweep-all`. `runVerdictOf` reads a run with nothing mutated, and `suite` reads every tool with it:
+**FAIL** and **PASS** are a finished run with and without a failed assertion, none failed on exit 1
+is **READ THE LOG**, a crash or a printed miss rather than a pass, and **DID NOT RUN** is as below.
+A mutation run is **CAUGHT** when the tool printed its count line, exited 0 or 1, and at least one
+assertion failed; **NOT CAUGHT** when it finished with none failed, or printed `NOT CAUGHT` because
+a required row stayed green; and **DID NOT RUN** otherwise: no count line, exit 2, or killed. A
+`FAIL` row printed on the way to a crash is not a catch, so a tool that crashes after its rows
+fired exits 2 or dies without its count line, never with the crash counted as an assertion. For
+the tools with no count line both readings read what they print once they finish instead:
+`cli-check`'s tally, the unit tests' `tests` and `fail` summary, and a verdict line alone, whose
+total is the tool's `PASS` and `FAIL` rows. A row never decides a verdict.
 
 The tools disagree about what a caught mutation exits. Four exit **0** on a catch and 1 on a miss
 — `registry-check`, `vendor-check`, `registration-check` and `release-gate-check` — so anything
@@ -103,6 +110,61 @@ which take hours and a GPU browser; all but `library` need a server at `SWEEP_UR
 one of `syntax`, `module`, `cpp`, `hd-encoder` and `release-gate`: those apply a mutation in memory
 or in a private temp copy and bind no port. Every other tool stages its mutation where a second
 run would read it.
+
+## `suite`
+
+Every tool that needs no sensor and no native build, once each, with one verdict line per tool.
+
+```
+node tools/suite.mjs
+node tools/suite.mjs --port 8431 --logs /tmp/suite-logs
+```
+
+| needs | |
+| --- | --- |
+| ports | every port the tools below bind, and 8431 (`--port`) for the server it starts |
+| fixtures | none: it builds the ones that are missing |
+| browser | a GPU browser |
+| binaries | a C++ compiler and turbojpeg's headers, ffmpeg and ffprobe, and the npm registry |
+
+It builds the missing fixtures first, each with the tool that makes it: `captures/sample.knct`,
+`fixture-1g` (8 loops), `fixture-large` (18 loops, past 2 GiB, for `index-check`) and
+`fixture-2x` (2 loops), which makes the four openable takes `editor-check` needs. Then three
+stages:
+
+1. `syntax-check`, `module-check`, `cpp-check`, the unit tests, `release-gate-check` and
+   `vendor-check`, side by side.
+2. The nine tools that start their own servers on ports no other tool binds — `guard`, `boot`,
+   `monitor`, `level`, `vcam`, `cli`, `jobs`, `effect` and `library` — all at once.
+3. A server of its own on `--port`, with the fake grabber and its stores in a temporary
+   directory, and against it, one after another, `registry`, `timeline`, `keyframe`, `export`,
+   `editor`, `preview`, `effect-conformance`, `determinism`, `sensor-view` and `index`. The tools
+   that need a long take get `fixture-1g`. The server is stopped at the end.
+
+Each line carries the verdict, failed/total assertions and seconds, and for a run that did not
+finish, the reason. A tool whose port already answers is not started, and its line names the port.
+Each tool's whole output is kept in the log directory, `--logs` or a new one under the system
+temporary directory, which the first and the last line name.
+
+Every run is read by `runVerdictOf` in `tools/mutation-verdict.mjs`: PASS, FAIL, READ THE LOG for
+none failed on exit 1, or DID NOT RUN. `determinism-check` prints no rows, so its total reads `?`.
+`vendor-check`'s exit 2 with `PASS on the source, with the artifact untested here` is its full
+answer on a machine with no `vendor/prefix`, as CI takes it, so it reads as a finished run and its
+line says so. Every other exit 2 is DID NOT RUN, `sensor-view-check`'s without a sensor among
+them. The suite exits 0 when every tool passed, 1 when any failed or read READ THE LOG, and 2 when
+the rest passed and any did not run. The known reds each tool's section names come through as
+they are.
+
+Stage 2 lasts as long as `library-check`, and `editor-check` and `preview-check` are most of stage
+3.
+
+It leaves out `hd-encoder-check`, `decoder-check` and `registration-check`, which need a native
+build, a built library or a corpus, and `sweep-all`, which runs mutations. A `*-check.mjs` it
+neither runs nor leaves out by name comes back DID NOT RUN, so a new tool is placed in a stage or
+named as left out.
+
+Stage 2 puts nine tools and their browsers on the machine at once. Two suites, or a suite beside
+one of its own tools, collide on the fixed ports, so run one at a time.
 
 ## `determinism-check`
 
