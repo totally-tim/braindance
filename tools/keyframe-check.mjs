@@ -227,7 +227,9 @@ const MUTATIONS = {
     [`    let planned = this.planSeek(programSec, options.frames);
     this.askFor(planned.spans);
     for (let attempt = 0; !this.resident(planned.spans); attempt++) {
-      if (attempt >= SEEK_REPLANS) {
+      // Standing down is for a transport playing on regardless - playback paints the frame
+      // either way. Paused, this seek is the only hand drawing it, so it waits for the bytes.
+      if (attempt >= SEEK_REPLANS && this.playing) {
 `,
     `    const planned = this.planSeek(programSec, options.frames);
     this.askFor(planned.spans);
