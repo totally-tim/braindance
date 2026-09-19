@@ -1705,6 +1705,15 @@ async function retryOnContextLoss(label, work) {
 const recorderPage = (base) => `${base}/record`;
 const editorPage = (base, take) => `${base}/edit?take=${encodeURIComponent(take)}`;
 const libraryPage = (base) => `${base}/library`;
+// The poll's cadence and its listing bound, shortened through `testTimer` for the pages that follow
+// the recorder. They ship at 5000 and 15000, which test/record-poll.test.mjs and the section's
+// own rows hold; the record page keeps the shipped cadence, because its row times a press against it.
+const POLL_MS = 500;
+const LISTING_BOUND_MS = 4000;
+const QUIET_MS = POLL_MS * 4;
+const timedLibraryPage = (base) => `${libraryPage(base)}?test-timers=${encodeURIComponent(JSON.stringify({
+  'record-poll': POLL_MS, 'listing-timeout': LISTING_BOUND_MS,
+}))}`;
 const projectsPage = (base) => `${base}/projects`;
 
 async function openPage(browser, url, viewport = { width: 1100, height: 760 }) {
@@ -1714,10 +1723,15 @@ async function openPage(browser, url, viewport = { width: 1100, height: 760 }) {
   // that never ran.
   await page.addInitScript(REV_IN_PAGE_INSTALL);
   const errors = [];
+  // Every timer the page shortened, which `testTimer` says on the console as the module loads.
+  const timers = [];
   page.on('pageerror', (err) => errors.push(String(err)));
-  page.on('console', (msg) => { if (msg.type() === 'error') errors.push(msg.text()); });
+  page.on('console', (msg) => {
+    if (msg.type() === 'error') errors.push(msg.text());
+    if (msg.text().startsWith('[timers]')) timers.push(msg.text());
+  });
   await page.goto(url, { waitUntil: 'domcontentloaded' });
-  return { page, errors };
+  return { page, errors, timers };
 }
 
 
@@ -6019,7 +6033,7 @@ async function runChecks() {
       'a take is genuinely open, which is what makes the tile below a tile that is lying rather than one that is right',
       String(shooting?.takeId));
 
-    const { page, errors } = await openPage(browser, libraryPage(liveUrl));
+    const { page, errors } = await openPage(browser, timedLibraryPage(liveUrl));
     await page.waitForFunction('globalThis.__library !== undefined', null, { timeout: 20000 });
     let polls = 0;
     page.on('request', (req) => { if (req.url().endsWith('/record/state')) polls++; });
@@ -6037,14 +6051,18 @@ async function runChecks() {
     await page.evaluate("document.querySelector('.tile').__quietProbe = 'planted'");
     const pollsAtProbe = polls;
     // Comfortably longer than one cadence rather than barely.
-    await new Promise((done) => { setTimeout(done, 8500); });
+    await new Promise((done) => { setTimeout(done, QUIET_MS); });
     const quiet = await page.evaluate(`(() => ({
       probe: document.querySelector('.tile')?.__quietProbe ?? null,
       tiles: globalThis.__library.tiles().length,
     }))()`);
     check(polls > pollsAtProbe,
       'the poll is running, which is what makes the row below about the gate rather than about a page that stopped asking',
-      `${polls - pollsAtProbe} requests to /record/state in 8.5s`);
+      `${polls - pollsAtProbe} requests to /record/state in ${QUIET_MS}ms`);
+    // The wiring row: at the shipped five seconds this window holds one tick at most.
+    check(polls - pollsAtProbe >= 2,
+      'and it polls at the cadence this run planted, so the waits in this section are the shipped poll with its timer shortened',
+      `${polls - pollsAtProbe} requests in ${QUIET_MS}ms at a planted ${POLL_MS}ms`);
     check(quiet.probe === 'planted',
       'and a tick in which the recorder did not move replaces no tile - the menu an operator has open and the skim under their pointer both survive it',
       quiet.probe === 'planted' ? `${quiet.tiles} tiles, the same nodes` : 'the grid was rebuilt');
@@ -6057,7 +6075,7 @@ async function runChecks() {
       '--captures', linkedDir, '--name', 'mac-editing',
       '--node', liveUrl, '--node-name', 'shooting-live',
     ], MAC_PORT + 12);
-    const linked = await openPage(browser, libraryPage(linkedUrl));
+    const linked = await openPage(browser, timedLibraryPage(linkedUrl));
     await linked.page.waitForFunction('globalThis.__library !== undefined', null, { timeout: 20000 });
     let linkedPolls = 0;
     linked.page.on('request', (req) => { if (req.url().endsWith('/record/state')) linkedPolls++; });
@@ -6167,6 +6185,10 @@ async function runChecks() {
       'and it says which node it could not reach, so the refusal is a fact about the link rather than a control that went dead',
       `"${why.slice(0, 90)}"`);
     check(dark.errors.length === 0, 'and that library raises no page error', dark.errors.slice(0, 2).join(' | '));
+    // The control for the pages above: without the parameter a page keeps every shipped timer.
+    check(dark.timers.length === 0,
+      'and a library page opened without the test-timers parameter shortens no timer, which is every page a normal launch opens',
+      dark.timers.join(' | ') || 'no [timers] line');
     await dark.page.close();
     for (const p2 of servers.filter((sv) => sv.port === MAC_PORT + 11)) p2.child.kill('SIGKILL');
 
@@ -6192,7 +6214,7 @@ async function runChecks() {
       if (releaseTicks) { await route.continue(); return; }
       heldTicks.push(route);
     });
-    await blind.goto(libraryPage(liveUrl), { waitUntil: 'domcontentloaded' });
+    await blind.goto(timedLibraryPage(liveUrl), { waitUntil: 'domcontentloaded' });
     await blind.waitForFunction('globalThis.__library !== undefined', null, { timeout: 20000 });
     const paintedMidWrite = await blind.evaluate(`(() => {
       const t = globalThis.__library.tiles().find((x) => x.id === ${JSON.stringify(shootingAgain?.takeId)});
@@ -6247,7 +6269,7 @@ async function runChecks() {
       if (listings === 2) { refused++; await route.abort('connectionfailed'); return; }
       await route.continue();
     });
-    await flaky.goto(libraryPage(liveUrl), { waitUntil: 'domcontentloaded' });
+    await flaky.goto(timedLibraryPage(liveUrl), { waitUntil: 'domcontentloaded' });
     await flaky.waitForFunction('globalThis.__library !== undefined', null, { timeout: 20000 });
     const flakyPainted = await flaky.evaluate(`(() => {
       const t = globalThis.__library.tiles().find((x) => x.id === ${JSON.stringify(shootingThird?.takeId)});
@@ -6299,17 +6321,17 @@ async function runChecks() {
       heldAt.push(Date.now());
     });
     await hung.route('**/record/state', async (route) => { ticksSeen++; await route.continue(); });
-    await hung.goto(libraryPage(liveUrl), { waitUntil: 'domcontentloaded' });
+    await hung.goto(timedLibraryPage(liveUrl), { waitUntil: 'domcontentloaded' });
     await hung.waitForFunction('globalThis.__library !== undefined', null, { timeout: 20000 });
     await post(`${liveUrl}/record/stop`);
-    await new Promise((done) => { setTimeout(done, 11000); });
+    await new Promise((done) => { setTimeout(done, POLL_MS * 5); });
     const heldCount = heldForever.length;
     const listingsWhileHung = hungListings;
     check(heldCount === 1,
       'it has exactly one listing in flight however long that one takes - a refresh that has not come back is the question already being asked, not a reason to ask it again every five seconds',
       `${heldCount} listings left hanging, ${hungListings} requested in total`);
     // The liveness half is that it comes back on its own.
-    const freeBy = (heldAt[0] ?? Date.now()) + 15000 + 5000 + 6000;
+    const freeBy = (heldAt[0] ?? Date.now()) + LISTING_BOUND_MS + POLL_MS + 3000;
     while (Date.now() < freeBy && hungListings === listingsWhileHung) {
       await new Promise((done) => { setTimeout(done, 250); });
     }
@@ -6426,17 +6448,17 @@ async function runChecks() {
     let coldListings = 0;
     await cold.route('**/library/all', async (route) => {
       coldListings++;
-      if (coldListings === 1) await new Promise((done) => { setTimeout(done, 18000); });
+      if (coldListings === 1) await new Promise((done) => { setTimeout(done, LISTING_BOUND_MS + 3000); });
       await route.continue();
     });
-    await cold.goto(libraryPage(liveUrl), { waitUntil: 'domcontentloaded' });
+    await cold.goto(timedLibraryPage(liveUrl), { waitUntil: 'domcontentloaded' });
     let coldInstalled = true;
     await cold.waitForFunction('globalThis.__library !== undefined', null, { timeout: 30000 })
       .catch(() => { coldInstalled = false; });
     const coldTiles = coldInstalled ? await cold.evaluate('globalThis.__library.tiles().length') : 0;
     check(coldInstalled && coldTiles > 0,
       'a first listing slower than the poll\'s own bound still paints, because a cold library is the case that listing exists to get through rather than a link to give up on',
-      coldInstalled ? `held 18s, ${coldTiles} tiles` : 'the page never installed its hook - module evaluation ended on the load');
+      coldInstalled ? `held ${LISTING_BOUND_MS + 3000}ms, ${coldTiles} tiles` : 'the page never installed its hook - module evaluation ended on the load');
     await cold.close();
 
     const broken = await browser.newPage();

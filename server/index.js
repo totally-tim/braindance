@@ -25,7 +25,9 @@ import { Recorder } from './recorder.js';
 import { JobStore } from './jobs.js';
 import { renderVersion } from './render-version.js';
 import { Webcam } from './webcam.js';
-import { IdleDeadline } from './idle.js';
+import { IDLE_TICK_MS, IdleDeadline } from './idle.js';
+import { ABSENT_DELAY, RESTART_DELAYS, retryAfter } from './backoff.js';
+import { testTimer } from '../web/test-timers.js';
 import { Output } from './output.js';
 import { KeyStream } from './key-stream.js';
 import { requireMutation, originAllowed, sameOriginBrowser } from './http-guard.js';
@@ -2002,15 +2004,6 @@ setInterval(() => {
   console.log(`[server] ${fps} fps  ${mbs} MB/s  dropped=${closed.dropped}  clients=${wss.clients.size}`);
 }, 5000);
 
-// The Kinect v2 drops off the bus under sustained load on a marginal USB link, so a dead grabber
-// is an expected condition rather than a fatal one.
-const RESTART_DELAYS = [1000, 2000, 4000, 8000];
-
-// How long to leave between attempts once the conclusion is that there is no sensor here. Long,
-// because the enumeration will not find one - but not never, so a sensor plugged in
-// later is picked up.
-const ABSENT_DELAY = 30000;
-
 function startLive() {
   const bin = GRABBER_BIN ? resolve(GRABBER_BIN) : join(ROOT, 'native/build/grabber');
   const buildArgs = () => {
@@ -2067,12 +2060,8 @@ function startLive() {
   // Written out only in the exit handler before, which is why the second way had no backoff.
   const scheduleRetry = () => {
     if (standby || shuttingDown) return;
-    // A grabber that has *never* handshaken is a machine with no sensor rather than the flaky USB
-    // link this backoff is for. The full table is spent first, because a node whose sensor is slow
-    // to enumerate at boot is the same shape for a few seconds.
-    const absent = !everLive && attempt >= RESTART_DELAYS.length;
+    const { absent, delayMs: delay } = retryAfter({ attempt, everLive });
     setSensorState(absent ? 'absent' : 'lost');
-    const delay = absent ? ABSENT_DELAY : RESTART_DELAYS[Math.min(attempt, RESTART_DELAYS.length - 1)];
     attempt++;
     // Once absent, said once, or this line and libfreenect2's enumeration run every few seconds
     // for as long as the editing station is up.
@@ -2239,7 +2228,7 @@ function startLive() {
   };
 
   // Conservative bounds; physical teardown and first-frame measurements belong in performance.md.
-  const STANDBY_GRACE_MS = 15000;
+  const STANDBY_GRACE_MS = testTimer('standby-grace', 15000);
   standbySensor = async () => {
     if (recordingStarts || recorder.armed || recorder.take) throw new Error('cannot enter standby while a take is armed or recording');
     if (standbyPending) return standbyPending;
@@ -2275,7 +2264,7 @@ function startLive() {
     if (idleRule.ask({ idle, state: sensorState }).expired) {
       standbySensor().catch((err) => console.error(`[server] ${err.message}`));
     }
-  }, 5000).unref();
+  }, IDLE_TICK_MS).unref();
 
   // Armed at boot rather than recording at boot, so there is one path into a take file. Armed
   // *before* the grabber is spawned, because a hello arriving during that disk read would find the

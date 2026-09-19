@@ -33,6 +33,9 @@ const MUTATE = flag('--mutate');
 const NO_BROWSER = argv.includes('--no-browser');
 const WORK = join(REPO, '.vcam-check');
 const SOURCE = join(REPO, 'captures', 'sample.knct');
+// The linger the two leaving-stops-it rows run the server at, through `testTimer`; it ships at six
+// seconds, which `test/on-demand.test.mjs` holds.
+const LINGER_MS = 1000;
 
 // Where the fixture plants what the registered image cannot contain. Has to match `fake-grabber`'s
 // `HD_MARGIN`, and is asserted below rather than assumed.
@@ -265,6 +268,17 @@ const MUTATIONS = {
     fails: 'section 7\'s pair-stamp row alone: the colour stamp is now newer than the depth stamp',
   },
 
+  // The webcam's twin of the control below, on Webcam's own drop rather than the shared class.
+  'webcam-linger-never-fires': {
+    file: 'server/webcam.js',
+    edits: [[
+      '      console.log(`[webcam] subscriber gone (${this.subscribers.size} left)`);\n'
+      + '      this.demand.settle();\n',
+      '      console.log(`[webcam] subscriber gone (${this.subscribers.size} left)`);\n',
+    ]],
+    fails: 'section 1\'s leaving-stops-it row alone, after the shortened linger has elapsed',
+  },
+
   // The last client goes away and the key stream stays wanted forever. Kept on KeyStream.detach
   // rather than the shared OnDemand class, so the webcam linger rows remain a control.
   'key-linger-never-fires': {
@@ -280,7 +294,7 @@ const MUTATIONS = {
       + '    console.log(`[key] client gone (${this.clients.size} left)`);\n'
       + '  }',
     ]],
-    fails: 'section 7\'s leaving-stops-it row alone, after the six-second linger has elapsed',
+    fails: 'section 7\'s leaving-stops-it row alone, after the shortened linger has elapsed',
   },
 
   // The plausible wrong input: throw away the colour camera's outer field, reduce what remains to
@@ -535,14 +549,17 @@ const EMIT_LOG = join(WORK, 'emitted.log');
  * throws and exits 2 as DID NOT RUN, because under `--mutate` a harness that never got a sensor
  * would otherwise be written down as the mutation being caught.
  */
-const start = async (extra = []) => {
+const start = async (extra = [], { timers = null } = {}) => {
   const log = await new Promise((resolve, reject) => {
     const grabber = `${join(WORK, 'tools/fake-grabber.mjs')} --source ${SOURCE} --fps 30 --hd `
       + `--key --emit-log ${EMIT_LOG}`;
     const child = spawn(process.execPath, [
       join(WORK, 'server/index.js'), '--standby-after', '0', '--port', String(PORT),
       '--captures', join(WORK, 'takes'), '--grabber', grabber, ...extra,
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    ], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: timers ? { ...process.env, BRAINDANCE_TEST_TIMERS: JSON.stringify(timers) } : process.env,
+    });
     servers.push(child);
     const lines = [];
     const onData = (c) => {
@@ -706,7 +723,7 @@ console.log(`\n[vcam] ${MUTATE ? `mutation ${MUTATE}` : 'unmutated'}, port ${POR
 try {
   console.log('1. the colour stream is asked for and stops again');
   {
-    await start();
+    await start([], { timers: { linger: LINGER_MS } });
     await wait(1500);
     const before = emitted().get(TYPE_COLOR)?.length ?? 0;
     ok('no colour message is emitted while nothing is subscribed', before === 0,
@@ -732,7 +749,7 @@ try {
 
     sub.stop();
     // Past the linger, which exists because OBS retries a dead source hard.
-    await wait(7500);
+    await wait(LINGER_MS + 1500);
     const atStop = emitted().get(TYPE_COLOR)?.length ?? 0;
     await wait(1500);
     const after = emitted().get(TYPE_COLOR)?.length ?? 0;
@@ -1193,7 +1210,7 @@ try {
   console.log('\n7. the keyed depth is asked for, paired, and stops again');
   {
     rmSync(EMIT_LOG, { force: true });
-    await start();
+    await start([], { timers: { linger: LINGER_MS } });
     await wait(1500);
     const before = emitted().get(TYPE_KEY)?.length ?? 0;
     ok('no key message is emitted while nothing is subscribed', before === 0, `${before} emitted`);
@@ -1220,9 +1237,9 @@ try {
       JSON.stringify(state?.monitors?.costingTheTake));
 
     await key.stop();
-    // Past the shared six-second linger. Take the first count after the stop should have landed,
-    // then watch another window: a count taken at detach would still include the linger by design.
-    await wait(7500);
+    // Past the shared linger. Take the first count after the stop should have landed, then watch
+    // another window: a count taken at detach would still include the linger by design.
+    await wait(LINGER_MS + 1500);
     const atStop = emitted().get(TYPE_KEY)?.length ?? 0;
     await wait(1500);
     const after = emitted().get(TYPE_KEY)?.length ?? 0;

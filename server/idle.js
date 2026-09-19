@@ -3,6 +3,11 @@
 // fewer than the states a sensor passes through, and a tick that starts the count again on each of
 // the extras sets it back often enough that a flapping link never stands down at all.
 
+import { testTimer } from '../web/test-timers.js';
+
+// How often the server asks the deadline, so a sensor stands down less than two of these late.
+export const IDLE_TICK_MS = testTimer('idle-tick', 5000);
+
 // An absent sensor is excluded by the design and a standby one has already stood down, so neither
 // carries a deadline.
 const HOLDS_NO_DEADLINE = new Set(['absent', 'standby']);

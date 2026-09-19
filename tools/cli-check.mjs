@@ -70,6 +70,16 @@ const MUTATIONS = {
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WORK = join(ROOT, '.cli-check');
+// The product timers every server after the first runs at, through `testTimer`. The shipped values
+// are held by test/backoff.test.mjs, test/idle-deadline.test.mjs and, for the grace, the stubborn
+// shutdown rows. The first rung stays at the shipped second, because the wake-cancels row's 500ms
+// window has to be shorter than it, and the ladder stays longer than the 1400ms `--wait` row.
+const TIMERS = {
+  'idle-tick': 250,
+  'restart-delays': [1000, 600, 600, 600],
+  'absent-delay': 2000,
+  'standby-grace': 3000,
+};
 const args = process.argv.slice(2);
 const mutation = args.includes('--mutate') ? args[args.indexOf('--mutate') + 1] : null;
 const PORT = Number(args.includes('--port') ? args[args.indexOf('--port') + 1] : 8401);
@@ -108,13 +118,24 @@ async function stop() {
   await exit;
   server = null;
 }
-async function start(extra = [], grabber = true) {
+// This process's environment with exactly the timers named here planted, or none.
+function withTimers(timers) {
+  const env = { ...process.env };
+  delete env.BRAINDANCE_TEST_TIMERS;
+  if (timers) env.BRAINDANCE_TEST_TIMERS = JSON.stringify(timers);
+  return env;
+}
+async function start(extra = [], grabber = true, { timers = TIMERS } = {}) {
   await stop();
   log = '';
   server = spawn(process.execPath, [join(WORK, 'server/index.js'), '--port', String(PORT),
     '--standby-after', extra.includes('--standby-after') ? extra[extra.indexOf('--standby-after') + 1] : '0', '--captures', join(WORK, 'captures'),
     ...(grabber ? ['--grabber', `${process.execPath} ${join(WORK, 'tools/fake-grabber.mjs')} --source ${join(ROOT, 'captures/sample.knct')} --hd --key`] : []), ...extra],
-  { cwd: WORK, stdio: ['ignore', 'pipe', 'pipe'] });
+  {
+    cwd: WORK,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: withTimers(timers),
+  });
   server.stdout.on('data', (data) => { log += data; });
   server.stderr.on('data', (data) => { log += data; });
   const up = await until(async () => { try { return (await health()).state; } catch { return null; } });
@@ -163,8 +184,9 @@ async function main() {
     writeFileSync(path, source);
   }
   if (!['standby-leaves-the-retry-timer', 'standby-from-absent'].includes(mutation)) {
-    await start();
+    await start([], true, { timers: null });
     check(await state('live'), 'fake sensor becomes live');
+    check(!log.includes('[timers]'), 'a launch that plants no test timer shortens none', log.match(/\[timers\][^\n]*/)?.[0] ?? 'no [timers] line');
     const stagedVerbs = (await import(`${pathToFileURL(join(WORK, 'bin/verbs.js')).href}?v=${Date.now()}`)).VERBS;
     const routes = (await json('/library/routes')).body.routes;
     for (const verb of stagedVerbs) check(routes.some((route) => route.path === verb.route
@@ -282,8 +304,14 @@ async function main() {
     if (mutation === 'partial-preset-retains-old-look') return;
     await stop();
     // The first occurrence is used by the flag parser.
+    const launchedAt = Date.now();
     await start(['--standby-after', '2']);
     check(await state('standby', 16000), 'idle sensor enters automatic standby');
+    // The wiring row: at the shipped five-second tick the first standby is ten seconds after launch.
+    const standbyMs = Date.now() - launchedAt;
+    check(standbyMs < 6000 && Object.keys(TIMERS).every((name) => log.includes(`[timers] ${name} runs at`)),
+      'and it stands down on the planted tick, so the standby rows below wait on the shipped rule with its timers shortened',
+      `${standbyMs}ms after launch`);
     const controller = new AbortController();
     const mjpeg = await fetch(url + '/camera.mjpg', { signal: controller.signal });
     check(mjpeg.status === 200, 'waking MJPEG holds with 200 headers');
@@ -298,7 +326,8 @@ async function main() {
     demand.ws.close();
     await state('standby', 16000);
     check((await cli('record', 'start')).code === 0 && await until(async () => (await json('/record/state')).body.takeId), 'record start wakes and opens at hello');
-    await sleep(11000);
+    // Past the two-second setting and two ticks, which is when an idle rule ignoring the take would fire.
+    await sleep(2000 + 2 * TIMERS['idle-tick'] + 1500);
     check((await health()).state === 'live' && !log.includes('cannot enter standby'), 'recorder prevents automatic standby attempts');
     await cli('record', 'stop');
 
@@ -335,7 +364,8 @@ async function main() {
       'the take really could not be finalised', stuckTake ?? 'no take was open');
     const named = log.match(/\[server\] shutdown: the take did not finish:[^\n]*/);
     check(Boolean(named), 'the shutdown names the take it could not close', named?.[0] ?? 'nothing was reported');
-    check(waitedMs > 12000, 'the shutdown grace runs out before the process leaves', `${waitedMs} ms`);
+    check(waitedMs > TIMERS['standby-grace'] * 0.8, 'the shutdown grace runs out before the process leaves',
+      `${waitedMs} ms against a planted ${TIMERS['standby-grace']} ms grace`);
     let orphan = false;
     try { process.kill(Number(stubborn), 0); orphan = true; } catch {}
     check(!orphan, 'a take that cannot close still ends with its grabber force-killed',
@@ -405,9 +435,11 @@ async function main() {
     'and that request is what woke the sensor', `state ${revivedHealth.state}, wakes ${revivedWakes} to ${revivedHealth.wakes}`);
 
   if (mutation === 'colour-return-leaves-the-old-refusal') return;
-  await start(['--grabber', '/missing-braindance-grabber', '--standby-after', '20'], false);
+  // The setting outlasts the planted ladder, because `lost` holds a deadline and `absent` does not.
+  await start(['--grabber', '/missing-braindance-grabber', '--standby-after', '5'], false);
   check(await state('lost'), 'failed spawn enters retry');
   await json('/sensor/standby', {});
+  const wokeAt = Date.now();
   await json('/sensor/wake', {});
   check(await state('lost', 500), 'wake cancels pending retry and attempts immediately');
   if (mutation === 'standby-leaves-the-retry-timer') return;
@@ -423,7 +455,12 @@ async function main() {
   await until(async () => waitingDone, 3000);
   if (mutation === 'wait-gives-up-on-a-single-lost') return;
   check(await state('absent', 22000), 'failed enumeration becomes absent');
-  await sleep(31000);
+  // The wiring row: the shipped ladder is fifteen seconds of trying before the verdict.
+  const absentMs = Date.now() - wokeAt;
+  check(absentMs < 8000, 'and the ladder it spent is the planted one, so the rows around it wait on the shipped rule',
+    `${absentMs}ms from the wake`);
+  // Past two absent retries and past the setting, which a deadline carried across `absent` would reach.
+  await sleep(TIMERS['absent-delay'] * 2 + 1000);
   check((await health()).state === 'absent', 'automatic standby excludes absent');
   await stop();
   check((await cli('status')).code === 2, 'CLI unavailable server exits 2');

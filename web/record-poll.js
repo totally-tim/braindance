@@ -35,11 +35,13 @@
  * confusing shape. A flat name at the web root has no namespace to collide with.
  */
 
+import { testTimer } from './test-timers.js';
+
 // Five seconds, which is what the editor's own poll ran at and is short enough that a
 // gallery tile stops lying within one of them. Not a parameter: two surfaces polling
 // the same route at two cadences is two behaviours to reason about, and neither of
 // them has a reason to want a different one.
-const EVERY_MS = 5000;
+const EVERY_MS = testTimer('record-poll', 5000);
 
 /**
  * The fields of a node's `/record/state` this fingerprint is computed from, named once
