@@ -671,6 +671,62 @@ async function serveRemoval(req, res, [id], kind) {
   }
 }
 
+// A node's reply read whole for a route passing it through, or null once `res` has been answered
+// with why not. `what` names the thing in each refusal. The signal is bound before the fetch: the
+// library asks for a poster on every pointer move, and a scrub across a shelf abandons dozens.
+async function readFromNode(res, path, what, cap) {
+  let upstream;
+  try {
+    upstream = await fetch(`${node.url}${path}`, { signal: untilCallerLeaves(res) });
+  } catch {
+    // The caller going away is the ordinary case here rather than an error.
+    if (!res.writableEnded) res.writeHead(502).end(`the node did not answer for that ${what}`);
+    return null;
+  }
+  if (!upstream.ok) {
+    res.writeHead(upstream.status).end(`the node could not serve that ${what}`);
+    return null;
+  }
+  // The whole reply lands in heap, so it is bounded by the caller's cap rather than by what a
+  // node happens to send.
+  const declared = Number(upstream.headers.get('content-length') ?? NaN);
+  if (Number.isFinite(declared) && declared > cap) {
+    // Cancelled, or the node goes on sending the body it declared into a connection nobody is
+    // draining, and a peer answering every request this way holds one socket per refusal.
+    upstream.body?.cancel().catch(() => { /* the node may already be gone */ });
+    res.writeHead(502).end(`the node offered ${declared} bytes for one ${what}, past the ${cap} allowed`);
+    return null;
+  }
+  // A chunk at a time, because the header above is a claim and this is the arithmetic:
+  // `arrayBuffer()` buffers the whole reply first, so a node answering chunked walked past the
+  // declared-size refusal. `cancel()` rather than a `break`, so the node is told to stop.
+  try {
+    const reader = upstream.body?.getReader();
+    if (!reader) {
+      res.writeHead(502).end(`the node answered that ${what} with no body at all`);
+      return null;
+    }
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > cap) {
+        await reader.cancel().catch(() => {});
+        res.writeHead(502).end(`the node sent past the ${cap} bytes allowed for one ${what},`
+          + ' and was cut off rather than buffered');
+        return null;
+      }
+      chunks.push(value);
+    }
+    return Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)), total);
+  } catch {
+    if (!res.writableEnded) res.writeHead(502).end(`the ${what} stopped arriving from the node`);
+    return null;
+  }
+}
+
 async function serveRemoteFrame(req, res, [id, n], query) {
   if (!node || !VALID_ID.test(id) || !/^\d+$/.test(n)) {
     res.writeHead(404).end('not found');
@@ -681,65 +737,36 @@ async function serveRemoteFrame(req, res, [id, n], query) {
     res.writeHead(400).end('decimate must be a whole number from 1 to 16');
     return;
   }
-  // Bound before the fetch: the library asks for a poster on every pointer move, and a scrub
-  // across a shelf abandons dozens of these.
-  let upstream;
-  try {
-    upstream = await fetch(`${node.url}/capture/${encodeURIComponent(id)}/frame/${n}?decimate=${divisor}`,
-      { signal: untilCallerLeaves(res) });
-  } catch {
-    // The caller going away is the ordinary case here rather than an error.
-    if (!res.writableEnded) res.writeHead(502).end('the node did not answer for that frame');
-    return;
-  }
-  if (!upstream.ok) {
-    res.writeHead(upstream.status).end('the node could not serve that frame');
-    return;
-  }
-  // The whole reply lands in heap, so it is bounded by what the format allows a payload to be
-  // rather than by what a node happens to send. A real decimated frame is under 486KB.
-  const declared = Number(upstream.headers.get('content-length') ?? NaN);
-  if (Number.isFinite(declared) && declared > MAX_PAYLOAD_BYTES) {
-    // Cancelled, or the node goes on sending the body it declared into a connection nobody is
-    // draining, and a peer answering every request this way holds one socket per refusal.
-    upstream.body?.cancel().catch(() => { /* the node may already be gone */ });
-    res.writeHead(502).end(`the node offered ${declared} bytes for one frame, past the ${MAX_PAYLOAD_BYTES} this format allows`);
-    return;
-  }
-  // A chunk at a time, because the header above is a claim and this is the arithmetic:
-  // `arrayBuffer()` buffers the whole reply first, so a node answering chunked walked past the
-  // declared-size refusal. `cancel()` rather than a `break`, so the node is told to stop.
-  let body;
-  try {
-    const reader = upstream.body?.getReader();
-    if (!reader) {
-      res.writeHead(502).end('the node answered that frame with no body at all');
-      return;
-    }
-    const chunks = [];
-    let total = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > MAX_PAYLOAD_BYTES) {
-        await reader.cancel().catch(() => {});
-        res.writeHead(502).end(`the node sent past the ${MAX_PAYLOAD_BYTES} bytes this format allows for one frame,`
-          + ' and was cut off rather than buffered');
-        return;
-      }
-      chunks.push(value);
-    }
-    body = Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)), total);
-  } catch {
-    if (!res.writableEnded) res.writeHead(502).end('the frame stopped arriving from the node');
-    return;
-  }
+  // Bounded by what the format allows a payload to be. A real decimated frame is under 486KB.
+  const body = await readFromNode(res, `/capture/${encodeURIComponent(id)}/frame/${n}?decimate=${divisor}`,
+    'frame', MAX_PAYLOAD_BYTES);
+  if (body === null) return;
   res.writeHead(200, {
     'Content-Type': 'application/octet-stream',
     'Content-Length': body.length,
     'Cache-Control': 'no-cache',
     'X-Depth-Divisor': String(divisor),
+  });
+  res.end(body);
+}
+
+// An index measured 23 bytes a frame on fixture-1g, so this is about a day of a take at 30fps.
+const MAX_REMOTE_INDEX_BYTES = 64 * 1024 * 1024;
+
+// A node-only take's index, for its frame stamps: the library resolves a mark through them, so a
+// take on the node lands a mark on the frame a take here would. Passed through untouched; the
+// page checks the hash against the listing.
+async function serveRemoteIndex(req, res, [id]) {
+  if (!node || !VALID_ID.test(id)) {
+    res.writeHead(404).end('not found');
+    return;
+  }
+  const body = await readFromNode(res, `/capture/${encodeURIComponent(id)}/index`, 'index', MAX_REMOTE_INDEX_BYTES);
+  if (body === null) return;
+  res.writeHead(200, {
+    'Content-Type': MIME['.json'],
+    'Content-Length': body.length,
+    'Cache-Control': 'no-cache',
   });
   res.end(body);
 }
@@ -1302,6 +1329,7 @@ const ROUTES = [
   // A frame of a node-only take, fetched through here rather than by the browser reaching across:
   // one origin for the page, and the decimation decision stays on the side that knows the link.
   { path: '/library/remote-frame/:id/:n', pattern: /^\/library\/remote-frame\/([^/]+)\/([^/]+)$/, read: serveRemoteFrame },
+  { path: '/library/remote-index/:id', pattern: /^\/library\/remote-index\/([^/]+)$/, read: serveRemoteIndex },
 
   // ---- the library, written
   { path: '/library/download/:id', pattern: /^\/library\/download\/([^/]+)$/, write: { methods: ['POST'], run: serveDownload } },
@@ -1379,8 +1407,8 @@ const ROUTES = [
   // ---- the webcam
   //
   // `live` rather than `write`: it changes nothing, but it hands out what the colour camera sees
-  // this second. `embeddable`, and the one route that is, because a media source and a plain
-  // `<img>` in somebody's overlay are documented uses.
+  // this second. OBS opens it as a browser source, a direct load. `embeddable`, and the one route
+  // that is, because a plain `<img>` in somebody's overlay page loads it cross-site.
   { path: '/camera.mjpg', pattern: /^\/camera\.mjpg$/, live: true, embeddable: true, read: (req, res) => {
     // Woken only for a request that can be served. A source pointed at a colour camera this server
     // will never have retries after every idle window, and each retry would start the grabber to

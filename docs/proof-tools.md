@@ -6,15 +6,30 @@ index of which tool proves what. `docs/instruments.md` carries the method behind
 
 ## Read the count, not the code
 
-Most tools print an assertion count and a failed count, and that pair is the verdict. Five do
-not: `determinism-check` prints `PASS` or `FAIL` alone, `index-check` and `registry-check` print
-`PASS` or `FAIL (n)` with the failed count only, `release-gate-check` prints the failed count
-alone, and `syntax-check` counts files, not assertions. A run with zero failed assertions and a non-zero exit is a crash to investigate, not
-a catch to record.
+Most tools print an assertion count and a failed count, `[tool] N assertions, M failed`, once they
+reach their verdict, and that pair is the verdict. Five do not: `determinism-check` prints `PASS`
+or `FAIL` alone, `index-check` and `registry-check` print `PASS` or `FAIL (n)` with the failed
+count only, `cli-check` prints `N passed, M failed`, and `syntax-check` counts files, not
+assertions. A run with zero failed assertions and a non-zero exit is a crash to investigate, not a
+catch to record.
+
+`tools/mutation-verdict.mjs` holds the two readings of a tool's run, over one count. `verdictOf`
+reads a mutation run: `sweep-all` grades every mutation with it, and CI runs its mutations through
+`sweep-all`. `runVerdictOf` reads a run with nothing mutated, and `suite` reads every tool with it:
+**FAIL** and **PASS** are a finished run with and without a failed assertion, none failed on exit 1
+is **READ THE LOG**, a crash or a printed miss rather than a pass, and **DID NOT RUN** is as below.
+A mutation run is **CAUGHT** when the tool printed its count line, exited 0 or 1, and at least one
+assertion failed; **NOT CAUGHT** when it finished with none failed, or printed `NOT CAUGHT` because
+a required row stayed green; and **DID NOT RUN** otherwise: no count line, exit 2, or killed. A
+`FAIL` row printed on the way to a crash is not a catch, so a tool that crashes after its rows
+fired exits 2 or dies without its count line, never with the crash counted as an assertion. For
+the tools with no count line both readings read what they print once they finish instead:
+`cli-check`'s tally, the unit tests' `tests` and `fail` summary, and a verdict line alone, whose
+total is the tool's `PASS` and `FAIL` rows. A row never decides a verdict.
 
 The tools disagree about what a caught mutation exits. Four exit **0** on a catch and 1 on a miss
 — `registry-check`, `vendor-check`, `registration-check` and `release-gate-check` — so anything
-gating on "non-zero means caught" reads a genuine miss by these four as a catch. Twelve exit 1 on
+gating on "non-zero means caught" reads a genuine miss by these four as a catch. Thirteen exit 1 on
 a catch *and* 1 on a miss, so the code carries no information and only the printed sentence
 separates them. Seven carry no miss branch at all and exit on the failure count, so a mutation they
 fail to catch exits 0 and reads as a clean pass.
@@ -25,16 +40,16 @@ Per tool, read from the source:
 | --- | --- | --- | --- |
 | `determinism-check` | pass | a failed assertion | not used |
 | `index-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no 2 GiB fixture, a stale anchor, a crash |
-| `registry-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: a stale anchor, a crash, no browser |
+| `registry-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: a stale anchor, a crash, no browser, a `--before-url` that is `--url` |
 | `timeline-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `DID NOT RUN`: a take under 12s |
-| `preview-check` | pass, or a **catch** | a failed assertion, a crash, or a miss | an unknown `--mutate` name |
-| `keyframe-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or the page stopped answering | `DID NOT RUN`: a take under 24s |
-| `export-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or a crash (it has no crash handler) | not used |
+| `preview-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: a crash, or an unknown `--mutate` name |
+| `keyframe-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `DID NOT RUN`: a take under 24s, or the page stopped answering |
+| `export-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or a crash (it has no crash handler) | `DID NOT RUN`: a mutation the page never requested, a `--before-url` that is `--url` or cannot be compared |
 | `editor-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a take under 32s, a stale anchor |
-| `library-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `PASS WITH CLAIMS UNPROVEN`, or a held port |
+| `library-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `PASS WITH CLAIMS UNPROVEN`, a held port, or `DID NOT RUN`: a crash |
 | `boot-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8391 held, a crash |
 | `monitor-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8341 held, a crash |
-| `sensor-view-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no sensor hello, a stale anchor, no browser |
+| `sensor-view-check` | pass | a failed assertion, a catch, or a miss | `UNTESTED`: no sensor hello; `DID NOT RUN`: a stale anchor, no browser |
 | `level-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8377 held, no GPU browser |
 | `vcam-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`, or section 6 unproven without an IPv4 |
 | `guard-check` | pass | a failed assertion, a catch, or a miss | `PASS, with claims untested here`: no non-internal IPv4; `DID NOT RUN`: a crash |
@@ -45,6 +60,7 @@ Per tool, read from the source:
 | `syntax-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor |
 | `cpp-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor, no compiler or headers |
 | `decoder-check` | pass, or a missed mutation | a failed assertion, a catch, or a probe that will not build or run | `DID NOT RUN`: no compiler, no built library or grabber, a stale anchor, a failed rebuild, or a mutated rebuild that changed nothing |
+| `grabber-args-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no `vendor/prefix`, build-native failed, a mutation the binary did not change, a stale anchor |
 | `vendor-check` | pass, or a **catch** | a failed assertion, a miss, or a stale anchor | `PASS on the source, with the artifact untested` |
 | `registration-check` | pass, or a **catch** | a failed assertion, or a miss | a build or tooling failure |
 | `release-gate-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: no registry |
@@ -67,14 +83,109 @@ Every tool answers a name it does not declare by listing the whole set it does, 
 `unknown mutation __enumerate__ - have …` and exits without running. The tools that check their
 fixture, server or browser first (`timeline-check`, `keyframe-check`, `export-check`,
 `sensor-view-check`, `editor-check`) need those in place before they reach the name.
-`tools/sweep-all.mjs` reads its inventory out of exactly that line.
+`tools/sweep-all.mjs` reads its inventory out of exactly that line, in any of its three shapes:
+`- have …`, `; have: …` and `this tool knows …`.
 
 A mutated run prints the expected failure row when its entry carries a `fails:` field.
 For other entries, read the catch from the assertions that fired.
 
-Four tables are too large to reproduce here — `editor-check` declares 202, `library-check` 156,
-`registry-check` 54 and `effect-check` 42. Their sections give the count and the enumerate
+Four tables are too large to reproduce here — `editor-check` declares 207, `library-check` 165,
+`registry-check` 60 and `effect-check` 42. Their sections give the count and the enumerate
 command prints the names.
+
+## Comparing against another build
+
+`export-check` and `registry-check` take `--before-url`, a server running another build, and
+render their arms through both builds on one GPU, one pinned camera and one take. A change that
+claims to leave the picture alone points it at the commit before itself. Stand that build up from
+a clean extract of the revision, on a free port:
+
+```
+git archive <rev> | tar -x -C /tmp/rev
+cp -R node_modules /tmp/rev/ && mkdir /tmp/rev/captures && cp captures/sample.knct /tmp/rev/captures/
+(cd /tmp/rev && node server/index.js --port 8081 --grabber "$(which node) tools/fake-grabber.mjs")
+node tools/export-check.mjs --url http://localhost:8080 --before-url http://localhost:8081
+```
+
+Both tools exit 2 when `--before-url` is `--url`. `export-check` also exits 2 when the two servers
+hold the take under different hashes, or when the other build publishes no `setOutputSize`, which
+it does from `d9b5d9e` on. `registry-check` names each reading by its registry name, so a build
+from before the dotted names fails those rows and names what it lacks.
+
+## The sweep
+
+```
+node tools/sweep-all.mjs --tools syntax,module --jobs 4
+node tools/sweep-all.mjs                      # the five browser tools, one at a time
+```
+
+`sweep-all` runs every mutation each named tool declares and grades each run with
+`mutation-verdict.mjs`. A run that did not run is tried three times in all. It writes one log per
+run and `SUMMARY.txt` under `--out` (default `.sweep-all/`), and exits 0 only when every mutation
+was caught. With no `--tools` it sweeps `library`, `timeline`, `keyframe`, `export` and `preview`,
+which take hours and a GPU browser; all but `library` need a server at `SWEEP_URL` (default
+`http://localhost:8080`), and `timeline` and `keyframe` get the take `SWEEP_TAKE` names (default
+`fixture-1g`).
+
+`--jobs` above 1 runs mutations side by side, and the sweep refuses it unless every named tool is
+one of `syntax`, `module`, `cpp`, `hd-encoder` and `release-gate`: those apply a mutation in memory
+or in a private temp copy and bind no port. Every other tool stages its mutation where a second
+run would read it.
+
+## `suite`
+
+Every tool that needs no sensor and no native build, once each, with one verdict line per tool.
+
+```
+node tools/suite.mjs
+node tools/suite.mjs --port 8431 --logs /tmp/suite-logs
+```
+
+| needs | |
+| --- | --- |
+| ports | every port the tools below bind, and 8431 (`--port`) for the server it starts |
+| fixtures | none: it builds the ones that are missing |
+| browser | a GPU browser |
+| binaries | a C++ compiler and turbojpeg's headers, ffmpeg and ffprobe, and the npm registry |
+
+It builds the missing fixtures first, each with the tool that makes it: `captures/sample.knct`,
+`fixture-1g` (8 loops), `fixture-large` (18 loops, past 2 GiB, for `index-check`) and
+`fixture-2x` (2 loops), which makes the four openable takes `editor-check` needs. Then three
+stages:
+
+1. `syntax-check`, `module-check`, `cpp-check`, the unit tests, `release-gate-check` and
+   `vendor-check`, side by side.
+2. The nine tools that start their own servers on ports no other tool binds — `guard`, `boot`,
+   `monitor`, `level`, `vcam`, `cli`, `jobs`, `effect` and `library` — all at once.
+3. A server of its own on `--port`, with the fake grabber and its stores in a temporary
+   directory, and against it, one after another, `registry`, `timeline`, `keyframe`, `export`,
+   `editor`, `preview`, `effect-conformance`, `determinism`, `sensor-view` and `index`. The tools
+   that need a long take get `fixture-1g`. The server is stopped at the end.
+
+Each line carries the verdict, failed/total assertions and seconds, and for a run that did not
+finish, the reason. A tool whose port already answers is not started, and its line names the port.
+Each tool's whole output is kept in the log directory, `--logs` or a new one under the system
+temporary directory, which the first and the last line name.
+
+Every run is read by `runVerdictOf` in `tools/mutation-verdict.mjs`: PASS, FAIL, READ THE LOG for
+none failed on exit 1, or DID NOT RUN. `determinism-check` prints no rows, so its total reads `?`.
+`vendor-check`'s exit 2 with `PASS on the source, with the artifact untested here` is its full
+answer on a machine with no `vendor/prefix`, as CI takes it, so it reads as a finished run and its
+line says so. Every other exit 2 is DID NOT RUN, `sensor-view-check`'s without a sensor among
+them. The suite exits 0 when every tool passed, 1 when any failed or read READ THE LOG, and 2 when
+the rest passed and any did not run. The known reds each tool's section names come through as
+they are.
+
+Stage 2 lasts as long as `library-check`, and `editor-check` and `preview-check` are most of stage
+3.
+
+It leaves out `hd-encoder-check`, `decoder-check` and `registration-check`, which need a native
+build, a built library or a corpus, and `sweep-all`, which runs mutations. A `*-check.mjs` it
+neither runs nor leaves out by name comes back DID NOT RUN, so a new tool is placed in a stage or
+named as left out.
+
+Stage 2 puts nine tools and their browsers on the machine at once. Two suites, or a suite beside
+one of its own tools, collide on the fixed ports, so run one at a time.
 
 ## `determinism-check`
 
@@ -126,8 +237,8 @@ baseline in the conditions a mutated run failed in.
 
 ## `registry-check`
 
-One registry drives the renderer, the panel is a view on it, and every look term reaches the
-pixels.
+One registry drives the renderer, the panel is a view on it, every look term reaches the pixels,
+and each reading answers its own terms and draws what a planted room says it draws.
 
 ```
 node tools/registry-check.mjs --url http://localhost:8080
@@ -139,27 +250,55 @@ node tools/registry-check.mjs --url http://localhost:8080
 | fixture | a capture |
 | browser | a GPU browser |
 
-`--before` and `--against` drive the cross-build arm, which finds its revision by a content
-marker instead of a hash, so a rewritten history does not move it.
+The boot-state rows compare this build's boot against the commit before the registry, which
+`--before` overrides and a content marker finds otherwise. What they hold that no row inside the
+build holds is that the pre-registry defaults, the fog colour and the 1080/600 point-size rebase
+have not moved. `--before-url` adds the comparison in [Comparing against another build](#comparing-against-another-build):
+each reading at 1.0, and the raster at 0.35 over blackwall, against the other build's frames,
+within 64 bytes of 921,600 and a single step.
 
-54 controls, one per look term or per rule about how a term reaches the pixels.
+The wiring rows raise every look term the registry declares under each reading alone. A term
+declared under a reading's master has to move that reading and no other, and the terms no reading
+owns that move some readings and not others are printed. The planted rows draw sparse points,
+one every 24 texels, off-centre and through an off-centre eye, and read each point at the pixel
+the mirrored unprojection puts it on against the colour the reading's own formula gives it.
+
+60 controls, one per look term or per rule about how a term reaches the pixels.
 `node tools/registry-check.mjs --mutate __enumerate__` prints the names. Read the fired rows and
 not the total.
 
-Section 1b's `readGhost` row carries a two-sided tolerance: it absorbs up to 64 bytes of 921,600
-and a single step, and the passing line names what it absorbed. A clean run reads
-`6 frames, 1 within tolerance (worst 1 bytes of 921600, delta 1)`, so a red row there is a finding
-and so is that byte count climbing.
+The last section renders every shipped preset on contexts that render less than this machine.
+Each arm is a browser context whose init script changes WebGL before the page runs, and every
+arm also counts each draw and clear that lands in a framebuffer that cannot complete.
 
-**Known reds.** On a `make-sample` fixture the tool comes back FAIL (3) on a clean tree: the
-sweep reports `unexplained: bottom snapDelta`, the count lands at `92 of 97 parameters are proven
-to reach the pixels`, and the crop's second row reports `identical with only near/far authored`.
-
-| commit | rows | cause |
+| arm | what it changes | presets |
 | --- | --- | --- |
-| `3b7ab90` | 3, all crop and snap | the synthetic cloud sits inside the authored depth pair, so there is nothing to cut |
+| a 2048 texture cap | `MAX_TEXTURE_SIZE` and `MAX_RENDERBUFFER_SIZE` read 2048 and a larger allocation is dropped, at a device pixel ratio of 2 on a 1400x800 viewport | all twelve |
+| neither colour-buffer extension | hides `EXT_color_buffer_float` and `EXT_color_buffer_half_float` | all twelve |
+| no `EXT_color_buffer_float` | hides that one | Blackwall and Ghost |
+| no `EXT_color_buffer_half_float` | hides that one, which is Firefox's own list | Blackwall and Ghost |
 
-A run that takes the count past three has moved something. On real footage all three pass.
+The cap arm is Firefox's `privacy.resistFingerprinting`, which LibreWolf turns on by default. It
+also opens `/program` set to 3840x2160 and asks that Blackwall draws there inside the cap. The
+section's five controls, each with the rows it reddened:
+
+- **`targets-ignore-the-size-cap`** — `resize` stops capping the pixel ratio. Ten rows of the cap
+  arm: its buffer row, its eight composer presets, which draw black, and its incomplete-framebuffer
+  row. The four direct presets stay lit, which is the reporter's picture.
+- **`program-out-ignores-the-size-cap`** — `/program` draws at its setting whatever the limit.
+  The cap arm's `/program` row alone.
+- **`chain-assumes-half-float`** — the chain takes half-float without asking. Eleven rows of the
+  no-extension arm: its decision row, its eight composer presets, its incomplete-framebuffer row,
+  and its warning row, which loses the 8-bit clause.
+- **`memory-assumes-half-float`** — the surface memory falls back to half-float on the float
+  extension's name alone. Seven rows of the no-extension arm: its decision row, its
+  incomplete-framebuffer row, its warning row, which loses the ghost-and-wake clause, and the four
+  direct presets, which draw no point, because a memory that never completes reads as age zero.
+- **`types-read-from-extension-names`** — the decision reads extension names in place of
+  framebuffers. Two rows of the Firefox-shaped arm: its decision row, which reads 8-bit for a chain
+  that renders half-float, and its warning row.
+
+On a `make-sample` fixture a clean tree passes.
 
 ## `timeline-check`
 
@@ -223,6 +362,12 @@ assertions. That run did not run; re-run it, and read nothing off its count.
   document composites differently depending on how its clips are listed.
 - **`take-not-shared`** — every clip opens its own copy of its take, so two clips of one take
   carry two indexes and two caches.
+- **`seek-stands-down`** — a seek overtaken twice answers null and leaves the playhead where it
+  was. Section 1e's landing rows are the catch.
+- **`stand-down-counts-as-landed`** — the same stand-down, with any answer counted as a landing,
+  so `settled()` calls it idle. Section 1e's agreement rows are the catch.
+- **`settled-ignores-owed`** — `settled()` stops asking whether the last seek landed, and calls a
+  seek that rejected idle.
 
 ## `preview-check`
 
@@ -349,7 +494,19 @@ node tools/export-check.mjs --url http://localhost:8080
 | binaries | ffmpeg and ffprobe, resolved through PATH; `--ffmpeg` and `--ffprobe` override |
 
 Section 9 drives refused edits on purpose and its refusals are DOM-only, so it needs no render.
-`--before` drives the cross-build arm.
+`--before-url` renders every resolution arm and both aspect arms through another build as well;
+see [Comparing against another build](#comparing-against-another-build).
+
+Two rows hold the resolution rows to account. The control renders `points` and `nobloom` at
+1920x1200 with the point size held in framebuffer pixels, and has to fail the same comparison by
+five times its tolerance. The aspect row renders one off-centre pose at 1920x1080 and at
+1440x1080 and requires the narrow frame to be the wide frame's centre columns, which holds only
+while every screen-space size follows the height. Section 3 draws the registry's default look
+through its own pose, off the sensor's axis, because the near plane can reveal only what a
+viewpoint the sensor did not have sees behind it.
+
+Section 10 spoofs a 2048-pixel target limit on one page and asks for an export either side of it;
+each request names an empty frame range, so nothing is encoded whether the door holds or not.
 
 The lens rows compare the center half of a 50-degree frame with a full 26.25-degree frame
 reduced by two, both rendered at 1728x1080 at program time 4s. Bloom, trails and vignette are off.
@@ -417,18 +574,14 @@ camera, requiring the smallest sprite above the 10.8-reference-pixel normalizati
 - **`scale-by-width`** — the reference becomes buffer width over 1728 rather than height over
   1080, and every term follows it.
 - **`export-fail-unlinks-output`** — the failure path reaches back to an output it did not write.
+- **`export-ignores-the-size-cap`** — the size door is taken out, so an export larger than the
+  context's target limit starts. Fails section 10's first row alone.
 
-**Known reds.** The recorded `make-sample` baseline has ten fixture-dependent failures.
-
-| commit | rows | cause |
-| --- | --- | --- |
-| `3b7ab90` | 9 resolution-invariance rows (`trails`, `rgbsplit`, `scanlines`, `grain`, `bloom`, `nobloom`, `full`, `regionpush`, `regionmask`) | the synthetic sample has no depth jitter, so the fine structure those rows correlate is aliasing |
-| `3b7ab90` | the crop's cull row | the same fixture |
-
-The numbers repeat to four figures across trees — `trails` at a coarse mean of 2.732, the crop row
-at 110 revealed and 314,021 lit against 410,577 released — so compare the numbers, not the pass
-count. An eleventh red in section 4 is inherited state: clear the server's working project and
-re-run.
+On a `make-sample` fixture a clean tree passes. The resolution arms draw at `pointSize` 36: that
+fixture's back wall faces the camera at one depth, so its sensor lattice lands 1.17px apart at
+960x600, and narrower sprites alias it into a beat that 1920x1200 resolves. The grain row compares
+1728x1080 with 3456x2160, because a grain cell is one reference pixel and 960x600 cannot hold it.
+A red in section 4 alone is inherited state: clear the server's working project and re-run.
 
 ## `editor-check`
 
@@ -454,7 +607,7 @@ because `rebuildLanes` writes the second one onto the strip itself. Sections 13 
 state the sections before them leave. Two sweeps must never run at once, and `web/` must not be
 edited under a running one.
 
-202 controls, listed by `node tools/editor-check.mjs --mutate __enumerate__`. A mutated run is judged against the standing red set
+207 controls, listed by `node tools/editor-check.mjs --mutate __enumerate__`. A mutated run is judged against the standing red set
 rather than against zero, so it reports the assertions that fired beyond it and names the row a
 control is required to redden — as with this one, which `syntax-check`'s own bullet control
 anchors on:
@@ -631,12 +784,12 @@ node tools/sensor-view-check.mjs --url http://localhost:8080
 | --- | --- |
 | server | `--url`, default `http://localhost:8080`, plus port 8131 for the section with its own capture |
 | fixture | a capture in `captures/` for the private server on 8131; it throws naming the path without one |
-| sensor | the record arm needs one; without it the tool exits 2 |
+| sensor | the record arm needs a sensor hello, which `tools/fake-grabber.mjs` also sends |
 | browser | a GPU browser |
 
-Without a sensor the record arm gets no hello and the tool exits 2, which is the sensorless
-baseline. Arm C is anamorphic, so `fx` and `fy` differ and a substitution
-between them is visible.
+With no grabber the record arm gets no hello, its seven rows go unasked, and the tool exits 2
+`UNTESTED`, which is the sensorless baseline. Arm C is anamorphic, so `fx` and `fy` differ and a
+substitution between them is visible.
 
 - **`fov-hardcoded`** — the vertical angle becomes a constant, which is right for this rig, so
   only the synthetic arms see it.
@@ -647,6 +800,9 @@ between them is visible.
 - **`no-repaint`** — the button moves the camera and asks for no repaint.
 - **`sensor-view-keys-camera`** — the button writes a camera key as well as moving the view, so
   looking at the intrinsics becomes an edit to the clip.
+- **`store-answers-a-page`** — the projects store read at `/projects`, the projects page, instead
+  of its listing at `/projects/all`. Only the projects store row fails; a store answering anything
+  but JSON is a failed row, not a run that stops.
 
 ## `level-check`
 
@@ -718,6 +874,13 @@ is NOT CAUGHT even though it exits 1.
 - **`rgbx-read-as-bgrx`** — the packed format is read BGRX, so the red/blue row swaps.
 - **`held-colour-gets-depth-time`** — a held colour is stamped with the depth frame's time, and
   the slow-colour identity row fails.
+- **`encoder-has-no-destructor`** — the class goes back to the implicit destructor, which destroys a
+  joinable thread. The early-return row runs in a forked child and fails when that child aborts.
+
+The early-return row is the part of the grabber's failed corpus write that runs without a sensor:
+an encoder left running when its scope ends is joined. The write itself happens after the device
+starts, so the grabber's exit 1 on a short write needs a sensor and a filesystem that fills during
+the dump, and no tool here reaches it.
 
 ## `vcam-check`
 
@@ -741,6 +904,15 @@ in the difference, which no upscale can invent. The keyed page cuts that same fr
 against a live depth in colour-camera space, and sections 7, 8 and 9 hold the key's wire, its bytes
 and its picture the way sections 1 to 6 hold the webcam's.
 
+Section 10 asks which subscribers a revocation ends. A grabber restart holds them and colour off
+ends them, and the recorder's accounting must lose every ended one, including a client that stopped
+reading and whose socket therefore never closes. That client is asked in standby: on a running
+grabber, colour off is followed by the grabber's exit, which ends every response a second time, and
+the write-after-end error prunes the subscriber whether or not the reap does. The section waits out
+the webcam's whole hold, `HOLD_MS` in `server/webcam.js`, which it reads from the source: 45
+seconds, and no flag shortens it. It removes the fixture's capture after the first respawn, so every
+later spawn fails and only the hold can end the subscriber.
+
 - **`pose-skips-the-registry`** — the camera pose in a socket patch bypasses the registry, so four
   finite numbers are drawn as a rotation.
 - **`patch-params-applied-one-at-a-time`** — the parameter half lands name by name, so a refused
@@ -753,6 +925,16 @@ and its picture the way sections 1 to 6 hold the webcam's.
   message type and its content hash moves.
 - **`refusal-ignores-webcam`** — the refusal loses its webcam clause, so a take starts while a
   full-rate MJPEG pull competes with the depth packets.
+- **`revoke-keeps-subscribers`** — colour off sets its reason and leaves every open response
+  attached and silent. Section 10's ended row and both accounting rows fail; the 503 row stays
+  green, because `attach` refuses on the reason whether or not anybody was ended.
+- **`restart-drops-subscribers`** — every revocation ends its subscribers, the grabber restart
+  included, which makes OBS reconnect on every USB drop. Only section 10's survives-a-restart row
+  fails.
+- **`hold-never-expires`** — a subscriber held through a restart that never comes back stays open
+  for good, and section 10's hold row fails after the hold and its margin.
+- **`reap-skips-ended`** — an ended response stays counted until its socket closes, so only the
+  standby accounting row fails, through the subscriber that stopped reading.
 - **`key-runs-unasked`** — the key encode runs before anybody asks, on the thread the colour
   camera already holds, and section 7's first row asks while no client exists.
 - **`key-never-asks`** — the socket attaches and is acknowledged, but the demand edge never
@@ -826,7 +1008,10 @@ exits 2, because a crash counted as a failed assertion reads under `--mutate` as
 - **`listen-any-host`** — the default bind becomes `0.0.0.0`.
 - **`origin-ignores-scheme`** — a parsed origin host compared against a raw Host string.
 - **`host-parsed-loosely`** — the authority-shape check goes, which is the hole the scheme fix
-  opened.
+  opened. It reddens all four malformed-Host rows, one per spelling.
+- **`host-accepts-a-duplicate`** — a request carrying two `Host` lines is no longer refused. Node's
+  parser keeps the first and answers 101, so the duplicate row fails and its single-`Host` twin
+  stays green.
 - **`host-accepts-a-name`** — the rebinding rule compares the two headers against each other,
   which a rebound browser satisfies by construction.
 - **`origin-allows-null`** — the literal string `null`, which a `file://` page and a sandboxed
@@ -1014,7 +1199,8 @@ with no dot in front of it, reads as a use of any import of the same name. `gpuT
 ## `syntax-check`
 
 Every shipped JavaScript file parses, the constants the two languages cannot share agree, the
-citations resolve, and every tool is named in `CLAUDE.md`.
+citations resolve, every tool is named in `CLAUDE.md`, and every `tools/*-check.mjs` is either run
+by `.github/workflows/checks.yml` or named on one of its `# not-run:` lines, never both.
 
 ```
 node tools/syntax-check.mjs
@@ -1053,6 +1239,8 @@ name.
   bullet naming one nothing declares.
 - **`doc-line-ends-in-whitespace`** — a prose line ending in a space, which is invisible on the
   page and invisible to a clean `git diff --check`.
+- **`ci-forgets-a-tool`** — a check tool the workflow neither runs nor lists as not run.
+- **`ci-runs-a-tool-it-lists-as-not-run`** — a tool on both sides of the workflow's ledger.
 
 ## `cpp-check`
 
@@ -1108,6 +1296,43 @@ so nothing in this repo compiles them.
   rows, and leaves the all-four row and every grabber row green, because the grabber names an
   enumerator only inside its own `#ifdef`.
 - **`harness-syntax-error`** — a break in `native/harness/reg-runner.cpp`.
+
+## `grabber-args-check`
+
+The grabber refuses a `--min-depth`/`--max-depth` it cannot read exactly, or a pair with no depth
+between the two planes, and exits 2 before it looks for a device.
+
+```
+node tools/grabber-args-check.mjs
+```
+
+| needs | |
+| --- | --- |
+| binaries | what `tools/build-native.mjs` needs |
+| prefix | libfreenect2 in `vendor/prefix`, from `node tools/build-native.mjs`; without it the tool exits 2 naming it |
+| everything else | no sensor, no server, no fixture |
+
+It runs `tools/build-native.mjs` on every run, because `native/build/grabber` can be older than the
+source beside it. A mutation edits `native/grabber.cpp` in place, the way `decoder-check`'s edit
+the library source, and the source goes back and is rebuilt on every way out, so neither tool may
+run while the other, or an edit, is in flight in the same tree. The make on macOS compares
+timestamps to the second, so a source written in the second its object was built in is not
+recompiled: the tool writes after that second, and a mutated build whose binary hashes the same as
+the unmutated one is DID NOT RUN rather than NOT CAUGHT. Every vector leads with the
+grabber's `--check`, which runs the argument pass and exits before enumeration, so a machine with a
+sensor answers exactly as one without. A refused row asks for exit 2 and the sentence that names
+the flag and quotes the text as typed. An accepted row asks for exit 0 and `--check`'s `arguments
+accepted` line. A pair refusal prints the two values as parsed, at three decimals, not as typed.
+The no-flags, defaults, `--quality 0` and missing-value rows stay green under every mutation, which
+confines each control to the rule it breaks.
+
+- **`clip-accepts-inverted-range`** — the pair rule is gone, so a swapped or equal pair reaches the
+  device. The four pair rows fail.
+- **`depth-takes-a-numeric-prefix`** — `std::atof`'s behaviour: the leading number is kept and the
+  rest dropped. The comma-decimal, trailing-unit and trailing-space rows fail.
+- **`depth-accepts-non-finite`** — `inf` reaches the device and `nan` is refused only by the pair
+  rule, in the pair rule's sentence. The nan and inf rows fail.
+- **`depth-accepts-zero-or-negative`** — the zero and negative rows fail.
 
 ## `decoder-check`
 
@@ -1197,8 +1422,14 @@ node tools/vendor-check.mjs
 
 Each declared edit pins the blob hash the patched file must have, because "differs from upstream"
 is not "contains our change". A declared edit that has quietly reverted fails too: that is what a
-careless re-vendor looks like. Its mutations are delivered as functions over a staged tree rather
-than as anchored text.
+careless re-vendor looks like. The other rows take `third_party/libfreenect2.manifest` as
+upstream, so the last row checks the manifest itself: its lines rebuild into git tree objects, and
+the root must equal the tree of upstream's v0.2.1 commit, a constant read from upstream and never
+from the tool's own output. That reaches every path, mode and hash in the manifest, and not the
+permission bits on disk. Its mutations are delivered as functions over a staged copy of the tree,
+the oracle and the manifest rather than as anchored text. Every mutation needs `vendor/prefix` as
+well: without one each exits 2, `DID NOT RUN`, the source mutations included, which is why CI runs
+this tool unmutated only.
 
 - **`undeclared-edit`** — an edit nothing declares.
 - **`revert-local-edit`** — a declared edit quietly put back to upstream.
@@ -1207,6 +1438,8 @@ than as anchored text.
 - **`oracle-drift`** — the pristine upstream copy edited, so the comparison is against the wrong
   thing.
 - **`stale-prefix`** — the artifact rows pointed at a prefix from an earlier build.
+- **`manifest-relabel`** — a file edited and its manifest line rewritten to the new hash. Only the
+  manifest row fails.
 
 ## `registration-check`
 
@@ -1288,9 +1521,12 @@ discontinuities:
 
 `tools/fake-grabber.mjs` stands in for the sensor when a tool needs a live stream. It honours
 `--no-color` and `--no-low-light`, rewriting each payload at load so the declared lengths still
-describe it. `--pipeline`, `--color-decoder`, `--log`, `--quality`, `--min-depth` and `--max-depth`
-are accepted and
-ignored, and anything else gets one line on stderr and is not refused.
+describe it. `--hd` sends one 1920x1080 colour frame over and over; with `--hd-counter` frame n
+carries n mod 256 as eight black and white squares below the scene, most significant bit on the
+left, over a row holding the complement, so a reader can name the frame it holds.
+`test/fake-grabber-counter.test.mjs` decodes them at 480x270. `--pipeline`, `--color-decoder`,
+`--log`, `--quality`, `--min-depth` and `--max-depth` are accepted and ignored, and anything else
+gets one line on stderr and is not refused.
 
 ## The supply-chain gate
 
@@ -1304,7 +1540,7 @@ node tools/release-gate-check.mjs
 | needs | |
 | --- | --- |
 | network | the npm registry |
-| binaries | npm; CI pins `npm@12.0.2` in the gate job |
+| binaries | npm 11 or newer; Node 26 bundles one |
 
 The setting is `min-release-age=2` in `.npmrc`, and **the unit is days as a plain integer**. Other
 package managers in this family take minutes or seconds, which is how a wrong number gets written
