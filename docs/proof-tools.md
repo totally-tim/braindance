@@ -34,7 +34,7 @@ Per tool, read from the source:
 | `library-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `PASS WITH CLAIMS UNPROVEN`, or a held port |
 | `boot-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8391 held, a crash |
 | `monitor-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8341 held, a crash |
-| `sensor-view-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no sensor hello, a stale anchor, no browser |
+| `sensor-view-check` | pass | a failed assertion, a catch, or a miss | `UNTESTED`: no sensor hello; `DID NOT RUN`: a stale anchor, no browser |
 | `level-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8377 held, no GPU browser |
 | `vcam-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`, or section 6 unproven without an IPv4 |
 | `guard-check` | pass | a failed assertion, a catch, or a miss | `PASS, with claims untested here`: no non-internal IPv4 |
@@ -608,12 +608,12 @@ node tools/sensor-view-check.mjs --url http://localhost:8080
 | --- | --- |
 | server | `--url`, default `http://localhost:8080`, plus port 8131 for the section with its own capture |
 | fixture | a capture in `captures/` for the private server on 8131; it throws naming the path without one |
-| sensor | the record arm needs one; without it the tool exits 2 |
+| sensor | the record arm needs a sensor hello, which `tools/fake-grabber.mjs` also sends |
 | browser | a GPU browser |
 
-Without a sensor the record arm gets no hello and the tool exits 2, which is the sensorless
-baseline. Arm C is anamorphic, so `fx` and `fy` differ and a substitution
-between them is visible.
+With no grabber the record arm gets no hello, its seven rows go unasked, and the tool exits 2
+`UNTESTED`, which is the sensorless baseline. Arm C is anamorphic, so `fx` and `fy` differ and a
+substitution between them is visible.
 
 - **`fov-hardcoded`** — the vertical angle becomes a constant, which is right for this rig, so
   only the synthetic arms see it.
@@ -624,6 +624,9 @@ between them is visible.
 - **`no-repaint`** — the button moves the camera and asks for no repaint.
 - **`sensor-view-keys-camera`** — the button writes a camera key as well as moving the view, so
   looking at the intrinsics becomes an edit to the clip.
+- **`store-answers-a-page`** — the projects store read at `/projects`, the projects page, instead
+  of its listing at `/projects/all`. Only the projects store row fails; a store answering anything
+  but JSON is a failed row, not a run that stops.
 
 ## `level-check`
 
@@ -801,7 +804,10 @@ server that refused every upgrade fails.
 - **`listen-any-host`** — the default bind becomes `0.0.0.0`.
 - **`origin-ignores-scheme`** — a parsed origin host compared against a raw Host string.
 - **`host-parsed-loosely`** — the authority-shape check goes, which is the hole the scheme fix
-  opened.
+  opened. It reddens all four malformed-Host rows, one per spelling.
+- **`host-accepts-a-duplicate`** — a request carrying two `Host` lines is no longer refused. Node's
+  parser keeps the first and answers 101, so the duplicate row fails and its single-`Host` twin
+  stays green.
 - **`host-accepts-a-name`** — the rebinding rule compares the two headers against each other,
   which a rebound browser satisfies by construction.
 - **`origin-allows-null`** — the literal string `null`, which a `file://` page and a sandboxed
@@ -1166,8 +1172,12 @@ node tools/vendor-check.mjs
 
 Each declared edit pins the blob hash the patched file must have, because "differs from upstream"
 is not "contains our change". A declared edit that has quietly reverted fails too: that is what a
-careless re-vendor looks like. Its mutations are delivered as functions over a staged tree rather
-than as anchored text.
+careless re-vendor looks like. The other rows take `third_party/libfreenect2.manifest` as
+upstream, so the last row checks the manifest itself: its lines rebuild into git tree objects, and
+the root must equal the tree of upstream's v0.2.1 commit, a constant read from upstream and never
+from the tool's own output. That reaches every path, mode and hash in the manifest, and not the
+permission bits on disk. Its mutations are delivered as functions over a staged copy of the tree,
+the oracle and the manifest rather than as anchored text.
 
 - **`undeclared-edit`** — an edit nothing declares.
 - **`revert-local-edit`** — a declared edit quietly put back to upstream.
@@ -1176,6 +1186,8 @@ than as anchored text.
 - **`oracle-drift`** — the pristine upstream copy edited, so the comparison is against the wrong
   thing.
 - **`stale-prefix`** — the artifact rows pointed at a prefix from an earlier build.
+- **`manifest-relabel`** — a file edited and its manifest line rewritten to the new hash. Only the
+  manifest row fails.
 
 ## `registration-check`
 
