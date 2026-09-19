@@ -1,99 +1,97 @@
-// The full sweep, with each tool's mutation list read out of the tool rather than written down
-// beside it: every tool refuses an unknown mutation with `have a, b, c`, so that refusal is the
-// enumeration. Judged by failed-assertion count and never by exit code, since a refused anchor,
-// a Playwright context destruction and a real catch all exit non-zero.
+// Every mutation of the named tools, each run judged by `verdictOf` in tools/mutation-verdict.mjs,
+// with each tool's list read out of its own refusal of a name it does not declare. A run that
+// did not run is tried three times in all. Exits 0 only when every mutation was caught.
+//
+//   node tools/sweep-all.mjs [--tools a,b] [--jobs N] [--out <dir>]
+//
+// With no --tools it sweeps the five browser tools, which need a server at SWEEP_URL and hours.
 
-import { spawn } from 'node:child_process';
-import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
-// Aliased because every promise in this file names its own `resolve`.
-import { dirname, join, resolve as resolvePath } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { StringDecoder } from 'node:string_decoder';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join, resolve as resolvePath } from 'node:path';
+import {
+  CAUGHT, DID_NOT_RUN, ENUMERATE, NOT_CAUGHT, ROOT, namesIn, runTool, verdictOf,
+} from './mutation-verdict.mjs';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
-const OUT = resolvePath(argv.includes('--out') ? argv[argv.indexOf('--out') + 1] : join(ROOT, '.sweep-all'));
+const flag = (name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined);
 const URL = process.env.SWEEP_URL ?? 'http://localhost:8080';
 const TAKE = process.env.SWEEP_TAKE ?? 'fixture-1g';
-const CRASH = 'Execution context was destroyed';
-const TOOLS = ['library', 'timeline', 'keyframe', 'export', 'preview'];
+const OUT = resolvePath(flag('--out') ?? join(ROOT, '.sweep-all'));
+const JOBS = Number(flag('--jobs') ?? '1');
+const ATTEMPTS = 3;
+
+// What each browser tool is handed beyond `--mutate`. A tool not named here is handed nothing.
+const BROWSER_ARGS = {
+  library: [],
+  timeline: ['--url', URL, '--take', TAKE],
+  keyframe: ['--url', URL, '--take', TAKE],
+  export: ['--url', URL],
+  preview: ['--url', URL],
+};
+// These mutate in memory or in a private temp copy and bind no port, so concurrent runs cannot
+// see each other. Every other tool stages its mutation where a second run would read it.
+const CONCURRENT = new Set(['syntax', 'module', 'cpp', 'hd-encoder', 'release-gate']);
+
+const TOOLS = flag('--tools')?.split(',').filter(Boolean) ?? Object.keys(BROWSER_ARGS);
+const argsFor = (tool) => BROWSER_ARGS[tool] ?? [];
+
+const refuse = (why) => {
+  console.log(`[sweep] DID NOT RUN - ${why}`);
+  process.exit(2);
+};
+if (!Number.isInteger(JOBS) || JOBS < 1) refuse(`--jobs wants a whole number of at least 1, not ${flag('--jobs')}`);
+const missing = TOOLS.filter((tool) => !existsSync(join(ROOT, 'tools', `${tool}-check.mjs`)));
+if (missing.length) refuse(`no tools/${missing[0]}-check.mjs${missing.length > 1 ? ` (nor ${missing.slice(1).join(', ')})` : ''}`);
+const staged = TOOLS.filter((tool) => !CONCURRENT.has(tool));
+if (JOBS > 1 && staged.length) refuse(`--jobs ${JOBS} runs mutations side by side, and these stage theirs where a second run would read it: ${staged.join(', ')}`);
 
 mkdirSync(OUT, { recursive: true });
-// Removed up front so the artifact cannot outlive the thing it describes: absent means running,
-// present means finished, and a previous run's file otherwise answers for this one.
+// Removed up front: absent means running, present means finished.
 rmSync(join(OUT, 'SUMMARY.txt'), { force: true });
 
-function run(tool, args, timeoutMs = 900_000) {
-  return new Promise((resolve) => {
-    const toolArgs = [...args];
-    if ((tool === 'timeline' || tool === 'keyframe') && !toolArgs.includes('--take')) {
-      toolArgs.push('--take', TAKE);
-    }
-    const child = spawn('node', [`tools/${tool}-check.mjs`, ...toolArgs], { cwd: ROOT });
-    // Decoded through a StringDecoder rather than by concatenating Buffers: a multi-byte sequence
-    // straddling a chunk boundary would corrupt the line and silently cost a `  FAIL ` match.
-    const decoder = new StringDecoder('utf8');
-    let out = '';
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-    child.stdout.on('data', (c) => { out += decoder.write(c); });
-    child.stderr.on('data', (c) => { out += decoder.write(c); });
-    child.on('close', (code, signal) => {
-      clearTimeout(timer);
-      out += decoder.end();
-      resolve({ code, signal, out });
-    });
-  });
-}
-
-// The refusal message is the enumeration, so an unparseable one throws rather than
-// yielding no mutations.
-async function enumerate(tool) {
-  const { out } = await run(tool, ['--mutate', '__enumerate__'], 60_000);
-  const m = out.match(/unknown mutation __enumerate__ - have ([^\n]+)/);
-  if (!m) throw new Error(`${tool}-check did not enumerate its mutations:\n${out.slice(0, 800)}`);
-  return m[1].split(',').map((s) => s.trim()).filter(Boolean);
+const queue = [];
+for (const tool of TOOLS) {
+  const { out } = await runTool(tool, [...argsFor(tool), '--mutate', ENUMERATE], { timeoutMs: 120_000 });
+  const names = namesIn(out);
+  if (names.length === 0) refuse(`${tool}-check named no mutations, so this sweep would assert nothing:\n${out.slice(0, 800)}`);
+  console.log(`[sweep] ${tool}: ${names.length} mutations declared`);
+  for (const name of names) queue.push({ tool, name });
 }
 
 const rows = [];
-let unproven = 0;
-
-for (const tool of TOOLS) {
-  const names = await enumerate(tool);
-  console.log(`[sweep] ${tool}: ${names.length} mutations declared`);
-  for (const name of names) {
+async function worker() {
+  for (let job = queue.shift(); job; job = queue.shift()) {
+    const { tool, name } = job;
+    let result;
     let attempt = 0;
-    for (;;) {
+    let run;
+    while (attempt < ATTEMPTS) {
       attempt++;
-      const { code, out } = await run(tool, ['--url', URL, '--mutate', name]);
-      writeFileSync(join(OUT, `${tool}-${name}.log`), out);
-      const fails = (out.match(/^ {2}FAIL /gm) ?? []).length;
-      if (fails > 0) {
-        rows.push({ tool, name, verdict: 'CAUGHT', fails, code, attempt });
-        console.log(`  CAUGHT   ${tool}/${name} fails=${fails} rc=${code} attempt=${attempt}`);
-        break;
-      }
-      if (out.includes(CRASH) && attempt < 3) {
-        writeFileSync(join(OUT, `${tool}-${name}.crash${attempt}.log`), out);
-        console.log(`  ...crash ${tool}/${name} attempt=${attempt}, retrying`);
-        continue;
-      }
-      rows.push({ tool, name, verdict: 'UNPROVEN', fails: 0, code, attempt });
-      unproven++;
-      console.log(`  UNPROVEN ${tool}/${name} fails=0 rc=${code} attempt=${attempt}`);
-      break;
+      run = await runTool(tool, [...argsFor(tool), '--mutate', name]);
+      writeFileSync(join(OUT, `${tool}-${name}${attempt > 1 ? `.attempt${attempt}` : ''}.log`), run.out);
+      result = verdictOf(run);
+      if (result.verdict !== DID_NOT_RUN) break;
+    }
+    rows.push({ tool, name, ...result, code: run.code, signal: run.signal, attempt });
+    console.log(`  ${result.verdict.padEnd(11)} ${tool}/${name}  ${result.why}, rc=${run.signal ?? run.code}, attempt ${attempt}`);
+    if (result.verdict !== CAUGHT) {
+      for (const line of run.out.trimEnd().split('\n').slice(-6)) console.log(`      | ${line}`);
     }
   }
 }
+await Promise.all(Array.from({ length: JOBS }, worker));
 
-const byTool = Object.fromEntries(TOOLS.map((t) => [t, rows.filter((r) => r.tool === t).length]));
-const summary = [
-  ...rows.map((r) => `${r.tool.padEnd(9)} ${r.name.padEnd(32)} ${r.verdict.padEnd(9)} fails=${String(r.fails).padEnd(3)} rc=${r.code} attempt=${r.attempt}`),
-  '--- totals ---',
-  ...TOOLS.map((t) => `${t}: ${byTool[t]}`),
+const order = new Map(TOOLS.map((tool, i) => [tool, i]));
+rows.sort((a, b) => order.get(a.tool) - order.get(b.tool) || a.name.localeCompare(b.name));
+const count = (verdict) => rows.filter((r) => r.verdict === verdict).length;
+const totals = [
+  ...TOOLS.map((tool) => `${tool}: ${rows.filter((r) => r.tool === tool).length}`),
   `total mutations: ${rows.length}`,
-  `caught:          ${rows.filter((r) => r.verdict === 'CAUGHT').length}`,
-  `unproven:        ${unproven}`,
+  `caught:          ${count(CAUGHT)}`,
+  `not caught:      ${count(NOT_CAUGHT)}`,
+  `did not run:     ${count(DID_NOT_RUN)}`,
 ].join('\n');
-writeFileSync(join(OUT, 'SUMMARY.txt'), `${summary}\n`);
-console.log(`\n${summary}`);
-process.exit(unproven === 0 ? 0 : 1);
+const table = rows.map((r) => `${r.tool.padEnd(12)} ${r.name.padEnd(40)} ${r.verdict.padEnd(11)} failed=${String(r.failed ?? '-').padEnd(4)} rc=${r.signal ?? r.code} attempt=${r.attempt}`);
+writeFileSync(join(OUT, 'SUMMARY.txt'), `${table.join('\n')}\n--- totals ---\n${totals}\n`);
+console.log(`\n${totals}\n[sweep] every row is in ${join(OUT, 'SUMMARY.txt')}, every run's output beside it`);
+process.exit(count(CAUGHT) === rows.length ? 0 : 1);

@@ -278,6 +278,7 @@ through the full renderer.
 | mark | Plants a mark at the playhead, or takes away the one already there. |
 | speed | The selected clip's rate, 0.1x to 4x. The travel is logarithmic, with a detent at 1.00x. |
 | clip: `delete clip`, `move`, `rotate`, `key` | Removes the selected clip, arms its move or turn handles in the viewport, and keyframes its placement at the playhead. |
+| clip: `copy look`, `paste look` | Copies the selected clip's look, and applies the copied look to the selected clip. |
 | `+` below the last clip row | Opens the media library's takes. |
 | camera: eye, diamond | Looks through the program camera, and keyframes it at the playhead. |
 | Camera tab: `add key`, `delete key` | Writes a camera key at the playhead, and removes the one under it. |
@@ -420,6 +421,20 @@ effects and their versions. **suppress** says this render may go without that ef
 per effect, so suppressing one while another is still missing leaves the export refused. It is
 session state and per document: opening another project ends every suppression, and an undo
 keeps it. The render's `.job.json` carries a `suppressed` list of what it went without.
+
+### A browser that renders less
+
+The viewer asks the browser what it can render into. Where that is less than a look needs, the
+application bar says so in a warning that stays until the page is reloaded.
+
+| Warning | What it means |
+| --- | --- |
+| `this browser cannot render to float: ghost and wake are off, and trails, bloom and the grade run at 8 bits` | No ghost and no wake. Looks through trails, bloom or the grade band, and Cascade and Voxel darken. |
+| `this browser cannot render offscreen: trails, bloom and the grade are off` | Looks draw without trails, bloom and the grade. |
+
+LibreWolf, and Firefox with `privacy.resistFingerprinting` on, cap every render target at 2048
+pixels on a side. The viewport renders at 2048 pixels at most there. **An export larger than the
+cap is refused**, and the refusal names the cap.
 
 ## The record surface and OBS
 
@@ -657,6 +672,13 @@ whole-look save sheds an ordinary effect sitting wholly at its own defaults, bec
 whole-look apply restores it to those defaults anyway; the three reading packages stay whole
 even at their defaults, and a subset save sheds nothing.
 
+**`paste look` applies a preset nobody saved.** `copy look` takes what a save with every box
+ticked would write from the selected clip, and the stamp that clip wears. Pasting applies it
+the way the picker applies a whole look: the post-chain values land on the project; framing,
+placement, timing and tracks stay; a keyed parameter goes on following its track; and the clip
+claims the stamp the source wore, or none. One paste is one undo step. The open page holds the
+copy until it reloads.
+
 **Saving over a shipped name forks it**: the write lands in your library and shadows the
 built-in, and deleting the fork brings the shipped look back. `export` writes the look on
 screen, which is not the document the picker names once you have moved a slider, as
@@ -793,6 +815,7 @@ hash, `sha256:` and 64 hex digits, percent-encoded; `:id` is its name.
 | `/library/routes` | GET | This table. |
 | `/library/writes` | GET | Write counts per store. |
 | `/library/remote-frame/:hash/:n` | GET | One frame of a node-only take, fetched through here. |
+| `/library/remote-index/:hash` | GET | The frame index of a node-only take, fetched through here. |
 | `/library/download/:id` | POST | Pulls a take from the linked node. |
 | `/library/delete/:id` | POST | Deletes a take and its marks. Refused while the node holds a copy or cannot be asked, or while the take has a second name here. |
 | `/library/reclaim/:id` | POST | Merges the node's marks into the local copy, then deletes the node's copy. |

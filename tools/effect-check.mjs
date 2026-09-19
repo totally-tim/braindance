@@ -978,6 +978,8 @@ try {
     untested = 'playwright is not installed, and three of the five sections are about a page';
     throw new Error(untested);
   }
+  // The full chromium build rather than the headless shell, which lands on SwiftShader.
+  const launch = () => chromium.launch({ channel: 'chromium' });
 
   await start();
 
@@ -1203,7 +1205,7 @@ try {
 
   console.log('\n[effect] 3. a page that is already up, adopting an install');
 
-  browser = await chromium.launch();
+  browser = await launch();
   const page = await browser.newPage({ viewport: { width: 1100, height: 760 } });
   const pageErrors = [];
   // Whether a package read is being failed on purpose right now. One arm in section 9 plants a
@@ -2130,31 +2132,54 @@ try {
   // driver rejects at link time - reported through a log rather than an exception.
   console.log('\n[effect] 9. a package this build can store and cannot use');
 
+  // The page's six-second poll takes this package whenever its tick lands after the install, and
+  // its refusal sets the package aside, so a rebuild requested after that tick adopts the set
+  // without it. The poll is the route an install reaches a page by, so this asks the poll and
+  // waits for its outcome, whichever tick gets there: a refusal on the note, or an adoption.
+  const pageBeforeBroken = await page.evaluate(() => ({
+    names: globalThis.__kinect.params.names(),
+    signature: globalThis.__kinect.effects.signature(),
+    note: document.getElementById('tNote')?.textContent ?? '',
+  }));
+  const generationBeforeBroken = (await getJson('/effects')).body.generation;
   const broken = await put('probe', brokenProbe());
   ok('the server takes it: every name in it is one this build has, which is all the door can ask',
     broken.status === 200, `${broken.status}: ${broken.body.error ?? 'installed'}`);
-  const stored = await getJson('/effects');
 
-  const refused = await page.evaluate(async () => {
+  const refused = await page.evaluate(async (before) => {
     const k = globalThis.__kinect;
-    const before = { names: k.params.names(), signature: k.effects.signature() };
-    let threw = null;
-    try {
-      await k.effects.reload();
-    } catch (err) { threw = String(err.message); }
+    const note = () => document.getElementById('tNote')?.textContent ?? '';
+    // Read before asking for a tick and after each one: a refusal sets the package aside, so the
+    // tick after it adopts the set without it and hides the refusal.
+    const outcomeNow = () => {
+      if (k.effects.signature() !== before.signature) return 'adopted';
+      return note() !== before.note && /did not compile/.test(note()) ? 'refused' : null;
+    };
+    let outcome = outcomeNow();
+    for (const deadline = performance.now() + 15000; !outcome && performance.now() < deadline;) {
+      await k.effects.pollNow();
+      outcome = outcomeNow();
+      if (!outcome) {
+        await new Promise((resolve) => { setTimeout(resolve, 50); });
+        outcome = outcomeNow();
+      }
+    }
+    outcome ??= 'neither';
     return {
-      threw,
+      outcome,
+      said: note(),
       names: k.params.names(),
       same: JSON.stringify(k.params.names()) === JSON.stringify(before.names),
       signature: k.effects.signature(),
       signatureHeld: k.effects.signature() === before.signature,
-      note: document.getElementById('tNote')?.textContent ?? '',
       shader: k.effects.programs().cloud.fragmentShader.includes('col = probeAmount;'),
     };
-  });
+  }, pageBeforeBroken);
   ok('the page refuses it rather than adopting it, and says the shaders did not compile',
-    refused.threw !== null && /did not compile/.test(refused.threw ?? ''),
-    refused.threw ? `"${refused.threw.slice(0, 130)}"` : 'the rebuild reported success');
+    refused.outcome === 'refused',
+    refused.outcome === 'refused' ? `"${refused.said.slice(0, 130)}"`
+      : refused.outcome === 'adopted' ? `the rebuild reported success: "${refused.said.slice(0, 90)}"`
+        : 'the poll neither refused nor adopted it in 15s');
   ok('and it is back on the programs it was drawing with: the registry it had, the signature it had, and none of the broken text',
     refused.same === true && refused.signatureHeld === true && refused.shader === false,
     `${refused.names.length} parameters, the signature ${refused.signatureHeld ? 'held' : 'moved'}, `
@@ -2165,11 +2190,13 @@ try {
   // which is what the mark on the throw is for.
   const afterRefusal = await getJson('/effects');
   const asides = userRootHolds().filter((name) => /^probe\..+\.incompatible$/.test(name));
+  // Two moves: the install's own and the setting aside. Read before the install, because a tick can
+  // set the package aside before any read after it.
   ok('the page has the store set the package aside, so the id stops answering with something that will not compile',
     (afterRefusal.body.effects ?? []).every((e) => e.id !== 'probe')
-      && afterRefusal.body.generation === stored.body.generation + 1
+      && afterRefusal.body.generation === generationBeforeBroken + 2
       && asides.length === 1,
-    `${(afterRefusal.body.effects ?? []).length} packages, generation ${stored.body.generation} -> `
+    `${(afterRefusal.body.effects ?? []).length} packages, generation ${generationBeforeBroken} before the install -> `
     + `${afterRefusal.body.generation}, user root holds ${userRootHolds().join(', ') || 'nothing'}`);
   ok('and renamed rather than deleted, with every file it arrived with still in it',
     asides.length === 1
@@ -2595,7 +2622,7 @@ try {
 
   // The row the four above exist for: a store answering perfectly is beside the point if the
   // surface it feeds does not come up, so the last thing asked is the first thing that broke.
-  browser = await chromium.launch();
+  browser = await launch();
   const bootPage = await browser.newPage({ viewport: { width: 800, height: 600 } });
   const bootErrors = [];
   bootPage.on('pageerror', (e) => bootErrors.push(String(e)));
@@ -2773,7 +2800,7 @@ try {
 
   // The row the four above exist for, on section 12's argument: a store that answered perfectly and
   // a page that never published `__kinect` is the build this whole surface is arranged to prevent.
-  browser = await chromium.launch();
+  browser = await launch();
   const settledPage = await browser.newPage({ viewport: { width: 800, height: 600 } });
   const settledErrors = [];
   settledPage.on('pageerror', (e) => settledErrors.push(String(e)));

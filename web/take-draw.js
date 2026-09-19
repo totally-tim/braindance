@@ -2,6 +2,7 @@
 // and the mark ticks on a scrub bar. The take is not fixed at construction - `show` changes it,
 // so one skim can walk across a cut - and nothing here knows about clips or program time.
 
+import { frameAtOrBefore, sourceTimes } from './clip-plan.js';
 import { DEPTH_H, DEPTH_W } from './format.js';
 
 // How coarsely a take's frames may be asked for. A take that is only on the node crosses the
@@ -10,6 +11,53 @@ const DIVISOR = { local: 1, both: 1, remote: 4 };
 
 /** How coarsely this take's frames are fetched. A surface that says so reads it too. */
 export const divisorFor = (take) => DIVISOR[take?.state] ?? 1;
+
+// How long a take whose frame times did not arrive waits before they are asked for again.
+const TIMES_RETRY_MS = 5000;
+// Takes whose frame times are held, oldest dropped first. Keyed by hash, because a hash names
+// bytes that never change and every surface here is rebuilt on each refresh.
+const TIMED_TAKES = 64;
+const timesByKey = new Map();
+
+/**
+ * A take's frame times in source seconds, from the stamps in its index: the take here, or the
+ * node's copy through this server. `times` is null until they land and `error` says why they
+ * did not; `ready` settles either way and never rejects.
+ */
+export function timesFor(take) {
+  const key = take.hash ?? `${take.state}:${take.id}`;
+  const held = timesByKey.get(key);
+  timesByKey.delete(key);
+  if (held && !(held.error && Date.now() - held.failedAt > TIMES_RETRY_MS)) {
+    timesByKey.set(key, held);
+    return held;
+  }
+  const entry = { times: null, error: null, failedAt: 0, ready: null };
+  const url = take.state === 'remote'
+    ? `/library/remote-index/${encodeURIComponent(take.hash)}`
+    : `/capture/${encodeURIComponent(take.hash)}/index`;
+  entry.ready = fetch(url)
+    .then(async (res) => {
+      if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 80)}`);
+      return res.json();
+    })
+    .then((index) => {
+      const stamps = index?.frames?.stampMs;
+      // Against the listing, because a take renamed or replaced since is another take's index.
+      if (take.hash && index.hash !== take.hash) throw new Error('the index is of another take');
+      if (!Array.isArray(stamps) || stamps.length !== take.frames || !stamps.every(Number.isFinite)) {
+        throw new Error(`the index carries no stamp for each of its ${take.frames} frames`);
+      }
+      entry.times = sourceTimes(stamps);
+    })
+    .catch((err) => {
+      entry.error = err.message;
+      entry.failedAt = Date.now();
+    });
+  timesByKey.set(key, entry);
+  if (timesByKey.size > TIMED_TAKES) timesByKey.delete(timesByKey.keys().next().value);
+  return entry;
+}
 
 // One frame of a take, drawn to a 2D canvas. Depth rather than the colour JPEG, because
 // `--no-color` records none. Never sizes the backing store - the box is CSS.
@@ -73,8 +121,8 @@ function drawFrame(canvas, take, payload) {
 }
 
 /**
- * The take's marks as ticks on a scrub bar, at their source fraction. `onPick` makes each one
- * a button handed that fraction; without it they are labels.
+ * The take's marks as ticks on a scrub bar, at their source time. `onPick` makes each one a
+ * button handed the mark's source seconds; without it they are labels.
  */
 export function paintMarks(bar, take, onPick = null) {
   for (const old of bar.querySelectorAll('.mk')) old.remove();
@@ -89,16 +137,18 @@ export function paintMarks(bar, take, onPick = null) {
     if (onPick) {
       tick.type = 'button';
       tick.dataset.act = 'mark';
-      tick.addEventListener('click', (e) => { e.stopPropagation(); onPick(at); });
+      tick.addEventListener('click', (e) => { e.stopPropagation(); onPick(m.sourceMs / 1000); });
     }
     bar.appendChild(tick);
   }
 }
 
 /**
- * A scrubbable surface over whichever take `show` has been given. Positions are frame indices
- * and not fractions, so a caller's arrows step one frame. `onDraw(index, requested, take)` runs
- * when a position is asked for and again when the frame for it lands.
+ * A scrubbable surface over whichever take `show` has been given. A position is a frame index,
+ * so a caller's arrows step one frame, and the bar under it is the take's time: a fraction of
+ * the bar or a source second finds its frame through `frameAtOrBefore` over the take's stamps.
+ * `onDraw(index, requested, take)` runs when a position is asked for and again when the frame
+ * for it lands.
  *
  * `bar` is the scrub bar of the take being drawn: the skim fills it from the position within
  * that take, so a surface whose bar measures something else - an edit rather than a take -
@@ -109,6 +159,10 @@ export function createSkim({ canvas, surface, bar = null, onDraw }) {
   // Zero is a real answer and not clamped: frame 0 of a take with no whole frame is a 404.
   let frames = 0;
   let last = 0;
+  // The shown take's frame times, and the move asked for before they landed. Nothing moves
+  // without them except to frame 0, which is at time 0 whatever the stamps say.
+  let times = null;
+  let waiting = null;
   const pos = bar?.querySelector('.pos') ?? null;
   const done = bar?.querySelector('.done') ?? null;
   let wanted = 0;
@@ -127,6 +181,35 @@ export function createSkim({ canvas, surface, bar = null, onDraw }) {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`${res.status}`);
     return res.arrayBuffer();
+  };
+
+  // Whether the shown take's times are here, asking for them if not. A move that needed them
+  // runs when they land.
+  const timed = () => {
+    if (times) return true;
+    if (!take || frames === 0) return false;
+    const mine = take;
+    const entry = timesFor(mine);
+    if (entry.times) {
+      times = entry.times;
+      return true;
+    }
+    entry.ready.then(() => {
+      if (released || take !== mine || times || !entry.times) return;
+      times = entry.times;
+      const move = waiting;
+      waiting = null;
+      move?.();
+    });
+    return false;
+  };
+
+  // The bar at the shown frame's time, as a fraction of the take's.
+  const place = () => {
+    const span = times?.[last] ?? 0;
+    const at = span > 0 ? Math.max(0, Math.min(1, times[wanted] / span)) : 0;
+    if (pos) pos.style.left = `${at * 100}%`;
+    if (done) done.style.width = `${at * 100}%`;
   };
 
   const pump = async () => {
@@ -172,7 +255,7 @@ export function createSkim({ canvas, surface, bar = null, onDraw }) {
   const api = {
     get frames() { return frames; },
     get index() { return wanted; },
-    get seconds() { return (last === 0 ? 0 : wanted / last) * (take?.durationSec ?? 0); },
+    get seconds() { return times ? times[wanted] : 0; },
 
     /**
      * The take drawn from now on, `null` for one that is not here. Nothing is drawn until the
@@ -186,18 +269,39 @@ export function createSkim({ canvas, surface, bar = null, onDraw }) {
       showing = -1;
       // The old take's frame, which would otherwise be redrawn by a resize under the new name.
       payload = null;
+      times = null;
+      waiting = null;
     },
 
     setIndex(n) {
-      wanted = Math.max(0, Math.min(last, Math.round(n)));
-      const at = last === 0 ? 0 : wanted / last;
-      if (pos) pos.style.left = `${at * 100}%`;
-      if (done) done.style.width = `${at * 100}%`;
+      const k = Math.max(0, Math.min(last, Math.round(n)));
+      if (k > 0 && !timed()) {
+        waiting = () => api.setIndex(k);
+        return wanted;
+      }
+      waiting = null;
+      wanted = k;
+      place();
       onDraw?.(wanted, true, take);
       pump();
       return wanted;
     },
-    setT(t) { return api.setIndex(Math.max(0, Math.min(1, t)) * last); },
+    /** To the frame at or before a source second, the frame the editor brackets it with. */
+    seek(sourceSec) {
+      if (!timed()) {
+        waiting = () => api.seek(sourceSec);
+        return wanted;
+      }
+      return api.setIndex(frameAtOrBefore(times, sourceSec));
+    },
+    /** To a fraction of the take's time. */
+    setT(t) {
+      if (!timed()) {
+        waiting = () => api.setT(t);
+        return wanted;
+      }
+      return api.seek(Math.max(0, Math.min(1, t)) * times[last]);
+    },
     step(by) { return api.setIndex(wanted + by); },
     fromX(clientX, el) {
       const r = el.getBoundingClientRect();

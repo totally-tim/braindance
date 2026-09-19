@@ -4,7 +4,7 @@
 
 import { VALID_ID } from '/format.js';
 import { pollRecordState } from '/record-poll.js';
-import { createSkim, divisorFor, paintMarks } from './take-draw.js';
+import { createSkim, divisorFor, paintMarks, timesFor } from './take-draw.js';
 
 const grid = document.getElementById('grid');
 const dlg = document.getElementById('confirm');
@@ -692,6 +692,9 @@ function openViewer(key) {
   const take = takeByKey(key);
   if (!take) return;
   closeMenus();
+  // Read as a name before anything here is rebuilt: a focused mark tick is destroyed by
+  // `paintMarks`, and a rebuild `run` asked for reads null.
+  const focusWas = viewer.contains(document.activeElement) ? controlKey(document.activeElement) : null;
   // Where the operator was, kept across a rebuild: `paint` re-opens the viewer on every
   // refresh, so the `setIndex(0)` below sent them back to the first frame.
   const resumeAt = viewing && viewing.key === (take.hash ?? take.id) ? viewing.skim.index : 0;
@@ -715,7 +718,17 @@ function openViewer(key) {
     span.textContent = text;
     return span;
   }));
-  vNote.textContent = warningsOf(take).map((w) => w.why).join(' · ');
+  // A mark is pressed through the take's frame times, so without them its ticks are labels and
+  // the note says why. Rebuilt once they fail, the way a refresh rebuilds it. A take being
+  // recorded has no index yet, and its badge already says so.
+  const timed = take.frames > 0 ? timesFor(take) : null;
+  if (timed && !timed.times && !timed.error) {
+    timed.ready.then(() => { if (timed.error && viewing?.key === key) openViewer(key); });
+  }
+  vNote.textContent = [
+    ...warningsOf(take).map((w) => w.why),
+    timed?.error ? `its marks cannot be pressed: the frame times did not arrive (${timed.error})` : '',
+  ].filter(Boolean).join(' · ');
 
   // One skim for as long as the dialog is open, given each take in turn: the arrow keys and
   // every refresh change the take on this canvas rather than opening a second viewer. The
@@ -731,11 +744,9 @@ function openViewer(key) {
   });
   skim.show(take);
   viewing = { key: take.hash ?? take.id, take, skim };
-  paintMarks(vBar, take, (at) => skim.setT(at));
+  paintMarks(vBar, take, timed && !timed.error ? (sourceSec) => skim.seek(sourceSec) : null);
 
   const acts = document.getElementById('vActs');
-  // Read as a name before the rebuild detaches these nodes; null on a rebuild `run` asked for.
-  const focusWas = viewer.contains(document.activeElement) ? controlKey(document.activeElement) : null;
   acts.replaceChildren();
   // The surface an action runs on is this one: the tile behind the modal is absent whenever
   // the filter does not show this take, and a null host disables nothing.
@@ -1070,6 +1081,8 @@ globalThis.__library = {
       note: vNote.textContent,
       flags: [...document.querySelectorAll('#vFlags .flag')].map((f) => f.dataset.flag),
       marks: [...vBar.querySelectorAll('.mk')].map((m) => Number.parseFloat(m.style.left)),
+      pressable: [...vBar.querySelectorAll('.mk')].map((m) => m.tagName === 'BUTTON'),
+      pos: Number.parseFloat(vBar.querySelector('.pos').style.left),
       acts: [...document.querySelectorAll('#vActs .act')].map((b) => ({
         item: b.dataset.act, label: b.textContent, disabled: b.disabled, why: b.title,
       })),

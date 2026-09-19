@@ -15,6 +15,7 @@
 //   node tools/sensor-view-check.mjs --mutate sensor-view-keys-camera  # must FAIL
 //   node tools/sensor-view-check.mjs --mutate keyframes-on-every-surface # must FAIL
 //   node tools/sensor-view-check.mjs --mutate no-repaint               # must FAIL
+//   node tools/sensor-view-check.mjs --mutate store-answers-a-page     # must FAIL
 //
 // Exit 2 means the harness did not run - a stale anchor, a browser that never came up, or the
 // record arm with no sensor hello - because untested is not passed.
@@ -127,6 +128,13 @@ const MUTATIONS = {
     fails: 'the sensor-view button writing a camera key as well as moving the view, so a look at '
       + 'the intrinsics becomes an edit to the clip',
   },
+  // A store read at a route answering a page rather than its listing. That is a failed row, never
+  // a throw, or the run stops at DID NOT RUN and every section after it goes unasked.
+  'store-answers-a-page': {
+    stores: { projects: '/projects' },
+    fails: 'the projects store row alone: `/projects` is the projects page, so there is no listing '
+      + 'to compare',
+  },
 };
 
 /**
@@ -138,6 +146,7 @@ function mutatedSource(name) {
   if (!spec) {
     throw new Error(`unknown mutation ${name} - have ${Object.keys(MUTATIONS).join(', ')}`);
   }
+  if (!spec.file) return null;
   let source = readFileSync(join(REPO, spec.file), 'utf8');
   for (const [from, to] of spec.edits) {
     const hits = source.split(from).length - 1;
@@ -495,7 +504,7 @@ try {
   console.log(`[sensor-view] DID NOT RUN - ${err.message}`);
   process.exit(2);
 }
-if (MUTATE) console.log(`[sensor-view] MUTATED BUILD: ${MUTATE} in ${mutation.file} - this run is expected to FAIL`);
+if (MUTATE) console.log(`[sensor-view] MUTATED BUILD: ${MUTATE} in ${mutation?.file ?? 'the store reads'} - this run is expected to FAIL`);
 const mutatedJs = mutation?.file === 'web/main.js' ? mutation.body : null;
 const mutatedHtml = mutation?.file === 'web/index.html' ? mutation.body : null;
 // A mutation whose file is neither of the two this function serves is not delivered rather
@@ -628,15 +637,31 @@ async function clickSensorView(page) {
   await page.click('#camSensor');
 }
 
+// Each store the writes-nothing arm compares, at the route answering its listing as JSON.
+const STORE_ROUTES = {
+  writes: '/library/writes',
+  projects: '/projects/all',
+  presets: '/presets',
+  deliverables: '/deliverables',
+  marks: `/capture/${TAKE_KEY}/marks/log`,
+  ...MUTATIONS[MUTATE]?.stores,
+};
+
+// Each store's listing, or null and what answered instead: a page never changes, so an unchanged
+// page would pass the store's row.
 async function stores(base) {
-  const get = async (path) => JSON.stringify(await (await fetch(`${base}${path}`)).json());
-  return {
-    writes: await get('/library/writes'),
-    projects: await get('/projects'),
-    presets: await get('/presets'),
-    deliverables: await get('/deliverables'),
-    marks: await get(`/capture/${TAKE_KEY}/marks/log`),
-  };
+  const out = {};
+  for (const [key, path] of Object.entries(STORE_ROUTES)) {
+    const r = await fetch(`${base}${path}`);
+    const type = r.headers.get('content-type') ?? '';
+    const text = await r.text();
+    let body = null;
+    if (r.ok && /^application\/json\b/i.test(type)) {
+      try { body = JSON.stringify(JSON.parse(text)); } catch { /* reported as not a listing */ }
+    }
+    out[key] = { body, answered: `${path} answered ${r.status} ${type || 'with no content type'}` };
+  }
+  return out;
 }
 
 // Every store in a temporary directory and the take reached by symlink. Every editor arm runs here,
@@ -863,8 +888,11 @@ try {
     check(wrote.length === 0, 'and the page sent nothing that was not a read',
       wrote.length ? wrote.join(', ') : 'no non-GET request in the whole page lifetime');
     for (const key of Object.keys(beforeStores)) {
-      check(beforeStores[key] === afterStores[key], `the ${key} store is unchanged on the server`,
-        key === 'writes' ? `${beforeStores.writes} then ${afterStores.writes}` : `${beforeStores[key].length} bytes`);
+      const [was, is] = [beforeStores[key], afterStores[key]];
+      const listed = was.body !== null && is.body !== null;
+      check(listed && was.body === is.body, `the ${key} store is unchanged on the server`,
+        !listed ? `no listing to compare: ${(was.body === null ? was : is).answered}`
+          : key === 'writes' ? `${was.body} then ${is.body}` : `${was.body.length} bytes`);
     }
   }
 

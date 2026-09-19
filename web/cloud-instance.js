@@ -11,7 +11,9 @@
 // and `web/main.js` repoints them around every clip it draws.
 
 import { createTextures, selectTextures } from './gpu-textures.js';
-import { createSurfaceMemory, selectSurfaceMemory, disposeSurfaceMemory } from './surface-memory.js';
+import {
+  createSurfaceMemory, selectSurfaceMemory, disposeSurfaceMemory, memoryTexture,
+} from './surface-memory.js';
 import { createPointCloud, selectPointCloud, disposePointCloud } from './point-cloud.js';
 
 /**
@@ -24,7 +26,7 @@ import { createPointCloud, selectPointCloud, disposePointCloud } from './point-c
 export function createCloudInstance(program) {
   const textures = createTextures();
   const memory = createSurfaceMemory(textures);
-  const points = createPointCloud(textures.cells, memory.statePrev.texture, program);
+  const points = createPointCloud(textures.cells, memoryTexture(memory), program);
   return { textures, memory, points };
 }
 

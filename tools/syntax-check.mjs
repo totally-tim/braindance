@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Parses every JavaScript file this repo ships and asks the questions that need no server,
-// browser or sensor: every tool documented, every citation resolving, the decoder spec
+// browser or sensor: every tool documented, every check tool run by CI or listed as not run,
+// every citation resolving, the decoder spec
 // agreeing with its module, the grabber's hello matching the wire format, and every shell id
 // declared by the page that draws it.
 //
@@ -121,6 +122,20 @@ const MUTATIONS = {
       + 'declares',
   },
 
+  'ci-forgets-a-tool': {
+    file: '.github/workflows/checks.yml',
+    edits: [['registration registry', 'registry']],
+    fails: 'and a check tool CI neither runs nor lists as not run, so nobody can tell whether it '
+      + 'was left out on purpose',
+  },
+
+  'ci-runs-a-tool-it-lists-as-not-run': {
+    file: '.github/workflows/checks.yml',
+    edits: [['registration registry', 'registration registry syntax']],
+    fails: 'and a tool on both sides of the ledger, which makes the not-run list a claim nobody '
+      + 'can read',
+  },
+
   'doc-line-ends-in-whitespace': {
     file: 'docs/proof-tools.md',
     edits: [['Per tool, read from the source:', 'Per tool, read from the source: ']],
@@ -239,6 +254,39 @@ if (!existsSync(DOC)) {
     fail(`CLAUDE.md never mentions ${undocumented.join(', ')} - a tool nobody documented is a tool nobody runs`);
   } else {
     console.log(`  tools/  all ${shipped.length} named in CLAUDE.md`);
+  }
+}
+
+// Every `tools/*-check.mjs` is run by CI or named on the workflow's `# not-run:` lines, never
+// neither and never both, asked of the directory so a tool added next year is asked by existing.
+{
+  const rel = '.github/workflows/checks.yml';
+  const workflow = sourceWithMutation(rel);
+  const tools = readdirSync(join(ROOT, 'tools'))
+    .map((f) => /^(.+)-check\.mjs$/.exec(f)?.[1])
+    .filter(Boolean)
+    .sort();
+  if (workflow === null) {
+    fail(`${rel} is missing, so nothing says which proof tools CI runs`);
+  } else if (tools.length === 0) {
+    fail('tools/ yielded no check tools, so the CI ledger was asked of nothing');
+  } else {
+    const lines = workflow.split('\n');
+    const code = lines.filter((line) => !/^\s*#/.test(line)).join('\n');
+    const run = new Set([
+      ...[...code.matchAll(/tools\/([\w-]+)-check\.mjs/g)].map((m) => m[1]),
+      ...[...code.matchAll(/sweep-all\.mjs --tools ([\w,-]+)/g)].flatMap((m) => m[1].split(',')),
+    ]);
+    const notRun = lines.flatMap((line) => /^# not-run:(.*)$/.exec(line)?.[1].trim().split(/\s+/).filter(Boolean) ?? []);
+    const neither = tools.filter((t) => !run.has(t) && !notRun.includes(t));
+    const both = tools.filter((t) => run.has(t) && notRun.includes(t));
+    const unknown = [...new Set([...run, ...notRun])].filter((t) => !tools.includes(t));
+    if (neither.length) fail(`${rel} neither runs nor lists as not-run: ${neither.join(', ')}`);
+    if (both.length) fail(`${rel} runs and also lists as not-run: ${both.join(', ')}`);
+    if (unknown.length) fail(`${rel} names ${unknown.join(', ')}, which tools/ does not hold`);
+    if (!neither.length && !both.length && !unknown.length) {
+      console.log(`  ci/     all ${tools.length} check tools accounted for: ${run.size} run, ${notRun.length} listed as not run`);
+    }
   }
 }
 
@@ -542,8 +590,16 @@ const declaredMutations = new Map();
 {
   const DECLARATION = /^const MUTATIONS = \{$/m;
   const REGISTRATION = 'third_party/libfreenect2/src/registration.cpp';
-  // One name reused for every extraction, so a crash leaks at most one file.
-  const PROBE = join(ROOT, 'tools', '.mutation-table-probe.mjs');
+  // Outside the checkout, so a concurrent run's walk of `tools/` never meets a probe. A cut's
+  // relative imports and `import.meta.url` are pointed back at the tool, so they resolve as there.
+  const PROBES = mkdtempSync(join(tmpdir(), 'syntax-check-tables-'));
+  const inPlace = (cut, name) => {
+    const self = pathToFileURL(join(ROOT, 'tools', name)).href;
+    return cut
+      .replace(/^(import\s[^;]*?from\s+')(\.{1,2}\/[^']+)(';)$/gm,
+        (line, head, spec, tail) => `${head}${new URL(spec, self).href}${tail}`)
+      .replaceAll('import.meta.url', JSON.stringify(self));
+  };
 
   // The declaration alone, with the whole prefix only as a fallback: the prefix makes this row
   // need what the tool needs, a `ws` import CI has not installed or a top-level `git log`.
@@ -566,6 +622,7 @@ const declaredMutations = new Map();
           anchors: spec.edits.map(([from, to, where]) => ({ file: where ?? spec.file, from, to })),
         };
       }
+      if (spec.stores && typeof spec.stores === 'object') return { anchorless: 'store reads pointed at another route' };
     }
     return null;
   };
@@ -678,19 +735,16 @@ const declaredMutations = new Map();
       withoutPackages(source.slice(0, end + 3)),
     ];
     for (const [attempt, cut] of cuts.entries()) {
+      const probe = join(PROBES, `${name}.${attempt}.mjs`);
       try {
-        writeFileSync(PROBE, `${cut}\nexport { MUTATIONS };\n`);
-        // Cache-busted, because sixteen tools import through one filename and Node would
-        // otherwise hand back the first tool's table fifteen more times.
-        ({ MUTATIONS: table } = await import(`file://${PROBE}?tool=${encodeURIComponent(name)}&cut=${attempt}`));
+        writeFileSync(probe, `${inPlace(cut, name)}\nexport { MUTATIONS };\n`);
+        ({ MUTATIONS: table } = await import(pathToFileURL(probe).href));
         break;
       } catch (err) {
         if (attempt === cuts.length - 1) {
           unreadable++;
           fail(`${name}: its MUTATIONS table could not be read - ${String(err.message).split('\n')[0]}`);
         }
-      } finally {
-        rmSync(PROBE, { force: true });
       }
     }
     if (!table) continue;
@@ -704,7 +758,7 @@ const declaredMutations = new Map();
         continue;
       }
       if (shape.anchorless) {
-        if (!anchorless.some((a) => a.name === name)) anchorless.push({ name, why: shape.anchorless });
+        if (!anchorless.some((a) => a.name === name && a.why === shape.anchorless)) anchorless.push({ name, why: shape.anchorless });
         continue;
       }
       for (const { file, from, to } of shape.anchors) {
@@ -760,9 +814,10 @@ const declaredMutations = new Map();
     }
     if (carriesAnchors) tablesWithAnchors++;
   }
+  rmSync(PROBES, { recursive: true, force: true });
 
   for (const { name, why } of anchorless) {
-    console.log(`  anchors/ ${name} declares ${why} rather than source anchors, so it has none to check`);
+    console.log(`  anchors/ ${name} declares ${why}, which carry no source anchors to check`);
   }
   if (anchorsChecked === 0) {
     fail('no mutation anchors were checked at all, so this assertion passed on nothing - the tables moved or this scan is looking in the wrong place');

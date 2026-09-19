@@ -720,10 +720,23 @@ async function downloadToPath(node, take, dir, targetIn) {
 
   // Filed by the hash the copy was just verified against, so a rename landing while the log is
   // on its way changes nothing about where it goes.
+  let body;
   try {
-    const log = checkedMarkLog(await node.fetchJson(markLogPath(take), { signal: AbortSignal.timeout(MARKS_MS) }), take);
-    await appendMarks(dir, take.hash, log);
-  } catch { /* a node that went away mid-download still leaves a verified take */ }
+    body = await node.fetchJson(markLogPath(take), { signal: AbortSignal.timeout(MARKS_MS) });
+  } catch (err) {
+    // A node that went away mid-download still leaves a verified take; one that answered with a
+    // refusal gets a line, since its answer is why the take's marks are absent here.
+    if (!(err instanceof TypeError) && err?.name !== 'TimeoutError' && err?.name !== 'AbortError') {
+      console.warn(`[library] ${take.id}: the node's marks answer was refused or unreadable - ${err?.message ?? err}`);
+    }
+  }
+  if (body !== undefined) {
+    try {
+      await appendMarks(dir, take.hash, checkedMarkLog(body, take));
+    } catch (err) {
+      console.warn(`[library] ${take.id}: its marks were not written - ${err?.message ?? err}`);
+    }
+  }
   return target;
 }
 

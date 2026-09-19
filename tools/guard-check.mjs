@@ -58,6 +58,14 @@ const MUTATIONS = {
     '  if (/[@/?#\\s\\\\]/.test(rawHost)) return false;',
     '  if (false) return false;',
   ]] },
+  // Node's parser accepts a second Host line and keeps the first, so this line is all that
+  // refuses one.
+  'host-accepts-a-duplicate': {
+    file: 'server/http-guard.js',
+    edits: [['  if (hostCount > 1) return false;', '  if (false) return false;']],
+    fails: 'the duplicate-Host row alone: the server answers 101, and the single-Host twin beside '
+      + 'it stays green',
+  },
   // The rebinding rule reverted to comparing the two headers against each other, which a rebound
   // browser satisfies by construction. It must leave the address rows alone.
   'host-accepts-a-name': { file: 'server/http-guard.js', edits: [[
@@ -152,8 +160,9 @@ const upgradeWithHost = (origin, host) => new Promise((resolve) => {
   setTimeout(() => done('timeout'), 5000);
 });
 
-// Two Host headers, which `req.headers.host` collapses to the first. It must not open, either way.
-const duplicateHostUpgrade = () => new Promise((resolve) => {
+// A hand-built upgrade writing one Host line per entry, which the `ws` client cannot send twice.
+// Resolves the status line, or `timeout` or `error`, and a row names the status it wants.
+const rawUpgrade = (hosts) => new Promise((resolve) => {
   const s = new Socket();
   let seen = '';
   const done = (r) => { s.destroy(); resolve(r); };
@@ -167,8 +176,7 @@ const duplicateHostUpgrade = () => new Promise((resolve) => {
   s.connect(PORT, '127.0.0.1', () => {
     s.write([
       'GET / HTTP/1.1',
-      'Host: 127.0.0.1:' + PORT,
-      'Host: evil.example',
+      ...hosts.map((h) => `Host: ${h}`),
       'Upgrade: websocket',
       'Connection: Upgrade',
       'Sec-WebSocket-Key: ' + Buffer.from('0123456789abcdef').toString('base64'),
@@ -230,18 +238,25 @@ try {
   ok('while spellings of one authority still open - a default port written out, and a host in capitals',
     hostVariants.every((r) => r === 'open'), hostVariants.join(', '));
   // A Host header is an authority and nothing else, and `new URL('http://' + host)` consumes
-  // userinfo, a path, a query or a fragment and normalises what is left.
-  const malformed = await Promise.all([
-    upgradeWithHost(`http://127.0.0.1:${PORT}`, `evil.example@127.0.0.1:${PORT}`),
-    upgradeWithHost(`http://127.0.0.1:${PORT}`, `127.0.0.1:${PORT}/path`),
-    upgradeWithHost(`http://127.0.0.1:${PORT}`, `127.0.0.1:${PORT}?q`),
-    upgradeWithHost(`http://127.0.0.1:${PORT}`, `127.0.0.1:${PORT}#f`),
-  ]);
-  ok('a Host carrying userinfo, a path, a query or a fragment does not upgrade - it is an authority or it is not a Host',
-    malformed.every((r) => r !== 'open'), malformed.join(', '));
-  const dup = await duplicateHostUpgrade();
-  ok('and two Host headers do not upgrade, whoever refuses them - `req.headers.host` keeps only the first, so the one that was checked is not necessarily the one anything downstream believes',
-    !/^HTTP\/1\.1 101/.test(dup), dup.slice(0, 40));
+  // userinfo, a path, a query or a fragment and normalises what is left. One row per spelling, so
+  // a control that reddens one names the spelling that reached the predicate.
+  const malformed = [
+    ['userinfo', `evil.example@127.0.0.1:${PORT}`],
+    ['a path', `127.0.0.1:${PORT}/path`],
+    ['a query', `127.0.0.1:${PORT}?q`],
+    ['a fragment', `127.0.0.1:${PORT}#f`],
+  ];
+  const malformedAnswers = await Promise.all(
+    malformed.map(([, host]) => upgradeWithHost(`http://127.0.0.1:${PORT}`, host)));
+  malformed.forEach(([carries, host], i) => ok(
+    `a Host carrying ${carries} is refused by the guard - it is an authority or it is not a Host`,
+    malformedAnswers[i] === 'refused 403', `${host} -> ${malformedAnswers[i]}`));
+  const single = await rawUpgrade([`127.0.0.1:${PORT}`]);
+  ok('a hand-built upgrade with one Host opens, so the request the next row sends is one this server accepts',
+    /^HTTP\/1\.1 101/.test(single), single.slice(0, 40));
+  const dup = await rawUpgrade([`127.0.0.1:${PORT}`, 'evil.example']);
+  ok('and the same upgrade with a second Host is refused by the guard - `req.headers.host` keeps only the first, so the one checked is not necessarily the one anything downstream believes',
+    /^HTTP\/1\.1 403/.test(dup), dup.slice(0, 40));
 
   // Host equality alone cannot survive DNS rebinding: the attacker re-resolves a name they control
   // onto this address, so both headers carry it. These rows are about loopback
