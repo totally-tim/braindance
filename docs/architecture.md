@@ -107,7 +107,9 @@ the preset. This makes partial presets agree across existing and newly connected
 | `/key` | `web/key.html` | the colour camera with the room cut away on depth, which OBS opens as a browser source |
 
 **The recorder** waits for the sensor's hello, then streams frames to disk in the wire's own
-framing, so a capture holds the type 1 and type 2 messages as the grabber framed them. The one edit
+framing, so a capture holds the type 1 and type 2 messages as the grabber framed them, and the type
+3 colour camera messages when colour is on. While armed it asks the grabber for the colour camera
+itself, so what a take holds does not depend on whether a webcam was being watched. The one edit
 is the hello: `stampHello` rewrites `startedAt` to when this take began before writing it, and
 leaves a hello it cannot parse as an object untouched. The
 recorder refuses a take it lacks the disk for, and `MIN_TAKE_SEC` is 120: a take that never started
@@ -482,7 +484,8 @@ type 2  frame  [u32 depthBytes][u32 colorBytes][u64 timestampMs]
                [u16 depth[512*424] millimetres, 0 = no reading]
                [JPEG of the registered 512x424 colour image]
 type 3  colour [u64 timestampMs][JPEG of the native 1920x1080 colour image]
-               Live only, and only while something is subscribed.
+               Only while something asks for it: a webcam subscriber, a /key page,
+               or an armed recorder. A take recorded with colour on carries it.
 type 4  key    [u64 timestampMs][u64 colourTs][f32 fx][f32 fy][f32 cx][f32 cy][f32 rangeM]
                [greyscale JPEG 1920x1080: depth per colour pixel, 0 = no reading,
                 else metres = v / 255 * rangeM]
@@ -533,14 +536,20 @@ than the one that was asked for. The same name goes on the `[grabber] streaming`
 once per process, so the wire's value is when the grabber came up and would date a session's takes
 alike. `stampHello` replaces it, so a take's hello carries when that take began.
 
-**Types 3 and 4 are live-only, so "byte-identical" means identical to the type 1 and 2
-subsequence.** Both are dropped at the recorder, because a third message type in the file would
-move every take's content hash, which is the key the library joins two machines on. The
-intrinsics ride the key message rather than the hello for the same reason: no take can use them,
-so no take carries them. `web/key-stream.js` is the one spelling of the quantisation and of the
-pair the server pushes to a key client over the WebSocket, and a socket is a monitor or a key
-client, never both, which is what keeps the binary channel free of a discriminator.
-`vcam-check --mutate hd-reaches-recorder` keeps that true.
+**A take recorded with colour on carries type 3, and no take carries type 4, so "byte-identical"
+means identical to the type 1, 2 and 3 subsequence.** The content hash covers the colour messages
+like any other byte, and two copies of one take are still byte-identical, which is all the
+library's join on the hash needs. Type 3 arrives at the colour camera's own rate on the clock type
+2 is stamped with, 30fps or 15fps in dim light, so it lines up with no frame in particular. The
+index lists it as `colour` beside `frames`, and `frames` stays type 2 alone. The frame-run route
+serves the type 2 messages of a run and none between them, because the editor walks a run as one
+frame per message. A replay offers each colour message to the webcam after the frame it followed
+in the file, and only while something asks for it. There is no replayed key: the intrinsics ride
+the key message rather than the hello, no take carries a key message, and `/key` on a replay says
+so. `web/key-stream.js` is the one spelling of the quantisation and of the pair the server pushes
+to a key client over the WebSocket, and a socket is a monitor or a key client, never both, which is
+what keeps the binary channel free of a discriminator. `vcam-check --mutate hd-dropped-from-take`
+and `--mutate key-reaches-recorder` hold the take to that.
 
 Measured on a sensor capture, and which take is not recorded: 434,176 bytes of depth plus a
 49-59KB JPEG, 486KB per frame. At 30fps that is 14.6MB/s per browser, right at the practical

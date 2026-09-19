@@ -5,7 +5,7 @@
 import { createWriteStream, fstatSync, openSync, readdirSync } from 'node:fs';
 import { once } from 'node:events';
 import { join } from 'node:path';
-import { encodeMessage, TYPE_HELLO } from './protocol.js';
+import { encodeMessage, TYPE_HELLO, TYPE_COLOR } from './protocol.js';
 import { buildIndex, forgetCapture } from './capture.js';
 import { appendMarks, remaining, MIN_TAKE_SEC, durationLabel, sameTake, takeIdentity } from './library.js';
 
@@ -221,6 +221,7 @@ export class Recorder {
       frames: 0,
       bytes: 0,
       dropped: 0,
+      droppedColour: 0,
       stalling: false,
       // Cumulative bytes handed to the stream, and the end offset of every frame not yet known to
       // have reached the file. `inFlightHead` is how far into that queue the drain has got.
@@ -233,15 +234,22 @@ export class Recorder {
     this.onChange(this.state);
   }
 
+  // A frame or a colour message, framing included. Both go into the file in arrival order; only a
+  // frame counts toward `frames` and `dropped`, which are what the monitor and the drop record mean.
   write(raw) {
     const take = this.take;
     if (!take) return;
+    const colour = raw.readUInt32LE(4) === TYPE_COLOR;
     // Drained on the frame path rather than only when something asks for state, which is what
     // bounds the queue by the buffer ceiling below instead of by the length of the take.
     settle(take);
     // A discarded `write` return value made a slow disk into heap that grew until the process was
     // killed, having reported itself healthy throughout.
     if (take.stream.writableLength > MAX_TAKE_BUFFER) {
+      if (colour) {
+        take.droppedColour++;
+        return;
+      }
       take.dropped++;
       if (!take.stalling) {
         take.stalling = true;
@@ -262,7 +270,7 @@ export class Recorder {
     }
     take.stream.write(raw);
     take.accepted += raw.length;
-    take.inFlight.push(take.accepted);
+    if (!colour) take.inFlight.push(take.accepted);
   }
 
   // The scan writes the sidecar index and the content hash, which is what makes the take a library
@@ -297,8 +305,10 @@ export class Recorder {
       this.closing.delete(take);
     }
     console.log(
-      `[recorder] take ${take.id} closed (${reason}): ${index.frames.offset.length} frames, ${index.hash}`
-      + (take.dropped ? `, ${take.dropped} frames dropped to a slow disk` : ''),
+      `[recorder] take ${take.id} closed (${reason}): ${index.frames.offset.length} frames, `
+      + `${index.colour.offset.length} colour frames, ${index.hash}`
+      + (take.dropped ? `, ${take.dropped} frames dropped to a slow disk` : '')
+      + (take.droppedColour ? `, ${take.droppedColour} colour frames dropped to a slow disk` : ''),
     );
     this.onChange(this.state);
     if (closeError) throw closeError;
@@ -306,6 +316,7 @@ export class Recorder {
       id: take.id,
       path: take.path,
       frames: index.frames.offset.length,
+      colourFrames: index.colour.offset.length,
       hash: index.hash,
       bytes: take.bytes,
       dropped: take.dropped,

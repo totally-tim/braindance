@@ -38,7 +38,8 @@ builtin root is missing refuses to boot, so a broken install cannot read as noth
 
 **`--record` arms the first take and is then spent**, so stopping that take gives the recorder
 back its button. `--replay` loops a recorded capture with no sensor attached, replaying the
-arrival spacing the capture was recorded at, which on a degraded link is uneven.
+arrival spacing the capture was recorded at, which on a degraded link is uneven. A capture recorded
+with colour on also feeds `/camera.mjpg`; `/key` has nothing to key on a replay.
 
 ### Grabber flags
 
@@ -430,7 +431,7 @@ are doing. `r` starts and stops a take and `m` marks a running one.
 | --- | --- |
 | record | Starts a take, and stops the one running. |
 | mark | Marks the running take at the moment you press. |
-| colour camera | Whether the colour stream runs at all. With it off, exposure means nothing and the control says so. |
+| colour camera | Whether the colour stream runs at all. With it on, a take records the colour camera's 1080p picture as well; with it off, exposure means nothing and the control says so. |
 | Standby / Wake sensor | Stop or start the sensor while keeping the server up. An armed or running take refuses standby. |
 | low light | The sensor's low-light exposure mode. |
 | Monitor: depth ÷ | Sends every Nth depth sample, 1 to 16, so a thin link still shows a picture. |
@@ -777,11 +778,11 @@ route with a write method goes through the three checks under
 | Route | Method | What it does |
 | --- | --- | --- |
 | `/capture/:id/hello` | GET | The capture's own hello stanza. |
-| `/capture/:id/index` | GET | The frame index. |
+| `/capture/:id/index` | GET | The frame index, and the colour camera's messages listed apart as `colour`. |
 | `/capture/:id/extent` | GET | How much of the capture is on disk. |
 | `/capture/:id/file` | GET | The capture's bytes. |
 | `/capture/:id/frame/:n` | GET | One frame's payload. |
-| `/capture/:id/frames/:a-:b` | GET | A run of frames as the file's own slice. |
+| `/capture/:id/frames/:a-:b` | GET | A run of frames, framing included, back to back; a colour message between them is left out. |
 | `/capture/:id/marks` | GET, POST | Reads and writes the take's marks. |
 | `/capture/:id/marks/log` | GET | The marks with their write log. |
 | `/library/takes` | GET | The takes on this machine, with storage left. |

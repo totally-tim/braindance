@@ -22,7 +22,16 @@ export { PROJECT_VERSION };
 
 // Measured on this sensor: 424KB of depth plus 51KB of colour per frame at 30fps.
 const FRAME_BYTES = 486 * 1024;
+// One colour camera frame at 1920x1080; `docs/performance.md` says where the number comes from.
+export const COLOUR_FRAME_BYTES = 215082;
 const NOMINAL_FPS = 30;
+
+/**
+ * A take's byte rate before anything has arrived to measure it: depth and registered colour at
+ * 30fps, plus the colour camera at 30fps when the take will record it.
+ */
+export const nominalTakeRate = (colour) => (FRAME_BYTES + (colour ? COLOUR_FRAME_BYTES : 0)) * NOMINAL_FPS;
+
 // A take that never started is a decision; a take that dies at eighty percent is a loss.
 export const MIN_TAKE_SEC = 120;
 
@@ -429,7 +438,7 @@ export function reconcile(localTakes, nodeTakes) {
 }
 
 
-export async function remaining(dir, bytesPerSec = FRAME_BYTES * NOMINAL_FPS) {
+export async function remaining(dir, bytesPerSec = nominalTakeRate(false)) {
   let fs;
   try {
     fs = await statfs(dir);

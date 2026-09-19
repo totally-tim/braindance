@@ -337,14 +337,14 @@ const MUTATIONS = {
     file: 'server/index.js',
     edits: [
       [
-        '  const closed = { ms: Date.now() - stats.since, frames: stats.frames, dropped: stats.dropped, bytes: stats.bytes };\n'
-        + '  Object.assign(stats, { frames: 0, dropped: 0, bytes: 0, since: Date.now() });\n',
-        '  const closed = { ms: Date.now() - stats.since, frames: stats.frames, dropped: stats.dropped, bytes: stats.bytes };\n',
+        '  const closed = { ms: Date.now() - stats.since, frames: stats.frames, dropped: stats.dropped, bytes: stats.bytes, colourBytes: stats.colourBytes };\n'
+        + '  Object.assign(stats, { frames: 0, dropped: 0, bytes: 0, colourBytes: 0, since: Date.now() });\n',
+        '  const closed = { ms: Date.now() - stats.since, frames: stats.frames, dropped: stats.dropped, bytes: stats.bytes, colourBytes: stats.colourBytes };\n',
       ],
       [
         '  console.log(`[server] ${fps} fps  ${mbs} MB/s  dropped=${closed.dropped}  clients=${wss.clients.size}`);\n}, 5000);',
         '  console.log(`[server] ${fps} fps  ${mbs} MB/s  dropped=${closed.dropped}  clients=${wss.clients.size}`);\n'
-        + '  Object.assign(stats, { frames: 0, dropped: 0, bytes: 0, since: Date.now() });\n}, 5000);',
+        + '  Object.assign(stats, { frames: 0, dropped: 0, bytes: 0, colourBytes: 0, since: Date.now() });\n}, 5000);',
       ],
     ],
   },

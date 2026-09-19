@@ -13,12 +13,14 @@ const MAX_IN_FLIGHT = 1;
 
 export class Webcam {
   // `request` asks the grabber to start or stop encoding. Called only on a change, and
-  // re-called by `reassert` after a restart, because a new grabber's encoder is off.
-  constructor({ request }) {
+  // re-called by `reassert` after a restart, because a new grabber's encoder is off. `recording`
+  // says whether the recorder wants the same picture for its take, which asks for the encode
+  // whether or not anybody is watching; it is not a subscriber and is not charged to the take.
+  constructor({ request, recording = () => false }) {
     this.subscribers = new Set();
     this.latest = null;
     this.latestAt = 0;
-    this.demand = new OnDemand({ request, count: () => this.subscribers.size });
+    this.demand = new OnDemand({ request, count: () => this.subscribers.size + (recording() ? 1 : 0) });
     // Why the picture is not available, or null when it is; served to whoever asked. It asks
     // whether there is a colour camera, never whether a frame has arrived - the grabber encodes
     // only while subscribed, so refusing on "no frame yet" deadlocks the first subscriber.
@@ -87,6 +89,11 @@ export class Webcam {
 
   reassert() {
     this.demand.reassert();
+  }
+
+  /** Asks the encoder again after the recorder's wish changed. */
+  settle() {
+    this.demand.settle();
   }
 
   // The MJPEG route. The origin rule belongs to the dispatcher, which asks it of every route

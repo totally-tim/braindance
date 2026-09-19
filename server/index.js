@@ -9,13 +9,14 @@ import { fileURLToPath } from 'node:url';
 import { basename, dirname, join, normalize, extname, sep, resolve } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { MessageParser, encodeMessage, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, TYPE_KEY, MAX_PAYLOAD_BYTES } from './protocol.js';
-import { openCapture, withCapture, captureIdFor, openCaptureCount, decimatePayload, cloudExtent } from './capture.js';
+import { openCapture, withCapture, captureIdFor, openCaptureCount, decimatePayload, cloudExtent, colourAfterFrames } from './capture.js';
 import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
 import {
   VALID_ID, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, copyOnNode, downloadTake,
   downloadsInFlight, hashFile, markLogFor, markLogPath, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
   removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeIdentity,
 } from './library.js';
+import { COLOUR_FRAME_BYTES, nominalTakeRate } from './library.js';
 import { EffectStore } from './effect-store.js';
 import { RESERVED_EFFECT_IDS, doorRefusal, forkRefusal } from './effect-door.js';
 import { cloudSpine } from '../web/cloud-shader.js';
@@ -150,8 +151,8 @@ function capturePathFor(id) {
 }
 
 // The frame API: a single frame is the payload alone, so the pulled and pushed paths hand the
-// same decoder the same input; a run is the file's own slice, framing included, because
-// concatenated payloads have no boundaries left to parse back.
+// same decoder the same input; a run is the frames' own messages, framing included, because
+// concatenated payloads have no boundaries left to parse back, and nothing that lay between them.
 
 // A take the recorder still owns is refused through this API until its close finishes: a scan of
 // a growing file is a full read plus sha256 against the disk being written to, and the hash it
@@ -276,10 +277,10 @@ const serveFrameRun = (req, res, [id, from, to]) => withOpenCapture(res, id, asy
     res.writeHead(404).end('no such range');
     return;
   }
-  const { start, end } = capture.frameRunSpan(a, b);
+  const { bytes } = capture.frameRunSpans(a, b);
   res.writeHead(200, {
     'Content-Type': 'application/octet-stream',
-    'Content-Length': end - start + 1,
+    'Content-Length': bytes,
     'Cache-Control': 'no-cache',
   });
   // `pipeline` rather than `pipe`, because the headers are already out and a bare pipe leaves a
@@ -1231,7 +1232,14 @@ const serveOutputWrite = async (req, res) => {
   } catch (err) { sendJson(res, { error: err.message }, err.status ?? 400); }
 };
 
-const replayRefusal = () => `this server is replaying ${basename(REPLAY)}, so there is no colour camera to serve`;
+const replayRefusal = () => `this server is replaying ${basename(REPLAY)} rather than reading a sensor, so there is no camera to control`;
+// Whether the take being replayed carries the colour camera, known once `startReplay` has indexed it.
+let replayHasColour = false;
+const replayKeyRefusal = () => `this server is replaying ${basename(REPLAY)}, and a take carries no keyed depth, `
+  + 'so there is nothing to key its colour with';
+const replayWebcamRefusal = (state) => (replayHasColour
+  ? `the replay of ${basename(REPLAY)} is ${state}, so there is no colour frame to serve`
+  : `this server is replaying ${basename(REPLAY)}, and that take carries no colour camera frames`);
 const cameraState = () => ({ camera, available: !webcam.unavailable, unavailable: webcam.unavailable });
 const serveStandby = shooting(async (req, res) => {
   if (REPLAY) throw new Error(replayRefusal());
@@ -1661,11 +1669,20 @@ exportWss.on('connection', (ws) => {
 });
 
 let helloJson = null;
-const stats = { frames: 0, dropped: 0, bytes: 0, since: Date.now() };
-// The measured byte rate of what is actually arriving, which is what the remaining-time report
-// divides free space by. Falls back to the nominal 486KB at 30fps before anything has arrived.
+const stats = { frames: 0, dropped: 0, bytes: 0, colourBytes: 0, since: Date.now() };
+// The measured byte rate of the frames actually arriving.
 let observedBytesPerSec = 0;
-const recordingRate = () => (observedBytesPerSec > 0 ? observedBytesPerSec : undefined);
+// And of the colour camera's messages, which arrive only while something asks for them.
+let observedColourBytesPerSec = 0;
+// What a take would write each second, which is what the remaining-time report and the refusal to
+// start divide free space by. With colour on a take records the colour camera too: measured while
+// it flows, and otherwise one colour frame per depth frame, the most the camera sends. Before
+// anything has arrived, the nominal rate.
+const recordingRate = () => {
+  if (!(observedBytesPerSec > 0)) return nominalTakeRate(camera.color);
+  if (!camera.color) return observedBytesPerSec;
+  return observedBytesPerSec + (observedColourBytesPerSec > 0 ? observedColourBytesPerSec : observedFps * COLOUR_FRAME_BYTES);
+};
 // Kept beside the byte rate rather than derived from it: a link delivering half the frames at full
 // size and one delivering every frame at half size are the same MB/s and different faults.
 let observedFps = 0;
@@ -1704,10 +1721,10 @@ function setSensorState(state) {
   // The webcam cannot outlive the sensor being live, and hanging it off the state change rather
   // than off each path that causes one keeps a route added later from missing a case.
   if (state !== 'live') {
-    webcam.setUnavailable(REPLAY ? replayRefusal() : !camera.color
+    webcam.setUnavailable(REPLAY ? replayWebcamRefusal(state) : !camera.color
       ? 'colour is off on this grabber, so there is no colour camera to serve'
       : `the sensor is ${state}`, !REPLAY && camera.color && state !== 'absent');
-    keyStream.setUnavailable(`the sensor is ${state}`);
+    keyStream.setUnavailable(REPLAY ? replayKeyRefusal() : `the sensor is ${state}`);
   }
 }
 
@@ -1916,6 +1933,8 @@ let requestHdColor = null;
 // where no grabber ever starts: an editing station should say why the camera is unavailable.
 const webcam = new Webcam({
   request: (wanted) => requestHdColor?.(wanted),
+  // Armed rather than recording, so the encode is already running when the next hello opens a take.
+  recording: () => recorder.armed,
 });
 
 // Asks the grabber to start or stop the keyed depth encode. `key on` implies the colour encode, so
@@ -1928,8 +1947,9 @@ const keyStream = new KeyStream({
   maxBuffered: MAX_BUFFERED,
 });
 if (REPLAY) {
-  webcam.setUnavailable(`this server is replaying ${basename(REPLAY)}, so there is no colour camera to serve`);
-  keyStream.setUnavailable(`this server is replaying ${basename(REPLAY)}, so there is no colour camera to key`);
+  // Held rather than refused until `startReplay` has read whether the take carries colour.
+  webcam.setUnavailable(`this server is replaying ${basename(REPLAY)} and has not read it yet`, true);
+  keyStream.setUnavailable(replayKeyRefusal());
 }
 
 // One take is one file, and the recorder holds that identity. Created here rather than inside
@@ -1949,8 +1969,12 @@ const recorder = new Recorder({
   // So the refusal to start a take and the remaining-time readout divide by the same number.
   rateOf: () => recordingRate(),
   // Every monitor sees the recording state change: the control arrives over HTTP, the state comes
-  // back on the socket every client is already listening to.
-  onChange: (state) => broadcastText(JSON.stringify({ recording: state })),
+  // back on the socket every client is already listening to. Arming and disarming also move the
+  // colour camera's demand.
+  onChange: (state) => {
+    webcam.settle();
+    broadcastText(JSON.stringify({ recording: state }));
+  },
 });
 
 function handleMessage(msg) {
@@ -1969,16 +1993,15 @@ function handleMessage(msg) {
     // defined by. The replay loop did not supply it and every frame became a throw in its catch.
     recorder.write(msg.raw);
   } else if (msg.type === TYPE_COLOR) {
-    // The webcam and nothing else: there is deliberately no `recorder.write` here. A capture file
-    // is the wire verbatim, so a type 3 in one would move the content hash of every take - the key
-    // the library joins two machines on. Issue #9 carries what it would take, and
-    // `vcam-check --mutate hd-reaches-recorder` adds the write back and has to fail.
-    //
-    // The payload is [u64 timestampMs][JPEG], and the JPEG goes out untouched.
+    // The payload is [u64 timestampMs][JPEG], and the JPEG goes out untouched. Into the take as well,
+    // whole: a take recorded with colour on carries the colour camera, and the recorder asks for it
+    // through the webcam's demand so what a take holds does not depend on who was watching.
+    stats.colourBytes += msg.payload.length;
     webcam.offer(Buffer.from(msg.payload.subarray(8)), Number(msg.payload.readBigUInt64LE(0)));
+    recorder.write(msg.raw);
   } else if (msg.type === TYPE_KEY) {
-    // The key clients and nothing else: there is deliberately no `recorder.write` here, for the
-    // reason above. A type 4 in a capture would move the content hash of every take.
+    // The key clients and nothing else: there is deliberately no `recorder.write` here. A take
+    // records no keyed depth, so a replayed take feeds `/camera.mjpg` and not `/key`.
     keyStream.offer(msg.payload);
   }
 }
@@ -1987,8 +2010,8 @@ setInterval(() => {
   // The window closes before anything decides whether it was interesting: with the reset past the
   // early return, an empty window was never closed and after a sixty-second drop the next window's
   // frames were divided by sixty-five seconds, into the readout that promises card space.
-  const closed = { ms: Date.now() - stats.since, frames: stats.frames, dropped: stats.dropped, bytes: stats.bytes };
-  Object.assign(stats, { frames: 0, dropped: 0, bytes: 0, since: Date.now() });
+  const closed = { ms: Date.now() - stats.since, frames: stats.frames, dropped: stats.dropped, bytes: stats.bytes, colourBytes: stats.colourBytes };
+  Object.assign(stats, { frames: 0, dropped: 0, bytes: 0, colourBytes: 0, since: Date.now() });
   lastWindow = { ms: closed.ms, frames: closed.frames };
   droppedTotal += closed.dropped;
   // What stays behind the return is the derived rate, deliberately left stale: a window that
@@ -1998,6 +2021,7 @@ setInterval(() => {
   const fps = (closed.frames / dt).toFixed(1);
   const mbs = (closed.bytes / dt / 1e6).toFixed(1);
   observedBytesPerSec = closed.bytes / dt;
+  observedColourBytesPerSec = closed.colourBytes / dt;
   observedFps = closed.frames / dt;
   console.log(`[server] ${fps} fps  ${mbs} MB/s  dropped=${closed.dropped}  clients=${wss.clients.size}`);
 }, 5000);
@@ -2326,6 +2350,7 @@ async function startReplay() {
       // as a missing file, which is how a capture the reader refused looked like one nobody shot.
       console.error(`[server] cannot open ${REPLAY}: ${err.message}`);
     }
+    webcam.setUnavailable(`this server cannot read ${basename(REPLAY)}, so there is nothing to replay`);
     return;
   }
 
@@ -2340,8 +2365,16 @@ async function startReplay() {
   const stamps = capture.index.frames.stampMs;
   if (stamps.length === 0) {
     console.error('[server] replay file contains no frames');
+    webcam.setUnavailable(`this server is replaying ${basename(REPLAY)}, which holds no frames`);
     return;
   }
+
+  // The colour camera is replayed the way the grabber sends it: asked for, and only while asked.
+  // Each frame is followed by the colour messages that followed it on the wire.
+  replayHasColour = capture.colourCount > 0;
+  const colourFrom = colourAfterFrames(capture.index);
+  let colourWanted = false;
+  if (replayHasColour) requestHdColor = (wanted) => { colourWanted = wanted; };
 
   console.log(`[server] replaying ${REPLAY}`);
   const hello = await capture.readHello();
@@ -2358,7 +2391,17 @@ async function startReplay() {
   );
 
   // A replayed take is as live as this server gets, which is what gives `lost` something to mean.
-  setSensorState('live');
+  const live = () => {
+    setSensorState('live');
+    if (replayHasColour) {
+      webcam.setAvailable();
+      // A subscriber held while the take was being read asked before there was anyone to ask.
+      webcam.reassert();
+    } else {
+      webcam.setUnavailable(replayWebcamRefusal('live'));
+    }
+  };
+  live();
 
   let i = 0;
   let failing = false;
@@ -2370,17 +2413,22 @@ async function startReplay() {
   // Each frame is read when it is due, so a five-minute take costs what a nine-second one does.
   // The read is awaited before the timer is set, measured at 0.07-0.6ms against a 64ms median.
   const tick = () => {
+    const k = i % stamps.length;
     capture
-      .readFrame(i % stamps.length)
-      .then((payload) => {
+      .readFrame(k)
+      .then(async (payload) => {
         if (failing) {
           failing = false;
           console.log('[server] replay reads recovered');
-          setSensorState('live');
+          live();
         }
         // A whole message, framing included, because that is what `handleMessage` takes. The replay
         // handed over a bare payload with no `raw`, unnoticed until a take was open.
         handleMessage({ type: TYPE_FRAME, payload, raw: encodeMessage(TYPE_FRAME, payload) });
+        for (let c = colourFrom[k]; colourWanted && c < colourFrom[k + 1]; c++) {
+          const colour = await capture.readColour(c);
+          handleMessage({ type: TYPE_COLOR, payload: colour, raw: encodeMessage(TYPE_COLOR, colour) });
+        }
         schedule();
       })
       .catch((err) => {
