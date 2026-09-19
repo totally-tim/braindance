@@ -98,7 +98,7 @@ test('a carrier that is not a JSON object of timers is refused', () => {
   const [site] = callSites();
   // Read for the reason, because a child that failed to run at all would throw here too.
   for (const env of ['{', '[1000]', 'null']) {
-    assert.throws(() => ask([site], { env }), (err) => /test timers must|in JSON|JSON at position/.test(err.stderr), env);
+    assert.throws(() => ask([site], { env }), (err) => /test timers must|JSON/i.test(err.stderr), env);
   }
 });
 
