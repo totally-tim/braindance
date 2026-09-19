@@ -29,7 +29,7 @@ total is the tool's `PASS` and `FAIL` rows. A row never decides a verdict.
 
 The tools disagree about what a caught mutation exits. Four exit **0** on a catch and 1 on a miss
 — `registry-check`, `vendor-check`, `registration-check` and `release-gate-check` — so anything
-gating on "non-zero means caught" reads a genuine miss by these four as a catch. Twelve exit 1 on
+gating on "non-zero means caught" reads a genuine miss by these four as a catch. Thirteen exit 1 on
 a catch *and* 1 on a miss, so the code carries no information and only the printed sentence
 separates them. Six carry no miss branch at all and exit on the failure count, so a mutation they
 fail to catch exits 0 and reads as a clean pass.
@@ -59,6 +59,7 @@ Per tool, read from the source:
 | `module-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a stale anchor |
 | `syntax-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor |
 | `cpp-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor, no compiler or headers |
+| `grabber-args-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no `vendor/prefix`, build-native failed, a mutation the binary did not change, a stale anchor |
 | `vendor-check` | pass, or a **catch** | a failed assertion, a miss, or a stale anchor | `PASS on the source, with the artifact untested` |
 | `registration-check` | pass, or a **catch** | a failed assertion, or a miss | a build or tooling failure |
 | `release-gate-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: no registry |
@@ -830,6 +831,13 @@ is NOT CAUGHT even though it exits 1.
 - **`rgbx-read-as-bgrx`** — the packed format is read BGRX, so the red/blue row swaps.
 - **`held-colour-gets-depth-time`** — a held colour is stamped with the depth frame's time, and
   the slow-colour identity row fails.
+- **`encoder-has-no-destructor`** — the class goes back to the implicit destructor, which destroys a
+  joinable thread. The early-return row runs in a forked child and fails when that child aborts.
+
+The early-return row is the part of the grabber's failed corpus write that runs without a sensor:
+an encoder left running when its scope ends is joined. The write itself happens after the device
+starts, so the grabber's exit 1 on a short write needs a sensor and a filesystem that fills during
+the dump, and no tool here reaches it.
 
 ## `vcam-check`
 
@@ -853,6 +861,15 @@ in the difference, which no upscale can invent. The keyed page cuts that same fr
 against a live depth in colour-camera space, and sections 7, 8 and 9 hold the key's wire, its bytes
 and its picture the way sections 1 to 6 hold the webcam's.
 
+Section 10 asks which subscribers a revocation ends. A grabber restart holds them and colour off
+ends them, and the recorder's accounting must lose every ended one, including a client that stopped
+reading and whose socket therefore never closes. That client is asked in standby: on a running
+grabber, colour off is followed by the grabber's exit, which ends every response a second time, and
+the write-after-end error prunes the subscriber whether or not the reap does. The section waits out
+the webcam's whole hold, `HOLD_MS` in `server/webcam.js`, which it reads from the source: 45
+seconds, and no flag shortens it. It removes the fixture's capture after the first respawn, so every
+later spawn fails and only the hold can end the subscriber.
+
 - **`pose-skips-the-registry`** — the camera pose in a socket patch bypasses the registry, so four
   finite numbers are drawn as a rotation.
 - **`patch-params-applied-one-at-a-time`** — the parameter half lands name by name, so a refused
@@ -865,6 +882,16 @@ and its picture the way sections 1 to 6 hold the webcam's.
   message type and its content hash moves.
 - **`refusal-ignores-webcam`** — the refusal loses its webcam clause, so a take starts while a
   full-rate MJPEG pull competes with the depth packets.
+- **`revoke-keeps-subscribers`** — colour off sets its reason and leaves every open response
+  attached and silent. Section 10's ended row and both accounting rows fail; the 503 row stays
+  green, because `attach` refuses on the reason whether or not anybody was ended.
+- **`restart-drops-subscribers`** — every revocation ends its subscribers, the grabber restart
+  included, which makes OBS reconnect on every USB drop. Only section 10's survives-a-restart row
+  fails.
+- **`hold-never-expires`** — a subscriber held through a restart that never comes back stays open
+  for good, and section 10's hold row fails after the hold and its margin.
+- **`reap-skips-ended`** — an ended response stays counted until its socket closes, so only the
+  standby accounting row fails, through the subscriber that stopped reading.
 - **`key-runs-unasked`** — the key encode runs before anybody asks, on the thread the colour
   camera already holds, and section 7's first row asks while no client exists.
 - **`key-never-asks`** — the socket attaches and is acknowledged, but the demand edge never
@@ -1224,6 +1251,43 @@ so nothing in this repo compiles them.
   rows, and leaves the all-four row and every grabber row green, because the grabber names an
   enumerator only inside its own `#ifdef`.
 - **`harness-syntax-error`** — a break in `native/harness/reg-runner.cpp`.
+
+## `grabber-args-check`
+
+The grabber refuses a `--min-depth`/`--max-depth` it cannot read exactly, or a pair with no depth
+between the two planes, and exits 2 before it looks for a device.
+
+```
+node tools/grabber-args-check.mjs
+```
+
+| needs | |
+| --- | --- |
+| binaries | what `tools/build-native.mjs` needs |
+| prefix | libfreenect2 in `vendor/prefix`, from `node tools/build-native.mjs`; without it the tool exits 2 naming it |
+| everything else | no sensor, no server, no fixture |
+
+It runs `tools/build-native.mjs` on every run, because `native/build/grabber` can be older than the
+source beside it. A mutation edits `native/grabber.cpp` in place, the way `decoder-check`'s edit
+the library source, and the source goes back and is rebuilt on every way out, so neither tool may
+run while the other, or an edit, is in flight in the same tree. The make on macOS compares
+timestamps to the second, so a source written in the second its object was built in is not
+recompiled: the tool writes after that second, and a mutated build whose binary hashes the same as
+the unmutated one is DID NOT RUN rather than NOT CAUGHT. Every vector leads with the
+grabber's `--check`, which runs the argument pass and exits before enumeration, so a machine with a
+sensor answers exactly as one without. A refused row asks for exit 2 and the sentence that names
+the flag and quotes the text as typed. An accepted row asks for exit 0 and `--check`'s `arguments
+accepted` line. A pair refusal prints the two values as parsed, at three decimals, not as typed.
+The no-flags, defaults, `--quality 0` and missing-value rows stay green under every mutation, which
+confines each control to the rule it breaks.
+
+- **`clip-accepts-inverted-range`** — the pair rule is gone, so a swapped or equal pair reaches the
+  device. The four pair rows fail.
+- **`depth-takes-a-numeric-prefix`** — `std::atof`'s behaviour: the leading number is kept and the
+  rest dropped. The comma-decimal, trailing-unit and trailing-space rows fail.
+- **`depth-accepts-non-finite`** — `inf` reaches the device and `nan` is refused only by the pair
+  rule, in the pair rule's sentence. The nan and inf rows fail.
+- **`depth-accepts-zero-or-negative`** — the zero and negative rows fail.
 
 ## `decoder-check`
 

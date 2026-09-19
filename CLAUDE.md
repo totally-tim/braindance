@@ -113,7 +113,7 @@ Read the assertion count, never the exit code.
 | `monitor-check.mjs` | the monitor's decimation, the take it must not touch, the picture | port 8341 free |
 | `sensor-view-check.mjs` | the intrinsics a take was shot with, against a build assuming them | `--url`, plus port 8131 |
 | `level-check.mjs` | levelling: the room turns and every surface keeps its meaning | port 8377 free |
-| `vcam-check.mjs` | the output to OBS: the colour camera, the keyed webcam and its page, and the take neither may touch | port 8361 free |
+| `vcam-check.mjs` | the output to OBS: the colour camera, the keyed webcam and its page, the take neither may touch, and which webcam subscribers a revocation ends | port 8361 free |
 | `guard-check.mjs` | the socket's origin rule, the bind, the rebinding rule | port 8321 free, `captures/sample.knct` |
 | `jobs-check.mjs` | the queue, the pin, a real render, a job this build cannot read | ports 8231 and 8232, a GPU browser, ffprobe |
 | `effect-check.mjs` | installing an effect: revisions, the door, the hotload, park and restore | port 8281 free, a GPU browser |
@@ -122,9 +122,10 @@ Read the assertion count, never the exit code.
 | `preview-check.mjs` | rendered previews, camera identity, cancellation, and live fallback | `--url`, a take of at least 9s, a GPU browser |
 | `cli-check.mjs` | CLI, standby, demand wake, camera and server-owned output | port 8401 free, a synthetic capture, ffmpeg and a GPU browser |
 | `syntax-check.mjs` | every shipped file parses, the cross-language constants agree, the citations resolve, every tool is named here, every check tool is run by CI or listed as not run | nothing |
-| `hd-encoder-check.mjs` | native pairing under encoder backlog, held colour, key range and RGBX | a C++ compiler and TurboJPEG |
+| `hd-encoder-check.mjs` | native pairing under encoder backlog, held colour, key range and RGBX, and the join when an encoder's scope ends early | a C++ compiler and TurboJPEG |
 | `cpp-check.mjs` | both C++ files parse and typecheck, in eight pipeline and colour-decoder configurations, and each ColorDecoder enumerator exists only where its decoder does | a C++ compiler and turbojpeg's headers |
 | `decoder-check.mjs` | each `ColorDecoder` enumerator builds its own processor in the loaded library, and the grabber offers and defaults to what that library carries | a C++ compiler, `vendor/prefix` and the built grabber |
+| `grabber-args-check.mjs` | the built grabber refuses a depth-clip range it cannot read or that is empty, before it looks for a device | what build-native needs, and libfreenect2 in `vendor/prefix` |
 | `vendor-check.mjs` | `third_party` is upstream v0.2.1 plus declared edits | nothing |
 | `registration-check.mjs` | our registration equals upstream's, bit for bit | a corpus from `grabber --dump-corpus` |
 | `release-gate-check.mjs` | the `.npmrc` supply-chain gate is actually armed | the npm registry |

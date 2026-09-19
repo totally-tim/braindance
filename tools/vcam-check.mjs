@@ -12,11 +12,13 @@
 // It spawns its own server and needs none running; the stream is `tools/fake-grabber.mjs`, so no
 // sensor is required, and ffmpeg builds and decodes the fixture. Sections 5 and 9 need a GPU browser
 // and `--no-browser` drops them. Sections 6 and 7 need a non-internal IPv4 and exit 2 as UNPROVEN
-// rather than passing quietly without one. What it does not prove is OBS: that a browser source
+// rather than passing quietly without one. Section 10 waits out the webcam's whole 45-second hold,
+// because nothing shortens it. What it does not prove is OBS: that a browser source
 // renders WebGL at 1080p and that OBS samples it at canvas rate require OBS in front of you.
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { connect } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +35,11 @@ const MUTATE = flag('--mutate');
 const NO_BROWSER = argv.includes('--no-browser');
 const WORK = join(REPO, '.vcam-check');
 const SOURCE = join(REPO, 'captures', 'sample.knct');
+// Read off the server rather than copied, so section 10 waits out the hold the server really has.
+// No flag shortens it, so that section costs the whole of it.
+const HOLD_MS = Number(/^const HOLD_MS = (\d+);$/m.exec(readFileSync(join(REPO, 'server/webcam.js'), 'utf8'))?.[1]);
+// The sentence a colour-off grabber's webcam answers with, in the response it ends and in the 503.
+const COLOUR_OFF = 'colour is off on this grabber, so there is no colour camera to serve';
 
 // Where the fixture plants what the registered image cannot contain. Has to match `fake-grabber`'s
 // `HD_MARGIN`, and is asserted below rather than assumed.
@@ -188,6 +195,52 @@ const MUTATIONS = {
       + "      .map(() => ({ kind: 'webcam', at: 'the colour camera at full rate' })),",
       '',
     ]],
+  },
+
+  // A permanent revocation sets its reason and leaves every open response attached and silent, so
+  // OBS sits on its last frame and the refusal counts a stream that sends nothing. The loop alone:
+  // the `transient` assignment above it stays, or `attach` stops answering 503 and the positive
+  // twin reddens for a reason that is not this defect.
+  'revoke-keeps-subscribers': {
+    file: 'server/webcam.js',
+    edits: [[
+      '      if (!transient) sub.res.end(reason);\n      else this.#hold(sub);',
+      '      if (transient) this.#hold(sub);',
+    ]],
+    fails: 'section 10\'s colour-off ended and accounting rows, and the standby accounting row; the 503 '
+      + 'row and the restart rows stay green',
+  },
+
+  // Every revocation ends its subscribers, the grabber restart included, which is the reconnect
+  // storm on every USB drop that the linger exists to avoid.
+  'restart-drops-subscribers': {
+    file: 'server/webcam.js',
+    edits: [[
+      '      if (!transient) sub.res.end(reason);\n      else this.#hold(sub);',
+      '      sub.res.end(reason);',
+    ]],
+    fails: 'section 10\'s survives-a-restart row alone; the colour-off rows stay green',
+  },
+
+  // A subscriber held through a restart that never comes back stays open for good.
+  'hold-never-expires': {
+    file: 'server/webcam.js',
+    edits: [[
+      "      sub.res.end(this.unavailable ?? 'no colour frame arrived before the wait expired');\n",
+      '',
+    ]],
+    fails: 'section 10\'s hold row alone, after the hold and its margin have elapsed',
+  },
+
+  // An ended response whose socket has not closed stays in the set until it does, which for a
+  // client that stopped reading is never. Only the destroyed half of the reap is left.
+  'reap-skips-ended': {
+    file: 'server/webcam.js',
+    edits: [[
+      '      if (s.res.destroyed || s.res.writableEnded) {',
+      '      if (s.res.destroyed) {',
+    ]],
+    fails: 'section 10\'s standby accounting row alone, through the subscriber that stopped reading',
   },
 
   // A key encoder that runs before anybody asks consumes the same HD thread as the colour camera
@@ -468,6 +521,10 @@ if (!existsSync(SOURCE)) {
   console.error(`no capture at ${SOURCE} - this check needs one to loop; see tools/make-fixture.js`);
   process.exit(2);
 }
+if (!(HOLD_MS > 0)) {
+  console.error('server/webcam.js no longer declares `const HOLD_MS = <ms>;` - section 10 cannot know how long to wait');
+  process.exit(2);
+}
 
 // A mutation applied in place and restored afterwards leaves a mutated working tree behind any
 // crash, which is the one state a proof tool must never produce.
@@ -535,10 +592,10 @@ const EMIT_LOG = join(WORK, 'emitted.log');
  * throws and exits 2 as DID NOT RUN, because under `--mutate` a harness that never got a sensor
  * would otherwise be written down as the mutation being caught.
  */
-const start = async (extra = []) => {
+const start = async (extra = [], { source = SOURCE, grabberArgs = [] } = {}) => {
   const log = await new Promise((resolve, reject) => {
-    const grabber = `${join(WORK, 'tools/fake-grabber.mjs')} --source ${SOURCE} --fps 30 --hd `
-      + `--key --emit-log ${EMIT_LOG}`;
+    const grabber = [join(WORK, 'tools/fake-grabber.mjs'), '--source', source, '--fps', '30', '--hd',
+      '--key', '--emit-log', EMIT_LOG, ...grabberArgs].join(' ');
     const child = spawn(process.execPath, [
       join(WORK, 'server/index.js'), '--standby-after', '0', '--port', String(PORT),
       '--captures', join(WORK, 'takes'), '--grabber', grabber, ...extra,
@@ -606,6 +663,9 @@ function subscribe(host = '127.0.0.1') {
             }
           }
         } catch { /* aborted */ }
+        // What followed the last whole part, less that part's closing CRLF: the server's sentence
+        // when it ended the stream.
+        state.tail = buf.toString('utf8').trim();
         state.done = true;
       })();
       return state;
@@ -1501,6 +1561,128 @@ try {
       await browser.close();
       await stopAll();
     }
+  }
+
+  // A revocation either ends the webcam's subscribers or holds them, decided by whether a grabber
+  // is coming back. Ending on a restart makes OBS reconnect on every USB drop; holding on colour off
+  // leaves a response nothing will ever write to, still charged to the take.
+  console.log('\n10. a revoked webcam ends its subscribers unless the picture is coming back');
+  {
+    // Every spawn exits after 150 frames and reads the capture through a link this section removes,
+    // so the first respawn comes back and none after the link has gone can.
+    const link = join(WORK, 'once', 'sample.knct');
+    mkdirSync(dirname(link), { recursive: true });
+    symlinkSync(SOURCE, link);
+    rmSync(EMIT_LOG, { force: true });
+    const log = await start([], { source: link, grabberArgs: ['--die-after', '150'] });
+    const exits = () => (log().match(/\[server\] grabber exited/g) ?? []).length;
+    const sub = subscribe();
+    await sub.ready;
+    await waitFor(() => sub.parts.length > 10, 8000, 'parts before the grabber exits');
+    await waitFor(() => exits() > 0, 30000, 'the grabber to exit after 150 frames');
+    const atExit = sub.parts.length;
+    const back = await waitFor(async () => (await api('/record/state')).body?.webcam?.available === true,
+      30000, 'the respawned grabber to handshake').then(() => true, () => false);
+    await waitFor(() => sub.done || sub.parts.length > atExit + 10, 15000, 'parts after the respawn').catch(() => {});
+    ok('a subscriber survives a grabber restart and is served parts again on the same response',
+      back && !sub.done && sub.parts.length > atExit + 10,
+      `${atExit} parts at the exit, ${sub.parts.length} after${sub.done ? `; ended with "${sub.tail}"` : ''}`);
+
+    rmSync(link);
+    const before = exits();
+    await waitFor(() => exits() > before, 30000, 'the last grabber that can read its capture to exit');
+    const lostAt = Date.now();
+    const ended = await waitFor(() => sub.done, HOLD_MS + 20000, 'the hold to end the subscriber')
+      .then(() => true, () => false);
+    const heldS = ((Date.now() - lostAt) / 1000).toFixed(1);
+    const left = (await api('/record/state')).body?.webcam?.subscribers ?? null;
+    ok(`a subscriber whose grabber never comes back is ended by the ${HOLD_MS / 1000}s hold, saying why, `
+      + 'and leaves the accounting',
+    ended && /^the (sensor|grabber) is /.test(sub.tail ?? '') && left?.length === 0,
+    `${ended ? `ended ${heldS}s after the last exit with "${sub.tail}"` : `still open ${heldS}s after the last exit`}; `
+      + `subscribers ${JSON.stringify(left)}`);
+    sub.stop();
+    await stopAll();
+
+    rmSync(EMIT_LOG, { force: true });
+    await start();
+    const reading = subscribe();
+    await reading.ready;
+    await waitFor(() => reading.parts.length > 10, 8000, 'parts for the reading subscriber');
+
+    // The way the operator page turns colour off.
+    const control = new WebSocket(`ws://127.0.0.1:${PORT}`);
+    let depthOnly = false;
+    control.on('message', (bytes, binary) => {
+      if (binary) return;
+      try { const h = JSON.parse(bytes.toString()); if (h.serial && h.color === false) depthOnly = true; }
+      catch { /* not a hello */ }
+    });
+    await new Promise((resolve, reject) => { control.once('open', resolve); control.once('error', reject); });
+    control.send(JSON.stringify({ camera: { color: false } }));
+
+    const closed = await waitFor(() => reading.done, 5000, 'colour off to end the response')
+      .then(() => true, () => false);
+    ok('colour off ends a subscriber\'s response, with the reason as its last bytes',
+      closed && (reading.tail ?? '').includes(COLOUR_OFF),
+      closed ? `ended with "${reading.tail}"` : `still open 5s after colour went off, ${reading.parts.length} parts`);
+    let after = null;
+    await waitFor(async () => {
+      after = (await api('/record/state')).body?.webcam?.subscribers ?? null;
+      return after?.length === 0;
+    }, 3000, 'the accounting to empty').catch(() => {});
+    ok('and it is no longer in the recorder\'s accounting', after?.length === 0, `subscribers ${JSON.stringify(after)}`);
+
+    // After the depth-only hello, because the exit between says "the grabber is restarting".
+    await waitFor(() => depthOnly, 25000, 'the depth-only grabber to handshake');
+    const fresh = await fetch(`http://127.0.0.1:${PORT}/camera.mjpg`);
+    // A 200 here is a stream that never ends, so only a refusal is read to the end.
+    const refusal = fresh.status === 503 ? await fresh.json().catch(() => null) : null;
+    if (fresh.status !== 503) await fresh.body?.cancel();
+    ok('while a new request is answered 503 with the same reason', fresh.status === 503 && refusal?.error === COLOUR_OFF,
+      `status ${fresh.status}: ${JSON.stringify(refusal)}`);
+
+    control.close();
+    reading.stop();
+    await stopAll();
+
+    // A client that sends its request and never reads: its response cannot finish, so its socket
+    // never closes and only the reap takes an ended one out of the set. Colour off in standby,
+    // because on a running grabber the exit that follows ends the response a second time, and the
+    // write-after-end error that raises prunes it whether or not the reap does.
+    await start();
+    const stalled = connect(PORT, '127.0.0.1');
+    stalled.on('error', () => {});
+    stalled.write(`GET /camera.mjpg HTTP/1.1\r\nHost: 127.0.0.1:${PORT}\r\n\r\n`);
+    // Stuck, not merely slow: the kernel buffers grow before they fill, so a write can finish late
+    // and the response then closes on its own. Stuck is two whole seconds of frames dropped, at a
+    // floor of 10 a second so a contended fixture below its 30fps still counts.
+    let attached = null;
+    const behind = async () => {
+      attached = (await api('/record/state')).body?.webcam?.subscribers ?? null;
+      return attached?.length === 1 ? attached[0].behind : -1;
+    };
+    let stuck = false;
+    let streak = 0;
+    let last = await behind();
+    for (const until = Date.now() + 30000; !stuck && Date.now() < until;) {
+      await wait(1000);
+      const now = await behind();
+      streak = last >= 0 && now - last >= 10 ? streak + 1 : 0;
+      stuck = streak >= 2;
+      last = now;
+    }
+    // The positive twin of the reap: a subscriber that is stuck but open is still a subscriber.
+    ok('a subscriber that stops reading stays in the accounting, dropping every frame, while nothing has ended it',
+      stuck, JSON.stringify(attached));
+    const standby = await post('/sensor/standby');
+    const off = await post('/sensor/camera', { color: false });
+    const inStandby = (await api('/record/state')).body?.webcam?.subscribers ?? null;
+    ok('colour off in standby takes it out of the accounting while its socket is still open',
+      standby.status === 200 && off.status === 200 && inStandby?.length === 0 && !stalled.destroyed,
+      `standby ${standby.status}, colour off ${off.status}, subscribers ${JSON.stringify(inStandby)}`);
+    stalled.destroy();
+    await stopAll();
   }
 } catch (err) {
   // A run that threw did not finish, and that is a different answer from a claim that failed. Under
