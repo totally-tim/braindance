@@ -9,7 +9,11 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const MANIFEST = join(ROOT, 'third_party', 'libfreenect2.manifest');
+
+// The root tree of upstream's v0.2.1 commit, read from OpenKinect/libfreenect2. Never replace it
+// with what this tool computes: a constant taken from its own output proves only that it agrees
+// with itself.
+const UPSTREAM_TREE = '8ac8ee52388586e8b1763f7a76531a299c3b8969';
 
 // Each entry pins the blob hash our patched file must have, because "differs from
 // upstream" is not "contains our change". `marker` is a string the edit leaves in the
@@ -59,14 +63,42 @@ const walk = (dir, base = dir, out = []) => {
   return out;
 };
 
-function parseManifest() {
+// Path to { mode, hash }, one per `<mode> <blob hash>  <path>` line.
+function parseManifest(file) {
   const m = new Map();
-  for (const line of readFileSync(MANIFEST, 'utf8').split('\n')) {
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
     if (!line || line.startsWith('#')) continue;
-    const [hash, ...rest] = line.split(/\s+/);
-    m.set(rest.join(' '), hash);
+    const fields = line.split(/\s+/);
+    if (fields.length !== 3) throw new Error(`${file}: not a <mode> <hash> <path> line: ${line}`);
+    const [mode, hash, path] = fields;
+    m.set(path, { mode, hash });
   }
   return m;
+}
+
+// Rebuilds git's tree objects bottom-up from the manifest and returns the root's hash. Git sorts
+// entries bytewise, reading a subtree's name as though it ended in `/`, and writes a subtree's mode
+// as `40000`.
+function rootTree(manifest) {
+  const root = new Map();
+  for (const [path, entry] of manifest) {
+    const parts = path.split('/');
+    let dir = root;
+    for (const part of parts.slice(0, -1)) {
+      if (!dir.has(part)) dir.set(part, new Map());
+      dir = dir.get(part);
+    }
+    dir.set(parts.at(-1), entry);
+  }
+  const hashTree = (dir) => {
+    const entries = [...dir].map(([name, v]) => (v instanceof Map
+      ? { key: `${name}/`, name, mode: '40000', hash: hashTree(v) }
+      : { key: name, name, mode: v.mode, hash: v.hash }));
+    entries.sort((a, b) => Buffer.compare(Buffer.from(a.key), Buffer.from(b.key)));
+    const body = Buffer.concat(entries.flatMap((e) => [Buffer.from(`${e.mode} ${e.name}\0`), Buffer.from(e.hash, 'hex')]));
+    return createHash('sha1').update(`tree ${body.length}\0`).update(body).digest('hex');
+  };
+  return hashTree(root);
 }
 
 const MUTATIONS = {
@@ -91,6 +123,20 @@ const MUTATIONS = {
     if (!s.includes('filter_width_half(2)')) throw new Error('anchor missing');
     writeFileSync(f, s.replace('filter_width_half(2)', 'filter_width_half(4)'));
   },
+  // The quickest way to silence an undeclared-change FAIL: edit the file, then paste its new hash
+  // over its manifest line. On a file no declared edit touches, because a declared file relabelled
+  // also reads as a reverted edit, and the control would stop separating the manifest row.
+  'manifest-relabel': (tree, _oracle, manifestFile) => {
+    const path = 'src/frame_listener_impl.cpp';
+    const f = join(tree, path);
+    writeFileSync(f, readFileSync(f, 'utf8') + '\n// not upstream\n');
+    const lines = readFileSync(manifestFile, 'utf8').split('\n');
+    const at = lines.findIndex((l) => l.endsWith(`  ${path}`));
+    if (at < 0) throw new Error('anchor missing');
+    const [mode] = lines[at].split(' ');
+    lines[at] = `${mode} ${blobHash(readFileSync(f))}  ${path}`;
+    writeFileSync(manifestFile, lines.join('\n'));
+  },
 // vendor/prefix-oracle only exists after a registration-check run, so its absence is exit 2.
   'stale-prefix': () => ({ prefix: join(ROOT, 'vendor', 'prefix-oracle') }),
 };
@@ -105,16 +151,20 @@ if (mutation && !MUTATIONS[mutation]) {
 // Mutations run against a throwaway copy so a falsification run cannot alter the real tree.
 let tree = join(ROOT, 'third_party', 'libfreenect2');
 let oracleDir = join(ROOT, 'third_party', 'oracle');
+let manifestFile = join(ROOT, 'third_party', 'libfreenect2.manifest');
 let prefix = argv.includes('--prefix') ? argv[argv.indexOf('--prefix') + 1] : join(ROOT, 'vendor', 'prefix');
 let scratch = null;
 if (mutation) {
   scratch = mkdtempSync(join(tmpdir(), 'vendor-check-'));
   cpSync(tree, join(scratch, 'libfreenect2'), { recursive: true });
   cpSync(oracleDir, join(scratch, 'oracle'), { recursive: true });
+  // Beside the copied tree, never inside it, or section 3 finds it as a file upstream never had.
+  cpSync(manifestFile, join(scratch, 'libfreenect2.manifest'));
   tree = join(scratch, 'libfreenect2');
   oracleDir = join(scratch, 'oracle');
+  manifestFile = join(scratch, 'libfreenect2.manifest');
   // A mutation may redirect what gets inspected rather than edit the copy.
-  const redirect = MUTATIONS[mutation](tree, oracleDir);
+  const redirect = MUTATIONS[mutation](tree, oracleDir, manifestFile);
   if (redirect?.prefix) prefix = redirect.prefix;
 }
 
@@ -122,13 +172,13 @@ let checked = 0;
 let failed = 0;
 const fail = (msg) => { failed++; console.log(`FAIL  ${msg}`); };
 
-const manifest = parseManifest();
+const manifest = parseManifest(manifestFile);
 const onDisk = new Set(walk(tree));
 
 // 1. every upstream file is present and hashes as upstream, unless declared.
 const actuallyDiffer = new Set();
 const ourHashes = new Map();
-for (const [path, upstreamHash] of manifest) {
+for (const [path, { hash: upstreamHash }] of manifest) {
   checked++;
   if (!onDisk.has(path)) { fail(`missing from our tree: ${path}`); continue; }
   const ours = blobHash(readFileSync(join(tree, path)));
@@ -165,7 +215,7 @@ for (const path of onDisk) {
 //    Without it, registration-check could be comparing our build against itself.
 for (const [oraclePath, upstreamOf] of [['registration.cpp', 'src/registration.cpp']]) {
   checked++;
-  const want = manifest.get(upstreamOf);
+  const want = manifest.get(upstreamOf)?.hash;
   const full = join(oracleDir, oraclePath);
   let got = null;
   try { got = blobHash(readFileSync(full)); } catch { /* reported below */ }
@@ -198,6 +248,15 @@ if (!lib) {
       fail(`the library at ${lib} does not carry ${marker}, so it was NOT built from our ${path} - "${why}" is missing from the artifact even though the source has it`);
     }
   }
+}
+
+// 6. the manifest is upstream's, not a record of this tree. Sections 1-4 take it as upstream, so a
+//    file edited with its line rewritten to the new hash passes all five. This reaches every path,
+//    mode and hash in the manifest, and NOT the permission bits on disk, which nothing compares.
+checked++;
+const rebuilt = rootTree(manifest);
+if (rebuilt !== UPSTREAM_TREE) {
+  fail(`the manifest rebuilds to root tree ${rebuilt}, not upstream v0.2.1's ${UPSTREAM_TREE} - a line was rewritten, added or dropped, so every row above compared against a manifest that is not upstream`);
 }
 
 if (scratch) rmSync(scratch, { recursive: true, force: true });

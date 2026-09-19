@@ -5,6 +5,7 @@
 //   tools/fake-grabber.mjs --source captures/sample.knct --fps 60 --frames 40
 //   tools/fake-grabber.mjs --die-after 12      # exits, so the server respawns it
 //   tools/fake-grabber.mjs --hd --key          # type 3 and the keyed depth beside it
+//   tools/fake-grabber.mjs --hd --hd-counter   # every type 3 frame numbered in a code band
 
 import { appendFileSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -31,6 +32,7 @@ const ARGUMENTS = {
   '--tag': { value: true },
   '--emit-log': { value: true },
   '--hd': { value: false },
+  '--hd-counter': { value: false },
   '--key': { value: false },
   '--no-color': { value: false },
   '--no-low-light': { value: false },
@@ -97,9 +99,20 @@ const LOW_LIGHT = !given('--no-low-light');
 // 0.12 is wide enough to survive 4:2:0 chroma subsampling and JPEG ringing at the boundary, and
 // narrow enough that the middle is still most of the picture.
 const HD_MARGIN = 0.12;
+// Numbers the type 3 frames so a reader downstream can tell which one it holds, which the one
+// repeated frame cannot: frame n carries n mod 256, the n its stamp is computed from. Eight
+// squares, most significant bit on the left, white for a one on the top row and the complement on
+// the row under it, in a black band clear of the margins and of the middle `vcam-check` samples.
+// Opt-in, because `vcam-check` holds every served part to one byte-identical JPEG.
+const HD_COUNTER = given('--hd-counter');
+const COUNTER = { cycle: 256, bits: 8, square: 64, pitch: 96, x: 576, top: 860, bottom: 956 };
 
 if (KEY && !HD) {
   process.stderr.write('[fake-grabber] --key needs --hd: the keyed output pairs depth with the colour camera frame\n');
+  process.exit(1);
+}
+if (HD_COUNTER && !HD) {
+  process.stderr.write('[fake-grabber] --hd-counter needs --hd: it numbers the colour camera frames\n');
   process.exit(1);
 }
 
@@ -115,7 +128,38 @@ if (!sourceHello || frames.length === 0) {
   process.exit(1);
 }
 
-let hdFrame = null;
+// The drawbox chain for frame `n`'s code band. ffmpeg's `n` counts output frames from 0.
+const counterBand = () => {
+  const { bits, square, pitch, x, top, bottom } = COUNTER;
+  const band = [`drawbox=x=${x - 32}:y=${top - 32}:w=${(bits - 1) * pitch + square + 64}`
+    + `:h=${bottom - top + square + 64}:color=black@1.0:t=fill`];
+  for (let bit = 0; bit < bits; bit++) {
+    const left = x + (bits - 1 - bit) * pitch;
+    const set = `mod(floor(n/${2 ** bit}),2)`;
+    band.push(`drawbox=x=${left}:y=${top}:w=${square}:h=${square}:color=white@1.0:t=fill:enable='eq(${set},1)'`);
+    band.push(`drawbox=x=${left}:y=${bottom}:w=${square}:h=${square}:color=white@1.0:t=fill:enable='eq(${set},0)'`);
+  }
+  return band.join(',');
+};
+
+// ffmpeg writes its mjpeg output as JPEGs back to back, so each one ends at an end-of-image marker
+// followed by the next one's start-of-image or by the end of the stream.
+const splitJpegs = (stream) => {
+  const out = [];
+  let start = 0;
+  for (let i = 0; i + 1 < stream.length; i++) {
+    if (stream[i] !== 0xff || stream[i + 1] !== 0xd9) continue;
+    const next = i + 2;
+    if (next === stream.length || (stream[next] === 0xff && stream[next + 1] === 0xd8)) {
+      out.push(stream.subarray(start, next));
+      start = next;
+    }
+  }
+  return out;
+};
+
+// One frame, or one per counter value. `encodeHd` sends frame n's entry.
+let hdFrames = null;
 if (HD) {
   const first = frames[0];
   const depthBytes = first.readUInt32LE(0);
@@ -126,20 +170,27 @@ if (HD) {
   }
   const registered = first.subarray(16 + depthBytes, 16 + depthBytes + colorBytes);
   const margin = Math.round(1920 * HD_MARGIN);
+  const count = HD_COUNTER ? COUNTER.cycle : 1;
   try {
-    hdFrame = execFileSync('ffmpeg', [
-      '-hide_banner', '-loglevel', 'error', '-y', '-i', 'pipe:0',
+    hdFrames = splitJpegs(execFileSync('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-y', ...(HD_COUNTER ? ['-loop', '1'] : []), '-i', 'pipe:0',
       '-vf', `scale=1920:1080,`
         + `drawbox=x=0:y=0:w=${margin}:h=1080:color=magenta@1.0:t=fill,`
-        + `drawbox=x=${1920 - margin}:y=0:w=${margin}:h=1080:color=cyan@1.0:t=fill`,
-      '-frames:v', '1', '-q:v', '3', '-f', 'mjpeg', 'pipe:1',
-    ], { input: registered, maxBuffer: 64 * 1024 * 1024 });
+        + `drawbox=x=${1920 - margin}:y=0:w=${margin}:h=1080:color=cyan@1.0:t=fill`
+        + (HD_COUNTER ? `,${counterBand()}` : ''),
+      '-frames:v', String(count), '-q:v', '3', '-f', 'mjpeg', 'pipe:1',
+    ], { input: registered, maxBuffer: count * 64 * 1024 * 1024 }));
   } catch (err) {
     process.stderr.write(`[fake-grabber] cannot build the HD fixture frame: ${err.message}\n`);
     process.exit(1);
   }
-  process.stderr.write(`[fake-grabber] HD fixture ready: ${hdFrame.length} bytes, `
-    + `${margin}px magenta left margin and cyan right\n`);
+  if (hdFrames.length !== count) {
+    process.stderr.write(`[fake-grabber] ffmpeg wrote ${hdFrames.length} HD frames where ${count} were asked for\n`);
+    process.exit(1);
+  }
+  process.stderr.write(`[fake-grabber] HD fixture ready: ${hdFrames[0].length} bytes, `
+    + `${margin}px magenta left margin and cyan right`
+    + (HD_COUNTER ? `, ${count} frames numbered in the code band\n` : '\n'));
 }
 
 // What the grabber would clip at, so the fixture quantises against the range a real one would send.
@@ -282,10 +333,11 @@ const encode = () => {
 };
 
 const encodeHd = () => {
-  const payload = Buffer.alloc(8 + hdFrame.length);
+  const jpeg = hdFrames[n % hdFrames.length];
+  const payload = Buffer.alloc(8 + jpeg.length);
   payload.writeBigUInt64LE(BigInt(origin + Math.round((n * 1000) / FPS)), 0);
-  hdFrame.copy(payload, 8);
-  note(TYPE_COLOR, payload, hdFrame);
+  jpeg.copy(payload, 8);
+  note(TYPE_COLOR, payload, jpeg);
   return encodeMessage(TYPE_COLOR, payload);
 };
 
@@ -304,7 +356,7 @@ const emit = () => {
   const parts = [encode()];
   // `key on` implies the colour encode, the way the real grabber's does: type 3 flows whenever
   // type 4 does, whether or not `hd-color` asked for it separately.
-  if ((hdOn || keyOn) && hdFrame) parts.push(encodeHd());
+  if ((hdOn || keyOn) && hdFrames) parts.push(encodeHd());
   // After the colour it belongs to, because the server pairs a type 4 with the colour frame it is
   // holding when the type 4 lands - and both carry the same stamp.
   if (keyOn && keyFrame) parts.push(encodeKey());

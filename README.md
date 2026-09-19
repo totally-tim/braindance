@@ -17,7 +17,7 @@ commitment. Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 ## What you need
 
 - **A Kinect v2.** Without one you can still replay a capture and work on the browser side.
-- **Node 18.15 or newer.**
+- **Node 26 or newer.**
 - **macOS on Apple Silicon, or Debian / Raspberry Pi OS** for a capture node.
 - **ffmpeg** for video out, expected at `/opt/homebrew/bin/ffmpeg`. Set `FFMPEG=` to override.
 
@@ -85,8 +85,10 @@ carries the project, the export and the OBS status, and is the same on every sur
 
 The **Effects** tab's preset picker holds the twelve shipped looks. Pick one to apply it.
 Shipped presets cannot be overwritten. **save** writes your own to `presets/`, and **export**
-and **import** move presets between machines as JSON. Every slider underneath stays
-adjustable, and a changed row grows a **↺** that resets just that one.
+and **import** move presets between machines as JSON. To put one clip's look on another clip,
+select the first, press **copy look** in the clip controls, then select the other and press
+**paste look**. Every slider underneath stays adjustable, and a changed row grows a **↺** that
+resets just that one.
 [Presets](docs/reference.md#presets) lists the twelve.
 
 ![The same surface with the Effects tab open. The Preset picker is expanded over the
@@ -189,6 +191,8 @@ foot.](media/export.png)
 | PNG sequence | one file per frame in a directory | compositing |
 
 The render runs in the page and lands in its own directory under `exports/` on the server.
+LibreWolf, and Firefox with `privacy.resistFingerprinting` on, refuse an export larger than 2048
+pixels on a side. Export those from another browser.
 **save a copy…** puts the file anywhere through the browser's file picker. It is disabled in a
 browser without one, and for a PNG sequence, which is a directory.
 

@@ -106,6 +106,10 @@ the preset. This makes partial presets agree across existing and newly connected
 | `/program` | `web/index.html` | the program output, which OBS opens as a browser source |
 | `/key` | `web/key.html` | the colour camera with the room cut away on depth, which OBS opens as a browser source |
 
+**`/camera.mjpg` serves the grabber's colour JPEG byte for byte, and the route takes no
+options.** A processed webcam, mirrored, cropped or keyed, is a GPU page that draws the colour
+frame the way `/key` does.
+
 **The recorder** waits for the sensor's hello, then streams frames to disk in the wire's own
 framing, so a capture holds the type 1 and type 2 messages as the grabber framed them, and the type
 3 colour camera messages when colour is on. While armed it asks the grabber for the colour camera
@@ -133,7 +137,8 @@ unless the browser is on the server's machine, and refused for the take being re
 file manager would stat and index as the recorder writes it.
 
 **The editor** keyframes the camera on its own track and the look on others. Seeking to a frame
-and playing to it produce the same image, which `tools/timeline-check.mjs` proves.
+and playing to it produce the same image, which `tools/timeline-check.mjs` proves. A seek re-plans
+for as long as the clip moves under its fetch, and either lands where it was asked or rejects.
 
 **The render queue** produces video from finished edits. A job is a self-contained project body
 plus the captures it names and an output spec, claimed by a worker pinned to the renderer class it
@@ -422,12 +427,20 @@ guards take ids, which nothing types, and allows no space. Document names get
 name joins to, up to `MAX_DOCUMENT_NAME_BYTES`.
 
 **A project shows a picture, and dragging it walks the cut.** The listing hands the whole document
-body over, so only frames are fetched. The finger moves through program time: the clip covering
-that second is found by its `start` and `length`, its `speed` and `sourceStart` map it into source
-time, and the skim changes capture at a cut. Nothing here holds the grade, the effects or the
-camera, so the skim is raw geometry. `web/take-draw.js` draws it — a take, a canvas and an index
-in, a frame out, the capture free to change between draws — and the library page and the clip
-picker are its other callers.
+body over, so only frames and each take's stamps are fetched. The finger moves through program
+time: the clip covering that second is found by its `start` and `length`, its `speed` and
+`sourceStart` map it into source time, and the skim changes capture at a cut. Nothing here holds
+the grade, the effects or the camera, so the skim is raw geometry. `web/take-draw.js` draws it — a
+take, a canvas and a source second or a frame index in, a frame out, the capture free to change
+between draws — and the library page and the clip picker are its other callers.
+
+**A source second finds its frame through the take's stamps, on every surface.** A take's frames
+are unevenly spaced wherever the link dropped some, so the skim reads the stamps from the take's
+index, or from the node's copy through `/library/remote-index/:id`, and resolves a second with
+`frameAtOrBefore`, the search the editor's bracket runs. A mark lands on one frame whichever
+surface pressed it. The bar under a skim is the take's time, so a tick and the playhead stopped on
+it agree. A skim moves only once it has the stamps; a take whose stamps do not arrive stays on its
+first frame, and the library viewer draws its marks as labels and says why.
 
 **A project whose footage is not on this machine says so on its row, and the control goes to the
 library.** The loader refuses a document naming a take no local capture hashes, so reclaiming one
@@ -443,8 +456,9 @@ open and this tab's last change did not land.
 ## Surface memory
 
 A ray landing on a different surface between frames is a death and a birth, and teleporting the
-point is the loudest artifact in the image. A ping-pong float target in `web/surface-memory.js`
-remembers where each ray was and how long ago it swapped.
+point is the loudest artifact in the image. A ping-pong target in `web/surface-memory.js`
+remembers where each ray was and how long ago it swapped. It holds float, or half-float where float
+does not render, and **Render targets** below says what happens when neither does.
 
 - **`fade`** cross-fades the transition, the new point ramping in as the old one thins out. 120ms
   by default, and the correctness half.
@@ -455,6 +469,36 @@ Both are in milliseconds, so a better frame rate does not shorten the look. `MAX
 seconds and `refuseAgeCeiling` refuses a fade and wake asking for more, because a frame depending
 on more history than the memory holds is one no pre-roll reproduces. At zero the ghost geometry
 leaves the draw range and the plain 217,088-point draw is restored.
+
+## Render targets
+
+Every offscreen target the viewer draws into takes its pixel type and its largest size from one
+decision in `web/render-targets.js`. `renderTargetCaps` makes it the first time a target is
+allocated: it builds a 1x1 framebuffer on float, half-float and 8-bit and keeps the types that
+complete. The largest edge is the smaller of `MAX_TEXTURE_SIZE` and `MAX_RENDERBUFFER_SIZE`,
+because a post-chain target is a colour texture and a depth renderbuffer. A type is proved on a
+framebuffer and not read off extension names, because Firefox renders half-float through
+`EXT_color_buffer_float` and never lists `EXT_color_buffer_half_float`.
+
+- **The post chain asks for half-float and takes 8-bit where half-float does not render.**
+  `buildPostChain` hands the answer to the composer's two targets, the afterimage's history, the
+  mosh's history and every bloom level, which three.js would otherwise build as half-float without
+  asking. Where not even 8-bit renders, `chainType` is null, the viewer draws straight to the
+  canvas, and the warning chip in the application bar says that trails, bloom and the grade are off.
+- **The surface memory asks for float, then half-float, and nothing below.** Its channels hold
+  millimetres and seconds, which 8 bits cannot. Below half-float the memory is off: the cloud reads
+  a still state in which every ray has settled and none sheds a ghost, and the chip says that ghost
+  and wake are off.
+- **The drawing buffer is held to the largest target.** `resize` caps the pixel ratio so that the
+  buffer and every chain target fit. Firefox's `privacy.resistFingerprinting`, which LibreWolf
+  turns on by default, holds both limits at 2048, so any stage wider than 2048 device pixels meets
+  the cap. The canvas is not held to the limit, so an allocation past it fails only for the chain: a
+  look that skips the chain draws, and a look through it draws black.
+- **An export is refused, not capped.** Its size is the deliverable's, so `exportClip` refuses
+  one larger than the limit before it starts and names the limit.
+- **`/program` is capped, not refused.** It is a live source with no bar, so
+  `programOutDrawSize` scales its whole frame down to the limit and its readout names both
+  sizes, as in `3840x2160 capped to 2048x1152`.
 
 ## Frame interpolation
 

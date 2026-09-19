@@ -274,15 +274,9 @@ Only Blackwall is comparable across the two chains. Every other bloom-bearing lo
 duotone whose ramp width is in metres, so `ember` and `tearline` differ by 5.17% and 5.16% with
 the glow off, and `voxel` carries the glyph field's exposure regrade on top.
 
-`export-check` judges its two resolution-independence rows with bloom taken out, because the build
-they are pinned against imports `UnrealBloomPass` and always will. Isolated at 960x600, Blackwall
-at `bloom` 0.5 reads 7.1614 here against 17.3797 there — a ratio of 0.41205 and a worst tile of
-45.649 — where `bloom` 0 reads 5.0925 against 5.0581, 1.00679 and 0.337. The tool prints the
-bloom-up ratio beside the judged one on every run, and `docs/instruments.md` has the case file.
-
-No shipped row moves with `BLOOM_LEVELS`, so the level count has no picture control, and both
-tools build their earlier arm by serving `git show <rev>:web/main.js` into a second page load, so
-a look-affecting change here is argued from the rows it moves and never from a re-baseline.
+No shipped row moves with `BLOOM_LEVELS`, so the level count has no picture control. A
+look-affecting change here is argued from the rows it moves, and from `export-check
+--before-url` against a server running the commit before it, never from a re-baseline.
 
 ### Lens scaling and brightness
 
@@ -299,8 +293,7 @@ luminance ratios are:
 | recorded `2026-08-12-take1`, `lens-points` | 1.0037 | 0.9149 on `194ae972` |
 | recorded `2026-08-12-take1`, `lens-splat` | 1.0004 | 0.5459 on `194ae972` |
 
-The synthetic runs retain ten fixture failures and the recorded runs retain the crop-culling
-failure. `lens-absolute` fails the two ordinary-point rows; `vsize-lensed` fails only the additive
+`lens-absolute` fails the two ordinary-point rows; `vsize-lensed` fails only the additive
 row; `glyph-base-lens-absolute` fails only the glyph row. `splat-large`, with one accurate frame
 at 960x600 and 1920x1200 on warm synthetic pages, reads a coarse difference of 0.287/255 and a
 brightness ratio of 1.0001, against 17.567 and 0.6267 with `vsize-framebuffer`.
@@ -409,10 +402,42 @@ multiply against `streak.angle`, so each tap carries arithmetic these numbers le
 
 Per rendered frame it is enabled for, `web/mosh-pass.js` costs **two full-screen draws** — the
 mosh program into one target and a copy out of it — against the grade's one and bloom's ten. Its
-memory is two `HalfFloatType` RGBA targets at the drawing buffer's size, eight bytes a pixel each:
+memory is two RGBA targets at the drawing buffer's size in the chain's pixel type, which is
+half-float wherever it renders, eight bytes a pixel each:
 **33.2 MB at 1920x1080 and 132.7 MB at 3840x2160**. Both are allocated whenever the chain exists
 whether the pass is switched on or off, so a build nobody has raised the smear on still holds
 them. Its time is not measured; see [Not measured](#not-measured).
+
+## The 8-bit post chain
+
+A context that renders neither float nor half-float runs the post chain on 8-bit targets. That
+moves every look drawn through the chain, and it moves two of them a long way. The chain stores
+linear light, so 8 bits crush the darks and clip anything above 1.0 before the output pass tone-maps
+it. The figures below compare each shipped preset's half-float chain with its 8-bit chain on the
+same machine, with the surface memory at float in both arms.
+
+| preset | mean abs diff /255 | max | pixels off by >4 | pixels off by >16 | mean luma, half → 8-bit | distinct colours, half → 8-bit |
+| --- | --- | --- | --- | --- | --- | --- |
+| cascade | 18.63 | 213 | 46.9% | 46.4% | 78.3 → 54.6 | 17,337 → 34,503 |
+| voxel | 2.96 | 118 | 17.2% | 15.7% | 3.33 → 1.63 | 29,237 → 6,991 |
+| blackwall | 0.45 | 58 | 8.0% | 0.2% | 8.73 → 8.97 | 74,313 → 14,706 |
+| rift | 0.28 | 39 | 4.7% | 0.0% | 4.62 → 4.78 | 6,680 → 817 |
+| updraft | 0.28 | 41 | 4.5% | 0.0% | 4.68 → 4.82 | 6,680 → 830 |
+| ember | 0.21 | 43 | 3.8% | 0.0% | 3.05 → 3.14 | 5,947 → 643 |
+| tearline | 0.15 | 40 | 2.1% | 0.0% | 2.30 → 2.24 | 9,824 → 3,722 |
+| grille | 0.12 | 41 | 1.6% | 0.0% | 2.47 → 2.41 | 4,089 → 1,675 |
+
+Cascade loses 30% of its mean luminance and voxel 51%. The other six keep their brightness within
+4% but lose 59% to 89% of their distinct colours, which is the banding in the bloom and the trails.
+The four direct presets do not use the chain and are identical in both arms.
+
+Method: Playwright 1.62's full Chromium 151 on ANGLE Metal, Apple M2 Max, a 1390x782 buffer at a
+device pixel ratio of 1, and the 8-bit arm made by serving `web/post-chain.js` with `chainType`
+pinned to 8-bit.
+The input is a planted 8-frame leaning plane (1100 to 3200 mm, 200 ms apart), not a capture. Each
+preset is read back at 0.15, 0.7 and 1.3 s after a reset, and the four renders per preset are
+interleaved half, 8-bit, half, 8-bit. Each arm reproduced its own bytes exactly. No warmup is
+discarded because nothing in these renders is timed.
 
 ## The grabber, the wire and the library
 
