@@ -6,11 +6,26 @@ index of which tool proves what. `docs/instruments.md` carries the method behind
 
 ## Read the count, not the code
 
-Most tools print an assertion count and a failed count, and that pair is the verdict. Five do
-not: `determinism-check` prints `PASS` or `FAIL` alone, `index-check` and `registry-check` print
-`PASS` or `FAIL (n)` with the failed count only, `release-gate-check` prints the failed count
-alone, and `syntax-check` counts files, not assertions. A run with zero failed assertions and a non-zero exit is a crash to investigate, not
-a catch to record.
+Most tools print an assertion count and a failed count, `[tool] N assertions, M failed`, once they
+reach their verdict, and that pair is the verdict. Five do not: `determinism-check` prints `PASS`
+or `FAIL` alone, `index-check` and `registry-check` print `PASS` or `FAIL (n)` with the failed
+count only, `cli-check` prints `N passed, M failed`, and `syntax-check` counts files, not
+assertions. A run with zero failed assertions and a non-zero exit is a crash to investigate, not a
+catch to record.
+
+`tools/mutation-verdict.mjs` holds the two readings of a tool's run, over one count. `verdictOf`
+reads a mutation run: `sweep-all` grades every mutation with it, and CI runs its mutations through
+`sweep-all`. `runVerdictOf` reads a run with nothing mutated, and `suite` reads every tool with it:
+**FAIL** and **PASS** are a finished run with and without a failed assertion, none failed on exit 1
+is **READ THE LOG**, a crash or a printed miss rather than a pass, and **DID NOT RUN** is as below.
+A mutation run is **CAUGHT** when the tool printed its count line, exited 0 or 1, and at least one
+assertion failed; **NOT CAUGHT** when it finished with none failed, or printed `NOT CAUGHT` because
+a required row stayed green; and **DID NOT RUN** otherwise: no count line, exit 2, or killed. A
+`FAIL` row printed on the way to a crash is not a catch, so a tool that crashes after its rows
+fired exits 2 or dies without its count line, never with the crash counted as an assertion. For
+the tools with no count line both readings read what they print once they finish instead:
+`cli-check`'s tally, the unit tests' `tests` and `fail` summary, and a verdict line alone, whose
+total is the tool's `PASS` and `FAIL` rows. A row never decides a verdict.
 
 The tools disagree about what a caught mutation exits. Four exit **0** on a catch and 1 on a miss
 — `registry-check`, `vendor-check`, `registration-check` and `release-gate-check` — so anything
@@ -27,14 +42,14 @@ Per tool, read from the source:
 | `index-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no 2 GiB fixture, a stale anchor, a crash |
 | `registry-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: a stale anchor, a crash, no browser, a `--before-url` that is `--url` |
 | `timeline-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `DID NOT RUN`: a take under 12s |
-| `preview-check` | pass, or a **catch** | a failed assertion, a crash, or a miss | an unknown `--mutate` name |
-| `keyframe-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or the page stopped answering | `DID NOT RUN`: a take under 24s |
+| `preview-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: a crash, or an unknown `--mutate` name |
+| `keyframe-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `DID NOT RUN`: a take under 24s, or the page stopped answering |
 | `export-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or a crash (it has no crash handler) | `DID NOT RUN`: a mutation the page never requested, a `--before-url` that is `--url` or cannot be compared |
 | `editor-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a take under 32s, a stale anchor |
-| `library-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `PASS WITH CLAIMS UNPROVEN`, or a held port |
+| `library-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `PASS WITH CLAIMS UNPROVEN`, a held port, or `DID NOT RUN`: a crash |
 | `boot-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8391 held, a crash |
 | `monitor-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8341 held, a crash |
-| `sensor-view-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no sensor hello, a stale anchor, no browser |
+| `sensor-view-check` | pass | a failed assertion, a catch, or a miss | `UNTESTED`: no sensor hello; `DID NOT RUN`: a stale anchor, no browser |
 | `level-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8377 held, no GPU browser |
 | `vcam-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`, or section 6 unproven without an IPv4 |
 | `guard-check` | pass | a failed assertion, a catch, or a miss | `PASS, with claims untested here`: no non-internal IPv4 |
@@ -66,7 +81,8 @@ Every tool answers a name it does not declare by listing the whole set it does, 
 `unknown mutation __enumerate__ - have …` and exits without running. The tools that check their
 fixture, server or browser first (`timeline-check`, `keyframe-check`, `export-check`,
 `sensor-view-check`, `editor-check`) need those in place before they reach the name.
-`tools/sweep-all.mjs` reads its inventory out of exactly that line.
+`tools/sweep-all.mjs` reads its inventory out of exactly that line, in any of its three shapes:
+`- have …`, `; have: …` and `this tool knows …`.
 
 A mutated run prints the expected failure row when its entry carries a `fails:` field.
 For other entries, read the catch from the assertions that fired.
@@ -75,6 +91,7 @@ Four tables are too large to reproduce here — `editor-check` declares 202, `li
 `registry-check` 60 and `effect-check` 42. Their sections give the count and the enumerate
 command prints the names.
 
+<<<<<<< HEAD
 ## Comparing against another build
 
 `export-check` and `registry-check` take `--before-url`, a server running another build, and
@@ -93,6 +110,83 @@ Both tools exit 2 when `--before-url` is `--url`. `export-check` also exits 2 wh
 hold the take under different hashes, or when the other build publishes no `setOutputSize`, which
 it does from `d9b5d9e` on. `registry-check` names each reading by its registry name, so a build
 from before the dotted names fails those rows and names what it lacks.
+||||||| 4dad1c0
+=======
+## The sweep
+
+```
+node tools/sweep-all.mjs --tools syntax,module --jobs 4
+node tools/sweep-all.mjs                      # the five browser tools, one at a time
+```
+
+`sweep-all` runs every mutation each named tool declares and grades each run with
+`mutation-verdict.mjs`. A run that did not run is tried three times in all. It writes one log per
+run and `SUMMARY.txt` under `--out` (default `.sweep-all/`), and exits 0 only when every mutation
+was caught. With no `--tools` it sweeps `library`, `timeline`, `keyframe`, `export` and `preview`,
+which take hours and a GPU browser; all but `library` need a server at `SWEEP_URL` (default
+`http://localhost:8080`), and `timeline` and `keyframe` get the take `SWEEP_TAKE` names (default
+`fixture-1g`).
+
+`--jobs` above 1 runs mutations side by side, and the sweep refuses it unless every named tool is
+one of `syntax`, `module`, `cpp`, `hd-encoder` and `release-gate`: those apply a mutation in memory
+or in a private temp copy and bind no port. Every other tool stages its mutation where a second
+run would read it.
+
+## `suite`
+
+Every tool that needs no sensor and no native build, once each, with one verdict line per tool.
+
+```
+node tools/suite.mjs
+node tools/suite.mjs --port 8431 --logs /tmp/suite-logs
+```
+
+| needs | |
+| --- | --- |
+| ports | every port the tools below bind, and 8431 (`--port`) for the server it starts |
+| fixtures | none: it builds the ones that are missing |
+| browser | a GPU browser |
+| binaries | a C++ compiler and turbojpeg's headers, ffmpeg and ffprobe, and the npm registry |
+
+It builds the missing fixtures first, each with the tool that makes it: `captures/sample.knct`,
+`fixture-1g` (8 loops), `fixture-large` (18 loops, past 2 GiB, for `index-check`) and
+`fixture-2x` (2 loops), which makes the four openable takes `editor-check` needs. Then three
+stages:
+
+1. `syntax-check`, `module-check`, `cpp-check`, the unit tests, `release-gate-check` and
+   `vendor-check`, side by side.
+2. The nine tools that start their own servers on ports no other tool binds — `guard`, `boot`,
+   `monitor`, `level`, `vcam`, `cli`, `jobs`, `effect` and `library` — all at once.
+3. A server of its own on `--port`, with the fake grabber and its stores in a temporary
+   directory, and against it, one after another, `registry`, `timeline`, `keyframe`, `export`,
+   `editor`, `preview`, `effect-conformance`, `determinism`, `sensor-view` and `index`. The tools
+   that need a long take get `fixture-1g`. The server is stopped at the end.
+
+Each line carries the verdict, failed/total assertions and seconds, and for a run that did not
+finish, the reason. A tool whose port already answers is not started, and its line names the port.
+Each tool's whole output is kept in the log directory, `--logs` or a new one under the system
+temporary directory, which the first and the last line name.
+
+Every run is read by `runVerdictOf` in `tools/mutation-verdict.mjs`: PASS, FAIL, READ THE LOG for
+none failed on exit 1, or DID NOT RUN. `determinism-check` prints no rows, so its total reads `?`.
+`vendor-check`'s exit 2 with `PASS on the source, with the artifact untested here` is its full
+answer on a machine with no `vendor/prefix`, as CI takes it, so it reads as a finished run and its
+line says so. Every other exit 2 is DID NOT RUN, `sensor-view-check`'s without a sensor among
+them. The suite exits 0 when every tool passed, 1 when any failed or read READ THE LOG, and 2 when
+the rest passed and any did not run. The known reds each tool's section names come through as
+they are.
+
+Stage 2 lasts as long as `library-check`, and `editor-check` and `preview-check` are most of stage
+3.
+
+It leaves out `hd-encoder-check`, `decoder-check` and `registration-check`, which need a native
+build, a built library or a corpus, and `sweep-all`, which runs mutations. A `*-check.mjs` it
+neither runs nor leaves out by name comes back DID NOT RUN, so a new tool is placed in a stage or
+named as left out.
+
+Stage 2 puts nine tools and their browsers on the machine at once. Two suites, or a suite beside
+one of its own tools, collide on the fixed ports, so run one at a time.
+>>>>>>> origin/main
 
 ## `determinism-check`
 
@@ -264,6 +358,12 @@ assertions. That run did not run; re-run it, and read nothing off its count.
   document composites differently depending on how its clips are listed.
 - **`take-not-shared`** — every clip opens its own copy of its take, so two clips of one take
   carry two indexes and two caches.
+- **`seek-stands-down`** — a seek overtaken twice answers null and leaves the playhead where it
+  was. Section 1e's landing rows are the catch.
+- **`stand-down-counts-as-landed`** — the same stand-down, with any answer counted as a landing,
+  so `settled()` calls it idle. Section 1e's agreement rows are the catch.
+- **`settled-ignores-owed`** — `settled()` stops asking whether the last seek landed, and calls a
+  seek that rejected idle.
 
 ## `preview-check`
 
@@ -663,12 +763,12 @@ node tools/sensor-view-check.mjs --url http://localhost:8080
 | --- | --- |
 | server | `--url`, default `http://localhost:8080`, plus port 8131 for the section with its own capture |
 | fixture | a capture in `captures/` for the private server on 8131; it throws naming the path without one |
-| sensor | the record arm needs one; without it the tool exits 2 |
+| sensor | the record arm needs a sensor hello, which `tools/fake-grabber.mjs` also sends |
 | browser | a GPU browser |
 
-Without a sensor the record arm gets no hello and the tool exits 2, which is the sensorless
-baseline. Arm C is anamorphic, so `fx` and `fy` differ and a substitution
-between them is visible.
+With no grabber the record arm gets no hello, its seven rows go unasked, and the tool exits 2
+`UNTESTED`, which is the sensorless baseline. Arm C is anamorphic, so `fx` and `fy` differ and a
+substitution between them is visible.
 
 - **`fov-hardcoded`** — the vertical angle becomes a constant, which is right for this rig, so
   only the synthetic arms see it.
@@ -679,6 +779,9 @@ between them is visible.
 - **`no-repaint`** — the button moves the camera and asks for no repaint.
 - **`sensor-view-keys-camera`** — the button writes a camera key as well as moving the view, so
   looking at the intrinsics becomes an edit to the clip.
+- **`store-answers-a-page`** — the projects store read at `/projects`, the projects page, instead
+  of its listing at `/projects/all`. Only the projects store row fails; a store answering anything
+  but JSON is a failed row, not a run that stops.
 
 ## `level-check`
 
@@ -856,7 +959,10 @@ server that refused every upgrade fails.
 - **`listen-any-host`** — the default bind becomes `0.0.0.0`.
 - **`origin-ignores-scheme`** — a parsed origin host compared against a raw Host string.
 - **`host-parsed-loosely`** — the authority-shape check goes, which is the hole the scheme fix
-  opened.
+  opened. It reddens all four malformed-Host rows, one per spelling.
+- **`host-accepts-a-duplicate`** — a request carrying two `Host` lines is no longer refused. Node's
+  parser keeps the first and answers 101, so the duplicate row fails and its single-`Host` twin
+  stays green.
 - **`host-accepts-a-name`** — the rebinding rule compares the two headers against each other,
   which a rebound browser satisfies by construction.
 - **`origin-allows-null`** — the literal string `null`, which a `file://` page and a sandboxed
@@ -1044,7 +1150,8 @@ with no dot in front of it, reads as a use of any import of the same name. `gpuT
 ## `syntax-check`
 
 Every shipped JavaScript file parses, the constants the two languages cannot share agree, the
-citations resolve, and every tool is named in `CLAUDE.md`.
+citations resolve, every tool is named in `CLAUDE.md`, and every `tools/*-check.mjs` is either run
+by `.github/workflows/checks.yml` or named on one of its `# not-run:` lines, never both.
 
 ```
 node tools/syntax-check.mjs
@@ -1083,6 +1190,8 @@ name.
   bullet naming one nothing declares.
 - **`doc-line-ends-in-whitespace`** — a prose line ending in a space, which is invisible on the
   page and invisible to a clean `git diff --check`.
+- **`ci-forgets-a-tool`** — a check tool the workflow neither runs nor lists as not run.
+- **`ci-runs-a-tool-it-lists-as-not-run`** — a tool on both sides of the workflow's ledger.
 
 ## `cpp-check`
 
@@ -1221,8 +1330,14 @@ node tools/vendor-check.mjs
 
 Each declared edit pins the blob hash the patched file must have, because "differs from upstream"
 is not "contains our change". A declared edit that has quietly reverted fails too: that is what a
-careless re-vendor looks like. Its mutations are delivered as functions over a staged tree rather
-than as anchored text.
+careless re-vendor looks like. The other rows take `third_party/libfreenect2.manifest` as
+upstream, so the last row checks the manifest itself: its lines rebuild into git tree objects, and
+the root must equal the tree of upstream's v0.2.1 commit, a constant read from upstream and never
+from the tool's own output. That reaches every path, mode and hash in the manifest, and not the
+permission bits on disk. Its mutations are delivered as functions over a staged copy of the tree,
+the oracle and the manifest rather than as anchored text. Every mutation needs `vendor/prefix` as
+well: without one each exits 2, `DID NOT RUN`, the source mutations included, which is why CI runs
+this tool unmutated only.
 
 - **`undeclared-edit`** — an edit nothing declares.
 - **`revert-local-edit`** — a declared edit quietly put back to upstream.
@@ -1231,6 +1346,8 @@ than as anchored text.
 - **`oracle-drift`** — the pristine upstream copy edited, so the comparison is against the wrong
   thing.
 - **`stale-prefix`** — the artifact rows pointed at a prefix from an earlier build.
+- **`manifest-relabel`** — a file edited and its manifest line rewritten to the new hash. Only the
+  manifest row fails.
 
 ## `registration-check`
 
@@ -1312,9 +1429,12 @@ discontinuities:
 
 `tools/fake-grabber.mjs` stands in for the sensor when a tool needs a live stream. It honours
 `--no-color` and `--no-low-light`, rewriting each payload at load so the declared lengths still
-describe it. `--pipeline`, `--color-decoder`, `--log`, `--quality`, `--min-depth` and `--max-depth`
-are accepted and
-ignored, and anything else gets one line on stderr and is not refused.
+describe it. `--hd` sends one 1920x1080 colour frame over and over; with `--hd-counter` frame n
+carries n mod 256 as eight black and white squares below the scene, most significant bit on the
+left, over a row holding the complement, so a reader can name the frame it holds.
+`test/fake-grabber-counter.test.mjs` decodes them at 480x270. `--pipeline`, `--color-decoder`,
+`--log`, `--quality`, `--min-depth` and `--max-depth` are accepted and ignored, and anything else
+gets one line on stderr and is not refused.
 
 ## The supply-chain gate
 
@@ -1328,7 +1448,7 @@ node tools/release-gate-check.mjs
 | needs | |
 | --- | --- |
 | network | the npm registry |
-| binaries | npm; CI pins `npm@12.0.2` in the gate job |
+| binaries | npm 11 or newer; Node 26 bundles one |
 
 The setting is `min-release-age=2` in `.npmrc`, and **the unit is days as a plain integer**. Other
 package managers in this family take minutes or seconds, which is how a wrong number gets written

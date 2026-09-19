@@ -15,7 +15,7 @@
   "keywords": [],
   "type": "module",
   "engines": {
-    "node": ">=18.15.0"
+    "node": ">=26"
   },
   "scripts": {
     "start": "node server/index.js",

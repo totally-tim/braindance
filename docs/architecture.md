@@ -106,6 +106,10 @@ the preset. This makes partial presets agree across existing and newly connected
 | `/program` | `web/index.html` | the program output, which OBS opens as a browser source |
 | `/key` | `web/key.html` | the colour camera with the room cut away on depth, which OBS opens as a browser source |
 
+**`/camera.mjpg` serves the grabber's colour JPEG byte for byte, and the route takes no
+options.** A processed webcam, mirrored, cropped or keyed, is a GPU page that draws the colour
+frame the way `/key` does.
+
 **The recorder** waits for the sensor's hello, then streams frames to disk in the wire's own
 framing, so a capture holds the type 1 and type 2 messages as the grabber framed them. The one edit
 is the hello: `stampHello` rewrites `startedAt` to when this take began before writing it, and
@@ -128,7 +132,8 @@ unless the browser is on the server's machine, and refused for the take being re
 file manager would stat and index as the recorder writes it.
 
 **The editor** keyframes the camera on its own track and the look on others. Seeking to a frame
-and playing to it produce the same image, which `tools/timeline-check.mjs` proves.
+and playing to it produce the same image, which `tools/timeline-check.mjs` proves. A seek re-plans
+for as long as the clip moves under its fetch, and either lands where it was asked or rejects.
 
 **The render queue** produces video from finished edits. A job is a self-contained project body
 plus the captures it names and an output spec, claimed by a worker pinned to the renderer class it
@@ -417,12 +422,20 @@ guards take ids, which nothing types, and allows no space. Document names get
 name joins to, up to `MAX_DOCUMENT_NAME_BYTES`.
 
 **A project shows a picture, and dragging it walks the cut.** The listing hands the whole document
-body over, so only frames are fetched. The finger moves through program time: the clip covering
-that second is found by its `start` and `length`, its `speed` and `sourceStart` map it into source
-time, and the skim changes capture at a cut. Nothing here holds the grade, the effects or the
-camera, so the skim is raw geometry. `web/take-draw.js` draws it — a take, a canvas and an index
-in, a frame out, the capture free to change between draws — and the library page and the clip
-picker are its other callers.
+body over, so only frames and each take's stamps are fetched. The finger moves through program
+time: the clip covering that second is found by its `start` and `length`, its `speed` and
+`sourceStart` map it into source time, and the skim changes capture at a cut. Nothing here holds
+the grade, the effects or the camera, so the skim is raw geometry. `web/take-draw.js` draws it — a
+take, a canvas and a source second or a frame index in, a frame out, the capture free to change
+between draws — and the library page and the clip picker are its other callers.
+
+**A source second finds its frame through the take's stamps, on every surface.** A take's frames
+are unevenly spaced wherever the link dropped some, so the skim reads the stamps from the take's
+index, or from the node's copy through `/library/remote-index/:id`, and resolves a second with
+`frameAtOrBefore`, the search the editor's bracket runs. A mark lands on one frame whichever
+surface pressed it. The bar under a skim is the take's time, so a tick and the playhead stopped on
+it agree. A skim moves only once it has the stamps; a take whose stamps do not arrive stays on its
+first frame, and the library viewer draws its marks as labels and says why.
 
 **A project whose footage is not on this machine says so on its row, and the control goes to the
 library.** The loader refuses a document naming a take no local capture hashes, so reclaiming one
