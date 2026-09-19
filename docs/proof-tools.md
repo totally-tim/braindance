@@ -72,7 +72,7 @@ fixture, server or browser first (`timeline-check`, `keyframe-check`, `export-ch
 A mutated run prints the expected failure row when its entry carries a `fails:` field.
 For other entries, read the catch from the assertions that fired.
 
-Four tables are too large to reproduce here — `editor-check` declares 202, `library-check` 121,
+Four tables are too large to reproduce here — `editor-check` declares 202, `library-check` 156,
 `registry-check` 54 and `effect-check` 42. Their sections give the count and the enumerate
 command prints the names.
 
@@ -520,7 +520,15 @@ case, and name themselves in the verdict as unproven on one that does not. The t
 shoots on `+17` and `+18` at once, and the marks-sync section answers as the node from a stub
 inside the check on `+17`.
 
-129 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
+The control sweep runs on its own node and editing machine on `+17` and `+18`. It lists every
+control the library renders, requires a driver for each, and presses each one for the first thing
+the press changes: a tab filters the grid, Rename opens the box on that take, Reveal puts an argv
+line in a recorder, the confirm's Delete removes the file. Every driven control has a
+`dead-<key>` mutation that leaves it rendered and inert and reddens that key's row, and the sweep
+requires the drivers and the `dead-` mutations to name the same controls. A dialog's buttons are
+reached through the control that opens the dialog, so a dead opener reddens their rows as well.
+
+156 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
 
 **Known reds.** Three rows are flaky under machine contention. Two are
 in the marks-on-the-scrubber section and are one race between a seek, `settled()` and the mark's

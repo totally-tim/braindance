@@ -84,6 +84,64 @@ const REVEAL_EDITS = {
 };
 const REVEAL_EDIT = REVEAL_EDITS[process.platform] ?? REVEAL_EDITS.darwin;
 
+// Every control the library renders, keyed as `__library.controls()` keys it, and the edit that
+// leaves it on screen doing nothing. The control sweep drives each key and requires this table and
+// its drivers to name the same keys, so `dead-<key>` is the control that key's row can go red.
+const tabGoesDead = (filter) => ({ file: 'web/library.js', edits: [[
+  "  tab.addEventListener('click', () => { filter = tab.dataset.filter; paint(); });",
+  `  tab.addEventListener('click', () => { if (tab.dataset.filter === '${filter}') return; filter = tab.dataset.filter; paint(); });`,
+]] });
+const DEAD_CONTROLS = {
+  toMenu: { file: 'web/library.html', edits: [['id="toMenu" href="/"', 'id="toMenu" href="#"']] },
+  toProjects: { file: 'web/library.html', edits: [['id="toProjects" href="/projects"', 'id="toProjects" href="#"']] },
+  toLibrary: { file: 'web/library.html', edits: [['id="toLibrary" href="/library"', 'id="toLibrary" href="#"']] },
+  all: tabGoesDead('all'),
+  local: tabGoesDead('local'),
+  remote: tabGoesDead('remote'),
+  both: tabGoesDead('both'),
+  'new-project': { file: 'web/library.js', edits: [[
+    '      run: () => { location.href = `/edit?new=${encodeURIComponent(take.id)}`; },', '      run: () => {},',
+  ]] },
+  download: { file: 'web/library.js', edits: [[
+    '        () => post(`/library/download/${encodeURIComponent(take.id)}`),', '        () => Promise.resolve({}),',
+  ]] },
+  delete: { file: 'web/library.js', edits: [['    run: (host) => askDelete(host, take),', '    run: () => {},']] },
+  more: { file: 'web/library.js', edits: [[
+    "  buildMenu(tile.querySelector('.meta'), more, take, () => tile);",
+    "  buildMenu(tile.querySelector('.meta'), document.createElement('button'), take, () => tile);",
+  ]] },
+  rename: { file: 'web/library.js', edits: [['      run: (tile) => askRename(tile, take),', '      run: () => {},']] },
+  reveal: { file: 'web/library.js', edits: [[
+    '      run: (tile) => run(tile, `showing ${take.id} in ${label}`, () => post(`/library/reveal/${encodeURIComponent(take.id)}`), null, { refresh: false }),',
+    '      run: () => {},',
+  ]] },
+  reclaim: { file: 'web/library.js', edits: [['      run: (tile) => askReclaim(tile, take),', '      run: () => {},']] },
+  vMore: { file: 'web/library.js', edits: [[
+    "  buildMenu(viewer.querySelector('.vhead'), freshMore, take, hostOf);",
+    "  buildMenu(viewer.querySelector('.vhead'), document.createElement('button'), take, hostOf);",
+  ]] },
+  mark: { file: 'web/library.js', edits: [['  paintMarks(vBar, take, (at) => skim.setT(at));', '  paintMarks(vBar, take, () => {});']] },
+  vClose: { file: 'web/library.js', edits: [[
+    "document.getElementById('vClose').addEventListener('click', () => viewer.close());",
+    "document.getElementById('vClose').addEventListener('click', () => {});",
+  ]] },
+  cCancel: { file: 'web/library.js', edits: [[
+    "document.getElementById('cCancel').addEventListener('click', () => dlg.close());",
+    "document.getElementById('cCancel').addEventListener('click', () => {});",
+  ]] },
+  cGo: { file: 'web/library.js', edits: [['  dlg.close();\n  confirmAction?.();\n});', '  dlg.close();\n});']] },
+  rName: { file: 'web/library.js', edits: [[
+    "renameInput.addEventListener('input', validateRename);", '/* dead: nothing listens for typing */',
+  ]] },
+  rCancel: { file: 'web/library.js', edits: [[
+    "document.getElementById('rCancel').addEventListener('click', () => renameDlg.close());",
+    "document.getElementById('rCancel').addEventListener('click', () => {});",
+  ]] },
+  rGo: { file: 'web/library.js', edits: [[
+    "renameGo.addEventListener('click', () => commitRename());", "renameGo.addEventListener('click', () => {});",
+  ]] },
+};
+
 const MUTATIONS = {
   // The library joins on the filename instead of the hash.
   'reconcile-by-filename': { file: 'server/library.js', edits: [[
@@ -886,8 +944,11 @@ const MUTATIONS = {
     '  <a class="appback" id="toMenu" href="/"><span class="arrow">&lt;</span><span>Menu</span></a>',
     '  <!-- mutation: no way back -->',
   ]] },
-  // The falsification control for the enumeration, and the only mutation here that is not a
-  // bug being put back.
+  // One per control the sweep drives, each leaving that control rendered and inert.
+  ...Object.fromEntries(Object.entries(DEAD_CONTROLS).map(([key, spec]) => [`dead-${key}`, {
+    ...spec, fails: `the "${key}" row of the control sweep`,
+  }])),
+  // The falsification control for the enumeration: a control the sweep has no driver for.
   'plant-unswept-menu-item': { file: 'web/library.js', edits: [[
     "      item: 'reclaim',",
     `      item: 'planted',
@@ -3193,28 +3254,6 @@ async function runChecks() {
       await page.waitForFunction('globalThis.__library.viewer.isOpen() === false', null, { timeout: 5000 })
         .catch(() => {});
     }
-
-    await page.evaluate(`globalThis.__library.viewer.open(${JSON.stringify(clipHash2)})`);
-    await page.evaluate('globalThis.__library.viewer.drawn(1)');
-    const DRIVERS = new Set([
-      'toMenu', 'toProjects', 'toLibrary', 'all', 'local', 'remote', 'both',
-      'new-project', 'download', 'delete', 'more',
-      'rename', 'reveal', 'reclaim',
-      'vMore', 'vClose', 'mark',
-      'cCancel', 'cGo', 'rCancel', 'rGo', 'rName',
-    ]);
-    const rendered = await page.evaluate('globalThis.__library.controls()');
-    const unswept = rendered.filter((c) => !DRIVERS.has(c.key));
-    check(unswept.length === 0,
-      `every interactive control the library renders has a driver in this file (${rendered.length} controls)`,
-      unswept.length ? `no driver for ${[...new Set(unswept.map((c) => `${c.where}:${c.key}`))].join(' ')}`
-        : [...new Set(rendered.map((c) => c.key))].join(' '));
-    const present = new Set(rendered.map((c) => c.key));
-    const missing = [...DRIVERS].filter((k) => !present.has(k));
-    check(missing.length === 0,
-      'and every control this file names is one the library still renders',
-      missing.join(' ') || `${present.size} distinct controls on screen`);
-    await page.evaluate('globalThis.__library.viewer.close()');
 
     check(errors.length === 0, 'the library raises no page errors', errors.slice(0, 2).join(' | '));
     await page.close();
@@ -6618,6 +6657,317 @@ async function runChecks() {
     check(reaching.length >= 4 && late.length === 0,
       'and it is bound before anything is awaited, because a response emits close once and a listener attached after the caller left can never fire',
       late.length ? late.join(', ') : `${reaching.length} handlers, all bound ahead of their first await`);
+  }
+
+  console.log('\n[library] every control the library renders is driven, and pressing it does what it says');
+  {
+    // Its own pair of machines, because half of these presses delete, rename or copy a take, and a
+    // driver that asserted only a name would pass a control wired to nothing.
+    await exitedOn(MAC_PORT + 17);
+    await exitedOn(MAC_PORT + 18);
+    const sweepNode = join(WORK, 'sweep-node');
+    const sweepMac = join(WORK, 'sweep-mac');
+    for (const d of [sweepNode, sweepMac]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    // One take per press that changes the library, so no driver reads another's aftermath.
+    const at = (minute) => ({ startedAt: Date.UTC(2026, 7, 1, 10, minute) });
+    writeTake(sweepNode, 'sweep-remote', { frames: 6, ...at(0) });
+    writeTake(sweepNode, 'sweep-both', { frames: 7, ...at(1) });
+    writeTake(sweepMac, 'sweep-both', { frames: 7, ...at(1) });
+    writeTake(sweepMac, 'sweep-marked', { frames: 30, ...at(2) });
+    writeTake(sweepMac, 'sweep-kept', { frames: 5, ...at(3) });
+    writeTake(sweepMac, 'sweep-doomed', { frames: 4, ...at(4) });
+    writeTake(sweepMac, 'sweep-renamed', { frames: 3, ...at(5) });
+    writeFileSync(join(sweepMac, 'sweep-marked.marks.jsonl'),
+      markLine({ id: 's1', sourceMs: 500, label: 'halfway', at: 1000 }));
+    const sweepLog = join(WORK, 'sweep-reveal-argv.log');
+    const sweepRecorder = join(WORK, 'sweep-file-manager.mjs');
+    writeFileSync(sweepRecorder, "import { appendFileSync } from 'node:fs';\n"
+      + `appendFileSync(${JSON.stringify(sweepLog)}, process.argv.slice(2).map((a) => \`\${a}\\n\`).join(''));\n`);
+    rmSync(sweepLog, { force: true });
+
+    const sweepNodeUrl = await startServer(root, ['--captures', sweepNode, '--name', 'sweep-node',
+      '--projects', join(WORK, 'sweep-node-projects'), '--presets', join(WORK, 'sweep-node-presets')], MAC_PORT + 17);
+    const sweepUrl = await startServer(root, ['--captures', sweepMac, '--name', 'sweep-mac',
+      '--node', sweepNodeUrl, '--node-name', 'sweep-node', '--reveal-with', `"${process.execPath}" "${sweepRecorder}"`,
+      '--projects', join(WORK, 'sweep-projects'), '--presets', join(WORK, 'sweep-presets')], MAC_PORT + 18);
+    const { page } = await openPage(browser, libraryPage(sweepUrl));
+    const ready = async () => {
+      await page.waitForFunction('globalThis.__library !== undefined && document.querySelectorAll(".tile").length > 0',
+        null, { timeout: 20000 });
+    };
+    await ready();
+
+    const listing = async () => (await getJson(`${sweepUrl}/library/all`)).takes;
+    const takeCalled = async (id) => (await listing()).find((t) => t.id === id) ?? null;
+    const until = async (test, ms = 15000) => {
+      for (const end = Date.now() + ms; Date.now() < end;) {
+        if (await test()) return true;
+        await new Promise((done) => { setTimeout(done, 150); });
+      }
+      return test();
+    };
+    // A DOM click on the control itself, which runs the listener a press runs and nothing else,
+    // so a dead opener does not stop the control behind it from being reached by the next driver.
+    const press = (selector) => page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return false;
+      el.click();
+      return true;
+    }, selector);
+    const tileSel = (id, rest) => `.tile[data-id="${id}"] ${rest}`;
+    const dialogOpen = (id) => page.evaluate((d) => document.getElementById(d).open, id);
+    // Back to a page with nothing open and every take shown, whatever the last driver left.
+    const settle = async () => {
+      try {
+        await page.evaluate(() => {
+          for (const d of document.querySelectorAll('dialog[open]')) d.close();
+          document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+          globalThis.__library.filter('all');
+        });
+      } catch {
+        await page.goto(libraryPage(sweepUrl), { waitUntil: 'domcontentloaded' });
+        await ready();
+      }
+    };
+    // Pressing a link is a page load, or it is nothing.
+    const follow = async (selector, wantPath) => {
+      await page.evaluate(() => { globalThis.__beforePress = true; });
+      const loaded = page.waitForEvent('load', { timeout: 8000 }).then(() => true, () => false);
+      const pressed = await press(selector);
+      const landed = pressed && await loaded;
+      const path = new URL(page.url()).pathname;
+      const fresh = landed && await page.evaluate(() => globalThis.__beforePress !== true).catch(() => false);
+      const ok = landed && fresh && path === wantPath;
+      await page.goto(libraryPage(sweepUrl), { waitUntil: 'domcontentloaded' });
+      await ready();
+      return { ok, detail: `${pressed ? 'pressed' : 'not found'}, ${landed ? `loaded ${path}` : `no page load, still ${path}`}` };
+    };
+    const filterTo = async (filter) => {
+      await page.evaluate((f) => globalThis.__library.filter(f === 'all' ? 'local' : 'all'), filter);
+      await press(`.tab[data-filter="${filter}"]`);
+      const shown = await page.evaluate(() => globalThis.__library.tiles().map((t) => t.state));
+      const pressedTab = await page.evaluate((f) => document.querySelector(`.tab[data-filter="${f}"]`)
+        .getAttribute('aria-pressed'), filter);
+      const everyState = new Set((await listing()).map((t) => t.state));
+      const ok = pressedTab === 'true' && shown.length > 0 && (filter === 'all'
+        ? shown.length === (await listing()).length && new Set(shown).size === everyState.size
+        : shown.every((s) => s === filter));
+      return { ok, detail: `aria-pressed ${pressedTab}, tiles ${shown.join(' ') || 'none'}` };
+    };
+    const openRename = async (id) => {
+      await press(tileSel(id, '.mi[data-item="rename"]'));
+      return dialogOpen('rename');
+    };
+    const openDelete = async (id) => {
+      await press(tileSel(id, '.act[data-act="delete"]'));
+      return dialogOpen('confirm');
+    };
+    const openViewerOn = async (id) => {
+      const take = await takeCalled(id);
+      await page.evaluate((key) => globalThis.__library.viewer.open(key), take.hash ?? take.id);
+      await page.evaluate('globalThis.__library.viewer.drawn(1)');
+    };
+    const markedPath = join(sweepMac, 'sweep-marked.knct');
+
+    // In the order they run. Each presses its control and reads the first thing a press changes.
+    const DRIVERS = {
+      all: { does: 'shows every take again', run: () => filterTo('all') },
+      local: { does: 'shows only the takes on this machine', run: () => filterTo('local') },
+      remote: { does: 'shows only the takes on the node', run: () => filterTo('remote') },
+      both: { does: 'shows only the takes on both', run: () => filterTo('both') },
+      more: {
+        does: 'opens the tile\'s menu',
+        run: async () => {
+          await press(tileSel('sweep-kept', '.act[data-act="more"]'));
+          const open = await page.evaluate(() => [...document.querySelectorAll('.tile')]
+            .find((t) => t.dataset.id === 'sweep-kept').querySelector('.menu').hidden === false);
+          return { ok: open, detail: open ? 'menu shown' : 'menu still hidden' };
+        },
+      },
+      delete: {
+        does: 'asks to delete that take',
+        run: async () => {
+          const open = await openDelete('sweep-kept');
+          const body = await page.evaluate(() => document.getElementById('cBody').textContent);
+          return { ok: open && body === 'sweep-kept', detail: `confirm ${open ? 'open' : 'shut'}, naming ${body || 'nothing'}` };
+        },
+      },
+      cCancel: {
+        does: 'shuts the confirm and deletes nothing',
+        run: async () => {
+          const opened = await openDelete('sweep-kept');
+          await press('#cCancel');
+          const shut = !(await dialogOpen('confirm'));
+          const kept = existsSync(join(sweepMac, 'sweep-kept.knct'));
+          return { ok: opened && shut && kept, detail: `${opened ? 'opened' : 'never opened'}, ${shut ? 'shut' : 'still open'}, take ${kept ? 'kept' : 'gone'}` };
+        },
+      },
+      cGo: {
+        does: 'deletes the take the confirm names',
+        run: async () => {
+          const opened = await openDelete('sweep-doomed');
+          await press('#cGo');
+          const gone = await until(async () => !existsSync(join(sweepMac, 'sweep-doomed.knct'))
+            && !(await takeCalled('sweep-doomed')));
+          return { ok: opened && gone, detail: `${opened ? 'confirm opened' : 'confirm never opened'}, take ${gone ? 'deleted' : 'still there'}` };
+        },
+      },
+      rename: {
+        does: 'opens the rename box on that take',
+        run: async () => {
+          const open = await openRename('sweep-kept');
+          const value = await page.evaluate(() => document.getElementById('rName').value);
+          return { ok: open && value === 'sweep-kept', detail: `box ${open ? 'open' : 'shut'}, holding ${value || 'nothing'}` };
+        },
+      },
+      rName: {
+        does: 'checks the name as it is typed',
+        run: async () => {
+          const opened = await openRename('sweep-kept');
+          const read = () => page.evaluate(() => ({
+            why: document.getElementById('rWhy').textContent,
+            blocked: document.getElementById('rGo').disabled,
+          }));
+          await page.locator('#rName').fill('not a name!', { timeout: 3000 }).catch(() => {});
+          const bad = await read();
+          await page.locator('#rName').fill('sweep-typed-name', { timeout: 3000 }).catch(() => {});
+          const good = await read();
+          const ok = opened && /letters, digits/.test(bad.why) && bad.blocked && good.why === '' && !good.blocked;
+          return { ok, detail: `${opened ? 'opened' : 'never opened'}; "not a name!" -> ${bad.blocked ? 'blocked' : 'allowed'} "${bad.why.slice(0, 30)}"; a legal name -> ${good.blocked ? 'blocked' : 'allowed'}` };
+        },
+      },
+      rCancel: {
+        does: 'shuts the rename box and renames nothing',
+        run: async () => {
+          const opened = await openRename('sweep-kept');
+          await press('#rCancel');
+          const shut = !(await dialogOpen('rename'));
+          const kept = existsSync(join(sweepMac, 'sweep-kept.knct'));
+          return { ok: opened && shut && kept, detail: `${opened ? 'opened' : 'never opened'}, ${shut ? 'shut' : 'still open'}, name ${kept ? 'kept' : 'changed'}` };
+        },
+      },
+      rGo: {
+        does: 'renames the take to what was typed',
+        run: async () => {
+          const opened = await openRename('sweep-renamed');
+          await page.locator('#rName').fill('sweep-renamed-after', { timeout: 3000 }).catch(() => {});
+          await press('#rGo');
+          const moved = await until(async () => existsSync(join(sweepMac, 'sweep-renamed-after.knct'))
+            && Boolean(await takeCalled('sweep-renamed-after')) && !(await takeCalled('sweep-renamed')));
+          return { ok: opened && moved, detail: `${opened ? 'opened' : 'never opened'}, ${moved ? 'listed under the new name' : 'still under the old name'}` };
+        },
+      },
+      reveal: {
+        does: 'starts the file manager on that take',
+        run: async () => {
+          const wanted = REVEAL[process.platform]?.args(markedPath) ?? [markedPath];
+          const seen = () => (existsSync(sweepLog) ? readFileSync(sweepLog, 'utf8').trim().split('\n') : []);
+          await press(tileSel('sweep-marked', '.mi[data-item="reveal"]'));
+          const started = await until(() => wanted.every((arg) => seen().includes(arg)), 6000);
+          return { ok: started, detail: `wanted ${JSON.stringify(wanted).slice(-50)}, saw ${JSON.stringify(seen()).slice(-50)}` };
+        },
+      },
+      reclaim: {
+        does: 'asks to reclaim the node\'s copy',
+        run: async () => {
+          await press(tileSel('sweep-both', '.mi[data-item="reclaim"]'));
+          const open = await dialogOpen('confirm');
+          const said = await page.evaluate(() => `${document.getElementById('cTitle').textContent} / ${document.getElementById('cGo').textContent}`);
+          return { ok: open && said === 'Reclaim on sweep-node / Reclaim', detail: `confirm ${open ? 'open' : 'shut'}: ${said}` };
+        },
+      },
+      download: {
+        does: 'copies the node\'s take to this machine',
+        run: async () => {
+          await press(tileSel('sweep-remote', '.act[data-act="download"]'));
+          const copied = await until(async () => existsSync(join(sweepMac, 'sweep-remote.knct'))
+            && (await takeCalled('sweep-remote'))?.state === 'both');
+          return { ok: copied, detail: `sweep-remote is ${(await takeCalled('sweep-remote'))?.state ?? 'unlisted'}` };
+        },
+      },
+      vMore: {
+        does: 'opens the viewer\'s menu',
+        run: async () => {
+          await openViewerOn('sweep-marked');
+          await press('#vMore');
+          const open = await page.evaluate(() => document.querySelector('#viewer .vhead .menu')?.hidden === false);
+          return { ok: open, detail: open ? 'menu shown' : 'menu still hidden' };
+        },
+      },
+      mark: {
+        does: 'moves the viewer to that mark',
+        run: async () => {
+          await openViewerOn('sweep-marked');
+          const before = (await page.evaluate('globalThis.__library.viewer.state()'))?.index;
+          await press('#viewer .mk');
+          const after = (await page.evaluate('globalThis.__library.viewer.state()'))?.index;
+          return { ok: before === 0 && after > 0, detail: `frame ${before} -> ${after}` };
+        },
+      },
+      vClose: {
+        does: 'shuts the viewer',
+        run: async () => {
+          await openViewerOn('sweep-marked');
+          const opened = await page.evaluate('globalThis.__library.viewer.isOpen()');
+          await press('#vClose');
+          const shut = await page.evaluate('globalThis.__library.viewer.isOpen()') === false;
+          return { ok: opened && shut, detail: `${opened ? 'opened' : 'never opened'}, ${shut ? 'shut' : 'still open'}` };
+        },
+      },
+      'new-project': {
+        does: 'opens the editor on a new project from that take',
+        run: async () => {
+          // The editor itself is not what this presses: a stub answers, so the row is the address.
+          await page.route(/\/edit\?/, (route) => route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>stub</title>' }));
+          const loaded = page.waitForEvent('load', { timeout: 8000 }).then(() => true, () => false);
+          const pressed = await press(tileSel('sweep-marked', '.act[data-act="new-project"]'));
+          const landed = pressed && await loaded;
+          const url = new URL(page.url());
+          await page.unroute(/\/edit\?/);
+          const ok = landed && url.pathname === '/edit' && url.searchParams.get('new') === 'sweep-marked';
+          await page.goto(libraryPage(sweepUrl), { waitUntil: 'domcontentloaded' });
+          await ready();
+          return { ok, detail: landed ? `${url.pathname}${url.search}` : 'no page load' };
+        },
+      },
+      toLibrary: { does: 'reloads the media library', run: () => follow('#toLibrary', '/library') },
+      toProjects: { does: 'goes to the projects', run: () => follow('#toProjects', '/projects') },
+      toMenu: { does: 'goes back to the menu', run: () => follow('#toMenu', '/') },
+    };
+
+    // What the page renders with the viewer open on a marked take, which is when every kind shows.
+    await openViewerOn('sweep-marked');
+    const rendered = await page.evaluate('globalThis.__library.controls()');
+    await settle();
+    const unswept = rendered.filter((c) => !Object.hasOwn(DRIVERS, c.key));
+    check(unswept.length === 0,
+      `every interactive control the library renders has a driver in this file (${rendered.length} controls)`,
+      unswept.length ? `no driver for ${[...new Set(unswept.map((c) => `${c.where}:${c.key}`))].join(' ')}`
+        : [...new Set(rendered.map((c) => c.key))].join(' '));
+    const present = new Set(rendered.map((c) => c.key));
+    const missing = Object.keys(DRIVERS).filter((k) => !present.has(k));
+    check(missing.length === 0,
+      'and every control this file drives is one the library still renders',
+      missing.join(' ') || `${present.size} distinct controls on screen`);
+    check(eq(Object.keys(DRIVERS).sort(), Object.keys(DEAD_CONTROLS).sort()),
+      'and every driven control has a `dead-` mutation leaving it inert, so each row below is one a dead control can redden',
+      `${Object.keys(DRIVERS).length} driven, ${Object.keys(DEAD_CONTROLS).length} with a dead- mutation`);
+
+    for (const [key, driver] of Object.entries(DRIVERS)) {
+      let result;
+      try {
+        result = await driver.run();
+      } catch (err) {
+        result = { ok: false, detail: `the driver threw: ${String(err.message).split('\n')[0]}` };
+      }
+      check(result.ok, `pressing ${key} ${driver.does}`, result.detail);
+      await settle();
+    }
+    await page.close();
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 17 || sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
   }
 
   console.log('\n[library] the faint token clears AA on every page that declares it');
