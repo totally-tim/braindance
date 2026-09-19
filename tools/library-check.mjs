@@ -13,7 +13,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, linkSync, mkdirSync, readdirSync, renameSync, rmSync, symlinkSync, existsSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
+import { chmodSync, cpSync, linkSync, mkdirSync, readdirSync, renameSync, rmSync, symlinkSync, lstatSync, existsSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { createConnection } from 'node:net';
 import { createServer, request } from 'node:http';
@@ -407,6 +407,37 @@ const MUTATIONS = {
     '    return Boolean(path) && this.ownedTakes().length > 0 && this.ownsFile(takeIdentity(path));',
     '    return this.ownedTakes().some((take) => take.path === path);',
   ]] },
+  // The marks sync joins on the listing's bare hash field rather than through `copyOnNode`, so a
+  // node that could not be asked is answered as one that does not hold the take, where the guard
+  // throws and the catch names why.
+  'sync-answers-for-an-unasked-node': { file: 'server/index.js', edits: [[
+    '    const match = copyOnNode(node, theirTakes, hash);',
+    '    const match = (theirTakes ?? []).find((t) => t.hash === hash);',
+  ]] },
+  // The marks sync stops asking whether the take is still here before it appends, so a take deleted
+  // while the node's answer was on its way gets a marks log written for footage nothing holds.
+  'sync-appends-under-a-race': { file: 'server/index.js', edits: [[
+    '    const merged = await mergeMarkLog(CAPTURES_DIR, hash, theirLog, { present: () => takeFile(hash) });',
+    '    const merged = await mergeMarkLog(CAPTURES_DIR, hash, theirLog);',
+  ]] },
+  // A caller takes a node's marks log whatever take the answer says it is for, which is what a
+  // node on an older build, answering by name, relies on.
+  'caller-takes-a-log-by-name': { file: 'server/library.js', edits: [[
+    '  if (body?.hash !== take.hash || !Array.isArray(body.log)) {',
+    '  if (!Array.isArray(body?.log)) {',
+  ]] },
+  // A reclaim's delete goes back to removing the node's copy however many marks it gained since
+  // the other machine read them, so a mark pressed in between goes with the copy.
+  'reclaim-loses-a-late-mark': { file: 'server/library.js', edits: [[
+    '    if (now !== marksRead) {',
+    '    if (false) {',
+  ]] },
+  // A node's log answer stops naming the hash it was asked for, which is what an older build
+  // answering by name sends, and the caller's `checkedMarkLog` refuses it.
+  'node-log-ignores-the-hash': { file: 'server/index.js', edits: [[
+    '  sendJson(res, log ? { log: entries, hash } : { marks: resolveMarks(entries) });',
+    '  sendJson(res, log ? { log: entries } : { marks: resolveMarks(entries) });',
+  ]] },
 
   // The library's poll goes back to a first tick that cannot disagree with anything.
   'poll-first-tick-is-blind': { file: 'web/library.js', edits: [[
@@ -724,7 +755,7 @@ const MUTATIONS = {
   },
   // A reclaim goes back to removing the node's copy without bringing its marks here first.
   'reclaim-drops-node-marks': { file: 'server/index.js', edits: [[
-    '    const marksMerged = await mergeMarkLog(CAPTURES_DIR, mine.hash, theirLog.log ?? [], { present: () => takeFile(mine.hash) });',
+    '    const marksMerged = await mergeMarkLog(CAPTURES_DIR, mine.hash, theirLog, { present: () => takeFile(mine.hash) });',
     '    const marksMerged = 0;',
   ]],
     // Three rows, because the merge is also where the kept copy is asked for again: a merge that
@@ -734,16 +765,17 @@ const MUTATIONS = {
   },
   // A reclaim treats a node marks log it could not read as an empty one and goes on to delete.
   'reclaim-ignores-an-unread-log': { file: 'server/index.js', edits: [[
-    '      theirLog = await node.fetchJson(markLogPath(theirs), { signal: left });',
-    '      theirLog = await node.fetchJson(markLogPath(theirs), { signal: left })\n'
-    + '        .catch(() => ({ log: [] }));',
+    '      theirLog = checkedMarkLog(await node.fetchJson(markLogPath(theirs), { signal: left }), theirs);',
+    '      theirLog = await node.fetchJson(markLogPath(theirs), { signal: left }).then((b) => b.log)\n'
+    + '        .catch(() => []);',
   ]],
     fails: 'the row saying a reclaim whose node marks cannot be read is refused, and no other',
   },
-  // A reclaim goes back to appending the node's marks by name after an await a rename can land in.
+  // A reclaim's merge goes back to writing without asking whether the kept copy is still here, so
+  // a delete landing while the node's answer was on its way loses the copy and keeps the marks.
   'reclaim-merges-under-a-race': { file: 'server/index.js', edits: [[
-    '    const marksMerged = await mergeMarkLog(CAPTURES_DIR, mine.hash, theirLog.log ?? [], { present: () => takeFile(mine.hash) });',
-    '    const marksMerged = await mergeMarkLog(CAPTURES_DIR, mine.hash, theirLog.log ?? []);',
+    '    const marksMerged = await mergeMarkLog(CAPTURES_DIR, mine.hash, theirLog, { present: () => takeFile(mine.hash) });',
+    '    const marksMerged = await mergeMarkLog(CAPTURES_DIR, mine.hash, theirLog);',
   ]],
     fails: 'the deleted-mid-reclaim refusal: the local copy is gone and the node is asked to delete the last one',
   },
@@ -986,8 +1018,8 @@ const MUTATIONS = {
   },
   // The take being recorded becomes renameable.
   'rename-during-a-shoot': { file: 'server/library.js', edits: [[
-    '  if (owns(from)) {',
-    '  if (false) {',
+    '      if (ownsFile(await opened.stat())) {',
+    '      if (false) {',
   ]] },
 
   // The path is dropped from the arguments, so the file manager is started on nothing - a route
@@ -3408,6 +3440,20 @@ async function runChecks() {
       'and every one that lost still has its footage under its own name, which is what a silent overwrite takes away',
       `${survivors.length} of ${racers.length - 1} survived: ${survivors.join(' ') || 'nothing'}`);
 
+    // A dangling symlink is a name stat(2) cannot see - it follows the link to nothing - yet the
+    // name is still taken: link(2) refuses EEXIST where rename(2) would replace the entry.
+    symlinkSync(join(raceDir, 'not-there.knct'), join(raceDir, 'dangling-target.knct'));
+    const overDangling = await staged.renameTake(
+      raceDir, 'racer-two', 'dangling-target', { hash: racerHashes[1] },
+    ).then(() => 'accepted', (err) => String(err?.message ?? err));
+    check(/is taken/.test(overDangling),
+      'a target a dangling symlink holds is refused by the kernel rather than renamed over an entry stat could not see',
+      overDangling.slice(0, 90));
+    check(lstatSync(join(raceDir, 'dangling-target.knct'), { throwIfNoEntry: false })?.isSymbolicLink() === true
+      && existsSync(join(raceDir, 'racer-two.knct')),
+      'and the entry it held survived with the take still under its own name',
+      `symlink at target ${lstatSync(join(raceDir, 'dangling-target.knct'), { throwIfNoEntry: false })?.isSymbolicLink()}, racer-two.knct ${existsSync(join(raceDir, 'racer-two.knct'))}`);
+
     // #10's first half: a mark write in flight while its take is renamed. Headers and half the body
     // go first, the rename lands, and then the rest.
     const inFlightTake = await listed('stale-listing-take');
@@ -5256,7 +5302,7 @@ async function runChecks() {
           if (path === null) { unbuildable.push(r.path); continue; }
           for (const method of ['GET', 'HEAD']) {
             const code = await fetch(shootUrl + path, { method }).then((x) => x.status).catch(() => 0);
-            // 409 is `beingRecorded` answering before the handler runs.
+            // 409 is a refusal answering before the handler runs.
             if (code !== 409) reached.set(r.path, `${code} on ${id === shooting.takeId ? 'the open take' : 'a closed take'}`);
           }
         }
@@ -6045,6 +6091,8 @@ async function runChecks() {
     let stubTakes = () => ({ status: 500, body: { error: 'the stub cannot read its captures directory' } });
     const heldTakes = [];
     const stubLog = [{ id: 'm-from-the-node', sourceMs: 500, label: 'pressed on the node', at: 5 }];
+    // This build answers a log with the hash it was asked for; an older one answers by name, with none.
+    let stubEchoesHash = true;
     const answer = (res, { status, body }) => {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
@@ -6057,7 +6105,8 @@ async function runChecks() {
       } else if (req.url.startsWith('/record/state')) {
         answer(res, { status: 200, body: { recording: false, takeId: null, writingIds: [] } });
       } else if (/^\/capture\/[^/]+\/marks\/log(\?|$)/.test(req.url)) {
-        answer(res, { status: 200, body: { log: stubLog } });
+        const asked = decodeURIComponent(req.url.match(/^\/capture\/([^/]+)\/marks\/log/)[1]);
+        answer(res, { status: 200, body: stubEchoesHash ? { log: stubLog, hash: asked } : { log: stubLog } });
       } else {
         answer(res, { status: 404, body: { error: 'not a stub route' } });
       }
@@ -6109,6 +6158,23 @@ async function runChecks() {
       'a take renamed while its sync waited on the node still gets the node\'s mark, filed by its hash and read under its new name, with nothing written beside either name',
       `rename ${renamed.error ?? 'done'}; HTTP ${raced.status}: ${JSON.stringify(raced.body).slice(0, 80)}; `
         + `${underNewName?.id ?? 'no take'} has ${JSON.stringify((underNewName?.marks ?? []).map((m) => m.id))}; sidecars ${leftBehind.join(' ') || 'none'}`);
+
+      // A node on an older build ignores the hash and answers whatever the name holds.
+      stubTakes = () => ({ status: 200, body: { takes: [underNewName] } });
+      stubEchoesHash = false;
+      const byName = await fetch(`${syncUrl}/library/sync-marks/${encodeURIComponent(underNewName.hash)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const byNameBody = await byName.json().catch(() => null);
+      check(!byName.ok && /older build/.test(byNameBody?.error ?? '') && byNameBody?.merged === undefined,
+        'a marks sync against a node whose log names no hash is refused and merges nothing',
+        `HTTP ${byName.status}: ${JSON.stringify(byNameBody).slice(0, 110)}`);
+      stubEchoesHash = true;
+      stubLog.push({ id: 'm-after-the-refusal', sourceMs: 700, label: 'pressed on the node since', at: 6 });
+      const echoed = await post(`${syncUrl}/library/sync-marks/${encodeURIComponent(underNewName.hash)}`);
+      check(echoed.merged === 1,
+        'and the same node answering with the hash it was asked for is merged, so the refusal above was about the hash',
+        `merged ${echoed.merged ?? echoed.error}`);
       for (const p of servers.filter((sv) => sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
     } finally {
       stub.close();
@@ -6145,6 +6211,7 @@ async function runChecks() {
         const chunks = [];
         for await (const c of req) chunks.push(c);
         if (/\/marks\/log(\?|$)/.test(req.url) && heldLogs.hold) await new Promise((r) => { heldLogs.push(r); });
+        if (req.url.startsWith('/library/delete/') && heldLogs.holdDelete) await new Promise((r) => { heldLogs.push(r); });
         try {
           const up = await fetch(`${nodeUrlHere}${req.url}`, {
             method: req.method,
@@ -6214,6 +6281,30 @@ async function runChecks() {
       check(plain.merged === 1 && /m-on-a/.test(macLog()) && !/m-on-b/.test(macLog()),
         'and with nothing renamed the same sync brings the shared take\'s mark across, so the refusals above were about the rename',
         `merged ${plain.merged ?? plain.error}`);
+
+      // A mark pressed on the node between the reclaim's read of its log and its delete.
+      heldLogs.holdDelete = true;
+      let reclaimSettled = false;
+      const reclaiming = post(`${macUrlHere}/library/reclaim/shared`).finally(() => { reclaimSettled = true; });
+      for (let i = 0; i < 400 && heldLogs.length === 0; i++) await new Promise((done) => { setTimeout(done, 50); });
+      const late = { id: 'm-late-on-node', sourceMs: 30, label: 'pressed while the reclaim ran', at: 3 };
+      const pressed = await post(`${nodeUrlHere}/capture/shot-x/marks`, { marks: [late] });
+      const heldDeletes = heldLogs.length;
+      const lateWindow = heldDeletes === 1 && !reclaimSettled && !pressed.error;
+      heldLogs.holdDelete = false;
+      for (const release of heldLogs.splice(0)) release();
+      const lateReclaim = await reclaiming;
+      const stillThere = (await getJson(`${nodeUrlHere}/library/takes`)).takes.find((t) => t.id === 'shot-x');
+      check(lateWindow,
+        'the reclaim\'s delete was held while a mark was pressed on the node\'s copy, after the reclaim had read that copy\'s marks',
+        pressed.error ?? `${heldDeletes} delete held, the mark written`);
+      check(lateReclaim.error !== undefined && stillThere?.marks?.some((m) => m.id === late.id),
+        'and the node keeps its copy and the late mark, rather than deleting a mark nothing here has',
+        `${String(lateReclaim.error ?? JSON.stringify(lateReclaim)).slice(0, 110)}; node ${stillThere ? 'still holds shot-x' : 'removed shot-x'}`);
+      const again = await post(`${macUrlHere}/library/reclaim/shared`);
+      check(again.reclaimed?.removed === 'shot-x.knct' && /m-late-on-node/.test(macLog()),
+        'and reclaiming again brings the late mark across and removes the node\'s copy, so the refusal was about the mark',
+        String(again.error ?? JSON.stringify(again.reclaimed)).slice(0, 110));
     } finally {
       link.close();
       link.closeAllConnections();
