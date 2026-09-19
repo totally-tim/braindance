@@ -126,7 +126,8 @@ content hash, and `takeFileFor` finds the file that holds it, so an editor open 
 fetching it through a rename, and a take given the freed name is never answered in its place. Marks
 are an append-only log filed by hash in `captures/marks/`, so a rename moves none and a new take
 under a reused name starts with none. A take being recorded has no hash: its marks stay in the
-recorder until the close scans it, and the close files them under the hash it computed. At start,
+recorder until the close scans it, and the close files them under the hash it computed. A take that
+died before its hello landed files none, because every such take hashes alike. At start,
 `adoptNamedMarkLogs` moves each log an older build filed by name beside a take into that take's hash
 log; it cannot tell a log a deleted take left under the name from the marks of the take there now.
 Two renames at one name are answered by the kernel, and the loser keeps its footage. A rename links

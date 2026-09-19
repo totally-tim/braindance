@@ -62,11 +62,17 @@ function settle(take) {
 
 // Marks hang off the take rather than the recorder, or a take that failed mid-write leaves them
 // for whichever take closes next. Until the scan gives the take its hash they are the take object's
-// own, and the hash is what files them.
-async function flushMarks(dir, take, hash) {
+// own, and the hash is what files them - once the hello has landed, because its `startedAt` is what
+// makes one take's bytes differ from another's: two takes that died before it hash alike.
+async function flushMarks(dir, take, index) {
   if (!take.pendingMarks.length) return;
+  if (!index.hello) {
+    console.error(`[recorder] take ${take.id}: ${take.pendingMarks.splice(0).length} mark(s) not filed, `
+      + 'because its hello never reached the file and nothing else tells this take from another');
+    return;
+  }
   try {
-    await appendMarks(dir, hash, take.pendingMarks.splice(0));
+    await appendMarks(dir, index.hash, take.pendingMarks.splice(0));
   } catch (err) {
     console.error(`[recorder] take ${take.id}: could not write its marks: ${err.message}`);
   }
@@ -197,7 +203,7 @@ export class Recorder {
         // flushing left them for the next take, at a source time meaningless there.
         settle(failed);
         cachedIndex(failed.path).then(
-          (index) => flushMarks(this.dir, failed, index.hash),
+          (index) => flushMarks(this.dir, failed, index),
           (err) => console.error(`[recorder] take ${failed.id}: its marks have no hash to be filed under: ${err.message}`),
         );
         this.onChange(this.state);
@@ -292,7 +298,7 @@ export class Recorder {
         }
         throw err;
       });
-      await flushMarks(this.dir, take, index.hash);
+      await flushMarks(this.dir, take, index);
     } finally {
       // In a `finally`, or an index build that threw leaves this process claiming a file it had
       // stopped working on, with the library refusing to open or remove it until a restart. This

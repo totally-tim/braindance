@@ -644,7 +644,7 @@ const MUTATIONS = {
   ] },
   // A take that dies mid-write drops the marks pressed during it.
   'mid-write-drops-marks': { file: 'server/recorder.js', edits: [[
-    '          (index) => flushMarks(this.dir, failed, index.hash),', '          () => { /* mutation: the marks go nowhere */ },',
+    '          (index) => flushMarks(this.dir, failed, index),', '          () => { /* mutation: the marks go nowhere */ },',
   ]] },
   // The flush moves out of the `finally`, so a close that rejects loses them - the second way
   // the same orphaning arrived.
@@ -928,6 +928,13 @@ const MUTATIONS = {
     '      const read = await readLogAt(join(dir, file));\n      await appendLines(dir, hash, read);\n      const merged = read.length;',
   ]],
     fails: 'the interrupted-move row alone: the marks still resolve to two, which is why the log is counted',
+  },
+  // The recorder files the marks of a take whose hello never landed, under the hash every empty
+  // take shares.
+  'empty-take-marks-filed': { file: 'server/recorder.js', edits: [[
+    '  if (!index.hello) {\n    console.error(', '  if (false) {\n    console.error(',
+  ]],
+    fails: 'the row saying a take that dies before its hello lands files none of its marks',
   },
   // A second name for one hash goes back to being written over the first, so one name vanishes.
   'second-name-overwrites-the-first': { file: 'server/library.js', edits: [[
@@ -5467,12 +5474,20 @@ async function runChecks() {
     const hello = SRC.hello.toString('utf8');
 
     // A take that dies mid-write used to null itself without flushing.
+    // Until what was written has reached the file: a take's marks are filed by its hash, and a take
+    // that died before its hello landed is one no hash tells from another.
+    const landed = async (rec) => {
+      for (let i = 0; i < 200 && (rec.take?.stream.writableLength ?? 0) > 0; i++) {
+        await new Promise((done) => { setTimeout(done, 5); });
+      }
+    };
     const one = new Recorder({ dir: recDir });
     await one.start(null);
     one.open(hello);
     const firstTake = one.state.takeId;
     one.write(SRC.frames[0]);
     one.mark(1234, 'the moment');
+    await landed(one);
     one.take.stream.destroy(new Error('the card was pulled'));
     await new Promise((done) => { setTimeout(done, 400); });
     check(one.state.recording === false && one.state.armed === false,
@@ -5500,6 +5515,7 @@ async function runChecks() {
     const thirdTake = three.state.takeId;
     three.write(SRC.frames[2]);
     three.mark(777, 'flagged as it died');
+    await landed(three);
     const stream = three.take.stream;
     const closing = three.close('testing a close that fails').catch((err) => err);
     stream.destroy(new Error('the card went away during the close'));
@@ -5510,6 +5526,24 @@ async function runChecks() {
     check(thirdMarks.length === 1 && JSON.parse(thirdMarks[0]).sourceMs === 777,
       'and the marks are still written, because the flush hangs off the take rather than off the close succeeding',
       thirdMarks.join(' ').slice(0, 70));
+
+    // A take that dies before its hello lands: its file is empty, and every such file hashes alike.
+    const unlanded = new Recorder({ dir: recDir });
+    await unlanded.start(null);
+    unlanded.open(hello);
+    const emptyTake = unlanded.state.takeId;
+    unlanded.mark(55, 'on nothing');
+    const said = [];
+    const quiet = console.error;
+    console.error = (...args) => { said.push(args.join(' ')); };
+    unlanded.take.stream.destroy(new Error('the card was pulled before a byte landed'));
+    await new Promise((done) => { setTimeout(done, 400); });
+    console.error = quiet;
+    const emptyLog = join(recDir, 'marks', `${createHash('sha256').digest('hex')}.jsonl`);
+    const emptySize = existsSync(join(recDir, `${emptyTake}.knct`)) ? statSync(join(recDir, `${emptyTake}.knct`)).size : -1;
+    check(emptySize === 0 && !existsSync(emptyLog) && said.some((line) => /not filed/.test(line)),
+      'a take that dies before its hello lands files none of its marks, and says so, because every such take hashes alike',
+      `${emptySize} bytes; empty-hash log ${existsSync(emptyLog) ? 'written' : 'absent'}; ${said.find((line) => /not filed/.test(line))?.slice(0, 60) ?? 'nothing said'}`);
 
     // The requirement this arm holds the ceiling to is written down here rather than imported.
     const CEILING_REQUIRED = 64 * 1024 * 1024;
@@ -5800,18 +5834,18 @@ async function runChecks() {
     }));
     const whileOpen = await routeAnswers();
 
-    // The rename refusal under another spelling of the id. Where the volume folds case it opens
-    // the same file, and a rename that did not know would scan it for the hash it checks.
+    // The recording refusal under another spelling of the id, asked through the one route that takes
+    // a name straight to a path. Where the volume folds case it opens the same file.
     const spelled = takeA?.toUpperCase();
     if (!takeA || !existsSync(join(overlapDir, `${spelled}.knct`))) {
       console.log('  ...  this volume does not fold case, so another spelling of the id names no file here');
       skipped.push('the recording refusal under another spelling of the id (needs a case-insensitive volume)');
     } else {
-      const renamedSpelled = await post(`${overlapUrl}/library/rename/${spelled}`, { hash: null, to: 'renamed-while-open' });
-      check(/being recorded right now/.test(renamedSpelled.error ?? '') && !existsSync(join(overlapDir, `${takeA}.idx`))
+      const unnamedSpelled = await post(`${overlapUrl}/library/remove-name/${spelled}`, { hash: null, keep: 'no-take-by-this-name' });
+      check(/being recorded right now/.test(unnamedSpelled.error ?? '') && !existsSync(join(overlapDir, `${takeA}.idx`))
         && existsSync(join(overlapDir, `${takeA}.knct`)),
-      'the take being recorded is refused a rename under another spelling of its id as well, and nothing scanned it - the recorder owns the file, not the name',
-      `${spelled}: ${(renamedSpelled.error ?? 'ACCEPTED').slice(0, 60)}; ${readdirSync(overlapDir).sort().join(' ')}`);
+      'the take being recorded is refused under another spelling of its id as well, and nothing scanned it - the recorder owns the file, not the name',
+      `${spelled}: ${(unnamedSpelled.error ?? 'ACCEPTED').slice(0, 60)}; ${readdirSync(overlapDir).sort().join(' ')}`);
     }
 
     // Fired without waiting on the last: under a broken guard a request inside the window blocks
