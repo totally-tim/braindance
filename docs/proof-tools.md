@@ -339,6 +339,12 @@ assertions. That run did not run; re-run it, and read nothing off its count.
   document composites differently depending on how its clips are listed.
 - **`take-not-shared`** — every clip opens its own copy of its take, so two clips of one take
   carry two indexes and two caches.
+- **`seek-stands-down`** — a seek overtaken twice answers null and leaves the playhead where it
+  was. Section 1e's landing rows are the catch.
+- **`stand-down-counts-as-landed`** — the same stand-down, with any answer counted as a landing,
+  so `settled()` calls it idle. Section 1e's agreement rows are the catch.
+- **`settled-ignores-owed`** — `settled()` stops asking whether the last seek landed, and calls a
+  seek that rejected idle.
 
 ## `preview-check`
 
