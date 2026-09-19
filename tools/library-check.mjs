@@ -13,7 +13,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, mkdirSync, readdirSync, renameSync, rmSync, symlinkSync, existsSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, readdirSync, renameSync, rmSync, symlinkSync, lstatSync, existsSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { createConnection } from 'node:net';
 import { createServer } from 'node:http';
@@ -3329,6 +3329,20 @@ async function runChecks() {
     check(survivors.length === racers.length - 1 && existsSync(join(raceDir, 'the-contested-name.knct')),
       'and every one that lost still has its footage under its own name, which is what a silent overwrite takes away',
       `${survivors.length} of ${racers.length - 1} survived: ${survivors.join(' ') || 'nothing'}`);
+
+    // A dangling symlink is a name stat(2) cannot see - it follows the link to nothing - yet the
+    // name is still taken: link(2) refuses EEXIST where rename(2) would replace the entry.
+    symlinkSync(join(raceDir, 'not-there.knct'), join(raceDir, 'dangling-target.knct'));
+    const overDangling = await staged.renameTake(
+      raceDir, 'racer-two', 'dangling-target', { hash: racerHashes[1] },
+    ).then(() => 'accepted', (err) => String(err?.message ?? err));
+    check(/is taken/.test(overDangling),
+      'a target a dangling symlink holds is refused by the kernel rather than renamed over an entry stat could not see',
+      overDangling.slice(0, 90));
+    check(lstatSync(join(raceDir, 'dangling-target.knct'), { throwIfNoEntry: false })?.isSymbolicLink() === true
+      && existsSync(join(raceDir, 'racer-two.knct')),
+      'and the entry it held survived with the take still under its own name',
+      `symlink at target ${lstatSync(join(raceDir, 'dangling-target.knct'), { throwIfNoEntry: false })?.isSymbolicLink()}, racer-two.knct ${existsSync(join(raceDir, 'racer-two.knct'))}`);
 
     const done = await post(`${renameUrl}/library/rename/before-the-rename`,
       { hash: before.hash, to: 'after-the-rename.knct' });
