@@ -917,6 +917,9 @@ try {
   };
   const emittedPayloads = (type) => new Set((emitted().get(type) ?? []).map((e) => e.hash));
   const takeFile = (id) => join(WORK, 'takes', `${id}.knct`);
+  // The capture routes answer under the take's content hash, so an id resolves through the listing.
+  const takeHash = async (id) =>
+    (await api('/library/takes')).body?.takes?.find((take) => take.id === id)?.hash;
   // Kept for section 10, which replays it.
   let colourTake = null;
   {
@@ -967,7 +970,7 @@ try {
         `${foreign.length} of ${colourCount} are not in the emit log`);
       ok('with stamps that only rise', colourStamps.every((t, k) => k === 0 || t > colourStamps[k - 1]),
         `${colourStamps.length} stamps`);
-      const index = (await api(`/capture/${started.body.takeId}/index`)).body;
+      const index = (await api(`/capture/${await takeHash(started.body.takeId)}/index`)).body;
       ok('and the index lists those colour messages apart from the frames',
         index?.colour?.offset?.length === colourCount && index?.frames?.offset?.length === (types.get(TYPE_FRAME) ?? 0),
         `index: ${index?.frames?.offset?.length} frames, ${index?.colour?.offset?.length} colour; file: `
