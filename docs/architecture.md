@@ -106,6 +106,10 @@ the preset. This makes partial presets agree across existing and newly connected
 | `/program` | `web/index.html` | the program output, which OBS opens as a browser source |
 | `/key` | `web/key.html` | the colour camera with the room cut away on depth, which OBS opens as a browser source |
 
+**`/camera.mjpg` serves the grabber's colour JPEG byte for byte, and the route takes no
+options.** A processed webcam, mirrored, cropped or keyed, is a GPU page that draws the colour
+frame the way `/key` does.
+
 **The recorder** waits for the sensor's hello, then streams frames to disk in the wire's own
 framing, so a capture holds the type 1 and type 2 messages as the grabber framed them. The one edit
 is the hello: `stampHello` rewrites `startedAt` to when this take began before writing it, and

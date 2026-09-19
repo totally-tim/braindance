@@ -1306,8 +1306,8 @@ const ROUTES = [
   // ---- the webcam
   //
   // `live` rather than `write`: it changes nothing, but it hands out what the colour camera sees
-  // this second. `embeddable`, and the one route that is, because a media source and a plain
-  // `<img>` in somebody's overlay are documented uses.
+  // this second. OBS opens it as a browser source, a direct load. `embeddable`, and the one route
+  // that is, because a plain `<img>` in somebody's overlay page loads it cross-site.
   { path: '/camera.mjpg', pattern: /^\/camera\.mjpg$/, live: true, embeddable: true, read: (req, res) => {
     // Woken only for a request that can be served. A source pointed at a colour camera this server
     // will never have retries after every idle window, and each retry would start the grabber to
