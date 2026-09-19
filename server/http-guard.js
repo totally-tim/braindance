@@ -22,17 +22,15 @@ export function originAllowed(req) {
     return false;
   }
 
-  // A Host header is an authority and nothing else; unchecked the parser eats userinfo or
-  // a path. Both sides then compare through the URL parser, scheme included.
+  // A Host header is an authority and nothing else, and the parser would eat userinfo, a path, a
+  // query or a fragment. This regex is the only check of that: it refuses every character that
+  // ends an http authority, so nothing parses out of one, and a delimiter it lacks belongs here.
+  // Both sides then compare through the URL parser, scheme included.
   if (/[@/?#\s\\]/.test(rawHost)) return false;
   let hostUrl;
   try {
     hostUrl = new URL(`http://${rawHost}`);
   } catch {
-    return false;
-  }
-  if (hostUrl.host === '') return false;
-  if (hostUrl.pathname !== '/' || hostUrl.search !== '' || hostUrl.username !== '' || hostUrl.password !== '') {
     return false;
   }
   // DNS rebinding: a name re-resolved onto this server makes both headers agree, so a

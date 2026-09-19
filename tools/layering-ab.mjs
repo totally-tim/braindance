@@ -438,7 +438,7 @@ for (const arm of ARMS) {
     const k = globalThis.__kinect;
     const t = k.timeline.transport();
     const out = await t.seek(${WINDOW_SEC});
-    return out && {
+    return {
       asked: out.plan.frames, rendered: out.frames, capped: out.capped, shortfall: out.shortfall,
       sourceFrames: out.sourceFrames,
     };
@@ -447,10 +447,6 @@ for (const arm of ARMS) {
 }
 console.log(`\n  at fade ${LONG_LOOK.fade}ms plus wake ${LONG_LOOK.wake}ms, all clips on one take:`);
 for (const { arm, seek } of capped) {
-  if (!seek) {
-    console.log(`  ${arm.label.padEnd(22)} the seek stood down`);
-    continue;
-  }
   console.log(`  ${arm.label.padEnd(22)} pre-roll ${String(seek.asked).padStart(3)} frames asked, `
     + `${String(seek.rendered).padStart(3)} rendered, ${seek.sourceFrames} source frames wanted`
     + `${seek.capped ? ` - CAPPED by the cache, ${seek.shortfall} short` : ''}`);

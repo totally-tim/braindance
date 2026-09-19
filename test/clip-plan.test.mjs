@@ -1,10 +1,46 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  RATE_MAX, RATE_MIN, clipAffordedSec, clipProgramSecAt, clipSourceSecAt, frameLoadByTake,
-  framesBackFor, headFramesFor, headTrim, integerMidpoint, rescaleClipKeys, snapshotClipKeys,
-  usableClipRate,
+  RATE_MAX, RATE_MIN, clipAffordedSec, clipProgramSecAt, clipSourceSecAt, frameAtOrBefore,
+  frameLoadByTake, framesBackFor, headFramesFor, headTrim, integerMidpoint, rescaleClipKeys,
+  snapshotClipKeys, sourceTimes, usableClipRate,
 } from '../web/clip-plan.js';
+
+// Twenty frames at 33ms, twenty at 111ms, twenty at 33ms: a take shot over a loaded link.
+const unevenStamps = () => {
+  const stamps = [5_000_000];
+  for (let k = 1; k < 60; k++) stamps.push(stamps[k - 1] + (k >= 20 && k < 40 ? 111 : 33));
+  return stamps;
+};
+
+test('source times count from the first frame\'s stamp, in seconds', () => {
+  assert.deepEqual(sourceTimes([5_000_000, 5_000_033, 5_000_144]), [0, 0.033, 0.144]);
+  assert.deepEqual(sourceTimes([]), []);
+});
+
+test('a time finds the frame at or before it, over stamps that are not evenly spaced', () => {
+  const stamps = unevenStamps();
+  const times = sourceTimes(stamps);
+  for (let k = 0; k < stamps.length; k++) {
+    // Exactly on a stamp is that frame; a millisecond short of the next one is still it.
+    assert.equal(frameAtOrBefore(times, times[k]), k, `on stamp ${k}`);
+    if (k + 1 < stamps.length) assert.equal(frameAtOrBefore(times, times[k + 1] - 0.001), k, `short of ${k + 1}`);
+  }
+  // Where the uniform reading puts frame 45's time, six frames later.
+  const uniform = Math.round((times[45] / times[59]) * 59);
+  assert.equal(uniform, 51);
+  assert.equal(frameAtOrBefore(times, times[45]), 45);
+});
+
+test('a time outside the take clamps to its ends, and a bound caps the search', () => {
+  const times = sourceTimes(unevenStamps());
+  assert.equal(frameAtOrBefore(times, -1), 0);
+  assert.equal(frameAtOrBefore(times, times[59] + 10), 59);
+  // The editor's bracket asks for the lower half of a pair, which is never the last frame.
+  assert.equal(frameAtOrBefore(times, times[59] + 10, 58), 58);
+  assert.equal(frameAtOrBefore(times, times[30], 58), 30);
+  assert.equal(frameAtOrBefore([0], 5), 0);
+});
 
 test('bisection midpoints stay inside safe-integer intervals above the signed 32-bit range', () => {
   assert.equal(integerMidpoint(2_900_000_000, 3_000_000_000), 2_950_000_000);

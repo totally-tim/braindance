@@ -170,7 +170,7 @@ const ADVANCED = !MUTATE || ['cache-boundary-stays-cold', 'corrupt-frame-stops-i
 const RENDERER_IDLE_MS = 1500;
 
 if (MUTATE && !MUTATIONS[MUTATE]) {
-  console.error(`Unknown mutation: ${MUTATE}. Choose ${Object.keys(MUTATIONS).join(', ')}`);
+  console.error(`unknown mutation ${MUTATE} - have ${Object.keys(MUTATIONS).join(', ')}`);
   process.exit(2);
 }
 
@@ -190,6 +190,7 @@ const context = await browser.newContext({ viewport: { width: 1000, height: 700 
 await context.addInitScript(() => localStorage.setItem('braindance.preview.auto', 'off'));
 await context.route('**/favicon.ico', (route) => route.fulfill({ status: 204, body: '' }));
 let served = 0;
+let crashed = null;
 if (MUTATE) {
   const mutation = MUTATIONS[MUTATE];
   let source = readFileSync(join(ROOT, mutation.file), 'utf8');
@@ -939,9 +940,18 @@ try {
   await page.screenshot({ path: join(TMP, 'editor.png') });
   check(errors.length === 0, 'the browser reported no uncaught errors', errors.join('; '));
 } catch (err) {
-  check(false, 'the preview workflow completed', `${err.stack ?? err}; browser errors: ${errors.join('; ')}`);
+  // Apart from the assertions: counted as a failed one, a crash reads as a catch to sweep-all.
+  crashed = err;
 } finally {
   await browser.close();
+}
+
+if (crashed) {
+  console.log(`\n[preview] DID NOT RUN - ${crashed.stack ?? crashed}; browser errors: ${errors.join('; ')}`);
+  console.log(`[preview] ${assertions} assertions ran, ${failures} failed before the crash`);
+  if (failed.length) console.log(`[preview] rows that had already fired: ${failed.join('; ')}`);
+  console.log(`[preview] evidence ${TMP}`);
+  process.exit(2);
 }
 
 if (MUTATE) check(served > 0, 'the browser actually loaded the mutation', `${served} responses`);

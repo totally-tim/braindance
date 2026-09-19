@@ -349,8 +349,14 @@ async function main() {
     const DEAD_GRABBER = `${process.execPath} ${join(WORK, 'tools/fake-grabber.mjs')}`
       + ` --source ${join(ROOT, 'captures/sample.knct')} --stubborn`;
     await start(['--grabber', DEAD_GRABBER], false);
-    await cli('record', 'start');
+    // The answer is kept: a take that never opens is this section not running, and it says why
+    // rather than going on to open `null.knct`.
+    const recording = await cli('record', 'start');
     const stuckTake = await until(async () => (await json('/record/state')).body.takeId);
+    if (!stuckTake) {
+      throw new Error(`no take opened for the stubborn grabber: record start exited ${recording.code}, `
+        + `${recording.err.trim() || JSON.stringify(recording.body)}; the server said:\n${log.slice(-1500)}`);
+    }
     const stuckFile = join(WORK, 'captures', `${stuckTake}.knct`);
     const head = openSync(stuckFile, 'r+');
     writeSync(head, Buffer.alloc(4), 0, 4, 0);
