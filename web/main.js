@@ -6017,9 +6017,14 @@ ui.rotateClip = stripCommand('tRotateClip', 'rotate', 'Turn the selected clip in
 // This is that control: without it the first key on a placement track could not be planted at all
 // and the handles would only ever move a clip once.
 ui.keyClip = stripCommand('tKeyClip', 'key', 'Keyframe the selected clip\'s placement at the playhead');
+ui.copyLook = stripCommand('tCopyLook', 'copy look', 'Copy the selected clip\'s look');
+ui.pasteLook = stripCommand('tPasteLook', 'paste look', 'Paste the copied look onto the selected clip');
 
 // Clip commands live in the dynamic controls area.
-ui.clipOptions.append(ui.deleteClip, ui.moveClip, ui.rotateClip, ui.keyClip);
+ui.clipOptions.append(ui.deleteClip, ui.moveClip, ui.rotateClip, ui.keyClip, ui.copyLook, ui.pasteLook);
+
+// The look `copy look` took, as an unsaved preset document. Session state, not in the document.
+let copiedLook = null;
 
 /**
  * The clip gizmo: three's own handles, attached to the selected clip's placement group.
@@ -8217,7 +8222,10 @@ function applyStoredPreset(doc, target = EDITING ? selectedClipRow() : selectedC
   }
   params.apply(projectValues);
   if (target) withClip(target, () => params.apply(clipValues));
-  if (stamped && target) target.appliedPreset = { name: doc.name, rev: doc.rev };
+  if (stamped && target) {
+    // A look nobody saved has no revision to name, so the clip is left claiming none.
+    target.appliedPreset = typeof doc.rev === 'string' ? { name: doc.name, rev: doc.rev } : null;
+  }
   requestRepaint();
   history.commit();
   return {
@@ -8789,6 +8797,8 @@ function paintClipCommands() {
   ui.moveClip.disabled = !selected;
   ui.rotateClip.disabled = !selected;
   ui.keyClip.disabled = !selected;
+  ui.copyLook.disabled = !selected;
+  ui.pasteLook.disabled = !selected || copiedLook === null;
   ui.rate.disabled = !selected;
   ui.preset.disabled = !selected;
   for (const button of [ui.presetSave, ui.presetExport, ui.presetImport]) button.disabled = !selected;
@@ -8920,6 +8930,43 @@ ui.addClip.addEventListener('click', () => {
     .catch(showTimelineError);
 });
 ui.deleteClip.addEventListener('click', () => { deleteSelectedClip(); });
+
+/** Takes the selected clip's look as the preset `save` writes with every box ticked. */
+function copyLook() {
+  const source = EDITING ? selectedClipRow() : selectedClip;
+  if (!source) {
+    say('select a clip before copying its look');
+    return null;
+  }
+  const stamp = source.appliedPreset ?? null;
+  // The stamp comes too, so the clip this lands on says it wears what this one says it wears.
+  copiedLook = {
+    name: stamp?.name ?? 'copied look',
+    rev: stamp?.rev ?? null,
+    body: withClip(source, () => presetFromCurrentLook()),
+  };
+  paintClipCommands();
+  return copiedLook;
+}
+
+/** Applies the copied look to the selected clip, the way applying a saved preset does. */
+function pasteLook() {
+  if (!copiedLook) {
+    say('copy a look before pasting one');
+    return null;
+  }
+  return applyStoredPreset(copiedLook);
+}
+
+ui.copyLook.addEventListener('click', () => { copyLook(); });
+ui.pasteLook.addEventListener('click', () => {
+  try {
+    if (!pasteLook()) return;
+    showPickerChoice(pickers.find((p) => p.trigger === ui.preset), appliedPreset()?.name ?? '');
+  } catch (err) {
+    showTimelineError(err);
+  }
+});
 
 /** The shapes a handle drag is usually reaching for, as one press each. */
 const EASE_PRESETS = {
@@ -11943,6 +11990,9 @@ globalThis.__kinect = {
     loadProject: loadProjectNamed,
     applyStoredPreset,
     presetFromCurrentLook,
+    copyLook,
+    pasteLook,
+    copiedLook: () => (copiedLook ? JSON.parse(JSON.stringify(copiedLook)) : null),
     refreshPresets,
     setActiveDeliverable,
     applyDeliverable,

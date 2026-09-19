@@ -431,6 +431,70 @@ const MUTATIONS = {
     mustFail: 'and the wheel stops at each end of the band, at a reading the row can hold',
   },
 
+  // ---- section 22b, copy look and paste look ----
+  // The copy taken off every look name rather than off the preset's own: framing rides along, and
+  // the door refuses the paste before it writes anything.
+  'copy-look-carries-framing': {
+    file: 'web/main.js',
+    edits: [[
+      '    body: withClip(source, () => presetFromCurrentLook()),',
+      "    body: withClip(source, () => presetFromCurrentLook(params.names('look'))),",
+    ]],
+    fails: 'and carries none of the framing a preset may not carry',
+    mustFail: 'and carries none of the framing a preset may not carry',
+  },
+
+  // A paste that takes the target's tracks away before it writes, which is a paste that no longer
+  // leaves the target's animation alone.
+  'paste-look-drops-the-target-tracks': {
+    file: 'web/main.js',
+    edits: [[
+      '  return applyStoredPreset(copiedLook);',
+      '  selectedClipRow()?.look.tracks.clear();\n  return applyStoredPreset(copiedLook);',
+    ]],
+    fails: 'and the target keeps every track it had, keys and all',
+    mustFail: 'and the target keeps every track it had, keys and all',
+  },
+
+  // The project half written and committed on its own ahead of the apply, so one paste costs two
+  // undo steps and one undo leaves half of it standing.
+  'paste-look-in-two-steps': {
+    file: 'web/main.js',
+    edits: [[
+      '  return applyStoredPreset(copiedLook);',
+      '  params.apply(Object.fromEntries(Object.entries(copiedLook.body.values)\n'
+        + "    .filter(([n]) => PARAMS[n].scope === 'project')));\n"
+        + '  history.commit();\n'
+        + '  return applyStoredPreset(copiedLook);',
+    ]],
+    fails: 'and the paste is one undo step',
+    mustFail: 'and the paste is one undo step',
+  },
+
+  // The paste without the picker repaint, so the picker goes on naming whatever it named before.
+  'paste-look-leaves-the-picker': {
+    file: 'web/main.js',
+    edits: [[
+      '    if (!pasteLook()) return;\n'
+        + "    showPickerChoice(pickers.find((p) => p.trigger === ui.preset), appliedPreset()?.name ?? '');",
+      '    pasteLook();',
+    ]],
+    fails: 'and the preset picker names what the selected clip now claims',
+    mustFail: 'and the preset picker names what the selected clip now claims',
+  },
+
+  // A look with no revision stamped as if it had one, which leaves the target claiming a preset
+  // named `copied look` that no store holds.
+  'paste-look-stamps-an-unsaved-look': {
+    file: 'web/main.js',
+    edits: [[
+      "    target.appliedPreset = typeof doc.rev === 'string' ? { name: doc.name, rev: doc.rev } : null;",
+      '    target.appliedPreset = { name: doc.name, rev: doc.rev };',
+    ]],
+    fails: 'a look copied from a clip that claims no preset leaves the clip it lands on claiming none',
+    mustFail: 'a look copied from a clip that claims no preset leaves the clip it lands on claiming none',
+  },
+
   // ---- section 22, the clip a person adds, selects and deletes ----
   // A head trim that moves the clip and lets the footage travel with it, which is a slip and not
   // a trim. Must redden 'the footage under what is left holds still', alone.
@@ -482,8 +546,9 @@ const MUTATIONS = {
       "  rows.push({ owner: 'clip-add', label: '', kind: 'clip-add', height: CLIP_ADD_H });",
       '',
     ], [
-      'ui.clipOptions.append(ui.deleteClip, ui.moveClip, ui.rotateClip, ui.keyClip);',
-      'ui.clipOptions.append(ui.addClip, ui.deleteClip, ui.moveClip, ui.rotateClip, ui.keyClip);',
+      'ui.clipOptions.append(ui.deleteClip, ui.moveClip, ui.rotateClip, ui.keyClip, ui.copyLook, ui.pasteLook);',
+      'ui.clipOptions.append(ui.addClip, ui.deleteClip, ui.moveClip, ui.rotateClip, ui.keyClip, ui.copyLook, '
+        + 'ui.pasteLook);',
     ]],
     fails: 'the plus control returning to the dynamic controls area beside commands that need a selected clip',
   },
@@ -977,8 +1042,8 @@ const MUTATIONS = {
   'part-apply-stamps-a-revision': {
     file: 'web/main.js',
     edits: [[
-      '  if (stamped && target) target.appliedPreset = { name: doc.name, rev: doc.rev };',
-      '  if (target) target.appliedPreset = { name: doc.name, rev: doc.rev };',
+      '  if (stamped && target) {\n    // A look nobody saved',
+      '  if (target) {\n    // A look nobody saved',
     ]],
     mustFail: 'and applying part of a look claims no revision, because this gesture did not apply one',
     fails: 'and applying part of a look claims no revision, because this gesture did not apply one',
@@ -2601,6 +2666,9 @@ const DRIVER_IDS = {
   tMoveClip: 'section 22b - arms the move handles, drags them and reads where the clip went',
   tRotateClip: 'section 22b - arms the turn handles and reads that the mode moved with the press',
   tKeyClip: 'section 22b - keys the placement at two playheads and scrubs between them',
+  tCopyLook: 'section 22b - copies a clip\'s look and reads it against the document save writes',
+  tPasteLook: 'section 22b - pastes onto another clip and onto the source, reads what moved and '
+    + 'what stayed, and undoes it',
   tPlay: 'section 2 - toggles playback and the state is read back',
   tLoop: 'section 2 - runs playback into the out-point with it off and with it armed, and reads '
     + 'where the playhead ended up each time',
@@ -11285,8 +11353,7 @@ try {
         })`);
         releaseMovingSource();
         await page.waitForFunction(
-          (id) => globalThis.__kinect.timeline.clips().some((clip) => clip.take?.id === id)
-            && document.getElementById('tNote').textContent.includes(id),
+          (id) => globalThis.__kinect.timeline.clips().some((clip) => clip.take?.id === id),
           movingAddTake.id,
           { timeout: 25000 },
         );
@@ -12734,6 +12801,319 @@ try {
       }
     }
 
+    // Copy look and paste look. A paste is applying the preset a save with every box ticked would
+    // have written from the source clip, so every rule of an apply holds on the target and nothing
+    // a preset does not carry moves.
+    console.log('\n  a look copied from one clip and pasted onto another');
+    {
+      const lookSource = initiatingClip;
+      const lookTarget = otherClip;
+      const undoKey = `${process.platform === 'darwin' ? 'Meta' : 'Control'}+z`;
+      const tabBeforeLooks = await page.evaluate(
+        'document.querySelector(".paneltab[aria-selected=true]")?.dataset.panelTab ?? null');
+      const documentBeforeLooks = await page.evaluate('__kinect.library.serialiseProjectBody()');
+      const docNow = () => page.evaluate('JSON.stringify(__kinect.library.serialiseProjectBody())');
+      const depthNow = () => page.evaluate('__kinect.keyframes.undo.depth()');
+      // Pressed only when it is there and live, so a build without the commands reddens the rows
+      // below rather than stalling the run on a click that cannot land.
+      const press = async (id) => {
+        const state = await page.evaluate((el) => {
+          const button = document.getElementById(el);
+          if (!button) return 'absent';
+          return button.disabled ? 'disabled' : 'live';
+        }, id);
+        if (state === 'live') {
+          await page.locator(`#${id}`).click();
+          await settle();
+        }
+        return state;
+      };
+      const lookCommands = () => page.evaluate(() => ['tCopyLook', 'tPasteLook'].map((id) => {
+        const button = document.getElementById(id);
+        return button
+          ? { id, text: button.textContent, disabled: button.disabled,
+            inChip: button.closest('#tClipOptions') !== null }
+          : { id, absent: true };
+      }));
+      const describe = (commands) => commands
+        .map((c) => (c.absent ? `${c.id} absent` : `${c.id} "${c.text}" disabled ${c.disabled}`)).join(', ');
+
+      // The target wears another shipped look, keys opacity and has its own crop; the source wears
+      // Blackwall and has been moved off it, so the copy is not the stored document.
+      await page.evaluate(async ({ sourceId, targetId }) => {
+        const k = globalThis.__kinect;
+        const stored = async (name) => (await fetch(`/presets/${name}`)).json();
+        const [blackwall, cascade] = await Promise.all([stored('blackwall'), stored('cascade')]);
+        k.editor.selectClipRow(targetId);
+        k.library.applyStoredPreset(cascade);
+        k.params.set('pointSize', 30);
+        k.params.set('left', -1.25);
+        const body = k.library.serialiseProjectBody();
+        body.clips.find((clip) => clip.id === targetId).tracks.opacity = [
+          { t: 0, value: 0.31 }, { t: 12, value: 0.83 },
+        ];
+        k.library.restoreProject(body);
+        k.editor.selectClipRow(sourceId);
+        k.library.applyStoredPreset(blackwall);
+        k.params.set('pointSize', 12.5);
+        k.params.set('left', -2.5);
+        const target = k.timeline.clips().find((clip) => clip.id === targetId);
+        await k.timeline.transport().seek(target.start + 3);
+        await k.timeline.settled();
+        k.keyframes.undo.begin();
+      }, { sourceId: lookSource, targetId: lookTarget });
+      await settle();
+
+      const going = await page.evaluate(({ sourceId, targetId }) => {
+        const k = globalThis.__kinect;
+        const body = k.library.serialiseProjectBody();
+        const at = (id) => body.clips.find((clip) => clip.id === id);
+        const clipNames = k.presetValueNames().filter((n) => k.params.spec(n).scope === 'clip');
+        return {
+          differing: clipNames.filter((n) => JSON.stringify(at(sourceId).params[n])
+            !== JSON.stringify(at(targetId).params[n])).length,
+          stamps: [at(sourceId).appliedPreset?.name ?? null, at(targetId).appliedPreset?.name ?? null],
+          keyed: Object.keys(at(targetId).tracks),
+          left: [at(sourceId).params.left, at(targetId).params.left],
+        };
+      }, { sourceId: lookSource, targetId: lookTarget });
+      check(going.differing > 5 && going.stamps[0] === 'blackwall' && going.stamps[1] === 'cascade'
+        && going.keyed.includes('opacity') && going.left[0] !== going.left[1],
+      'the two clips wear different looks and crops going in, and the target keys opacity, so the '
+        + 'rows below can tell a paste from nothing',
+      `${going.differing} clip look values differ, stamps ${going.stamps.join('/')}, target keys `
+        + `${going.keyed.join(', ') || 'nothing'}, crop left ${going.left.join('/')}`);
+
+      await clickClip(lookSource);
+      const fresh = await lookCommands();
+      check(fresh.every((c) => !c.absent && c.inChip),
+        'the clip chip carries copy look and paste look beside the other clip commands', describe(fresh));
+      check(fresh[0].disabled === false && fresh[1].disabled === true,
+        'and with a clip selected and nothing copied yet, copy is live and paste is not', describe(fresh));
+      const emptyBefore = await docNow();
+      const emptyPaste = await page.evaluate(() => {
+        const paste = globalThis.__kinect.library.pasteLook;
+        return { result: paste ? paste() : 'absent', note: document.getElementById('tNote').textContent };
+      });
+      check(emptyPaste.result === null && /copy a look before pasting one/.test(emptyPaste.note)
+        && await docNow() === emptyBefore,
+      'pasting with nothing copied writes nothing and says what to do first',
+      `returned ${JSON.stringify(emptyPaste.result)}, note "${emptyPaste.note}"`);
+
+      // The copy, against the document the Effects tab's own save writes from the same clip.
+      const copyPressed = await press('tCopyLook');
+      const copied = await page.evaluate('__kinect.library.copiedLook?.() ?? null');
+      const savedName = `ec-copy-look-${process.pid}-${Date.now().toString(36)}`;
+      const saveDepth = await depthNow();
+      await page.locator('#panelTabLook').click();
+      await page.locator('#tPresetSave').click();
+      await page.waitForFunction("document.getElementById('presetPick').open === true", null, { timeout: 10000 });
+      await page.fill('#ppName', savedName);
+      await page.click('#ppGo');
+      await page.waitForFunction(() => !__kinect.library.presetGestureRunning(), null, { timeout: 15000 });
+      await settle();
+      const savedBody = (await (await fetch(`${URL_BASE}/presets/${encodeURIComponent(savedName)}`)).json()).body;
+      // The save stamped the source with the new name. Taken back, so the copy's stamp is the one
+      // the source wore when it was copied.
+      if (await depthNow() > saveDepth) await page.evaluate('__kinect.keyframes.undo.pop()');
+      await writePresetDoc(savedName, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+      await page.evaluate('__kinect.library.refreshPresets()');
+      await settle();
+      const framingNames = await page.evaluate(() => __kinect.params.names('look')
+        .filter((n) => !__kinect.presetValueNames().includes(n)));
+      // Keys sorted: the save lists values in the dialog's order and the copy in the registry's,
+      // and an apply reads neither order.
+      const canonical = (body) => JSON.stringify({
+        version: body?.version,
+        requires: [...(body?.requires ?? [])].sort((a, b) => a.id.localeCompare(b.id)),
+        values: Object.fromEntries(Object.entries(body?.values ?? {}).sort(([a], [b]) => a.localeCompare(b))),
+        keys: Object.keys(body ?? {}).sort(),
+      });
+      const copyIsSave = copied !== null && canonical(copied.body) === canonical(savedBody);
+      check(copyPressed === 'live' && copyIsSave,
+        'copy look takes exactly the document save writes from that clip with every box ticked',
+        copied ? `${Object.keys(copied.body.values).length} values copied, `
+          + `${Object.keys(savedBody?.values ?? {}).length} saved, ${copyIsSave ? 'the same' : 'different'}`
+          : `copy look was ${copyPressed}`);
+      check(copied !== null && framingNames.length > 0
+        && framingNames.every((n) => !Object.hasOwn(copied.body.values, n)),
+      'and carries none of the framing a preset may not carry',
+      `${framingNames.length} framing names, `
+        + `${copied ? framingNames.filter((n) => Object.hasOwn(copied.body.values, n)).join(', ') || 'none' : '-'} in the copy`);
+      check(copied?.name === 'blackwall' && typeof copied?.rev === 'string',
+        'and it carries the stamp its clip wears', `${copied?.name} at ${copied?.rev}`);
+      const armed = await lookCommands();
+      check(armed[1].disabled === false, 'and paste look comes live once a look is copied', describe(armed));
+
+      // Onto the clip it came from, with nothing changed since.
+      const selfBefore = await docNow();
+      const selfDepth = await depthNow();
+      const selfPressed = await press('tPasteLook');
+      const selfSame = await docNow() === selfBefore;
+      const selfDepthAfter = await depthNow();
+      check(selfPressed === 'live' && selfSame && selfDepthAfter === selfDepth,
+        'pasting onto the clip the look came from, unchanged since the copy, changes nothing and '
+          + 'costs no undo step',
+        `${selfPressed}, document ${selfSame ? 'unchanged' : 'changed'}, depth ${selfDepth} -> ${selfDepthAfter}`);
+
+      // The project half moves on after the copy, so the paste has to bring it back.
+      await page.evaluate((copiedBloom) => {
+        const k = globalThis.__kinect;
+        k.params.set('bloom', copiedBloom === 0.9 ? 0.2 : 0.9);
+        k.keyframes.undo.commit();
+      }, copied?.body.values.bloom ?? null);
+      await clickClip(lookTarget);
+      // Selecting a row does not repaint the picker, so it is blanked here: whatever reads
+      // `blackwall` after the paste was written by the paste.
+      await page.evaluate("document.getElementById('tPreset').value = ''");
+      const beforeText = await docNow();
+      const beforeDepth = await depthNow();
+      const pastePressed = await press('tPasteLook');
+      const afterText = await docNow();
+      const afterDepth = await depthNow();
+      const pasted = await page.evaluate(({ before, after, sourceId, targetId, values }) => {
+        const k = globalThis.__kinect;
+        const was = JSON.parse(before);
+        const now = JSON.parse(after);
+        const at = (body, id) => body.clips.find((clip) => clip.id === id);
+        const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+        const valueIn = (body, n) => (k.params.spec(n).scope === 'clip'
+          ? at(body, targetId).params[n] : body.look.params[n]);
+        const keyed = Object.keys(at(was, targetId).tracks);
+        const named = Object.keys(values ?? {});
+        const lookNames = k.presetValueNames();
+        const unclaimed = lookNames.filter((n) => k.effectOf(n) !== null && !named.includes(n)
+          && !keyed.includes(n));
+        // Absent is at its default: the save rule sheds an effect held wholly at its defaults.
+        const atDefault = (body, n) => valueIn(body, n) === undefined
+          || same(valueIn(body, n), k.params.normalise(n, k.params.spec(n).default));
+        return {
+          missed: named.filter((n) => !keyed.includes(n) && !same(valueIn(now, n), values[n])),
+          moved: named.filter((n) => !keyed.includes(n) && !same(valueIn(was, n), values[n])).length,
+          unclaimedWasOn: unclaimed.filter((n) => !atDefault(was, n)).length,
+          unclaimedStillOn: unclaimed.filter((n) => !atDefault(now, n)),
+          bloom: [was.look.params.bloom, now.look.params.bloom, values?.bloom],
+          keyed,
+          keyedWas: keyed.map((n) => at(was, targetId).params[n]),
+          keyedNow: keyed.map((n) => at(now, targetId).params[n]),
+          keyedCopied: keyed.map((n) => values?.[n]),
+          tracksSame: same(at(was, targetId).tracks, at(now, targetId).tracks),
+          rest: Object.keys(at(now, targetId)).filter((f) => f !== 'params' && f !== 'appliedPreset'
+            && !same(at(was, targetId)[f], at(now, targetId)[f])),
+          framing: Object.keys(at(now, targetId).params).filter((n) => !lookNames.includes(n)
+            && !same(at(was, targetId).params[n], at(now, targetId).params[n])),
+          sourceSame: same(at(was, sourceId), at(now, sourceId)),
+          stamp: at(now, targetId).appliedPreset ?? null,
+          picker: document.getElementById('tPreset').value,
+        };
+      }, { before: beforeText, after: afterText, sourceId: lookSource, targetId: lookTarget,
+        values: copied?.body.values ?? null });
+      console.log(`  pasted onto ${lookTarget}: ${pasted.moved} values moved, ${pasted.missed.length} missed, `
+        + `${pasted.unclaimedWasOn} unclaimed effect values were on, bloom ${pasted.bloom[0]} -> `
+        + `${pasted.bloom[1]}, keyed ${pasted.keyed.join(', ')} ${pasted.keyedWas.join('/')} -> `
+        + `${pasted.keyedNow.join('/')}, depth ${beforeDepth} -> ${afterDepth}`);
+      check(pastePressed === 'live' && pasted.moved > 5 && pasted.missed.length === 0,
+        'paste look writes every value of the copied look onto the selected clip',
+        `${pastePressed}, ${pasted.moved} moved, missed ${pasted.missed.slice(0, 4).join(', ') || 'none'}`);
+      check(pasted.unclaimedWasOn > 0 && pasted.unclaimedStillOn.length === 0,
+        'and puts every effect the copied look does not use back at its defaults, as applying a whole '
+          + 'look does',
+        `${pasted.unclaimedWasOn} were off their defaults, still off: `
+          + `${pasted.unclaimedStillOn.slice(0, 4).join(', ') || 'none'}`);
+      check(pasted.bloom[0] !== pasted.bloom[2] && pasted.bloom[1] === pasted.bloom[2],
+        'and the project half comes with it, as it does with any preset',
+        `bloom ${pasted.bloom[0]} -> ${pasted.bloom[1]}, copied ${pasted.bloom[2]}`);
+      check(pasted.keyed.length > 0 && JSON.stringify(pasted.keyedNow) === JSON.stringify(pasted.keyedWas)
+        && JSON.stringify(pasted.keyedNow) !== JSON.stringify(pasted.keyedCopied),
+      'a parameter the target keys goes on following its own track rather than the pasted value',
+      `${pasted.keyed.join(', ')}: ${pasted.keyedWas.join('/')} -> ${pasted.keyedNow.join('/')}, `
+        + `copied ${pasted.keyedCopied.join('/')}`);
+      check(pasted.tracksSame, 'and the target keeps every track it had, keys and all');
+      check(pasted.rest.length === 0 && pasted.framing.length === 0,
+        'and its crop, clip planes, levelling, placement, timing and take stay where they were',
+        `changed: ${[...pasted.rest, ...pasted.framing].join(', ') || 'nothing'}`);
+      check(pasted.sourceSame, 'and the clip the look came from is untouched');
+      check(pasted.stamp?.name === 'blackwall' && pasted.stamp?.rev === copied?.rev,
+        'and the target now claims the stamp the source wore when it was copied',
+        JSON.stringify(pasted.stamp));
+      check(pasted.picker === 'blackwall',
+        'and the preset picker names what the selected clip now claims', `"${pasted.picker}"`);
+      check(afterDepth === beforeDepth + 1, 'and the paste is one undo step',
+        `depth ${beforeDepth} -> ${afterDepth}`);
+
+      await focusStage();
+      await page.keyboard.press(undoKey);
+      await settle();
+      const undoneText = await docNow();
+      const undoneDepth = await depthNow();
+      const undoDiff = undoneText === beforeText ? [] : await page.evaluate(({ before, after, targetId }) => {
+        const a = JSON.parse(before).clips.find((clip) => clip.id === targetId);
+        const b = JSON.parse(after).clips.find((clip) => clip.id === targetId);
+        return Object.keys(a.params).filter((n) => JSON.stringify(a.params[n]) !== JSON.stringify(b.params[n]))
+          .concat(JSON.stringify(a.tracks) === JSON.stringify(b.tracks) ? [] : ['tracks'])
+          .concat(JSON.stringify(a.appliedPreset) === JSON.stringify(b.appliedPreset) ? [] : ['appliedPreset']);
+      }, { before: beforeText, after: undoneText, targetId: lookTarget });
+      check(undoneText === beforeText && undoneDepth === beforeDepth,
+        'undo puts the whole document back exactly as it was before the paste: the target\'s values, '
+          + 'tracks and stamp, and the project half',
+        `depth ${afterDepth} -> ${undoneDepth}; differs in ${undoDiff.slice(0, 6).join(', ') || 'nothing'}`);
+
+      // Back onto the source after it has moved on.
+      await clickClip(lookSource);
+      await page.evaluate(() => {
+        globalThis.__kinect.params.set('pointSize', 44);
+        globalThis.__kinect.keyframes.undo.commit();
+      });
+      const backDepth = await depthNow();
+      await press('tPasteLook');
+      const back = await page.evaluate(() => ({
+        pointSize: globalThis.__kinect.params.get('pointSize'),
+        bloom: globalThis.__kinect.params.get('bloom'),
+      }));
+      const backDepthAfter = await depthNow();
+      check(back.pointSize === copied?.body.values.pointSize && back.bloom === copied?.body.values.bloom
+        && backDepthAfter === backDepth + 1,
+      'pasting onto the source after it has moved on puts back the look it had when it was copied, '
+        + 'in one undo step',
+      `point size 44 -> ${back.pointSize} against ${copied?.body.values.pointSize}, bloom ${back.bloom}, `
+        + `depth ${backDepth} -> ${backDepthAfter}`);
+
+      // A look copied from a clip that claims no preset.
+      await page.evaluate((sourceId) => {
+        const k = globalThis.__kinect;
+        const body = k.library.serialiseProjectBody();
+        body.clips.find((clip) => clip.id === sourceId).appliedPreset = null;
+        k.library.restoreProject(body);
+        k.editor.selectClipRow(sourceId);
+      }, lookSource);
+      await settle();
+      await press('tCopyLook');
+      await clickClip(lookTarget);
+      const bareBefore = await page.evaluate((targetId) => globalThis.__kinect.library.serialiseProjectBody()
+        .clips.find((clip) => clip.id === targetId).appliedPreset ?? null, lookTarget);
+      await press('tPasteLook');
+      const bare = await page.evaluate((targetId) => ({
+        stamp: globalThis.__kinect.library.serialiseProjectBody()
+          .clips.find((clip) => clip.id === targetId).appliedPreset ?? null,
+        copiedRev: globalThis.__kinect.library.copiedLook?.()?.rev,
+        picker: document.getElementById('tPreset').value,
+      }), lookTarget);
+      check(bareBefore?.name === 'cascade' && bare.copiedRev === null && bare.stamp === null
+        && bare.picker === '',
+      'a look copied from a clip that claims no preset leaves the clip it lands on claiming none',
+      `stamp ${JSON.stringify(bareBefore?.name)} -> ${JSON.stringify(bare.stamp)}, copied rev `
+        + `${JSON.stringify(bare.copiedRev)}, picker "${bare.picker}"`);
+
+      await page.evaluate((body) => {
+        const k = globalThis.__kinect;
+        k.library.restoreProject(body);
+        k.editor.selectClipRow('gz2');
+        k.keyframes.undo.begin();
+      }, documentBeforeLooks);
+      if (tabBeforeLooks) await page.locator(`.paneltab[data-panel-tab="${tabBeforeLooks}"]`).click();
+      await settle();
+    }
+
     // The other door, and the ruling's other half. Through `loadProject` rather than through
     // `restoreProject`: the restore door is what undo arrives by and it must keep the selection,
     // so driving that one would report the opposite of what this row claims.
@@ -12860,7 +13240,7 @@ try {
         return { disabled: button.disabled, text: button.textContent,
           parent: button.parentElement?.className ?? '' };
       })(),
-      clipCommands: ['tDeleteClip', 'tMoveClip', 'tRotateClip', 'tKeyClip',
+      clipCommands: ['tDeleteClip', 'tMoveClip', 'tRotateClip', 'tKeyClip', 'tCopyLook', 'tPasteLook',
         'tRate', 'tPreset', 'tPresetSave', 'tPresetExport', 'tPresetImport',
         'tMark', 'camSensor', 'cropFit'].map((id) => [id, document.getElementById(id)?.disabled]),
       rateInClipOptions: document.getElementById('tRate').closest('#tClipOptions') !== null,
@@ -12899,6 +13279,23 @@ try {
     check(off.clipCommands.every(([, disabled]) => disabled === true),
       'and every command that does need a clip is disabled until a row is selected',
       off.clipCommands.map(([id, disabled]) => `${id}:${disabled}`).join(' '));
+    // A look is still copied from the rows above, so this refusal is about the clip and not about
+    // an empty copy.
+    const noClipBefore = await page.evaluate('JSON.stringify(__kinect.library.serialiseProjectBody())');
+    const noClipPaste = await page.evaluate(() => {
+      const { copiedLook, pasteLook } = globalThis.__kinect.library;
+      try {
+        return { copied: copiedLook?.() !== null, result: pasteLook ? pasteLook() : 'absent' };
+      } catch (err) {
+        return { copied: copiedLook?.() !== null, error: err.message };
+      }
+    });
+    const noClipAfter = await page.evaluate('JSON.stringify(__kinect.library.serialiseProjectBody())');
+    check(noClipPaste.copied === true && /select a clip before applying a preset/.test(noClipPaste.error ?? '')
+      && noClipAfter === noClipBefore,
+    'and pasting a copied look with no clip selected is refused before anything is written',
+    `copied ${noClipPaste.copied}, ${noClipPaste.error ?? `returned ${JSON.stringify(noClipPaste.result)}`}, `
+      + `document ${noClipAfter === noClipBefore ? 'unchanged' : 'changed'}`);
     check(off.rateInClipOptions && off.clipOptionsDisplay === 'none',
       'and the speed slider lives in the clip chip, which leaves the strip with the selection',
       `in clip chip ${off.rateInClipOptions}, chip display ${off.clipOptionsDisplay}`);
