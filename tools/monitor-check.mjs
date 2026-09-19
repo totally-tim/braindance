@@ -56,8 +56,8 @@ const MUTATIONS = {
   // It leaks into the recorder and nowhere else: decimating at the top of `handleMessage` corrupts
   // the socket too, fails section 1's first row, and aborts the run before it reaches a take.
   'decimate-reaches-recorder': { file: 'server/index.js', edits: [[
-    '    recorder.write(msg.raw);',
-    "    recorder.write(encodeMessage(TYPE_FRAME, decimatePayload(msg.payload, 4, 'leak')));",
+    '    recorder.write(msg.raw);\n  } else if (msg.type === TYPE_COLOR) {',
+    "    recorder.write(encodeMessage(TYPE_FRAME, decimatePayload(msg.payload, 4, 'leak')));\n  } else if (msg.type === TYPE_COLOR) {",
   ]] },
   'stride-ignored': { file: 'server/index.js', edits: [[
     '    if (frameSeq % m.stride !== 0) continue;',

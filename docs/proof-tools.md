@@ -88,7 +88,7 @@ fixture, server or browser first (`timeline-check`, `keyframe-check`, `export-ch
 A mutated run prints the expected failure row when its entry carries a `fails:` field.
 For other entries, read the catch from the assertions that fired.
 
-Four tables are too large to reproduce here — `editor-check` declares 207, `library-check` 151,
+Four tables are too large to reproduce here — `editor-check` declares 207, `library-check` 154,
 `registry-check` 60 and `effect-check` 42. Their sections give the count and the enumerate
 command prints the names.
 
@@ -696,7 +696,7 @@ case, and name themselves in the verdict as unproven on one that does not. The t
 shoots on `+17` and `+18` at once, and the marks-sync section answers as the node from a stub
 inside the check on `+17`.
 
-144 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
+154 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
 
 **Known reds.** Three rows are flaky under machine contention. Two are
 in the marks-on-the-scrubber section and are one race between a seek, `settled()` and the mark's
@@ -898,7 +898,8 @@ the dump, and no tool here reaches it.
 
 ## `vcam-check`
 
-The OBS output serves the colour camera and the keyed one, and the take never learns about either.
+The OBS output serves the colour camera and the keyed one, a take recorded with colour on carries
+the colour camera and never the key, and a replay of that take serves its colour camera.
 
 ```
 node tools/vcam-check.mjs
@@ -916,7 +917,9 @@ The discriminator is geometric rather than perceptual: the colour camera sees 84
 the registered frustum sees 70.6, and the fixture plants a magenta left margin and a cyan right one
 in the difference, which no upscale can invent. The keyed page cuts that same frame by the crop box
 against a live depth in colour-camera space, and sections 7, 8 and 9 hold the key's wire, its bytes
-and its picture the way sections 1 to 6 hold the webcam's.
+and its picture the way sections 1 to 6 hold the webcam's. Section 3 records one take with nothing
+watching and one with the webcam and a key page attached, and section 10 replays the first with
+each colour frame numbered after its end-of-image marker, so the order it is served in is visible.
 
 Section 10 asks which subscribers a revocation ends. A grabber restart holds them and colour off
 ends them, and the recorder's accounting must lose every ended one, including a client that stopped
@@ -935,8 +938,16 @@ later spawn fails and only the hold can end the subscriber.
   is the plausible wrong implementation.
 - **`hd-reencodes-in-flight`** — the colour payload decoded and re-encoded at the same size, so
   every geometric row passes and only the bytes differ.
-- **`hd-reaches-recorder`** — the colour message reaches the recorder, so the take carries a third
-  message type and its content hash moves.
+- **`hd-dropped-from-take`** — the colour message reaches the webcam and never the take, so a take
+  recorded with colour on has no colour camera in it.
+- **`recorder-never-asks-for-colour`** — the recorder stops asking for the colour camera, so a take
+  carries it only while a webcam is watched; section 3's unwatched arm is the catch and the watched
+  arm stays green.
+- **`rate-ignores-colour`** — the remaining-time rate sizes a colour take as depth alone, so the
+  refusal to start lets one begin that the disk cannot hold.
+- **`replay-serves-no-colour`** — a replay never offers the webcam its take's colour.
+- **`replay-repeats-one-colour-frame`** — a replay serves one recorded colour frame over and over,
+  and only section 10's order row can tell.
 - **`refusal-ignores-webcam`** — the refusal loses its webcam clause, so a take starts while a
   full-rate MJPEG pull competes with the depth packets.
 - **`revoke-keeps-subscribers`** — colour off sets its reason and leaves every open response
@@ -978,8 +989,8 @@ later spawn fails and only the hold can end the subscriber.
   so the outer field the discriminator is planted in is gone and the page rows that read it fail.
 - **`key-reencodes-in-flight`** — the served depth JPEG is re-encoded at the same size and values,
   so every geometric row passes and only the writer-log comparison fails.
-- **`key-reaches-recorder`** — a type 4 lands in the recorder, and section 3's existing row is
-  what permits only hello and type 2 frames in a take.
+- **`key-reaches-recorder`** — a type 4 lands in the recorder, and section 3's row that permits only
+  hello, frame and colour messages in a take is the catch.
 - **`refusal-ignores-key`** — the remote key stream vanishes from the refusal table, and the loopback
   row stays green, which is what separates this from the webcam's.
 - **`key-writes-opaque`** — an opaque clear turns every rejected pixel black; the mask is still

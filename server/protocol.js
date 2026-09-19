@@ -8,7 +8,7 @@
 //   HEADER_BYTES       12           three u32s: magic, type, payloadLen
 //   TYPE_HELLO         1            the sensor record, once, before any frame
 //   TYPE_FRAME         2            one depth grid and at most one JPEG
-//   TYPE_COLOR         3            live only - the recorder never writes one
+//   TYPE_COLOR         3            the colour camera's own picture, in a take recorded with colour on
 //   TYPE_KEY           4            live only - the colour picture's depth, for keying
 //   MAX_PAYLOAD_BYTES  8388608      a longer declared payload is a desync, not a frame
 //
@@ -19,6 +19,11 @@
 // constant. Type 2 is `[u32 depthBytes][u32 colorBytes][u64 stampMs][depth][jpeg]`, the
 // depth `width * height` u16 millimetres row-major with 0 meaning no reading; `colorBytes`
 // may be zero, and the JPEG is the registered colour, sharing the grid pixel for pixel.
+//
+// Type 3 is `[u64 stampMs][jpeg]`, the colour camera's own 1920x1080 picture, on the same clock as
+// type 2's stamp and at the colour camera's own rate, so it lines up with no frame in particular.
+// A take recorded with colour on carries one per colour frame the grabber encoded; a take recorded
+// with colour off carries none. A reader skips any type it does not know.
 //
 // Type 4 is `[u64 stampMs][u64 colourTs][f32 fx][f32 fy][f32 cx][f32 cy][f32 rangeM][jpeg]`, the colour camera's
 // own depth at 1920x1080 as a greyscale JPEG, so the four intrinsics are the colour camera's and
@@ -41,13 +46,13 @@
 export const MAGIC = 0x4b4e4354;
 export const TYPE_HELLO = 1;
 export const TYPE_FRAME = 2;
-// The colour camera's own 1920x1080 picture for the webcam output, not type 2's registered
-// colour. Live only: a type 3 in a capture would move every take's content hash, which is
-// the key the library joins two machines on.
+// The colour camera's own 1920x1080 picture, not type 2's registered colour: served to the
+// webcam output, and written into every take recorded with colour on.
 export const TYPE_COLOR = 3;
 // The same picture's depth, quantised to one byte a pixel and JPEG-compressed, so a browser can key
-// the colour against it. Live only for the same reason type 3 is, and it arrives only while a key
-// client is attached - `key on` implies the colour encode, so a type 4 never travels without one.
+// the colour against it. Live only: a take never carries one, so a replayed take has no key. It
+// arrives only while a key client is attached - `key on` implies the colour encode, so a type 4
+// never travels without one.
 export const TYPE_KEY = 4;
 export const HEADER_BYTES = 12;
 

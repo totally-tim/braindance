@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // OBS receives the point-cloud program, the live colour camera, and the colour camera keyed by
-// live depth. They have different failure modes, so this file has different arms for them and for
-// the take that must never receive either live-only stream.
+// live depth. They have different failure modes, so this file has different arms for them, for the
+// take, which records the colour camera and never the key, and for a replay of that take.
 //
 // The discriminator is geometric rather than perceptual. The wire already carries colour - type 2's
 // registered 512x424 JPEG - and an implementation that upscaled that to 1080p would look almost
@@ -23,7 +23,8 @@ import { networkInterfaces } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
-import { MessageParser, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, TYPE_KEY } from '../server/protocol.js';
+import { MessageParser, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, TYPE_KEY, encodeMessage } from '../server/protocol.js';
+import { COLOUR_FRAME_BYTES } from '../server/library.js';
 import { decodePair, quantiseDepthMm } from '../web/key-stream.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -174,17 +175,52 @@ const MUTATIONS = {
     ]],
   },
 
-  // The colour message reaches the recorder, so a take carries a third message type - which moves
-  // its content hash, the key the library joins two machines on. This is the `nearClip` versus
-  // `--min-depth` failure class: it changes the footage in the one situation where nobody is
-  // watching for it.
-  'hd-reaches-recorder': {
+  // The colour message goes to the webcam and never reaches the take, so a take recorded with colour
+  // on has no colour camera in it.
+  'hd-dropped-from-take': {
     file: 'server/index.js',
     edits: [[
-      'webcam.offer(Buffer.from(msg.payload.subarray(8)), Number(msg.payload.readBigUInt64LE(0)));',
-      'webcam.offer(Buffer.from(msg.payload.subarray(8)), Number(msg.payload.readBigUInt64LE(0)));\n'
-      + '    recorder.write(msg.raw);',
+      '    recorder.write(msg.raw);\n  } else if (msg.type === TYPE_KEY) {',
+      '  } else if (msg.type === TYPE_KEY) {',
     ]],
+    fails: 'section 3\'s colour rows in both arms, and section 10, which has no colour take to replay',
+  },
+
+  // The recorder stops asking for the colour camera, so a take carries it only while somebody is
+  // watching the webcam: what a take holds would depend on who was looking.
+  'recorder-never-asks-for-colour': {
+    file: 'server/webcam.js',
+    edits: [[
+      'count: () => this.subscribers.size + (recording() ? 1 : 0)',
+      'count: () => this.subscribers.size',
+    ]],
+    fails: 'section 3\'s unwatched arm, whose take has no colour, and section 10; the watched arm stays green',
+  },
+
+  // The remaining-time rate forgets the colour camera, so a take is sized as depth alone and the
+  // refusal to start lets one begin that the disk cannot hold.
+  'rate-ignores-colour': {
+    file: 'server/index.js',
+    edits: [[
+      '  if (!camera.color) return observedBytesPerSec;',
+      '  return observedBytesPerSec;',
+    ]],
+    fails: 'section 3\'s two rate rows, before the take and during it',
+  },
+
+  // A replay reads the take's colour and never offers the webcam anything.
+  'replay-serves-no-colour': {
+    file: 'server/index.js',
+    edits: [['  replayHasColour = capture.colourCount > 0;', '  replayHasColour = false;']],
+    fails: 'section 10\'s three served-colour rows',
+  },
+
+  // A replay serves one recorded colour frame over and over: every part is the take's, and only the
+  // order row can tell.
+  'replay-repeats-one-colour-frame': {
+    file: 'server/index.js',
+    edits: [['          const colour = await capture.readColour(c);', '          const colour = await capture.readColour(0);']],
+    fails: 'section 10\'s order row alone',
   },
 
   // The refusal keeps its monitors clause and loses its webcam one, so a take starts while somebody
@@ -280,9 +316,9 @@ const MUTATIONS = {
 
   'depth-only-take-gets-live-data': {
     file: 'server/index.js',
-    edits: [['    recorder.write(msg.raw);',
+    edits: [['    recorder.write(msg.raw);\n  } else if (msg.type === TYPE_COLOR) {',
       '    recorder.write(camera.color ? msg.raw : Buffer.concat([msg.raw,\n'
-      + '      Buffer.from([0x54, 0x43, 0x4e, 0x4b, 4, 0, 0, 0, 1, 0, 0, 0, 0])]));']],
+      + '      Buffer.from([0x54, 0x43, 0x4e, 0x4b, 4, 0, 0, 0, 1, 0, 0, 0, 0])]));\n  } else if (msg.type === TYPE_COLOR) {']],
     fails: 'the depth-only file census row in section 7',
   },
 
@@ -415,7 +451,7 @@ const MUTATIONS = {
       '    keyStream.offer(msg.payload);',
       '    keyStream.offer(msg.payload);\n    recorder.write(msg.raw);',
     ]],
-    fails: 'section 3\'s existing row that permits only hello and type 2 frames in a take',
+    fails: 'section 3\'s row that permits only hello, frame and colour messages in a take',
   },
 
   // The remote key stream vanishes from the same refusal table the webcam already occupies.
@@ -866,11 +902,85 @@ try {
     await stopAll();
   }
 
-  console.log('\n3. the take never learns the webcam exists');
+  console.log('\n3. a take recorded with colour on carries the colour camera, whoever is watching');
+  // The file's messages by type, and the payload hashes of its frames and colour messages.
+  const census = (file) => {
+    const types = new Map();
+    const hashes = { [TYPE_FRAME]: [], [TYPE_COLOR]: [] };
+    const colourStamps = [];
+    for (const msg of new MessageParser().push(readFileSync(file))) {
+      types.set(msg.type, (types.get(msg.type) ?? 0) + 1);
+      if (msg.type in hashes) hashes[msg.type].push(hashOf(msg.payload));
+      if (msg.type === TYPE_COLOR) colourStamps.push(Number(msg.payload.readBigUInt64LE(0)));
+    }
+    return { types, hashes, colourStamps };
+  };
+  const emittedPayloads = (type) => new Set((emitted().get(type) ?? []).map((e) => e.hash));
+  const takeFile = (id) => join(WORK, 'takes', `${id}.knct`);
+  // The capture routes answer under the take's content hash, so an id resolves through the listing.
+  const takeHash = async (id) =>
+    (await api('/library/takes')).body?.takes?.find((take) => take.id === id)?.hash;
+  // Kept for section 10, which replays it.
+  let colourTake = null;
   {
+    // Nothing attached: the only thing that can ask the grabber for colour is the recorder.
     rmSync(EMIT_LOG, { force: true });
     rmSync(join(WORK, 'takes'), { recursive: true, force: true });
     mkdirSync(join(WORK, 'takes'), { recursive: true });
+    await start();
+    // Past one five-second window, so the rate below is measured rather than the boot figure.
+    await wait(5600);
+    const idle = (await api('/record/state')).body;
+    const idleHealth = (await api('/sensor/health')).body;
+    const colourShare = idle?.storage?.bytesPerSec - idleHealth?.bytesPerSec;
+    const expectedShare = idleHealth?.fps * COLOUR_FRAME_BYTES;
+    ok('before a take, with colour on and nothing flowing, the remaining-time rate counts one colour frame per depth frame',
+      idleHealth?.fps > 0 && Math.abs(colourShare - expectedShare) <= 1,
+      `${(colourShare / 1e6).toFixed(2)}MB/s over ${(idleHealth?.bytesPerSec / 1e6).toFixed(2)}MB/s of depth at ${idleHealth?.fps?.toFixed(1)}fps, `
+      + `expected ${(expectedShare / 1e6).toFixed(2)}MB/s`);
+
+    const started = await post('/record/start');
+    ok('a take starts with nothing watching', started.status === 200, JSON.stringify(started.body));
+    // Long enough that the last window to close lies wholly inside the take.
+    await wait(10500);
+    const during = (await api('/record/state')).body;
+    const duringHealth = (await api('/sensor/health')).body;
+    const hdEmitted = (emitted().get(TYPE_COLOR) ?? []).length;
+    const measuredShare = during?.storage?.bytesPerSec - duringHealth?.bytesPerSec;
+    const fixtureShare = duringHealth?.fps * (readFileSync(EMIT_LOG, 'utf8').split('\n')
+      .map((line) => line.split(' ')).find(([type]) => Number(type) === TYPE_COLOR)?.[1] ?? 0);
+    ok('and while it records, the rate counts the colour the take is actually writing',
+      hdEmitted > 0 && measuredShare > 0.5 * fixtureShare && measuredShare < 1.5 * fixtureShare,
+      `${(measuredShare / 1e6).toFixed(2)}MB/s of colour counted, ${(fixtureShare / 1e6).toFixed(2)}MB/s at one fixture frame per depth frame`);
+    const stopped = await post('/record/stop');
+    ok('and stops', stopped.status === 200);
+    await wait(400);
+
+    const file = takeFile(started.body?.takeId);
+    if (!started.body?.takeId || !existsSync(file)) {
+      ok('the unwatched take was written', false, `nothing at ${file}`);
+    } else {
+      colourTake = file;
+      const { types, hashes, colourStamps } = census(file);
+      const colourCount = types.get(TYPE_COLOR) ?? 0;
+      ok('it carries the colour camera although nobody was subscribed', colourCount > 10,
+        `${colourCount} colour messages beside ${types.get(TYPE_FRAME) ?? 0} frames`);
+      const foreign = hashes[TYPE_COLOR].filter((h) => !emittedPayloads(TYPE_COLOR).has(h));
+      ok('and every colour message in it is byte for byte one the writer emitted', colourCount > 0 && foreign.length === 0,
+        `${foreign.length} of ${colourCount} are not in the emit log`);
+      ok('with stamps that only rise', colourStamps.every((t, k) => k === 0 || t > colourStamps[k - 1]),
+        `${colourStamps.length} stamps`);
+      const index = (await api(`/capture/${await takeHash(started.body.takeId)}/index`)).body;
+      ok('and the index lists those colour messages apart from the frames',
+        index?.colour?.offset?.length === colourCount && index?.frames?.offset?.length === (types.get(TYPE_FRAME) ?? 0),
+        `index: ${index?.frames?.offset?.length} frames, ${index?.colour?.offset?.length} colour; file: `
+        + `${types.get(TYPE_FRAME) ?? 0} and ${colourCount}`);
+    }
+    await stopAll();
+  }
+  {
+    // The webcam and a key page attached, so type 3 and type 4 both flow: the take takes one of them.
+    rmSync(EMIT_LOG, { force: true });
     await start();
     const sub = subscribe();
     await sub.ready;
@@ -879,7 +989,7 @@ try {
     await wait(800);
 
     const started = await post('/record/start');
-    ok('a take starts with the webcam attached', started.status === 200, JSON.stringify(started.body));
+    ok('a take starts with the webcam and a key page attached', started.status === 200, JSON.stringify(started.body));
     await wait(2500);
     const stopped = await post('/record/stop');
     ok('and stops', stopped.status === 200);
@@ -887,32 +997,24 @@ try {
     await key.stop();
     await wait(400);
 
-    const dir = join(WORK, 'takes');
-    const file = execFileSync('sh', ['-c', `ls ${dir}/*.knct 2>/dev/null | head -1`]).toString().trim();
-    if (!file) {
-      ok('the take was written', false, `nothing in ${dir}`);
+    const file = takeFile(started.body?.takeId);
+    if (!started.body?.takeId || !existsSync(file)) {
+      ok('the watched take was written', false, `nothing at ${file}`);
     } else {
-      const parser = new MessageParser();
-      const types = new Map();
-      const frameHashes = [];
-      for (const msg of parser.push(readFileSync(file))) {
-        types.set(msg.type, (types.get(msg.type) ?? 0) + 1);
-        if (msg.type === TYPE_FRAME) frameHashes.push(createHash('sha256').update(msg.payload).digest('hex'));
-      }
-      ok('the take carries a hello and frames', (types.get(TYPE_HELLO) ?? 0) === 1 && frameHashes.length > 10,
-        `hello ${types.get(TYPE_HELLO) ?? 0}, frames ${frameHashes.length}`);
-      // **The row the mutation has to trip.**
-      ok('and carries no colour message at all', !types.has(TYPE_COLOR),
-        `${types.get(TYPE_COLOR) ?? 0} colour messages in the take`);
-      ok('and nothing but those two types', [...types.keys()].every((t) => t === TYPE_HELLO || t === TYPE_FRAME),
+      const { types, hashes } = census(file);
+      ok('the take carries a hello and frames', (types.get(TYPE_HELLO) ?? 0) === 1 && hashes[TYPE_FRAME].length > 10,
+        `hello ${types.get(TYPE_HELLO) ?? 0}, frames ${hashes[TYPE_FRAME].length}`);
+      ok('and the colour camera', (types.get(TYPE_COLOR) ?? 0) > 10, `${types.get(TYPE_COLOR) ?? 0} colour messages`);
+      // **The row `key-reaches-recorder` has to trip.**
+      ok('and nothing but those three types - no keyed depth', [...types.keys()].every((t) => [TYPE_HELLO, TYPE_FRAME, TYPE_COLOR].includes(t)),
         `types ${[...types.keys()].join(', ')}`);
-
-      // The payload hash here, not the body one: a type 2 frame goes into the file whole, so the
-      // payload is what a reader gets and the log's fourth column is a `-` for it.
-      const emittedFrames = new Set((emitted().get(TYPE_FRAME) ?? []).map((e) => e.hash));
-      const foreign = frameHashes.filter((h) => !emittedFrames.has(h));
-      ok('and every frame in it is byte for byte one the writer emitted', foreign.length === 0,
-        `${foreign.length} of ${frameHashes.length} frames are not in the emit log`);
+      // The payload hash, not the body one: a message goes into the file whole.
+      const foreignFrames = hashes[TYPE_FRAME].filter((h) => !emittedPayloads(TYPE_FRAME).has(h));
+      ok('and every frame in it is byte for byte one the writer emitted', foreignFrames.length === 0,
+        `${foreignFrames.length} of ${hashes[TYPE_FRAME].length} frames are not in the emit log`);
+      const foreignColour = hashes[TYPE_COLOR].filter((h) => !emittedPayloads(TYPE_COLOR).has(h));
+      ok('and so is every colour message', hashes[TYPE_COLOR].length > 0 && foreignColour.length === 0,
+        `${foreignColour.length} of ${hashes[TYPE_COLOR].length} colour messages are not in the emit log`);
     }
     await stopAll();
   }
@@ -1349,7 +1451,7 @@ try {
         const file = join(WORK, 'takes', `${started.body.takeId}.knct`);
         const records = new MessageParser().push(readFileSync(file));
         const frames = records.filter((m) => m.type === TYPE_FRAME);
-        ok('the resulting take contains depth-only frames and no live-only messages',
+        ok('the resulting take contains depth-only frames, and no colour camera or keyed depth',
           frames.length > 5 && frames.every((m) => m.payload.readUInt32LE(4) === 0)
           && records.every((m) => m.type === TYPE_HELLO || m.type === TYPE_FRAME),
           `${frames.length} depth frames, types ${[...new Set(records.map((m) => m.type))]}`);
@@ -1580,10 +1682,84 @@ try {
     }
   }
 
+  console.log('\n10. a replayed take serves the colour camera it recorded, and no key');
+  {
+    // A server replaying `file`, with no grabber. Up when it answers, which in replay is after the
+    // take has been indexed.
+    const replay = async (file) => {
+      const child = spawn(process.execPath, [
+        join(WORK, 'server/index.js'), '--standby-after', '0', '--port', String(PORT),
+        '--captures', join(WORK, 'replay-caps'), '--replay', file,
+      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+      servers.push(child);
+      let log = '';
+      child.stdout.on('data', (c) => { log += c; });
+      child.stderr.on('data', (c) => { log += c; });
+      await waitFor(() => /frames indexed|contains no frames|cannot open/.test(log), 20000, 'the replay to index its take');
+    };
+    if (!colourTake) {
+      ok('section 3 left a colour take to replay', false, 'it did not');
+    } else {
+      mkdirSync(join(WORK, 'replay-caps'), { recursive: true });
+      // Each colour frame numbered after its end-of-image marker, so a part served says which frame
+      // it is: the fixture writes one picture over and over, and order would otherwise be invisible.
+      const numbered = [];
+      const colourless = [];
+      const bodies = new Map();
+      let seq = 0;
+      for (const msg of new MessageParser().push(readFileSync(colourTake))) {
+        if (msg.type !== TYPE_COLOR) {
+          numbered.push(msg.raw);
+          colourless.push(msg.raw);
+          continue;
+        }
+        const payload = Buffer.alloc(msg.payload.length + 4);
+        msg.payload.copy(payload);
+        payload.writeUInt32LE(seq, msg.payload.length);
+        bodies.set(hashOf(payload.subarray(8)), seq++);
+        numbered.push(encodeMessage(TYPE_COLOR, payload));
+      }
+      const numberedFile = join(WORK, 'replay-colour.knct');
+      const colourlessFile = join(WORK, 'replay-colourless.knct');
+      writeFileSync(numberedFile, Buffer.concat(numbered));
+      writeFileSync(colourlessFile, Buffer.concat(colourless));
+
+      await replay(numberedFile);
+      const sub = subscribe();
+      await sub.ready;
+      await wait(3000);
+      ok('/camera.mjpg on a replayed colour take answers and serves parts', sub.status === 200 && sub.parts.length > 10,
+        `status ${sub.status}, ${sub.parts.length} parts`);
+      const served = sub.parts.map((p) => bodies.get(hashOf(p)));
+      ok('and every part is a colour frame the take holds, byte for byte',
+        served.length > 0 && served.every((n) => n !== undefined),
+        `${served.filter((n) => n === undefined).length} of ${served.length} parts are not in the take`);
+      // One wrap is allowed, because the replay loops.
+      const backwards = served.filter((n, k) => k > 0 && !(n > served[k - 1])).length;
+      ok('in the order the take holds them', served.length > 10 && backwards <= 1,
+        `${backwards} steps back or standing in ${served.length} parts: ${served.slice(0, 12).join(' ')}`);
+      const state = (await api('/record/state')).body;
+      ok('while the key refuses on a replay and names the keyed depth a take does not carry',
+        state?.key?.available === false && /keyed depth/.test(state?.key?.unavailable ?? ''),
+        JSON.stringify(state?.key?.unavailable));
+      sub.stop();
+      await stopAll();
+
+      await replay(colourlessFile);
+      const refused = await fetch(`http://127.0.0.1:${PORT}/camera.mjpg`, { signal: AbortSignal.timeout(8000) })
+        .then(async (res) => ({ status: res.status, text: await res.text() }))
+        .catch((err) => ({ status: 0, text: err.message }));
+      ok('a replayed take with no colour refuses /camera.mjpg and says the take carries none',
+        refused.status === 503 && /carries no colour camera frames/.test(refused.text),
+        `${refused.status} ${refused.text.slice(0, 120)}`);
+      await stopAll();
+    }
+  }
+
   // A revocation either ends the webcam's subscribers or holds them, decided by whether a grabber
   // is coming back. Ending on a restart makes OBS reconnect on every USB drop; holding on colour off
   // leaves a response nothing will ever write to, still charged to the take.
-  console.log('\n10. a revoked webcam ends its subscribers unless the picture is coming back');
+  console.log('\n11. a revoked webcam ends its subscribers unless the picture is coming back');
   {
     // Every spawn exits after 150 frames and reads the capture through a link this section removes,
     // so the first respawn comes back and none after the link has gone can.

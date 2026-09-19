@@ -92,6 +92,13 @@ function warningsOf(take) {
       why: 'the writer stopped mid-frame, so the take is usable up to the cut and no further',
     });
   }
+  if (take.dropped > 0) {
+    out.push({
+      key: 'dropped',
+      short: 'dropped frames',
+      why: `the disk could not keep up, so ${take.dropped} frames were never written and the take has a gap where they were`,
+    });
+  }
   // The reasons in the server's words: written again here, badge and button disagreed.
   for (const refusal of take.openRefusals) {
     out.push({
