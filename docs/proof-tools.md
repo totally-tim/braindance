@@ -92,6 +92,33 @@ Four tables are too large to reproduce here — `editor-check` declares 207, `li
 `registry-check` 60 and `effect-check` 42. Their sections give the count and the enumerate
 command prints the names.
 
+## Shortened product timers
+
+A row that waits for a product timer runs the real code with that timer shortened, instead of
+waiting out the shipped delay. Each such timer reads its value through `testTimer` in
+`web/test-timers.js`, which returns the shipped value unless a run plants a substitute. A Node
+process reads the substitutes as JSON from the `BRAINDANCE_TEST_TIMERS` environment variable, and a
+page reads the same JSON from its `test-timers` query parameter. A normal launch sets neither. A
+planted name that no timer answers to is refused, a substitute must have the shape of the shipped
+value, and the process logs one `[timers]` line for each substitute it takes.
+`test/test-timers.test.mjs` walks every `testTimer` call site and holds each one at its shipped
+value when nothing is planted; `cli-check` and `library-check` each read that a launch planting
+nothing logs no `[timers]` line. The unit tests named below hold the timing rule at its shipped
+value with a fake clock. A timer with no unit test is held by the tool's row at the shortened
+value and by the mutation that row must fail under.
+
+| timer | shipped | site | shortened by | shipped rule held by |
+| --- | --- | --- | --- | --- |
+| `record-poll` | 5000 ms | `web/record-poll.js` | `library-check`, the library pages that follow the recorder | `test/record-poll.test.mjs` |
+| `listing-timeout` | 15000 ms | `web/library.js` | `library-check`, the same pages | no unit test: the constant lives in a page module that needs a DOM |
+| `linger` | 6000 ms | `server/on-demand.js` | `vcam-check`, sections 1 and 7 | `test/on-demand.test.mjs` |
+| `idle-tick` | 5000 ms | `server/idle.js` | `cli-check`, every server after the first | `test/idle-deadline.test.mjs` |
+| `restart-delays` | 1000, 2000, 4000, 8000 ms | `server/backoff.js` | `cli-check`, the same servers | `test/backoff.test.mjs` |
+| `absent-delay` | 30000 ms | `server/backoff.js` | `cli-check`, the same servers | `test/backoff.test.mjs` |
+| `standby-grace` | 15000 ms | `server/index.js` | `cli-check`, the same servers | no unit test: the grace lives inside `startLive` |
+| `renderer-idle` | 30000 ms | `web/previews.js` | `preview-check`, its last row | no unit test: the release lives inside `createPreviews` |
+| `store-read-gap` | 2500 ms | `tools/render-worker.mjs` | `jobs-check`, the blip and outage workers | no unit test: the gap lives inside the worker script |
+
 ## Comparing against another build
 
 `export-check` and `registry-check` take `--before-url`, a server running another build, and
@@ -377,7 +404,9 @@ removal on pause and resize, then checks cache boundaries, invalidation, animate
 free-camera views, reload persistence, overlapping clips, and storage failures. The top-down
 inset must match the live pixels for either selected clip. Other rows drive cross-tab eviction
 and clear, corrupt-frame repair, error containment, source prefetch before a cache boundary,
-and preserved-page lifecycle events. The ordinary run also waits for the renderer's idle release.
+and preserved-page lifecycle events. The last row reloads the editor with the renderer's idle
+release shortened, renders one frame, and waits for the hidden renderer to go; every row before it
+runs at the shipped release.
 The pixel comparisons use a 1000 by 700 browser viewport at device scale 1; their source is
 whichever take `--take` names. The overlap/feedback row uses the timeline tool's 2/255
 tolerance and repeats the sequential-versus-seek comparison on the live renderer beside it;
@@ -415,8 +444,8 @@ Its controls are `--mutate cache-never-displays`, `--mutate edits-keep-old-previ
 `--mutate clear-keeps-frame-blobs`, `--mutate coverage-uses-whole-clip`,
 `--mutate coverage-hides-gaps`, `--mutate coverage-stays-in-overview`,
 `--mutate late-decode-forces-live-seek`, `--mutate parked-coverage-repaints`,
-`--mutate hover-counts-as-interaction`, `--mutate identity-stays-plain`, and
-`--mutate preview-error-stays-in-menu`.
+`--mutate hover-counts-as-interaction`, `--mutate identity-stays-plain`,
+`--mutate preview-error-stays-in-menu`, and `--mutate renderer-never-idles`.
 Each intercepts the changed module in both browser contexts and must fail its declared assertion.
 A mutation exits zero only when that assertion
 fails and the browser loaded the changed module. The ordinary run exits zero only with no
@@ -940,6 +969,8 @@ later spawn fails and only the hold can end the subscriber.
   opens a page after the operator orbited and stopped is the catch.
 - **`pair-serves-stale-depth`** — the depth stamp is one frame behind the colour it is paired with,
   the one-frame silhouette lag at the wire seam, and only section 7's pair-stamp row sees it.
+- **`webcam-linger-never-fires`** — the last MJPEG subscriber goes away and the colour stream
+  stays wanted forever; section 1's leaving-stops-it row is the catch.
 - **`key-linger-never-fires`** — the last client goes away and the key stream stays wanted
   forever; held on `KeyStream.detach` rather than the shared `OnDemand` class, so the webcam
   linger rows stay a control.
@@ -1551,7 +1582,10 @@ keep `--wait` polling through a retry, stop a take that cannot be finalised from
 grabber, drive recorder and camera controls,
 restore output to new sockets, refuse incompatible and unknown presets by name, and drive the record
 and program pages.
-Replay and absent-sensor cases use separate server instances. The final line reports passed and
+Replay and absent-sensor cases use separate server instances. The first server runs at the
+shipped timers and its row reads no `[timers]` line. Every later server runs with the idle tick,
+the retry ladder, the absent delay and the standby grace shortened, and two rows read that the
+shortened values took. The final line reports passed and
 failed assertions; a crash is exit 2, never a caught mutation.
 
 Mutation controls (`node tools/cli-check.mjs --mutate NAME`):

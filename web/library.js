@@ -4,6 +4,7 @@
 
 import { VALID_ID } from '/format.js';
 import { pollRecordState } from '/record-poll.js';
+import { testTimer } from '/test-timers.js';
 import { createSkim, divisorFor, paintMarks, timesFor } from './take-draw.js';
 
 const grid = document.getElementById('grid');
@@ -849,7 +850,7 @@ function paint() {
 
 // Bounded, because `NodeLink.takes` carries no timeout and the poll's single-flight guard
 // then skips every tick. Only the poll passes `bound`: a cold library takes minutes to index.
-const LISTING_TIMEOUT_MS = 15000;
+const LISTING_TIMEOUT_MS = testTimer('listing-timeout', 15000);
 
 // Which listing is newest: a poll refresh on the wire when Delete is pressed resolves later.
 let refreshGeneration = 0;
