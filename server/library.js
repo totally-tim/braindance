@@ -655,13 +655,26 @@ async function downloadToPath(node, take, dir, targetIn) {
     stall.stop();
   }
 
+  let body = null;
   try {
-    const log = checkedMarkLog(await node.fetchJson(markLogPath(take), { signal: AbortSignal.timeout(MARKS_MS) }), take);
-    if (!await appendMarks(target, log, { identity: installed })) {
-      console.warn(`[library] ${take.id} was renamed or replaced while its marks were arriving, `
-        + 'so they were not written here - sync marks on the take under its new name to bring them across');
+    body = await node.fetchJson(markLogPath(take), { signal: AbortSignal.timeout(MARKS_MS) });
+  } catch (err) {
+    // A node that went away mid-download still leaves a verified take; one that answered with a
+    // refusal gets a line, since its answer is why the take's marks are absent here.
+    if (!(err instanceof TypeError) && err?.name !== 'TimeoutError' && err?.name !== 'AbortError') {
+      console.warn(`[library] ${take.id}: the node refused its marks - ${err?.message ?? err}`);
     }
-  } catch { /* a node that went away mid-download still leaves a verified take */ }
+  }
+  if (body !== null) {
+    try {
+      if (!await appendMarks(target, checkedMarkLog(body, take), { identity: installed })) {
+        console.warn(`[library] ${take.id} was renamed or replaced while its marks were arriving, `
+          + 'so they were not written here - sync marks on the take under its new name to bring them across');
+      }
+    } catch (err) {
+      console.warn(`[library] ${take.id}: its marks were not fetched or written - ${err?.message ?? err}`);
+    }
+  }
   return target;
 }
 
