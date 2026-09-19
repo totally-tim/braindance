@@ -6301,6 +6301,32 @@ async function runChecks() {
       check(lateReclaim.error !== undefined && stillThere?.marks?.some((m) => m.id === late.id),
         'and the node keeps its copy and the late mark, rather than deleting a mark nothing here has',
         `${String(lateReclaim.error ?? JSON.stringify(lateReclaim)).slice(0, 110)}; node ${stillThere ? 'still holds shot-x' : 'removed shot-x'}`);
+
+      // The shared take unlinked here while the node's log answer is still on its way: the merge
+      // asks whether the take is still present under its lock, so it refuses rather than filing
+      // the node's marks for footage nothing holds.
+      rmSync(sharedLog, { force: true });
+      heldLogs.hold = true;
+      let goneSyncSettled = false;
+      const goneSync = fetch(`${macUrlHere}/library/sync-marks/${sharedHash}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      }).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }),
+        (err) => ({ status: null, body: { error: err.message } }))
+        .finally(() => { goneSyncSettled = true; });
+      for (let i = 0; i < 200 && heldLogs.length === 0; i++) await new Promise((done) => { setTimeout(done, 50); });
+      const goneWindow = heldLogs.length === 1 && !goneSyncSettled;
+      rmSync(join(byContentMac, 'shared.knct'), { force: true });
+      heldLogs.hold = false;
+      for (const release of heldLogs.splice(0)) release();
+      const goneAnswer = await goneSync;
+      check(goneWindow,
+        'the node\'s log answer was held while the shared take was deleted here, which is the window the merge refuses to write through',
+        `settled before the delete: ${goneSyncSettled}`);
+      check(goneAnswer.status === 409 && /deleted here/.test(goneAnswer.body?.error ?? '') && !existsSync(sharedLog),
+        'and a marks sync in that window refuses and writes no log for the take that is gone, instead of filing the node\'s marks under a hash nothing holds',
+        `HTTP ${goneAnswer.status}: ${JSON.stringify(goneAnswer.body).slice(0, 110)}; log ${existsSync(sharedLog) ? 'written' : 'not written'}`);
+      cpSync(SAMPLE, join(byContentMac, 'shared.knct'));
+
       const again = await post(`${macUrlHere}/library/reclaim/shared`);
       check(again.reclaimed?.removed === 'shot-x.knct' && /m-late-on-node/.test(macLog()),
         'and reclaiming again brings the late mark across and removes the node\'s copy, so the refusal was about the mark',
