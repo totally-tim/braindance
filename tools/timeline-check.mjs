@@ -2432,8 +2432,7 @@ if (errors.length) console.log(`\n[timeline] page errors:\n  ${errors.join('\n  
 check(errors.length === 0, 'the page logged no errors');
 
 await browser.close();
-console.log(`\n[timeline] ${failures === 0
-  ? `PASS (${assertions} assertions)`
-  : `FAIL (${failures}/${assertions} assertions failed)`}`);
+console.log(`\n[timeline] ${assertions} assertions, ${failures} failed`);
+console.log(`[timeline] ${failures === 0 ? 'PASS' : 'FAIL'}`);
 if (MUTATE && MUTATIONS[MUTATE]?.fails) console.log(`[timeline] it should redden: ${MUTATIONS[MUTATE].fails}`);
 process.exit(failures === 0 ? 0 : 1);
