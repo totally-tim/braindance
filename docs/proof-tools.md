@@ -40,11 +40,11 @@ Per tool, read from the source:
 | --- | --- | --- | --- |
 | `determinism-check` | pass | a failed assertion | not used |
 | `index-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no 2 GiB fixture, a stale anchor, a crash |
-| `registry-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: a stale anchor, a crash, no browser |
+| `registry-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: a stale anchor, a crash, no browser, a `--before-url` that is `--url` |
 | `timeline-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `DID NOT RUN`: a take under 12s |
 | `preview-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: a crash, or an unknown `--mutate` name |
 | `keyframe-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `DID NOT RUN`: a take under 24s, or the page stopped answering |
-| `export-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or a crash (it has no crash handler) | not used |
+| `export-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or a crash (it has no crash handler) | `DID NOT RUN`: a mutation the page never requested, a `--before-url` that is `--url` or cannot be compared |
 | `editor-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a take under 32s, a stale anchor |
 | `library-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `PASS WITH CLAIMS UNPROVEN`, a held port, or `DID NOT RUN`: a crash |
 | `boot-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8391 held, a crash |
@@ -89,8 +89,27 @@ A mutated run prints the expected failure row when its entry carries a `fails:` 
 For other entries, read the catch from the assertions that fired.
 
 Four tables are too large to reproduce here — `editor-check` declares 207, `library-check` 138,
-`registry-check` 59 and `effect-check` 42. Their sections give the count and the enumerate
+`registry-check` 60 and `effect-check` 42. Their sections give the count and the enumerate
 command prints the names.
+
+## Comparing against another build
+
+`export-check` and `registry-check` take `--before-url`, a server running another build, and
+render their arms through both builds on one GPU, one pinned camera and one take. A change that
+claims to leave the picture alone points it at the commit before itself. Stand that build up from
+a clean extract of the revision, on a free port:
+
+```
+git archive <rev> | tar -x -C /tmp/rev
+cp -R node_modules /tmp/rev/ && mkdir /tmp/rev/captures && cp captures/sample.knct /tmp/rev/captures/
+(cd /tmp/rev && node server/index.js --port 8081 --grabber "$(which node) tools/fake-grabber.mjs")
+node tools/export-check.mjs --url http://localhost:8080 --before-url http://localhost:8081
+```
+
+Both tools exit 2 when `--before-url` is `--url`. `export-check` also exits 2 when the two servers
+hold the take under different hashes, or when the other build publishes no `setOutputSize`, which
+it does from `d9b5d9e` on. `registry-check` names each reading by its registry name, so a build
+from before the dotted names fails those rows and names what it lacks.
 
 ## The sweep
 
@@ -212,8 +231,8 @@ baseline in the conditions a mutated run failed in.
 
 ## `registry-check`
 
-One registry drives the renderer, the panel is a view on it, and every look term reaches the
-pixels.
+One registry drives the renderer, the panel is a view on it, every look term reaches the pixels,
+and each reading answers its own terms and draws what a planted room says it draws.
 
 ```
 node tools/registry-check.mjs --url http://localhost:8080
@@ -225,10 +244,20 @@ node tools/registry-check.mjs --url http://localhost:8080
 | fixture | a capture |
 | browser | a GPU browser |
 
-`--before` and `--against` drive the cross-build arm, which finds its revision by a content
-marker instead of a hash, so a rewritten history does not move it.
+The boot-state rows compare this build's boot against the commit before the registry, which
+`--before` overrides and a content marker finds otherwise. What they hold that no row inside the
+build holds is that the pre-registry defaults, the fog colour and the 1080/600 point-size rebase
+have not moved. `--before-url` adds the comparison in [Comparing against another build](#comparing-against-another-build):
+each reading at 1.0, and the raster at 0.35 over blackwall, against the other build's frames,
+within 64 bytes of 921,600 and a single step.
 
-59 controls, one per look term or per rule about how a term reaches the pixels.
+The wiring rows raise every look term the registry declares under each reading alone. A term
+declared under a reading's master has to move that reading and no other, and the terms no reading
+owns that move some readings and not others are printed. The planted rows draw sparse points,
+one every 24 texels, off-centre and through an off-centre eye, and read each point at the pixel
+the mirrored unprojection puts it on against the colour the reading's own formula gives it.
+
+60 controls, one per look term or per rule about how a term reaches the pixels.
 `node tools/registry-check.mjs --mutate __enumerate__` prints the names. Read the fired rows and
 not the total.
 
@@ -263,20 +292,7 @@ section's five controls, each with the rows it reddened:
   framebuffers. Two rows of the Firefox-shaped arm: its decision row, which reads 8-bit for a chain
   that renders half-float, and its warning row.
 
-Section 1b's `readGhost` row carries a two-sided tolerance: it absorbs up to 64 bytes of 921,600
-and a single step, and the passing line names what it absorbed. A clean run reads
-`6 frames, 1 within tolerance (worst 1 bytes of 921600, delta 1)`, so a red row there is a finding
-and so is that byte count climbing.
-
-**Known reds.** On a `make-sample` fixture the tool comes back FAIL (3) on a clean tree: the
-sweep reports `unexplained: bottom snapDelta`, the count lands at `92 of 97 parameters are proven
-to reach the pixels`, and the crop's second row reports `identical with only near/far authored`.
-
-| commit | rows | cause |
-| --- | --- | --- |
-| `3b7ab90` | 3, all crop and snap | the synthetic cloud sits inside the authored depth pair, so there is nothing to cut |
-
-A run that takes the count past three has moved something. On real footage all three pass.
+On a `make-sample` fixture a clean tree passes.
 
 ## `timeline-check`
 
@@ -472,9 +488,19 @@ node tools/export-check.mjs --url http://localhost:8080
 | binaries | ffmpeg and ffprobe, resolved through PATH; `--ffmpeg` and `--ffprobe` override |
 
 Section 9 drives refused edits on purpose and its refusals are DOM-only, so it needs no render.
+`--before-url` renders every resolution arm and both aspect arms through another build as well;
+see [Comparing against another build](#comparing-against-another-build).
+
+Two rows hold the resolution rows to account. The control renders `points` and `nobloom` at
+1920x1200 with the point size held in framebuffer pixels, and has to fail the same comparison by
+five times its tolerance. The aspect row renders one off-centre pose at 1920x1080 and at
+1440x1080 and requires the narrow frame to be the wide frame's centre columns, which holds only
+while every screen-space size follows the height. Section 3 draws the registry's default look
+through its own pose, off the sensor's axis, because the near plane can reveal only what a
+viewpoint the sensor did not have sees behind it.
+
 Section 10 spoofs a 2048-pixel target limit on one page and asks for an export either side of it;
 each request names an empty frame range, so nothing is encoded whether the door holds or not.
-`--before` drives the cross-build arm.
 
 The lens rows compare the center half of a 50-degree frame with a full 26.25-degree frame
 reduced by two, both rendered at 1728x1080 at program time 4s. Bloom, trails and vignette are off.
@@ -545,17 +571,11 @@ camera, requiring the smallest sprite above the 10.8-reference-pixel normalizati
 - **`export-ignores-the-size-cap`** — the size door is taken out, so an export larger than the
   context's target limit starts. Fails section 10's first row alone.
 
-**Known reds.** The recorded `make-sample` baseline has ten fixture-dependent failures.
-
-| commit | rows | cause |
-| --- | --- | --- |
-| `3b7ab90` | 9 resolution-invariance rows (`trails`, `rgbsplit`, `scanlines`, `grain`, `bloom`, `nobloom`, `full`, `regionpush`, `regionmask`) | the synthetic sample has no depth jitter, so the fine structure those rows correlate is aliasing |
-| `3b7ab90` | the crop's cull row | the same fixture |
-
-The numbers repeat to four figures across trees — `trails` at a coarse mean of 2.732, the crop row
-at 110 revealed and 314,021 lit against 410,577 released — so compare the numbers, not the pass
-count. An eleventh red in section 4 is inherited state: clear the server's working project and
-re-run.
+On a `make-sample` fixture a clean tree passes. The resolution arms draw at `pointSize` 36: that
+fixture's back wall faces the camera at one depth, so its sensor lattice lands 1.17px apart at
+960x600, and narrower sprites alias it into a beat that 1920x1200 resolves. The grain row compares
+1728x1080 with 3456x2160, because a grain cell is one reference pixel and 960x600 cannot hold it.
+A red in section 4 alone is inherited state: clear the server's working project and re-run.
 
 ## `editor-check`
 

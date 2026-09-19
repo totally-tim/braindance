@@ -274,15 +274,9 @@ Only Blackwall is comparable across the two chains. Every other bloom-bearing lo
 duotone whose ramp width is in metres, so `ember` and `tearline` differ by 5.17% and 5.16% with
 the glow off, and `voxel` carries the glyph field's exposure regrade on top.
 
-`export-check` judges its two resolution-independence rows with bloom taken out, because the build
-they are pinned against imports `UnrealBloomPass` and always will. Isolated at 960x600, Blackwall
-at `bloom` 0.5 reads 7.1614 here against 17.3797 there — a ratio of 0.41205 and a worst tile of
-45.649 — where `bloom` 0 reads 5.0925 against 5.0581, 1.00679 and 0.337. The tool prints the
-bloom-up ratio beside the judged one on every run, and `docs/instruments.md` has the case file.
-
-No shipped row moves with `BLOOM_LEVELS`, so the level count has no picture control, and both
-tools build their earlier arm by serving `git show <rev>:web/main.js` into a second page load, so
-a look-affecting change here is argued from the rows it moves and never from a re-baseline.
+No shipped row moves with `BLOOM_LEVELS`, so the level count has no picture control. A
+look-affecting change here is argued from the rows it moves, and from `export-check
+--before-url` against a server running the commit before it, never from a re-baseline.
 
 ### Lens scaling and brightness
 
@@ -299,8 +293,7 @@ luminance ratios are:
 | recorded `2026-08-12-take1`, `lens-points` | 1.0037 | 0.9149 on `194ae972` |
 | recorded `2026-08-12-take1`, `lens-splat` | 1.0004 | 0.5459 on `194ae972` |
 
-The synthetic runs retain ten fixture failures and the recorded runs retain the crop-culling
-failure. `lens-absolute` fails the two ordinary-point rows; `vsize-lensed` fails only the additive
+`lens-absolute` fails the two ordinary-point rows; `vsize-lensed` fails only the additive
 row; `glyph-base-lens-absolute` fails only the glyph row. `splat-large`, with one accurate frame
 at 960x600 and 1920x1200 on warm synthetic pages, reads a coarse difference of 0.287/255 and a
 brightness ratio of 1.0001, against 17.567 and 0.6267 with `vsize-framebuffer`.
