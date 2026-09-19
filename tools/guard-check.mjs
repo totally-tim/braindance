@@ -4,6 +4,7 @@
 // typed a flag saying so. Every refusal row has a positive twin, or a server that refused every
 // upgrade would pass. The bind half asks the real network interface, and is UNPROVEN without one.
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync, readFileSync } from 'node:fs';
 import { Socket } from 'node:net';
 import { networkInterfaces } from 'node:os';
@@ -199,8 +200,9 @@ const reachable = (host) => new Promise((resolve) => {
 const LAN = Object.values(networkInterfaces()).flat()
   .find((i) => i && i.family === 'IPv4' && !i.internal)?.address ?? null;
 const SAMPLE = join(REPO, 'captures', 'sample.knct');
-// The take id the server lists that capture under - the same derivation `server/capture.js` makes.
-const SAMPLE_ID = 'sample';
+// What the capture routes name that take by: its content hash, never its name.
+const SAMPLE_KEY = existsSync(SAMPLE)
+  ? encodeURIComponent(`sha256:${createHash('sha256').update(readFileSync(SAMPLE)).digest('hex')}`) : 'no-sample';
 
 try {
   console.log(`[guard] ${MUTATE ? `MUTATED: ${MUTATE} (${MUTATIONS[MUTATE].file})` : 'unmutated tree'}`);
@@ -283,7 +285,7 @@ try {
   // `<img>` sends no `Origin` at all, and several of these reads are expensive. `sec-fetch-site` is
   // set by the browser and cannot be set by a page, so absent must pass or the peer
   // link stops working.
-  const read = (site, path = `/capture/${SAMPLE_ID}/hello`) => fetch(`http://127.0.0.1:${PORT}${path}`, {
+  const read = (site, path = `/capture/${SAMPLE_KEY}/hello`) => fetch(`http://127.0.0.1:${PORT}${path}`, {
     headers: site === null ? {} : { 'sec-fetch-site': site },
   }).then((r) => r.status).catch(() => 'threw');
   const sameOrigin = await read('same-origin');
@@ -302,9 +304,9 @@ try {
   // Route-by-route would close the six that were found; the table's default is what
   // closes the seventh.
   const expensive = await Promise.all([
-    read('cross-site', `/capture/${SAMPLE_ID}/extent?near=0.5&far=6`),
+    read('cross-site', `/capture/${SAMPLE_KEY}/extent?near=0.5&far=6`),
     read('cross-site', '/library/all'),
-    read('cross-site', `/capture/${SAMPLE_ID}/index`),
+    read('cross-site', `/capture/${SAMPLE_KEY}/index`),
   ]);
   ok('every read is refused by default rather than the ones somebody thought of, so a route added later is asked by existing',
     expensive.every((r) => r === 403), expensive.join(', '));

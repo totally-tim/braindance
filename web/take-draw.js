@@ -34,8 +34,8 @@ export function timesFor(take) {
   }
   const entry = { times: null, error: null, failedAt: 0, ready: null };
   const url = take.state === 'remote'
-    ? `/library/remote-index/${encodeURIComponent(take.id)}`
-    : `/capture/${encodeURIComponent(take.id)}/index`;
+    ? `/library/remote-index/${encodeURIComponent(take.hash)}`
+    : `/capture/${encodeURIComponent(take.hash)}/index`;
   entry.ready = fetch(url)
     .then(async (res) => {
       if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 80)}`);
@@ -173,10 +173,11 @@ export function createSkim({ canvas, surface, bar = null, onDraw }) {
   // Kept so a resize can redraw the frame on screen; a window drag is a stream of resizes.
   let payload = null;
 
+  // By content hash, so a rename landing mid-skim can never draw another take under this one's name.
   const frameAt = async (t, n) => {
     const url = t.state === 'remote'
-      ? `/library/remote-frame/${encodeURIComponent(t.id)}/${n}?decimate=${divisorFor(t)}`
-      : `/capture/${encodeURIComponent(t.id)}/frame/${n}?decimate=${divisorFor(t)}`;
+      ? `/library/remote-frame/${encodeURIComponent(t.hash)}/${n}?decimate=${divisorFor(t)}`
+      : `/capture/${encodeURIComponent(t.hash)}/frame/${n}?decimate=${divisorFor(t)}`;
     const res = await fetch(url);
     if (!res.ok) throw new Error(`${res.status}`);
     return res.arrayBuffer();
