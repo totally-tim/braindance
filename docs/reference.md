@@ -422,6 +422,20 @@ per effect, so suppressing one while another is still missing leaves the export 
 session state and per document: opening another project ends every suppression, and an undo
 keeps it. The render's `.job.json` carries a `suppressed` list of what it went without.
 
+### A browser that renders less
+
+The viewer asks the browser what it can render into. Where that is less than a look needs, the
+application bar says so in a warning that stays until the page is reloaded.
+
+| Warning | What it means |
+| --- | --- |
+| `this browser cannot render to float: ghost and wake are off, and trails, bloom and the grade run at 8 bits` | No ghost and no wake. Looks through trails, bloom or the grade band, and Cascade and Voxel darken. |
+| `this browser cannot render offscreen: trails, bloom and the grade are off` | Looks draw without trails, bloom and the grade. |
+
+LibreWolf, and Firefox with `privacy.resistFingerprinting` on, cap every render target at 2048
+pixels on a side. The viewport renders at 2048 pixels at most there. **An export larger than the
+cap is refused**, and the refusal names the cap.
+
 ## The record surface and OBS
 
 The record surface shares the viewer and its camera, and adds what the sensor and the monitor
@@ -800,6 +814,7 @@ route with a write method goes through the three checks under
 | `/library/routes` | GET | This table. |
 | `/library/writes` | GET | Write counts per store. |
 | `/library/remote-frame/:id/:n` | GET | One frame of a node-only take, fetched through here. |
+| `/library/remote-index/:id` | GET | The frame index of a node-only take, fetched through here. |
 | `/library/download/:id` | POST | Pulls a take from the linked node. |
 | `/library/delete/:id` | POST | Deletes a take. |
 | `/library/reclaim/:id` | POST | Deletes the local copy of a take the node still holds. |
