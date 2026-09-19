@@ -31,9 +31,9 @@ import { pickDepth, sensorPoint } from './depth-pick.js';
 import { ZOOM_PER_NOTCH, rulerTickSeconds, tickLabel, makeViewWindow } from './view-window.js';
 import { clipIn, clipOut, clipBoundOrThrow, writeClipRange } from './clip-range.js';
 import {
-  RATE_MIN, RATE_MAX, clipAffordedSec, clipProgramSecAt, clipSourceSecAt, frameLoadByTake,
-  framesBackFor, headFramesFor, headTrim, integerMidpoint, rescaleClipKeys, snapshotClipKeys,
-  usableClipRate,
+  RATE_MIN, RATE_MAX, clipAffordedSec, clipProgramSecAt, clipSourceSecAt, frameAtOrBefore,
+  frameLoadByTake, framesBackFor, headFramesFor, headTrim, integerMidpoint, rescaleClipKeys,
+  snapshotClipKeys, sourceTimes, usableClipRate,
 } from './clip-plan.js';
 import {
   EFFECT_BIND_TRANSFORMS, EFFECT_GATED_TABLES, EFFECT_BOUNDED_TABLES, effectBindUniformType,
@@ -4556,14 +4556,7 @@ class StampedPairSource {
 
   /** The frame at or before `sourceSec`, as the lower half of a bracketing pair. */
   bracket(sourceSec) {
-    let lo = 0;
-    let hi = this.count - 2;
-    while (lo < hi) {
-      const mid = integerMidpoint(lo, hi, true);
-      if (this.times[mid] <= sourceSec) lo = mid;
-      else hi = mid - 1;
-    }
-    return lo;
+    return frameAtOrBefore(this.times, sourceSec, this.count - 2);
   }
 
   /** Puts the walk back at frame `i`, so the next `at` emits `i` and `i + 1` as its steps. */
@@ -4622,7 +4615,7 @@ class IndexedTake {
   constructor(id, index) {
     const stamps = index.frames.stampMs;
     if (stamps.length < 2) throw new Error(`capture ${id} has ${stamps.length} frames, need two to bracket`);
-    this.times = stamps.map((s) => (s - stamps[0]) / 1000);
+    this.times = sourceTimes(stamps);
     this.id = id;
     this.index = index;
     this.cache = new Map();
@@ -11416,8 +11409,7 @@ class PinnedPairSource extends StampedPairSource {
       });
       off += 16 + depthBytes + colorBytes;
     }
-    const first = frames[0].stampMs;
-    super(frames.map((f) => (f.stampMs - first) / 1000));
+    super(sourceTimes(frames.map((f) => f.stampMs)));
     this.frames = frames;
   }
 

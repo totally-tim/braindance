@@ -711,6 +711,49 @@ const MUTATIONS = {
       + 'still keeps now the migration is gone: older, later, and a version field that is not '
       + 'a number at all',
   },
+  // The viewer reads where focus was after `paintMarks` has destroyed a focused mark tick.
+  'viewer-reads-focus-after-marks': { file: 'web/library.js', edits: [
+    [`  closeMenus();
+  // Read as a name before anything here is rebuilt: a focused mark tick is destroyed by
+  // \`paintMarks\`, and a rebuild \`run\` asked for reads null.
+  const focusWas = viewer.contains(document.activeElement) ? controlKey(document.activeElement) : null;
+`, '  closeMenus();\n'],
+    ["  const acts = document.getElementById('vActs');\n",
+      "  const acts = document.getElementById('vActs');\n"
+      + '  const focusWas = viewer.contains(document.activeElement) ? controlKey(document.activeElement) : null;\n'],
+  ] },
+  // A source second finds its frame by spacing the take's frames evenly over its duration.
+  'mark-seeks-by-even-spacing': { file: 'web/take-draw.js', edits: [[
+    '      return api.setIndex(frameAtOrBefore(times, sourceSec));',
+    '      return api.setIndex((sourceSec / times[last]) * last);',
+  ]] },
+  // A skim with no stamps moves anyway, which needs a second rule to say where.
+  'untimed-skim-moves': { file: 'web/take-draw.js', edits: [[
+    '      if (k > 0 && !timed()) {',
+    '      if (false && k > 0 && !timed()) {',
+  ]] },
+  // The playhead is placed at the frame's share of the frame count instead of its time.
+  'bar-counts-frames': { file: 'web/take-draw.js', edits: [[
+    '    const at = span > 0 ? Math.max(0, Math.min(1, times[wanted] / span)) : 0;',
+    '    const at = last === 0 ? 0 : wanted / last;',
+  ]] },
+  // A node-only take asks this server for an index it does not hold.
+  'node-take-reads-the-local-index': { file: 'web/take-draw.js', edits: [[
+    `  const url = take.state === 'remote'
+    ? \`/library/remote-index/\${encodeURIComponent(take.id)}\`
+    : \`/capture/\${encodeURIComponent(take.id)}/index\`;`,
+    '  const url = `/capture/${encodeURIComponent(take.id)}/index`;',
+  ]] },
+  // The viewer's ticks stay buttons when the take's stamps did not arrive, so a press guesses.
+  'untimed-marks-guess': { file: 'web/library.js', edits: [[
+    '  paintMarks(vBar, take, timed && !timed.error ? (sourceSec) => skim.seek(sourceSec) : null);',
+    '  paintMarks(vBar, take, (sourceSec) => skim.seek(sourceSec));',
+  ]] },
+  // The shared lookup rounds to the nearest frame, which the editor's bracket does not.
+  'lookup-rounds-to-nearest': { file: 'web/clip-plan.js', edits: [[
+    '  return lo;\n}\n',
+    '  return lo < last && times[lo + 1] - sourceSec < sourceSec - times[lo] ? lo + 1 : lo;\n}\n',
+  ]] },
   'skim-ignores-state': { file: 'web/take-draw.js', edits: [[
     'const DIVISOR = { local: 1, both: 1, remote: 4 };',
     'const DIVISOR = { local: 1, both: 1, remote: 1 };',
@@ -3075,6 +3118,197 @@ async function runChecks() {
     await page.close();
   }
 
+  console.log('\n[library] a mark lands on the frame its stamp names, on a take shot at an uneven rate');
+  {
+    // Twenty frames at 33ms, twenty at 111ms and twenty at 33ms, the shape of a take shot over a
+    // loaded link: past frame 20, spacing the frames evenly over the duration reads late.
+    const stamps = [5_000_000];
+    for (let k = 1; k < 60; k++) stamps.push(stamps[k - 1] + (k >= 20 && k < 40 ? 111 : 33));
+    const msOf = (k) => stamps[k] - stamps[0];
+    const spanMs = msOf(stamps.length - 1);
+    // The answers, by walking every stamp rather than by the search under test.
+    const frameOfMs = (ms) => stamps.reduce((found, s, k) => (s - stamps[0] <= ms ? k : found), 0);
+    const evenOfMs = (ms) => Math.round((ms / spanMs) * (stamps.length - 1));
+    const writeUneven = (dir, id, startedAt) => {
+      const hello = Buffer.from(JSON.stringify({ ...JSON.parse(SRC.hello.toString('utf8')), startedAt }));
+      const parts = [encodeMessage(TYPE_HELLO, hello)];
+      for (let k = 0; k < stamps.length; k++) {
+        const frame = Buffer.from(SRC.frames[k % SRC.frames.length]);
+        // Past the 12-byte message header, the stamp is the payload's third field.
+        frame.writeBigUInt64LE(BigInt(stamps[k]), 12 + 8);
+        parts.push(frame);
+      }
+      writeFileSync(join(dir, `${id}.knct`), Buffer.concat(parts));
+    };
+    const ON_45 = msOf(45);
+    // Nearer 51 than 50, so the frame at or before it, the nearest frame and the even reading
+    // are three different answers.
+    const PAST_50 = msOf(50) + 25;
+    const marks = markLine({ id: 'on-45', sourceMs: ON_45, label: 'on frame 45', at: 1000 })
+      + markLine({ id: 'past-50', sourceMs: PAST_50, label: 'between 50 and 51', at: 1000 });
+
+    const hereCaps = join(WORK, 'gallery-captures');
+    const thereCaps = join(WORK, 'gallery-node-captures');
+    for (const dir of [hereCaps, thereCaps]) mkdirSync(dir, { recursive: true });
+    // Newest first is the viewer's walk order, so the uneven take has two takes below it.
+    writeUneven(hereCaps, 'uneven-take', Date.UTC(2026, 8, 5));
+    writeFileSync(join(hereCaps, 'uneven-take.marks.jsonl'), marks);
+    writeTake(hereCaps, 'plain-a', { frames: 12, startedAt: Date.UTC(2026, 8, 4) });
+    writeTake(hereCaps, 'plain-b', { frames: 9, startedAt: Date.UTC(2026, 8, 3) });
+    writeUneven(thereCaps, 'uneven-on-node', Date.UTC(2026, 8, 2));
+    writeFileSync(join(thereCaps, 'uneven-on-node.marks.jsonl'), marks);
+    writeUneven(thereCaps, 'untimed-on-node', Date.UTC(2026, 8, 1));
+    writeFileSync(join(thereCaps, 'untimed-on-node.marks.jsonl'), marks);
+
+    const galleryNode = await startServer(root, ['--captures', thereCaps, '--name', 'gallery-node'], MAC_PORT + 10);
+    // The link to the node refuses one take's index, which is how a node that stops answering
+    // looks from here, without the take leaving the listing on the next poll.
+    const REFUSED_INDEX = '/capture/untimed-on-node/index';
+    const link = createServer(async (req, res) => {
+      if (req.url === REFUSED_INDEX) {
+        res.writeHead(503).end('library-check refuses this index');
+        return;
+      }
+      try {
+        const upstream = await fetch(`${galleryNode}${req.url}`, { method: req.method });
+        const body = Buffer.from(await upstream.arrayBuffer());
+        res.writeHead(upstream.status, { 'Content-Type': upstream.headers.get('content-type') ?? 'application/octet-stream' });
+        res.end(body);
+      } catch {
+        res.writeHead(502).end();
+      }
+    });
+    await new Promise((done) => { link.listen(0, '127.0.0.1', done); });
+    const galleryUrl = await startServer(root, ['--captures', hereCaps, '--name', 'gallery',
+      '--node', `http://127.0.0.1:${link.address().port}`, '--node-name', 'gallery-node'], MAC_PORT + 11);
+
+    // The fixture first, because every row below reads nothing if the server indexed another shape.
+    const indexed = await getJson(`${galleryUrl}/capture/uneven-take/index`);
+    check(eq(indexed.frames?.stampMs, stamps),
+      'the uneven take is indexed with the stamps it was written with',
+      `${indexed.frames?.stampMs?.length} frames over ${spanMs}ms, where even spacing would be ${(spanMs / (stamps.length - 1)).toFixed(1)}ms`);
+
+    // A node-only take's stamps reach the page through this server, the way its frames do.
+    const theirs = await (await fetch(`${galleryNode}/capture/uneven-on-node/index`)).text();
+    const relayed = await fetch(`${galleryUrl}/library/remote-index/uneven-on-node`);
+    const relayedBody = await relayed.text();
+    check(relayed.status === 200 && relayedBody === theirs,
+      'a node-only take\'s index is passed through byte for byte by the route beside its frames',
+      `${relayed.status}, ${relayedBody.length} bytes against the node's ${theirs.length}`);
+    const refusedIndex = await fetch(`${galleryUrl}/library/remote-index/untimed-on-node`);
+    const unusableId = await fetch(`${galleryUrl}/library/remote-index/.hidden`);
+    check(refusedIndex.status === 503 && unusableId.status === 404,
+      'and a node refusing one is passed on as its refusal, while an id no take can have is refused here',
+      `node refusal ${refusedIndex.status}, unusable id ${unusableId.status}`);
+
+    const { page, errors } = await openPage(browser, libraryPage(galleryUrl));
+    await page.waitForFunction('globalThis.__library?.tiles().length === 5', null, { timeout: 20000 })
+      .catch(() => { /* the rows below say which take is missing */ });
+    const tiles = await page.evaluate('globalThis.__library.tiles()');
+    const hashOf = (id) => tiles.find((t) => t.id === id)?.hash ?? id;
+    const viewerState = () => page.evaluate('globalThis.__library.viewer.state()');
+    const openOn = async (id) => {
+      const before = await page.evaluate('globalThis.__library.viewer.draws()');
+      await page.evaluate(`globalThis.__library.viewer.open(${JSON.stringify(hashOf(id))})`);
+      await page.evaluate(`globalThis.__library.viewer.drawn(${before + 1})`).catch(() => {});
+    };
+    const pressMark = async (n) => {
+      const before = await page.evaluate('globalThis.__library.viewer.draws()');
+      await page.evaluate(`globalThis.__library.viewer.clickMark(${n})`);
+      await page.evaluate(`globalThis.__library.viewer.drawn(${before + 1})`).catch(() => {});
+      return viewerState();
+    };
+
+    // A tile first, on a page that has asked for no stamps yet, so its own skim fetches them.
+    // Seven tenths of the way from frame 30 to 31, where the frame at or before it, the nearest
+    // frame and the even reading are 30, 31 and 32. The poster lands first, so the draw the
+    // scrub waits on is the scrub's own.
+    const midMs = msOf(30) + 0.7 * (msOf(31) - msOf(30));
+    await page.evaluate(`globalThis.__library.drawn(${JSON.stringify(hashOf('uneven-take'))})`);
+    const skimmed = await page.evaluate(`globalThis.__library.skimTo(${JSON.stringify(hashOf('uneven-take'))}, ${midMs / spanMs})`);
+    const wantLeft = (msOf(frameOfMs(midMs)) / spanMs) * 100;
+    check(Math.abs(Number.parseFloat(skimmed.left) - wantLeft) < 0.05,
+      'a tile scrubbed to a point on its bar shows the frame at that time, with its playhead at that frame\'s time',
+      `${skimmed.left} against ${wantLeft.toFixed(3)}% for frame ${frameOfMs(midMs)}; `
+        + `even spacing reads frame ${evenOfMs(midMs)} at ${((evenOfMs(midMs) / (stamps.length - 1)) * 100).toFixed(3)}%`);
+
+    await openOn('uneven-take');
+    const on45 = await pressMark(0);
+    check(on45?.index === frameOfMs(ON_45),
+      'a mark on an unevenly shot take lands on the frame its stamp names',
+      `mark at ${ON_45}ms -> frame ${on45?.index}, want ${frameOfMs(ON_45)}; even spacing reads ${evenOfMs(ON_45)}`);
+    check(on45 !== null && Math.abs(on45.pos - on45.marks[0]) < 0.01,
+      'and the playhead stops on the tick it was pressed from, because the bar is the take\'s time and not its frame count',
+      `playhead ${on45?.pos?.toFixed(3)}%, tick ${on45?.marks?.[0]?.toFixed(3)}%`);
+    const past50 = await pressMark(1);
+    check(past50?.index === frameOfMs(PAST_50),
+      'a mark between two frames lands on the one at or before it, which is the frame the editor brackets it with',
+      `mark at ${PAST_50}ms -> frame ${past50?.index}, want ${frameOfMs(PAST_50)}; `
+        + `the nearest is ${frameOfMs(PAST_50) + 1} and even spacing reads ${evenOfMs(PAST_50)}`);
+
+    await openOn('uneven-on-node');
+    const remote45 = await pressMark(0);
+    check(remote45?.id === 'uneven-on-node' && remote45.index === frameOfMs(ON_45),
+      'and the same on a take that is only on the node, whose stamps come through this server',
+      `${remote45?.id}: mark at ${ON_45}ms -> frame ${remote45?.index}, want ${frameOfMs(ON_45)}`);
+
+    await openOn('untimed-on-node');
+    await page.waitForFunction('globalThis.__library.viewer.state()?.pressable?.some((p) => p) === false', null, { timeout: 10000 })
+      .catch(() => { /* the row below reads what it got */ });
+    const untimed = await viewerState();
+    check(untimed?.id === 'untimed-on-node' && untimed.marks.length === 2
+      && untimed.pressable.every((p) => !p) && /cannot be pressed/.test(untimed.note),
+      'a take whose stamps do not arrive keeps its marks as labels and says why, rather than guessing a frame',
+      `${untimed?.id}: ${untimed?.pressable?.map((p) => (p ? 'button' : 'label')).join(' ')}, note "${untimed?.note}"`);
+    // Focus inside first, so the keys below reach the viewer and staying put is the skim's answer.
+    await page.evaluate("document.getElementById('vMore').focus()");
+    await page.evaluate('globalThis.__library.viewer.key("ArrowRight")');
+    await page.evaluate('globalThis.__library.viewer.key("End")');
+    await page.evaluate('globalThis.__library.viewer.clickMark(0)');
+    await new Promise((done) => { setTimeout(done, 600); });
+    const held = await viewerState();
+    check(held?.id === 'untimed-on-node' && held.index === 0 && held.pos === 0,
+      'and its skim stays on the first frame through an arrow, End and a pressed mark, because a position needs the stamps',
+      `${held?.id}: frame ${held?.index} of ${held?.frames}, playhead at ${held?.pos}%`);
+
+    // A focused mark tick is destroyed by the rebuild an arrow causes, so focus is read before it.
+    await openOn('uneven-take');
+    const onTick = await page.evaluate(`(() => {
+      document.querySelector('#vBar .mk')?.focus();
+      return document.activeElement?.dataset?.act ?? null;
+    })()`);
+    check(onTick === 'mark', 'a mark tick on the viewer\'s bar can hold focus', String(onTick));
+    const movedFrom = async (from) => {
+      for (let i = 0; i < 40; i++) {
+        const id = (await viewerState())?.id;
+        if (id !== from) return id;
+        await new Promise((done) => { setTimeout(done, 50); });
+      }
+      return from;
+    };
+    const firstId = (await viewerState())?.id;
+    await page.keyboard.press('ArrowDown');
+    const secondId = await movedFrom(firstId);
+    const focusedOn = await page.evaluate('document.activeElement?.dataset?.act || document.activeElement?.id || document.activeElement?.tagName');
+    check(secondId !== firstId && await page.evaluate('globalThis.__library.viewer.focusInside()') === true,
+      'an arrow pressed on a focused mark tick moves to the next take and leaves focus inside the viewer',
+      `${firstId} -> ${secondId}, focus on ${focusedOn}`);
+    await page.keyboard.press('ArrowDown');
+    const thirdId = await movedFrom(secondId);
+    check(thirdId !== secondId, 'so a second real arrow moves a second take',
+      `${firstId} -> ${secondId} -> ${thirdId}`);
+    await page.evaluate('globalThis.__library.viewer.close()');
+
+    // The refused index is the one console line this section causes on purpose.
+    const unexpected = errors.filter((e) => !/status of 503/.test(e));
+    check(unexpected.length === 0, 'the library raises no page errors drawing an uneven take',
+      unexpected.slice(0, 2).join(' | '));
+    await page.close();
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 10 || sv.port === MAC_PORT + 11)) p.child.kill('SIGKILL');
+    link.closeAllConnections();
+    link.close();
+  }
+
   console.log('\n[library] the capture format band at the door the editor opens');
   {
     const refusedAt = editorPage(macUrl, 'future-format-take');
@@ -3384,8 +3618,10 @@ async function runChecks() {
     const trimmedAtHead = await page.evaluate(
       `globalThis.__projects.showing(${JSON.stringify(TRIMMED)})`,
     );
-    const wantedHeadFrame = Math.round((trimmed.clips[0].sourceStart / localTake.durationSec)
-      * Math.max(0, localTake.frames - 1));
+    // The frame at or before the in-point, found by walking the take's own stamps.
+    const localStamps = (await getJson(`${macUrl}/capture/local-clip/index`)).frames.stampMs;
+    const wantedHeadFrame = localStamps.reduce((found, s, k) =>
+      ((s - localStamps[0]) / 1000 <= trimmed.clips[0].sourceStart ? k : found), 0);
     check(trimmedAtHead?.frame === wantedHeadFrame && trimmedAtHead?.drawnFrame === wantedHeadFrame,
       'the projects page starts a trimmed clip skim at its in-point rather than at frame zero',
       `frame ${trimmedAtHead?.frame}, drawn ${trimmedAtHead?.drawnFrame}, want ${wantedHeadFrame} `
