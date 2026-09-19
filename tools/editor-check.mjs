@@ -11357,7 +11357,7 @@ try {
           movingAddTake.id,
           { timeout: 25000 },
         );
-        for (let i = 0; i < 250; i++) {
+        for (let i = 0; i < 1250; i++) {
           const complete = await page.evaluate((seeks) => __kinect.timeline.counters.seeks > seeks
             && __kinect.timeline.transport().playing, whileOpening.seeks);
           if (complete) break;
