@@ -8,12 +8,14 @@ import { createReadStream } from 'node:fs';
 import { open, readFile, writeFile, rename, stat, unlink } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { basename, resolve } from 'node:path';
-import { MAGIC, HEADER_BYTES, TYPE_HELLO, TYPE_FRAME, MAX_PAYLOAD_BYTES } from './protocol.js';
+import { MAGIC, HEADER_BYTES, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, MAX_PAYLOAD_BYTES } from './protocol.js';
 // A divisor applied to a flat byte count would take every k-th sample along one axis and none
 // along the other, so the decimation has to know the grid's shape.
 import { DEPTH_H, DEPTH_W } from '../web/format.js';
 
-export const INDEX_VERSION = 2;
+// 3 lists the colour camera's messages beside the frames, so a sidecar without that list is
+// scanned again rather than read as a take with no colour.
+export const INDEX_VERSION = 3;
 
 const SCAN_CHUNK = 4 * 1024 * 1024;
 
@@ -24,6 +26,8 @@ const RUN_CHUNK = 1024 * 1024;
 // frame payload - `handleFrame` in `web/main.js` reads exactly these three off the other end.
 const STAMP_BYTES = 16;
 const PREFIX_BYTES = HEADER_BYTES + STAMP_BYTES;
+// A colour message opens with its u64 stamp and nothing else before the JPEG.
+const COLOUR_STAMP_BYTES = 8;
 
 // One frame's payload sampled down by a depth divisor, or the payload itself at a divisor of 1. A
 // function rather than a method because the live socket holds a buffer instead of a `Capture`. The
@@ -65,6 +69,25 @@ export function decimatePayload(payload, depthDivisor, what = 'frame') {
   return out;
 }
 
+/**
+ * Where each colour message falls between the frames, by file order, which is the order the wire
+ * delivered them in: frame `k` is followed by colour messages `from[k]` up to `from[k + 1]`. A
+ * colour message ahead of the first frame goes with the first.
+ */
+export function colourAfterFrames(index) {
+  const frames = index.frames.offset;
+  const colour = index.colour.offset;
+  const from = new Array(frames.length + 1).fill(0);
+  let j = 0;
+  for (let k = 0; k < frames.length; k++) {
+    from[k] = j;
+    const next = k + 1 < frames.length ? frames[k + 1] : Infinity;
+    while (j < colour.length && colour[j] < next) j++;
+  }
+  from[frames.length] = j;
+  return from;
+}
+
 export const indexPathFor = (capturePath) => `${capturePath.replace(/\.knct$/i, '')}.idx`;
 
 export const captureIdFor = (capturePath) => basename(capturePath).replace(/\.knct$/i, '');
@@ -75,6 +98,8 @@ let indexWrites = 0;
 /**
  * One sequential pass that produces the index and the content hash together. With `handle`, the
  * pass reads that open file and never the name, which can have been given to another file since.
+ * `frames` lists the type 2 messages and `colour` the type 3; a type this build does not know is
+ * walked past and listed nowhere.
  */
 export async function buildIndex(capturePath, handle = null) {
   // Stamped before the read: a pre-scan mtime no longer matches on the next load if the capture
@@ -84,6 +109,7 @@ export async function buildIndex(capturePath, handle = null) {
   const offset = [];
   const stampMs = [];
   const length = [];
+  const colour = { offset: [], stampMs: [], length: [] };
   let hello = null;
 
   const prefix = Buffer.alloc(PREFIX_BYTES);
@@ -105,6 +131,10 @@ export async function buildIndex(capturePath, handle = null) {
       offset.push(payloadOffset);
       length.push(pending.len);
       stampMs.push(Number(prefix.readBigUInt64LE(HEADER_BYTES + 8)));
+    } else if (pending.type === TYPE_COLOR) {
+      colour.offset.push(payloadOffset);
+      colour.length.push(pending.len);
+      colour.stampMs.push(Number(prefix.readBigUInt64LE(HEADER_BYTES)));
     }
     pending = null;
     filled = 0;
@@ -155,6 +185,9 @@ export async function buildIndex(capturePath, handle = null) {
         if (type === TYPE_FRAME && len < STAMP_BYTES) {
           throw new Error(`frame at ${msgOffset} is ${len} bytes, too short to carry its header`);
         }
+        if (type === TYPE_COLOR && len < COLOUR_STAMP_BYTES) {
+          throw new Error(`colour message at ${msgOffset} is ${len} bytes, too short to carry its stamp`);
+        }
         pending = { type, len };
         need = HEADER_BYTES + Math.min(len, STAMP_BYTES);
         if (filled < need) continue;
@@ -175,6 +208,7 @@ export async function buildIndex(capturePath, handle = null) {
     truncated: filled > 0 || skip > 0,
     hello,
     frames: { offset, stampMs, length },
+    colour,
   };
 
   const sidecar = indexPathFor(capturePath);
@@ -197,23 +231,25 @@ export async function buildIndex(capturePath, handle = null) {
 // it was written for a file of this size at this mtime, and everything in it then reaches
 // `readAt`, which allocates and preads on those numbers. Failing a bound is treated as absent.
 function indexDescribes(cached, size) {
-  const frames = cached?.frames;
-  if (!frames || !Array.isArray(frames.offset) || !Array.isArray(frames.length) || !Array.isArray(frames.stampMs)) {
-    return false;
-  }
-  if (frames.length.length !== frames.offset.length || frames.stampMs.length !== frames.offset.length) return false;
   const spans = (offset, length, least) => Number.isSafeInteger(offset) && Number.isSafeInteger(length)
     && offset >= HEADER_BYTES && length >= least && length <= MAX_PAYLOAD_BYTES && offset + length <= size;
-  if (cached.hello !== null && !spans(cached.hello?.offset, cached.hello?.length, 0)) return false;
-  let after = 0;
-  for (let i = 0; i < frames.offset.length; i++) {
-    if (!spans(frames.offset[i], frames.length[i], STAMP_BYTES)) return false;
-  // Ordered and non-overlapping, because that is what appending messages to a file produces.
-    if (frames.offset[i] < after) return false;
-    if (!Number.isFinite(frames.stampMs[i])) return false;
-    after = frames.offset[i] + frames.length[i];
-  }
-  return true;
+  const lists = (list, least) => {
+    if (!list || !Array.isArray(list.offset) || !Array.isArray(list.length) || !Array.isArray(list.stampMs)) {
+      return false;
+    }
+    if (list.length.length !== list.offset.length || list.stampMs.length !== list.offset.length) return false;
+    let after = 0;
+    for (let i = 0; i < list.offset.length; i++) {
+      if (!spans(list.offset[i], list.length[i], least)) return false;
+      // Ordered and non-overlapping, because that is what appending messages to a file produces.
+      if (list.offset[i] < after) return false;
+      if (!Number.isFinite(list.stampMs[i])) return false;
+      after = list.offset[i] + list.length[i];
+    }
+    return true;
+  };
+  if (cached?.hello !== null && !spans(cached?.hello?.offset, cached?.hello?.length, 0)) return false;
+  return lists(cached?.frames, STAMP_BYTES) && lists(cached?.colour, COLOUR_STAMP_BYTES);
 }
 
 /** The sidecar when it still describes the file, else a scan. `handle` as for `buildIndex`. */
@@ -296,26 +332,56 @@ export class Capture {
     return decimatePayload(payload, depthDivisor, `frame ${n}`);
   }
 
-  // Framing included, inclusive end for `createReadStream`: a run of bare payloads would have no
-  // boundaries to parse back.
-  frameRunSpan(a, b) {
+  get colourCount() {
+    return this.index.colour.offset.length;
+  }
+
+  /** Colour message `n`'s payload: the u64 stamp, then the JPEG. */
+  readColour(n) {
+    const { offset, length } = this.index.colour;
+    return this.readAt(offset[n], length[n]);
+  }
+
+  /**
+   * The byte ranges holding frames a..b, framing included and ends inclusive: a run of bare
+   * payloads would have no boundaries to parse back. Adjacent frames share a range, so a take with
+   * nothing between its frames is one range; a colour message between two frames splits it, and a
+   * reader walking the run as one frame per message never meets one.
+   */
+  frameRunSpans(a, b) {
     const { offset, length } = this.index.frames;
-    return { start: offset[a] - HEADER_BYTES, end: offset[b] + length[b] - 1 };
+    const spans = [];
+    let bytes = 0;
+    for (let k = a; k <= b; k++) {
+      const start = offset[k] - HEADER_BYTES;
+      const end = offset[k] + length[k] - 1;
+      const last = spans[spans.length - 1];
+      if (last && last[1] + 1 === start) last[1] = end;
+      else spans.push([start, end]);
+      bytes += end - start + 1;
+    }
+    return { spans, bytes };
   }
 
   // Streams in bounded chunks off the same retained handle every other call uses: reopening by
   // path would serve a re-recorded take's bytes at the old file's offsets.
   createFrameRunStream(a, b) {
-    const { start, end } = this.frameRunSpan(a, b);
+    const { spans } = this.frameRunSpans(a, b);
     const { handle, path } = this;
-    let pos = start;
+    let at = 0;
+    let pos = spans[0][0];
     return new Readable({
       highWaterMark: RUN_CHUNK,
       read() {
-        if (pos > end) {
-          this.push(null);
-          return;
+        if (pos > spans[at][1]) {
+          at++;
+          if (at === spans.length) {
+            this.push(null);
+            return;
+          }
+          pos = spans[at][0];
         }
+        const end = spans[at][1];
         const want = Math.min(RUN_CHUNK, end - pos + 1);
         const buf = Buffer.allocUnsafe(want);
         handle.read(buf, 0, want, pos).then(

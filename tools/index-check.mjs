@@ -1,5 +1,6 @@
 // Proves the sidecar index, the content hash and the HTTP frame API.
-// Proves the sidecar index, the content hash and the HTTP frame API. The scan builds an index
+// Proves the sidecar index, the content hash and the HTTP frame API, for a take with the colour
+// camera's messages between its frames as well as one without. The scan builds an index
 // and a hash without ever holding the file, the index is checked against `MessageParser` rather
 // than against a second copy of the scanner's own logic, and a frame pulled over HTTP is
 // checked by an independent positioned read at offsets the parser produced.
@@ -11,8 +12,9 @@ import { open, stat, unlink, copyFile, utimes } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
-import { MessageParser, HEADER_BYTES, TYPE_FRAME } from '../server/protocol.js';
-import { buildIndex, loadIndex, indexPathFor, captureIdFor } from '../server/capture.js';
+import { MessageParser, HEADER_BYTES, TYPE_FRAME, TYPE_COLOR, encodeMessage } from '../server/protocol.js';
+import { buildIndex, loadIndex, indexPathFor, captureIdFor, INDEX_VERSION } from '../server/capture.js';
+import { DEPTH_H, DEPTH_W } from '../web/format.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -77,6 +79,31 @@ const MUTATIONS = {
       + '2147533537 and 2502006469. The two below it stay green and are the positive twin, '
       + 'because `x % 2**31 === x` under the line',
   },
+  // The scan walks past the colour messages and lists them nowhere, so a replay has none to serve.
+  'colour-left-unindexed': { file: 'server/capture.js', edits: [[
+    '      colour.offset.push(payloadOffset);\n'
+    + '      colour.length.push(pending.len);\n'
+    + '      colour.stampMs.push(Number(prefix.readBigUInt64LE(HEADER_BYTES)));\n',
+    '',
+  ]],
+    fails: 'the served colour list row in the colour section, and nothing that reads frames',
+  },
+  // The type-blind index: every message with a stamp is a frame, so the colour messages land in
+  // `frames` and every reader of it gets a JPEG where a depth grid should be.
+  'colour-indexed-as-frames': { file: 'server/capture.js', edits: [[
+    '    } else if (pending.type === TYPE_FRAME) {',
+    '    } else if (pending.type === TYPE_FRAME || pending.type === TYPE_COLOR) {',
+  ]],
+    fails: 'the colour section\'s served frame list, its single-frame row and its run row',
+  },
+  // A run is the file's slice from the first frame to the last again, colour messages and all, so
+  // the editor walking it one frame per message reads a colour message as a frame.
+  'run-serves-the-file-slice': { file: 'server/capture.js', edits: [[
+    '      if (last && last[1] + 1 === start) last[1] = end;',
+    '      if (last) last[1] = end;',
+  ]],
+    fails: 'the colour section\'s run row alone; a take with nothing between its frames serves the same bytes',
+  },
 };
 if (MUTATE && !MUTATIONS[MUTATE]) {
   console.error(`unknown mutation ${MUTATE} - have ${Object.keys(MUTATIONS).join(', ')}`);
@@ -129,7 +156,7 @@ function verdict(crashed) {
   // which a run that died in the middle of that section never reaches. Named by pid, so this
   // sweeps only what this process wrote.
   for (const ext of ['knct', 'idx']) {
-    rmSync(`captures/index-check-victim-${process.pid}.${ext}`, { force: true });
+    for (const name of ['victim', 'colour', 'older']) rmSync(`captures/index-check-${name}-${process.pid}.${ext}`, { force: true });
   }
   if (MUTATE && failures > 0) {
     console.log(`\n[index] caught, as required (${failures} assertion${failures === 1 ? '' : 's'} fired)`);
@@ -156,6 +183,7 @@ process.on('unhandledRejection', verdict);
 async function parserWalk(path) {
   const parser = new MessageParser();
   const frames = [];
+  const colour = [];
   const hash = createHash('sha256');
   let consumed = 0;
   for await (const chunk of createReadStream(path, { highWaterMark: 4 << 20 })) {
@@ -167,12 +195,25 @@ async function parserWalk(path) {
           length: msg.payload.length,
           stampMs: Number(msg.payload.readBigUInt64LE(8)),
         });
+      } else if (msg.type === TYPE_COLOR) {
+        colour.push({
+          offset: consumed + HEADER_BYTES,
+          length: msg.payload.length,
+          stampMs: Number(msg.payload.readBigUInt64LE(0)),
+        });
       }
       consumed += msg.raw.length;
     }
   }
-  return { frames, hash: `sha256:${hash.digest('hex')}` };
+  return { frames, colour, hash: `sha256:${hash.digest('hex')}` };
 }
+
+// Whether an index list and a parser walk name the same messages, and how many they disagree on.
+const listMismatches = (list, walked) => {
+  if (!list || list.offset.length !== walked.length) return Infinity;
+  return walked.filter((w, i) => w.offset !== list.offset[i] || w.length !== list.length[i]
+    || w.stampMs !== list.stampMs[i]).length;
+};
 
 
 async function scanCost(path) {
@@ -498,6 +539,107 @@ const BIG = FIXTURES[FIXTURES.length - 1];
   check((await fetch(`${URL_BASE}/capture/sha256%3A${'0'.repeat(64)}/index`)).status === 404, 'an unknown capture is 404');
 
   await fh.close();
+}
+
+console.log('\n== a take with the colour camera between its frames ==');
+{
+  // Built from the first fixture: after every frame a colour message stamped like it, carrying that
+  // frame's registered JPEG and the frame's number, and after frame 0 a message of a type this
+  // build has never heard of. Its frames are the first fixture's, byte for byte.
+  const src = FIXTURES[0];
+  const id = `index-check-colour-${process.pid}`;
+  const path = `captures/${id}.knct`;
+  const parts = [];
+  let k = 0;
+  for (const msg of new MessageParser().push(readFileSync(src))) {
+    parts.push(msg.raw);
+    if (msg.type !== TYPE_FRAME) continue;
+    const depthBytes = msg.payload.readUInt32LE(0);
+    const jpeg = msg.payload.subarray(16 + depthBytes, 16 + depthBytes + msg.payload.readUInt32LE(4));
+    const colour = Buffer.alloc(8 + jpeg.length + 4);
+    msg.payload.copy(colour, 0, 8, 16);
+    jpeg.copy(colour, 8);
+    colour.writeUInt32LE(k, 8 + jpeg.length);
+    parts.push(encodeMessage(TYPE_COLOR, colour));
+    if (k === 0) parts.push(encodeMessage(9, Buffer.from('a type no build here reads')));
+    k++;
+  }
+  writeFileSync(path, Buffer.concat(parts));
+  const twin = await loadIndex(src);
+  const walk = await parserWalk(path);
+  const scanned = await buildIndex(path);
+  // This process's scan leaves a sidecar the server would read instead of scanning, and then every
+  // served row below would be this check's own index coming back.
+  await unlink(indexPathFor(path));
+
+  check(walk.colour.length === twin.frames.offset.length && listMismatches(scanned.colour, walk.colour) === 0,
+    `the scan lists all ${walk.colour.length} colour messages at the parser's offsets, lengths and stamps`);
+  check(listMismatches(scanned.frames, walk.frames) === 0
+    && scanned.frames.stampMs.every((t, i) => t === twin.frames.stampMs[i] && scanned.frames.length[i] === twin.frames.length[i]),
+    'and its frames are the colour-free twin\'s, with the colour and the unknown type walked past');
+
+  const served = JSON.parse((await getBytes(`${URL_BASE}/capture/${id}/index`)).toString('utf8'));
+  check(served.version === INDEX_VERSION && listMismatches(served.colour, walk.colour) === 0,
+    `${id}: /index serves version ${INDEX_VERSION} with every colour message listed`
+    + ` (${served.colour?.offset?.length ?? 'no'} listed of ${walk.colour.length})`);
+  check(listMismatches(served.frames, walk.frames) === 0,
+    `${id}: and its frames are the type 2 messages alone (${served.frames.offset.length} listed of ${walk.frames.length})`);
+
+  const n = twin.frames.offset.length;
+  const tfh = await open(src, 'r');
+  const twinFrame = async (i) => {
+    const bytes = Buffer.alloc(twin.frames.length[i]);
+    await tfh.read(bytes, 0, bytes.length, twin.frames.offset[i]);
+    return bytes;
+  };
+  let singleBad = 0;
+  for (const i of [0, 1, Math.floor(n / 2), n - 1]) {
+    const got = await getBytes(`${URL_BASE}/capture/${id}/frame/${i}`).catch(() => Buffer.alloc(0));
+    if (!got.equals(await twinFrame(i))) singleBad++;
+  }
+  check(singleBad === 0, `a single frame over HTTP is the twin's, byte for byte (${singleBad} of 4 differ)`);
+
+  // Walked the way the editor walks a run: one frame per message, no type filter, so a colour
+  // message inside the run is read as a frame and its depth length is nonsense.
+  const a = 1;
+  const b = a + 7;
+  const res = await fetch(`${URL_BASE}/capture/${id}/frames/${a}-${b}`);
+  const run = Buffer.from(await res.arrayBuffer());
+  let off = 0;
+  let runBad = 0;
+  const kinds = [];
+  for (let i = a; i <= b; i++) {
+    if (off + HEADER_BYTES > run.length) { runBad++; break; }
+    const len = run.readUInt32LE(off + 8);
+    const payload = run.subarray(off + HEADER_BYTES, off + HEADER_BYTES + len);
+    kinds.push(run.readUInt32LE(off + 4));
+    if (payload.length < 4 || payload.readUInt32LE(0) !== DEPTH_W * DEPTH_H * 2 || !payload.equals(await twinFrame(i))) runBad++;
+    off += HEADER_BYTES + len;
+  }
+  check(runBad === 0 && off === run.length && Number(res.headers.get('content-length')) === run.length,
+    `frames/${a}-${b} is ${b - a + 1} frames back to back, the twin's, walked one frame per message `
+    + `(types ${kinds.join(',')}, ${runBad} bad, ${run.length - off} bytes left over)`);
+  await tfh.close();
+
+  // A take written before the colour list existed: its sidecar is the older version and holds no
+  // colour list. It is read, not refused, and the scan it gets is the same take.
+  const old = `captures/index-check-older-${process.pid}.knct`;
+  await copyFile(src, old);
+  const current = await buildIndex(old);
+  const { colour: _, ...rest } = current;
+  writeFileSync(indexPathFor(old), JSON.stringify({ ...rest, version: INDEX_VERSION - 1 }));
+  const oldServed = JSON.parse((await getBytes(`${URL_BASE}/capture/${captureIdFor(old)}/index`)).toString('utf8'));
+  const onDisk = JSON.parse(readFileSync(indexPathFor(old), 'utf8'));
+  check(oldServed.version === INDEX_VERSION && oldServed.colour?.offset?.length === 0
+    && oldServed.hash === current.hash && oldServed.frames.offset.length === current.frames.offset.length
+    && onDisk.version === INDEX_VERSION,
+    `a take whose sidecar is version ${INDEX_VERSION - 1} is scanned again: version ${oldServed.version}, `
+    + `${oldServed.colour?.offset?.length ?? 'no'} colour messages, the same hash, and the sidecar on disk is version ${onDisk.version}`);
+
+  for (const p of [path, old]) {
+    await unlink(p).catch(() => {});
+    await unlink(indexPathFor(p)).catch(() => {});
+  }
 }
 
 console.log('\n== the run endpoint survives the file moving underneath it ==');

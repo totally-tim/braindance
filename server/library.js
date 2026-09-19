@@ -22,7 +22,16 @@ export { PROJECT_VERSION };
 
 // Measured on this sensor: 424KB of depth plus 51KB of colour per frame at 30fps.
 const FRAME_BYTES = 486 * 1024;
+// One colour camera frame at 1920x1080; `docs/performance.md` says where the number comes from.
+export const COLOUR_FRAME_BYTES = 215082;
 const NOMINAL_FPS = 30;
+
+/**
+ * A take's byte rate before anything has arrived to measure it: depth and registered colour at
+ * 30fps, plus the colour camera at 30fps when the take will record it.
+ */
+export const nominalTakeRate = (colour) => (FRAME_BYTES + (colour ? COLOUR_FRAME_BYTES : 0)) * NOMINAL_FPS;
+
 // A take that never started is a decision; a take that dies at eighty percent is a loss.
 export const MIN_TAKE_SEC = 120;
 
@@ -224,6 +233,8 @@ function manifestRefusal(take) {
     return `has dateSource ${JSON.stringify(take.dateSource)}`;
   }
   if (typeof take.truncated !== 'boolean') return `has truncated ${JSON.stringify(take.truncated)}`;
+  // Absent is an older build, which `NodeLink.takes` names as one; present, it has to be a count.
+  if (take.dropped !== undefined && !count(take.dropped)) return `has dropped ${JSON.stringify(take.dropped)}`;
   if (take.hasHello !== null && typeof take.hasHello !== 'boolean') {
     return `has hasHello ${JSON.stringify(take.hasHello)}`;
   }
@@ -285,6 +296,9 @@ async function describeTake(dir, file, recording) {
       capturedAt: st.mtimeMs,
       dateSource: 'mtime',
       truncated: false,
+      // Null for the reason `hash` is: the recorder still holds the count, and a figure read now
+      // was true once.
+      dropped: null,
       hasHello: null,
       format: null,
       hello: null,
@@ -299,7 +313,12 @@ async function describeTake(dir, file, recording) {
   const index = await cachedIndex(path);
   const stamps = index.frames.stampMs;
   const hello = await readHelloOnce(path, index);
-  const marks = await readMarks(dir, index.hash);
+  const log = await readMarkLog(dir, index.hash);
+  const marks = resolveMarks(log);
+  // The recorder's `kind: 'drop'` record, which carries no `sourceMs` and so never resolves as a
+  // mark. A count that is not a whole number reads as none.
+  const drop = log.filter((rec) => rec.kind === 'drop').sort((a, b) => b.at - a.at)[0];
+  const dropped = Number.isSafeInteger(drop?.dropped) && drop.dropped > 0 ? drop.dropped : 0;
 
   const fromHello = Number.isFinite(hello?.startedAt) && hello.startedAt > 0;
   const format = hello?.format ?? null;
@@ -322,6 +341,7 @@ async function describeTake(dir, file, recording) {
     capturedAt: fromHello ? hello.startedAt : st.mtimeMs,
     dateSource: fromHello ? 'hello' : 'mtime',
     truncated: Boolean(index.truncated),
+    dropped,
     hasHello: Boolean(index.hello),
     format,
     hello: hello ? { fx: hello.fx, fy: hello.fy, cx: hello.cx, cy: hello.cy } : null,
@@ -420,9 +440,10 @@ export class NodeLink {
           return null;
         }
       }
-      const older = takes.find((t) => !carriesRefusals(t));
+      const older = takes.find((t) => !carriesRefusals(t) || t.dropped === undefined);
       if (older) {
-        this.lastError = 'it is running an older build whose take manifest carries no open-refusal reasons, '
+        const missing = carriesRefusals(older) ? 'dropped-frame count' : 'open-refusal reasons';
+        this.lastError = `it is running an older build whose take manifest carries no ${missing}, `
           + `so nothing it holds can be listed here - ${older.id} arrived with none. Upgrade the node to this build.`;
         return null;
       }
@@ -505,7 +526,7 @@ export function reconcile(localTakes, nodeTakes) {
 }
 
 
-export async function remaining(dir, bytesPerSec = FRAME_BYTES * NOMINAL_FPS) {
+export async function remaining(dir, bytesPerSec = nominalTakeRate(false)) {
   let fs;
   try {
     fs = await statfs(dir);
