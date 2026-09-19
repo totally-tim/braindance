@@ -91,7 +91,6 @@ Four tables are too large to reproduce here — `editor-check` declares 202, `li
 `registry-check` 60 and `effect-check` 42. Their sections give the count and the enumerate
 command prints the names.
 
-<<<<<<< HEAD
 ## Comparing against another build
 
 `export-check` and `registry-check` take `--before-url`, a server running another build, and
@@ -110,8 +109,7 @@ Both tools exit 2 when `--before-url` is `--url`. `export-check` also exits 2 wh
 hold the take under different hashes, or when the other build publishes no `setOutputSize`, which
 it does from `d9b5d9e` on. `registry-check` names each reading by its registry name, so a build
 from before the dotted names fails those rows and names what it lacks.
-||||||| 4dad1c0
-=======
+
 ## The sweep
 
 ```
@@ -186,7 +184,6 @@ named as left out.
 
 Stage 2 puts nine tools and their browsers on the machine at once. Two suites, or a suite beside
 one of its own tools, collide on the fixed ports, so run one at a time.
->>>>>>> origin/main
 
 ## `determinism-check`
 
