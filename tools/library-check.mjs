@@ -1510,8 +1510,11 @@ function buildFixture() {
   writeTake(macCaps, 'local-clip', { frames: 60, startedAt: Date.UTC(2026, 6, 15, 18, 5) });
 
   // The take whose cloud widens after its first frame - see `writeWideningTake` for why it is
-  // written rather than found.
+  // written rather than found. Its one mark is the tile section's single-mark case: same-name's
+  // cannot be it, because the append row below re-hashes that take and orphans the log.
   writeWideningTake(macCaps, 'widening-take', 24);
+  writeMarkLog(macCaps, 'widening-take',
+    markLine({ id: 'w1', sourceMs: 500, label: 'lone mark', at: 1000 }));
 
   // The shapes the library has to survive rather than the shapes it likes.
   writeTake(macCaps, 'truncated-take', { frames: 6, truncate: true, startedAt: false });
