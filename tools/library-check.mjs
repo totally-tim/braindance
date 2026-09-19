@@ -13,7 +13,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, mkdirSync, readdirSync, rmSync, symlinkSync, existsSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, readdirSync, renameSync, rmSync, symlinkSync, lstatSync, existsSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { createConnection } from 'node:net';
 import { createServer } from 'node:http';
@@ -43,7 +43,7 @@ const MAC_PORT = Number(flag('--mac-port', '8211'));
 // `MAC_PORT + n`, and `startServer` asserts its port is inside the span, so a section added
 // later at `+17` is caught by arithmetic rather than by a wrong reading. `startServer` polls
 // until something answers `/library/takes`, and a stranger on the port answers just as well.
-const PORT_SPAN = 16;
+const PORT_SPAN = 18;
 const MUTATE = flag('--mutate');
 const HEADED = argv.includes('--headed');
 const WORK = flag('--work') ?? join(REPO, '.library-check');
@@ -314,7 +314,7 @@ const MUTATIONS = {
       "  { path: '/library/writes', pattern: /^\\/library\\/writes$/, read: serveWriteCounts },\n"
       + "  { path: '/library/sweep-probe', pattern: /^\\/library\\/sweep-probe$/, read: (req, res) => {\n"
       + "    const victim = readdirSync(CAPTURES_DIR).find((f) => f.endsWith('.knct')\n"
-      + '      && join(CAPTURES_DIR, f) !== recorder.openPath);\n'
+      + '      && !recorder.owns(join(CAPTURES_DIR, f)));\n'
       + '    if (victim) unlinkSync(join(CAPTURES_DIR, victim));\n'
       + '    sendJson(res, { removed: victim ?? null });\n'
       + '  } },'],
@@ -372,10 +372,81 @@ const MUTATIONS = {
     'grabberRestarts++;\n        spawnTimer = setTimeout(() => { spawnTimer = null; spawnGrabber(); }, delay);',
   ]] },
 
-  // `openPath` goes back to answering only for the take currently being written.
-  'openpath-drops-at-the-stop': { file: 'server/recorder.js', edits: [[
-    'return this.take?.path ?? this.finalizing?.path ?? null;',
-    'return this.take?.path ?? null;',
+  // The recorder goes back to owning only the take currently being written, so a stopped take is
+  // anybody's while its close is still running.
+  'ownership-drops-at-the-stop': { file: 'server/recorder.js', edits: [[
+    '[this.take, ...this.closing]',
+    '[this.take]',
+  ]] },
+  // The shipped shape: one owned take, the open one when there is one. A grabber restart opens the
+  // next take while the last is still closing, and the closing one is anybody's for the overlap.
+  'open-take-shadows-the-closing-one': { file: 'server/recorder.js', edits: [[
+    '[this.take, ...this.closing]',
+    '[this.take ?? [...this.closing].at(-1) ?? null]',
+  ]] },
+  // The recorder reports one take as being written, the newest, so a take whose close finishes
+  // while the next is open changes nothing a gallery compares, and its tile stays refused.
+  'writing-names-one-take': { file: 'server/recorder.js', edits: [[
+    'writingIds: this.ownedTakes().map((owned) => owned.id).sort(),',
+    'writingIds: this.ownedTakes().map((owned) => owned.id).sort().slice(-1),',
+  ]] },
+  // A download stops asking whether the name it probes is the take being recorded here, so the
+  // probe's full read plus sha256 runs against the file the recorder is writing.
+  'download-probes-the-open-take': { file: 'server/library.js', edits: [[
+    '      if (ownsFile(await held.stat())) {',
+    '      if (false) {',
+  ]] },
+  // Every scan of a take writes its sidecar through one scratch name again, so two scans of one
+  // file under ids differing only in case race one rename and the second fails.
+  'sidecar-shares-one-scratch': { file: 'server/capture.js', edits: [[
+    '  const scratch = `${sidecar}.${++indexWrites}.tmp`;',
+    '  const scratch = `${sidecar}.tmp`;',
+  ]] },
+  // The recorder compares paths as strings again, so an id spelled in another case names the take
+  // being recorded on a volume that folds case and walks past every refusal that asks.
+  'owns-compares-names': { file: 'server/recorder.js', edits: [[
+    '    return Boolean(path) && this.ownedTakes().length > 0 && this.ownsFile(takeIdentity(path));',
+    '    return this.ownedTakes().some((take) => take.path === path);',
+  ]] },
+  // The marks sync goes back to joining on the bare hash field and stops refusing the take being
+  // recorded. Two edits, both in index.js: with the refusal alone gone the guarded join still
+  // matches nothing, and with the join alone restored the refusal answers first, so either edit on
+  // its own reddens a response shape rather than the damage. The join is restored at the call site,
+  // bypassing `copyOnNode`, because a mutation edits one file and the refusal is in this one;
+  // test/copy-on-node.test.mjs holds the guard inside `copyOnNode`.
+  'sync-joins-open-takes': { file: 'server/index.js', edits: [
+    ['  // lands in this take\'s sidecar, which is append-only. Refused here as the frame API refuses it.\n'
+      + '  if (beingRecorded(path)) {\n'
+      + '    sendJson(res, { error: recordingRefusal(id) }, 409);\n'
+      + '    return;\n'
+      + '  }\n',
+    '  // lands in this take\'s sidecar, which is append-only. Refused here as the frame API refuses it.\n'],
+    ['    const match = here ? copyOnNode(node, theirTakes, here.hash) : null;',
+      '    const match = here && (theirTakes ?? []).find((t) => t.hash === here.hash);'],
+  ] },
+  // The marks sync stops asking which file its path names before it appends, so a take renamed
+  // while the node's answer was on its way gets a marks sidecar recreated under its old name.
+  'sync-appends-under-a-race': { file: 'server/index.js', edits: [[
+    'mergeMarkLog(path, theirLog, { identity: mergingInto, hash: match.hash })',
+    'mergeMarkLog(path, theirLog)',
+  ]] },
+  // A caller takes a node's marks log whatever take the answer says it is for, which is what a
+  // node on an older build, answering by name, relies on.
+  'caller-takes-a-log-by-name': { file: 'server/library.js', edits: [[
+    '  if (body?.hash !== take.hash || !Array.isArray(body.log)) {',
+    '  if (!Array.isArray(body?.log)) {',
+  ]] },
+  // A reclaim's delete goes back to removing the node's copy however many marks it gained since
+  // the other machine read them, so a mark pressed in between goes with the copy.
+  'reclaim-loses-a-late-mark': { file: 'server/library.js', edits: [[
+    '    if (now !== marksRead) {',
+    '    if (false) {',
+  ]] },
+  // A node serves a take's marks log by name whatever hash it was asked for, so a rename on the
+  // node between its listing and the request hands over another take's marks.
+  'node-log-ignores-the-hash': { file: 'server/library.js', edits: [[
+    '    return index.hash === hash ? readMarkLog(capturePath) : null;',
+    '    return readMarkLog(capturePath);',
   ]] },
 
   // The library's poll goes back to a first tick that cannot disagree with anything.
@@ -583,7 +654,7 @@ const MUTATIONS = {
   'marks-without-a-take': { file: 'server/index.js', edits: [
     ['  const wasThere = takeIdentity(path);\n  if (wasThere === null) {\n    sendJson(res, { error: `no take ${id} here, so there is nothing to mark` }, 404);\n    return;\n  }',
       '  const wasThere = takeIdentity(path);'],
-    ['  if (!sameTake(wasThere, takeIdentity(path))) {', '  if (false) {'],
+    ['  if (!await appendMarks(path, records, { identity: wasThere })) {', '  if (!await appendMarks(path, records)) {'],
   ] },
   // The document store restamps the version instead of checking it, so a project from a build
   // this one is not lands looking like one this build wrote.
@@ -673,10 +744,55 @@ const MUTATIONS = {
     '  /* mutation: the captures directory is assumed */',
   ]] },
   // Delete goes back to trusting the sidecar where reclaim re-hashes, so the irreversible
-  // action carries the weaker check.
+  // action carries the weaker check. Anchored on the descriptor's hash since `removeTake` stopped
+  // hashing by name.
   'delete-trusts-sidecar': { file: 'server/library.js', edits: [[
-    '  const actual = await hashFile(path);', '  const actual = (await cachedIndex(path)).hash;',
+    '    actual = await hashOpenFile(handle);', '    actual = (await cachedIndex(path)).hash;',
   ]] },
+  // Removal goes back to leaving the marks log under the freed name, where the next take given that
+  // name finds it.
+  'delete-leaves-the-marks': { file: 'server/library.js', edits: [[
+    '  await unlink(marksPathFor(path)).catch((err) => {\n'
+    + "    if (err.code !== 'ENOENT') console.warn(`[library] ${id} was removed but its marks log was not: ${err.message}`);\n"
+    + '  });\n',
+    '',
+  ]],
+    fails: 'the node-side marks row of the reclaim, the last-copy marks row and the reused-name row. '
+      + 'The merge and the two reclaim refusals stay green',
+  },
+  // A reclaim goes back to removing the node's copy without bringing its marks here first.
+  'reclaim-drops-node-marks': { file: 'server/index.js', edits: [[
+    '    const marksMerged = await mergeMarkLog(keptPath, theirLog, { identity: kept, hash: mine.hash });',
+    '    const marksMerged = 0;',
+  ]],
+    // Two rows, because the merge is also where the kept copy's identity is asked: a merge that
+    // never runs never refuses a copy renamed under it.
+    fails: 'the row saying a reclaim brings the node\'s marks onto the kept copy, and the reclaim-race refusal',
+  },
+  // A reclaim treats a node marks log it could not read as an empty one and goes on to delete.
+  'reclaim-ignores-an-unread-log': { file: 'server/index.js', edits: [[
+    '      theirLog = checkedMarkLog(await node.fetchJson(markLogPath(theirs), { signal: left }), theirs);',
+    '      theirLog = await node.fetchJson(markLogPath(theirs), { signal: left }).then((b) => b.log)\n'
+    + '        .catch(() => []);',
+  ]],
+    fails: 'the row saying a reclaim whose node marks cannot be read is refused, and no other',
+  },
+  // A reclaim goes back to appending the node's marks by name after an await a rename can land in.
+  'reclaim-merges-under-a-race': { file: 'server/index.js', edits: [[
+    '    const marksMerged = await mergeMarkLog(keptPath, theirLog, { identity: kept, hash: mine.hash });',
+    '    const marksMerged = await mergeMarkLog(keptPath, theirLog);',
+  ]],
+    fails: 'both reclaim-race rows: the refusal, and no marks log at the freed name',
+  },
+  // Delete goes back to unlinking whatever the name holds once the hash is done, so a rename during
+  // the hash that moves another take into the name loses that take.
+  'delete-unlinks-under-a-race': { file: 'server/library.js', edits: [[
+    '  if (!sameTake(hashed, takeIdentity(path))) {', '  if (false) {',
+  ]],
+    fails: 'the delete-race refusal and the row saying the take renamed into the name is still on '
+      + 'disk. The row saying the named take survives under its new name stays green, and so does '
+      + 'every other delete row',
+  },
   // The decimation path stops checking that a frame's two declared lengths describe the frame,
   // so an overstated colour length returns the uninitialised tail of an `allocUnsafe` buffer.
   'decimate-skips-length-check': { file: 'server/capture.js', edits: [[
@@ -696,6 +812,26 @@ const MUTATIONS = {
   'list-swallows-unreadable': { file: 'server/library.js', edits: [[
     "    if (required || err?.code !== 'ENOENT') {", '    if (required) {',
   ]] },
+  // The take scan goes back to its own catch, so a captures directory that cannot be read answers
+  // an empty library, and the machine asking it reads a node holding nothing.
+  'scan-swallows-unreadable': { file: 'server/library.js', edits: [[
+    "  const files = (await directoryNames(dir, { what: 'captures directory' })).filter(isKnct);",
+    '  let files;\n  try {\n    files = (await readdir(dir)).filter(isKnct).sort();\n'
+    + '  } catch {\n    return { takes: [], unreadable: [] };\n  }',
+  ]],
+    fails: 'the /library/takes error row, the gallery sentence row, the reclaim row and the delete '
+      + 'row of the unreadable-captures section: the node lies in a 200. Its ENOENT and empty-directory '
+      + 'rows stay green',
+  },
+  // The node's answer goes back to being coalesced, so a node that could not be asked reads as a
+  // node holding no copy and delete's second-copy refusal never fires.
+  'delete-trusts-a-silent-node': { file: 'server/library.js', edits: [[
+    '  if (there === null) throw new Error(`${node.name} could not be asked which takes it holds: ${node.lastError}`);',
+    '  if (there === null) return null;',
+  ]],
+    fails: 'the reclaim row and the delete row of the unreadable-captures section: the node reports '
+      + 'honestly and the consumer ignores it. The /library/takes error row and the gallery row stay green',
+  },
   // The editor goes back to swallowing a library that will not load, which is the empty picker
   // an operator gets told nothing about.
   'open-take-swallows-library': { file: 'web/main.js', edits: [[
@@ -836,8 +972,8 @@ const MUTATIONS = {
   },
   // The take being recorded becomes renameable.
   'rename-during-a-shoot': { file: 'server/library.js', edits: [[
-    '  if (recordingPath !== null && resolve(from) === resolve(recordingPath)) {',
-    '  if (false) {',
+    '      if (ownsFile(await opened.stat())) {',
+    '      if (false) {',
   ]] },
 
   // The path is dropped from the arguments, so the file manager is started on nothing - a route
@@ -926,7 +1062,7 @@ const MUTATIONS = {
     '      const older = takes.find((t) => !carriesRefusals(t));\n      if (false) {',
   ]] },
 
-  // The same gate on the other route goes away: a `/record/state` with no `writingId` in it is
+  // The same gate on the other route goes away: a `/record/state` with no `writingIds` in it is
   // read as a recorder that owns no take, which is what `??
   'node-admits-an-old-record-state': { file: 'server/library.js', edits: [[
     '      const missing = POLLED_NODE_FIELDS.filter((f) => body[f] === undefined);',
@@ -1356,7 +1492,9 @@ async function reservePorts() {
   process.exit(2);
 }
 
-async function startServer(root, args, port) {
+// `ready` is the route polled until the server answers. `/library/takes` unless the fixture's
+// captures directory cannot be listed on purpose, which that route reports as an error.
+async function startServer(root, args, port, { ready = '/library/takes' } = {}) {
   // A port outside the declared span would not have been checked by `reservePorts`, so it is
   // the one thing that could still attach to a stranger.
   if (port !== NODE_PORT && (port < MAC_PORT || port > MAC_PORT + PORT_SPAN)) {
@@ -1385,7 +1523,7 @@ async function startServer(root, args, port) {
         + `so anything answering there is not ours:\n${log.join('')}`);
     }
     try {
-      const res = await fetch(`http://localhost:${port}/library/takes`);
+      const res = await fetch(`http://localhost:${port}${ready}`);
       if (res.ok) return `http://localhost:${port}`;
     } catch { /* not listening yet */ }
   }
@@ -2048,7 +2186,7 @@ async function runChecks() {
       // Written out rather than derived by deleting a key from the current one.
       let served = { recording: false, takeId: null };
       const behind = await twoRoute(() => served);
-      const carries = await twoRoute(() => ({ recording: false, takeId: null, writingId: null }));
+      const carries = await twoRoute(() => ({ recording: false, takeId: null, writingIds: [] }));
       try {
         const blind = new NodeLink(behind.url, 'behind-node');
         check(Array.isArray(await blind.takes()),
@@ -2057,24 +2195,24 @@ async function runChecks() {
 
         const polled = await blind.recordState();
         check(polled.reachable === false,
-          'a recorder state with no writingId in it is refused rather than read as a node that owns no take',
-          `reachable ${polled.reachable}, writingId ${JSON.stringify(polled.writingId)}`);
+          'a recorder state with no writingIds in it is refused rather than read as a node that owns no take',
+          `reachable ${polled.reachable}, writingIds ${JSON.stringify(polled.writingIds)}`);
         const refused = await blind.takes();
-        check(refused === null && /older build/.test(blind.lastError ?? '') && /writingId/.test(blind.lastError ?? ''),
+        check(refused === null && /older build/.test(blind.lastError ?? '') && /writingIds/.test(blind.lastError ?? ''),
           'and the refusal reaches the listing, which is the only one of the two routes that draws anything',
           `${refused === null ? 'null' : `${refused.length} takes`}, ${JSON.stringify(blind.lastError)}`);
 
         // The other arm, and the rows above are unfalsifiable without it.
         const well = new NodeLink(carries.url, 'carrying-node');
         const wellPolled = await well.recordState();
-        check(wellPolled.reachable === true && wellPolled.writingId === null,
+        check(wellPolled.reachable === true && eq(wellPolled.writingIds, []),
           'a node carrying the field and simply not writing is not refused for it, so the gate reads absence rather than an idle recorder',
-          `reachable ${wellPolled.reachable}, writingId ${JSON.stringify(wellPolled.writingId)}`);
+          `reachable ${wellPolled.reachable}, writingIds ${JSON.stringify(wellPolled.writingIds)}`);
         check(Array.isArray(await well.takes()),
           'and its takes still list, so this is a version band rather than the poll switched off',
           `${well.lastError === null ? 'no error' : well.lastError}`);
 
-        served = { recording: false, takeId: null, writingId: null };
+        served = { recording: false, takeId: null, writingIds: [] };
         await blind.recordState();
         const healed = await blind.takes();
         check(healed !== null && blind.lastError === null,
@@ -2398,7 +2536,7 @@ async function runChecks() {
       const clashUrl = await startServer(root, [
         '--captures', clash, '--name', 'shooting', '--record', '--no-color',
         '--grabber', `${join(REPO, 'tools/fake-grabber.mjs')} --source ${SAMPLE} --fps 40 --burst 4`,
-      ], MAC_PORT + 6);
+      ], MAC_PORT + 6, { ready: '/record/state' });
       for (let i = 0; i < 40; i++) {
         await new Promise((done) => { setTimeout(done, 250); });
         state = await getJson(`${clashUrl}/record/state`);
@@ -3432,6 +3570,20 @@ async function runChecks() {
       'and every one that lost still has its footage under its own name, which is what a silent overwrite takes away',
       `${survivors.length} of ${racers.length - 1} survived: ${survivors.join(' ') || 'nothing'}`);
 
+    // A dangling symlink is a name stat(2) cannot see - it follows the link to nothing - yet the
+    // name is still taken: link(2) refuses EEXIST where rename(2) would replace the entry.
+    symlinkSync(join(raceDir, 'not-there.knct'), join(raceDir, 'dangling-target.knct'));
+    const overDangling = await staged.renameTake(
+      raceDir, 'racer-two', 'dangling-target', { hash: racerHashes[1] },
+    ).then(() => 'accepted', (err) => String(err?.message ?? err));
+    check(/is taken/.test(overDangling),
+      'a target a dangling symlink holds is refused by the kernel rather than renamed over an entry stat could not see',
+      overDangling.slice(0, 90));
+    check(lstatSync(join(raceDir, 'dangling-target.knct'), { throwIfNoEntry: false })?.isSymbolicLink() === true
+      && existsSync(join(raceDir, 'racer-two.knct')),
+      'and the entry it held survived with the take still under its own name',
+      `symlink at target ${lstatSync(join(raceDir, 'dangling-target.knct'), { throwIfNoEntry: false })?.isSymbolicLink()}, racer-two.knct ${existsSync(join(raceDir, 'racer-two.knct'))}`);
+
     const done = await post(`${renameUrl}/library/rename/before-the-rename`,
       { hash: before.hash, to: 'after-the-rename.knct' });
     check(done.id === 'after-the-rename',
@@ -3509,7 +3661,7 @@ async function runChecks() {
       for (const p of servers.filter((sv) => sv.port === MAC_PORT + 15)) p.child.kill('SIGKILL');
     }
 
-    // `scanTakes` decides which take is open by comparing paths against `recorder.openPath`.
+    // `scanTakes` decides which take is open by asking `recorder.owns` about each path.
     const shootDir = join(WORK, 'rename-shooting');
     rmSync(shootDir, { recursive: true, force: true });
     mkdirSync(shootDir, { recursive: true });
@@ -4573,6 +4725,265 @@ async function runChecks() {
       'and the library no longer lists it');
   }
 
+  console.log('\n[library] a captures directory that cannot be read is reported, and delete does not act on the silence');
+  {
+    const silentDir = join(WORK, 'silent-node-captures');
+    const keptDir = join(WORK, 'silent-mac-captures');
+    for (const d of [silentDir, keptDir]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    writeTake(silentDir, 'on-both-machines', { frames: 6 });
+    cpSync(join(silentDir, 'on-both-machines.knct'), join(keptDir, 'on-both-machines.knct'));
+    // Offsets the rename and preset sections have already released.
+    const silentUrl = await startServer(root, ['--captures', silentDir, '--name', 'pi-silent',
+      '--presets', join(WORK, 'silent-presets'), '--projects', join(WORK, 'silent-projects')], MAC_PORT + 14);
+    const keptUrl = await startServer(root, ['--captures', keptDir, '--name', 'mac-kept',
+      '--node', silentUrl, '--node-name', 'pi-silent',
+      '--presets', join(WORK, 'kept-presets'), '--projects', join(WORK, 'kept-projects')], MAC_PORT + 15);
+    const shared = (await getJson(`${keptUrl}/library/all`)).takes.find((t) => t.id === 'on-both-machines');
+    const armed = await post(`${keptUrl}/library/delete/on-both-machines`, { hash: shared?.hash, confirm: true });
+    check(shared?.state === 'both' && /exists on pi-silent as well/.test(armed.error ?? ''),
+      'a take on both machines, whose delete the node\'s answer refuses, which is the refusal the rows below need armed',
+      `${shared?.state}: ${(armed.error ?? 'ACCEPTED').slice(0, 60)}`);
+
+    // Replaced under the running server, because `startServer` waits for `/library/takes` to answer
+    // 200. A regular file gives ENOTDIR from `readdir` on every platform and for root, where a chmod
+    // does neither.
+    rmSync(silentDir, { recursive: true, force: true });
+    writeFileSync(silentDir, 'a file where the captures directory was\n');
+    const listing = await fetch(`${silentUrl}/library/takes`);
+    const listingBody = await listing.json().catch(() => null);
+    check(!listing.ok && /captures directory .* cannot be read: ENOTDIR/.test(listingBody?.error ?? '')
+      && listingBody?.takes === undefined,
+      '/library/takes on a node whose captures directory cannot be read answers an error rather than an empty list',
+      `${listing.status} ${JSON.stringify(listingBody).slice(0, 110)}`);
+    {
+      const { page: shelf, errors: shelfErrors } = await openPage(browser, libraryPage(silentUrl));
+      const said = await shelf.waitForFunction(
+        '(() => { const t = document.getElementById("note")?.textContent ?? ""; return /cannot be read/.test(t) ? t : null; })()',
+        null, { timeout: 20000 },
+      ).then((h) => h.jsonValue(), () => null);
+      const drawn = await shelf.evaluate('document.getElementById("note")?.textContent ?? ""');
+      check(said !== null && /ENOTDIR/.test(said),
+        'and the gallery on that node shows the server\'s own sentence rather than an empty shelf',
+        JSON.stringify((said ?? drawn).slice(0, 110)));
+      const thrown = shelfErrors.filter((e) => !/Failed to load resource/.test(e));
+      check(thrown.length === 0, 'and saying so raises no page error', thrown.slice(0, 2).join(' | ') || 'none beyond the 500');
+      await shelf.close();
+    }
+    // Reclaim first: it removes nothing here, so a mutated build that lets the delete below
+    // through cannot take this row's fixture with it.
+    const reclaim = await post(`${keptUrl}/library/reclaim/on-both-machines`, {});
+    check(/pi-silent could not be asked/.test(reclaim.error ?? ''),
+      'a reclaim against that node says the node could not be asked, rather than that the take is not on it',
+      (reclaim.error ?? JSON.stringify(reclaim)).slice(0, 110));
+    const refused = await post(`${keptUrl}/library/delete/on-both-machines`, { hash: shared?.hash, confirm: true });
+    check(/pi-silent could not be asked/.test(refused.error ?? '') && existsSync(join(keptDir, 'on-both-machines.knct')),
+      'a delete of a take on both machines is refused when the node cannot say what it holds, and this machine\'s copy is still on disk',
+      (refused.error ?? `REMOVED ${JSON.stringify(refused)}`).slice(0, 110));
+
+    // ENOENT is still an absence, which is the branch the shared rule keeps.
+    rmSync(silentDir, { force: true });
+    const absent = await fetch(`${silentUrl}/library/takes`);
+    const absentBody = await absent.json().catch(() => null);
+    check(absent.ok && Array.isArray(absentBody?.takes) && absentBody.takes.length === 0,
+      'while a captures directory removed from under the server still answers 200 with no takes',
+      `${absent.status} ${JSON.stringify(absentBody?.takes ?? absentBody).slice(0, 60)}`);
+    mkdirSync(silentDir, { recursive: true });
+    const empty = await getJson(`${silentUrl}/library/takes`).catch(() => null);
+    check(Array.isArray(empty?.takes) && empty.takes.length === 0,
+      'and an empty one answers an empty library', JSON.stringify(empty?.takes ?? empty).slice(0, 60));
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 14 || sv.port === MAC_PORT + 15)) {
+      p.child.kill('SIGKILL');
+    }
+  }
+
+  console.log('\n[library] delete unlinks the file it hashed, not whatever holds the name once the hash is done');
+  {
+    // The staged module rather than a route, so a mutated run tests the mutated code and the race
+    // is two renames this process lands, not a request's timing across a socket.
+    const lib = await import(pathToFileURL(join(root, 'server/library.js')).href);
+    const { fstatSync } = await import('node:fs');
+    const raceDir = join(WORK, 'delete-race');
+    rmSync(raceDir, { recursive: true, force: true });
+    mkdirSync(raceDir, { recursive: true });
+    // Sized by frames so the hash outlasts two renames, about 200MB of the sample.
+    writeTake(raceDir, 'asked-to-go', { frames: 400 });
+    writeTake(raceDir, 'never-named', { frames: 5 });
+    // The listing the delete is pressed from, which also builds both indexes: `renameTake` reads
+    // `cachedIndex`, and a cold one is a full parse that would outlast the hash it races.
+    const listed = await lib.scanTakes(raceDir);
+    const asked = listed.takes.find((t) => t.id === 'asked-to-go');
+    const stranger = listed.takes.find((t) => t.id === 'never-named');
+    const inode = statSync(join(raceDir, 'asked-to-go.knct'));
+    // Whether this process holds the take open, read off its own descriptor table.
+    const holding = () => readdirSync('/dev/fd').some((n) => {
+      try {
+        const st = fstatSync(Number(n));
+        return st.dev === inode.dev && st.ino === inode.ino;
+      } catch {
+        return false;
+      }
+    });
+    const heldBefore = holding();
+    let settled = false;
+    const pending = lib.removeTake(raceDir, 'asked-to-go', { hash: asked.hash })
+      .then((done) => ({ done }), (err) => ({ error: err.message }))
+      .finally(() => { settled = true; });
+    for (let i = 0; i < 2000 && !holding() && !settled; i++) await new Promise((r) => { setImmediate(r); });
+    // The descriptor is what says the hash has begun; before it, the removal would hash the take
+    // renamed in and be refused by the hash rather than by the question this section asks.
+    const opened = !heldBefore && holding();
+    // Renamed from outside the server, the way a file manager renames: `renameTake` takes the
+    // take's lock and waits for the removal, so the only rename that can land inside the hash is
+    // one no lock sees, and that is the rename this re-check is for.
+    let renameRefused = null;
+    try {
+      renameSync(join(raceDir, 'asked-to-go.knct'), join(raceDir, 'moved-away.knct'));
+      renameSync(join(raceDir, 'never-named.knct'), join(raceDir, 'asked-to-go.knct'));
+    } catch (err) {
+      renameRefused = err.message;
+    }
+    const inside = opened && renameRefused === null && !settled;
+    const outcome = await pending;
+    const hashOf = async (id) => (existsSync(join(raceDir, `${id}.knct`))
+      ? lib.hashFile(join(raceDir, `${id}.knct`)) : null);
+    if (!inside) {
+      skipped.push('the delete-race refusal, whose renames did not land inside the hash');
+      console.log(`  ...   the renames did not land inside the hash (${heldBefore ? 'the take was already held open'
+        : !opened ? 'the removal never opened the take' : renameRefused ?? 'the removal settled first'}), so the race was not entered`);
+    } else {
+      check(/renamed or replaced while it was being hashed/.test(outcome.error ?? ''),
+        'a delete is refused when its take is renamed away, and another renamed into its name, while it hashes',
+        (outcome.error ?? `REMOVED ${JSON.stringify(outcome.done)}`).slice(0, 100));
+      check(await hashOf('asked-to-go') === stranger.hash,
+        'and the take renamed into that name is still on disk, which is the footage an unlink by name takes',
+        `asked-to-go.knct now hashes ${String(await hashOf('asked-to-go')).slice(7, 19)}, the stranger ${stranger.hash.slice(7, 19)}`);
+      check(await hashOf('moved-away') === asked.hash,
+        'while the take the delete named survives under its new name, because nothing was removed',
+        String(await hashOf('moved-away')).slice(7, 19));
+    }
+    rmSync(raceDir, { recursive: true, force: true });
+  }
+
+  console.log('\n[library] a take\'s marks go with it, and a reclaim brings the node\'s marks here first');
+  {
+    const marksNodeDir = join(WORK, 'marks-node-captures');
+    const marksMacDir = join(WORK, 'marks-mac-captures');
+    for (const d of [marksNodeDir, marksMacDir]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    // Distinct frame counts, so each pair is its own hash and one reclaim cannot reach another.
+    for (const [id, frames] of [['kept-here', 6], ['fails-to-sync', 7], ['moves-mid-reclaim', 8]]) {
+      writeTake(marksNodeDir, id, { frames });
+      cpSync(join(marksNodeDir, `${id}.knct`), join(marksMacDir, `${id}.knct`));
+    }
+    writeTake(marksMacDir, 'last-copy', { frames: 9 });
+    writeFileSync(join(marksMacDir, 'last-copy.marks.jsonl'),
+      markLine({ id: 'lc1', sourceMs: 60, label: 'on the last copy', at: 1000 }));
+    const marksNodeUrl = await startServer(root, ['--captures', marksNodeDir, '--name', 'pi-marks',
+      '--presets', join(WORK, 'marks-node-presets'), '--projects', join(WORK, 'marks-node-projects')], MAC_PORT + 12);
+    // The link between the two machines, passed through except where a row needs it to fail or to
+    // hold. Inside the reserved span and closed before the section that needs +16 unanswered.
+    const reached = [];
+    let linkMode = 'pass';
+    let releaseHeld = null;
+    const link = await new Promise((done) => {
+      const srv = createServer(async (req, res) => {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        reached.push(`${req.method} ${req.url}`);
+        if (/\/marks\/log(\?|$)/.test(req.url) && linkMode === 'fail') {
+          res.writeHead(500, { 'content-type': 'application/json' })
+            .end('{"error":"the card holding the marks is not answering"}');
+          return;
+        }
+        if (/\/marks\/log(\?|$)/.test(req.url) && linkMode === 'hold') await new Promise((r) => { releaseHeld = r; });
+        try {
+          const up = await fetch(`${marksNodeUrl}${req.url}`, {
+            method: req.method,
+            headers: { 'content-type': req.headers['content-type'] ?? 'application/json' },
+            body: req.method === 'GET' || req.method === 'HEAD' ? undefined : Buffer.concat(chunks),
+          });
+          res.writeHead(up.status, { 'content-type': up.headers.get('content-type') ?? 'application/json' })
+            .end(Buffer.from(await up.arrayBuffer()));
+        } catch {
+          res.writeHead(502).end();
+        }
+      });
+      srv.listen(MAC_PORT + 16, '127.0.0.1', () => done(srv));
+    });
+    const marksMacUrl = await startServer(root, ['--captures', marksMacDir, '--name', 'mac-marks',
+      '--node', `http://127.0.0.1:${MAC_PORT + 16}`, '--node-name', 'pi-marks',
+      '--presets', join(WORK, 'marks-mac-presets'), '--projects', join(WORK, 'marks-mac-projects')], MAC_PORT + 13);
+    const macMarks = async (id) => ((await getJson(`${marksMacUrl}/capture/${id}/marks`)).marks ?? [])
+      .map((m) => m.label);
+    const askedToDelete = (id) => reached.some((r) => r === `POST /library/delete/${id}`);
+    for (const id of ['kept-here', 'fails-to-sync', 'moves-mid-reclaim']) {
+      await post(`${marksNodeUrl}/capture/${id}/marks`,
+        { marks: [{ id: `on-node-${id}`, sourceMs: 90, label: `pressed on the node for ${id}`, at: 7000 }] });
+    }
+    const pairs = (await getJson(`${marksMacUrl}/library/all`)).takes.filter((t) => t.state === 'both');
+    check(pairs.length === 3 && (await macMarks('kept-here')).length === 0,
+      'three takes on both machines, each with a mark pressed only on the node',
+      `${pairs.length} on both, ${(await macMarks('kept-here')).length} marks here on kept-here`);
+
+    const kept = await post(`${marksMacUrl}/library/reclaim/kept-here`, {});
+    check(kept.reclaimed && (await macMarks('kept-here')).includes('pressed on the node for kept-here'),
+      'a reclaim brings the node\'s marks onto the copy it keeps before it asks the node to remove its own',
+      kept.error ? kept.error.slice(0, 90) : `${kept.marksMerged} merged, here: ${JSON.stringify(await macMarks('kept-here'))}`);
+    check(!existsSync(join(marksNodeDir, 'kept-here.knct')) && !existsSync(join(marksNodeDir, 'kept-here.marks.jsonl')),
+      'and the node\'s marks log went with its copy, so nothing is left there under a name a later take can be given',
+      readdirSync(marksNodeDir).sort().join(' '));
+
+    linkMode = 'fail';
+    const unread = await post(`${marksMacUrl}/library/reclaim/fails-to-sync`, {});
+    check(/marks on pi-marks's copy could not be read/.test(unread.error ?? '') && !askedToDelete('fails-to-sync')
+      && existsSync(join(marksNodeDir, 'fails-to-sync.knct')),
+      'a reclaim whose node marks cannot be read is refused, and the node is never asked to remove its copy',
+      `${(unread.error ?? JSON.stringify(unread)).slice(0, 80)}; delete asked: ${askedToDelete('fails-to-sync')}`);
+
+    linkMode = 'hold';
+    const racing = post(`${marksMacUrl}/library/reclaim/moves-mid-reclaim`, {});
+    for (let i = 0; i < 200 && releaseHeld === null; i++) await new Promise((r) => { setTimeout(r, 25); });
+    const holding = releaseHeld !== null;
+    const movesHash = pairs.find((t) => t.id === 'moves-mid-reclaim')?.hash;
+    const moved = holding ? await post(`${marksMacUrl}/library/rename/moves-mid-reclaim`,
+      { hash: movesHash, to: 'moved-mid-reclaim' }) : { error: 'the link never held the marks log' };
+    linkMode = 'pass';
+    releaseHeld?.();
+    const raced = await racing;
+    if (!holding || moved.id !== 'moved-mid-reclaim') {
+      skipped.push('the reclaim-race refusal, whose rename did not land while the node marks were held');
+      console.log(`  ...   the rename did not land inside the reclaim (${(moved.error ?? 'no hold').slice(0, 60)})`);
+    } else {
+      check(/renamed or replaced here while the reclaim ran/.test(raced.error ?? '') && !askedToDelete('moves-mid-reclaim'),
+        'a reclaim whose kept copy is renamed while the node\'s marks are on the way is refused, and the node is not asked to delete',
+        `${(raced.error ?? JSON.stringify(raced)).slice(0, 80)}; delete asked: ${askedToDelete('moves-mid-reclaim')}`);
+      check(!existsSync(join(marksMacDir, 'moves-mid-reclaim.marks.jsonl')),
+        'and no marks log was made at the name the rename freed, where nothing would read it',
+        readdirSync(marksMacDir).sort().join(' '));
+    }
+
+    const lastCopy = (await getJson(`${marksMacUrl}/library/takes`)).takes.find((t) => t.id === 'last-copy');
+    const gone = await post(`${marksMacUrl}/library/delete/last-copy`, { hash: lastCopy?.hash, confirm: true });
+    check(gone.removed === 'last-copy.knct' && !existsSync(join(marksMacDir, 'last-copy.marks.jsonl')),
+      'a delete of the last copy removes its marks log with it',
+      gone.error ? gone.error.slice(0, 90) : readdirSync(marksMacDir).sort().join(' '));
+    writeTake(marksMacDir, 'last-copy', { frames: 3 });
+    const reborn = (await getJson(`${marksMacUrl}/library/takes`)).takes.find((t) => t.id === 'last-copy');
+    check(reborn !== undefined && reborn.marks.length === 0,
+      'so a take given that name later starts with no marks, rather than with the deleted take\'s',
+      JSON.stringify(reborn?.marks?.map((m) => m.label) ?? null));
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 12 || sv.port === MAC_PORT + 13)) {
+      p.child.kill('SIGKILL');
+    }
+    link.closeAllConnections();
+    await new Promise((done) => { link.close(done); });
+  }
+
   console.log('\n[library] every route that changes something requires its method, its type and its origin');
   {
     const guardDir = join(WORK, 'guarded');
@@ -5222,6 +5633,498 @@ async function runChecks() {
     for (const p of servers.filter((sv) => sv.port === MAC_PORT + 12)) p.child.kill('SIGKILL');
   }
 
+  // A server this run SIGKILLed is gone once it has exited, not once it was signalled, and the
+  // next section to bind its port before then finds the port held.
+  const exitedOn = (port) => Promise.all(servers.filter((sv) => sv.port === port)
+    .map((sv) => (sv.child.exitCode !== null || sv.child.signalCode !== null ? null
+      : new Promise((done) => { sv.child.once('exit', done); }))));
+
+  console.log('\n[library] a take stays the recorder\'s until its close finishes, after a restart has opened the next');
+  {
+    // The window: a colour toggle restarts the grabber, `split()` closes take A unawaited, and the
+    // replacement's hello opens take B about 250ms later while A's index is still being built. The
+    // index build is a full read plus sha256, so the window scales with A, and A is sized by frames:
+    // 5000 frames of the synthetic sample is about 2.2 GB, read back warm because it was just
+    // written. B opens about 0.45s after the restart; at 3000 frames A's close ran 0.73s, which
+    // left 0.28s of overlap, too little to sample on a contended machine.
+    const OVERLAP_FRAMES = 5000;
+    const INSIDE_FLOOR = 5;
+    // A sample counts as inside only if it started this long before A's "closed" line landed here:
+    // the line crosses a pipe, so a request fired just before it may be answered after the close.
+    const MARGIN_MS = 50;
+    const overlapDir = join(WORK, 'restart-overlap');
+    rmSync(overlapDir, { recursive: true, force: true });
+    mkdirSync(overlapDir, { recursive: true });
+    const overlapUrl = await startServer(root, [
+      '--captures', overlapDir, '--name', 'restarting', '--record', '--no-color',
+      '--grabber', `${join(REPO, 'tools/fake-grabber.mjs')} --source ${SAMPLE} --fps 400`,
+    ], MAC_PORT + 17);
+    // Timed where each line lands in this process, which is the clock the samples are timed on.
+    const began = Date.now();
+    const clock = () => Date.now() - began;
+    const opened = new Map();
+    const closed = new Map();
+    let partial = '';
+    servers.find((sv) => sv.port === MAC_PORT + 17).child.stdout.on('data', (chunk) => {
+      const lines = (partial + chunk.toString()).split('\n');
+      partial = lines.pop();
+      for (const line of lines) {
+        const m = /\[recorder\] take (\S+) (open|closed)/.exec(line);
+        if (m) (m[2] === 'open' ? opened : closed).set(m[1], { at: clock(), line });
+      }
+    });
+
+    // 12.5s at the nominal rate; the ceiling is for a contended machine where the grabber falls short.
+    let shooting = null;
+    for (let i = 0; i < 1800; i++) {
+      await new Promise((done) => { setTimeout(done, 50); });
+      shooting = await getJson(`${overlapUrl}/record/state`);
+      if (shooting.recording && shooting.frames >= OVERLAP_FRAMES) break;
+    }
+    check(shooting?.recording === true && shooting.frames >= OVERLAP_FRAMES,
+      `a take of at least ${OVERLAP_FRAMES} frames is open, which is what gives its close a window to sample`,
+      `${shooting?.takeId}: ${shooting?.frames} frames, ${((shooting?.bytes ?? 0) / 1e9).toFixed(2)} GB`);
+    const takeA = shooting?.takeId;
+
+    // Every `:id` route that answers GET, off the table the server publishes, so a route added later
+    // is asked by existing. The write routes are not driven: with the guard broken they would act on
+    // the take mid-close, and the ones refusing an open take read the listing's `recording` flag,
+    // which a row below asserts directly.
+    const idReads = (await getJson(`${overlapUrl}/library/routes`)).routes
+      .filter((r) => r.read && !r.live && r.path.includes(':id'))
+      .map((r) => r.path.replace(':id', encodeURIComponent(takeA)).replace(':a-:b', '0-1').replace(':name', 'none').replace(':n', '0'))
+      .filter((path) => !path.includes(':'));
+    const routeAnswers = () => Promise.all(idReads.map(async (path) => {
+      const res = await fetch(`${overlapUrl}${path}`);
+      await res.body?.cancel().catch(() => {});
+      return `${path.replace(encodeURIComponent(takeA), ':id')} ${res.status}`;
+    }));
+    const whileOpen = await routeAnswers();
+
+    // The same refusal under another spelling of the id. Where the volume folds case it opens the
+    // same file, and a scan of it would leave its sidecar beside the open take.
+    const spelled = takeA?.toUpperCase();
+    if (!takeA || !existsSync(join(overlapDir, `${spelled}.knct`))) {
+      console.log('  ...  this volume does not fold case, so another spelling of the id names no file here');
+      skipped.push('the recording refusal under another spelling of the id (needs a case-insensitive volume)');
+    } else {
+      const answers = await Promise.all(['index', 'hello', 'file'].map(async (leaf) => {
+        const res = await fetch(`${overlapUrl}/capture/${spelled}/${leaf}`);
+        await res.body?.cancel().catch(() => {});
+        return `${leaf} ${res.status}`;
+      }));
+      check(answers.every((a) => a.endsWith(' 409')) && !existsSync(join(overlapDir, `${takeA}.idx`)),
+        'the take being recorded is refused under another spelling of its id as well, and nothing scanned it - the recorder owns the file, not the name',
+        `${spelled}: ${answers.join(', ')}; ${readdirSync(overlapDir).sort().join(' ')}`);
+    }
+
+    // Fired without waiting on the last: under a broken guard a request inside the window blocks
+    // in a second full scan of A, and a sampler waiting on it stops sampling the window it measures.
+    const samples = [];
+    const inflight = [];
+    let walk = null;
+    await post(`${overlapUrl}/sensor/camera`, { color: true });
+    const giveUp = Date.now() + 30000;
+    while (!closed.has(takeA) && Date.now() < giveUp) {
+      const started = clock();
+      if (walk === null && [...opened.keys()].some((id) => id !== takeA)) {
+        walk = { started, answers: null };
+        inflight.push(routeAnswers().then((answers) => { walk.answers = answers; }));
+      }
+      inflight.push(Promise.all([getJson(`${overlapUrl}/library/takes`), getJson(`${overlapUrl}/record/state`)])
+        .then(([listed, state]) => {
+          const t = listed.takes.find((x) => x.id === takeA);
+          samples.push({ started, recording: t?.recording ?? null, hash: t?.hash ?? null, writing: state.writingIds });
+        }));
+      await new Promise((done) => { setTimeout(done, 25); });
+    }
+    await Promise.all(inflight);
+    // Asked before B stops, so the answer is about A's close finishing and not about B's.
+    const afterA = await getJson(`${overlapUrl}/record/state`);
+    // B goes on recording at 400fps, so it is stopped before anything else reads this disk.
+    await post(`${overlapUrl}/record/stop`);
+    const takeB = [...opened.keys()].find((id) => id !== takeA) ?? null;
+    const bAt = takeB ? opened.get(takeB).at : null;
+    const aAt = closed.get(takeA)?.at ?? null;
+    const inWindow = (t) => bAt !== null && aAt !== null && t >= bAt && t <= aAt - MARGIN_MS;
+    const inside = samples.filter((s) => inWindow(s.started));
+    check(inside.length >= INSIDE_FLOOR && walk !== null && inWindow(walk.started),
+      'the restart opened the next take while this one was still closing, and the check sampled inside that overlap - which is what makes the rows below readings from inside the window rather than ones that missed it',
+      `${takeB ?? 'no next take'} open at ${bAt}ms, ${takeA} closed at ${aAt}ms (${aAt - bAt}ms overlap), `
+        + `${inside.length} listings and ${walk && inWindow(walk.started) ? 'the route walk' : 'no route walk'} started inside it`);
+    const wrong = inside.filter((s) => s.recording !== true || s.hash !== null);
+    check(inside.length > 0 && wrong.length === 0,
+      'every listing inside the overlap says the closing take is being recorded, with no hash - it is still the recorder\'s, so the gallery offers nothing to open, download, rename or remove',
+      wrong.length ? `${wrong.length} of ${inside.length} said recording ${wrong[0].recording} with hash ${String(wrong[0].hash).slice(0, 15)}`
+        : `${inside.length} of ${inside.length}`);
+    const differs = (walk?.answers ?? []).filter((a, i) => a !== whileOpen[i]);
+    check(walk?.answers !== null && walk?.answers !== undefined && differs.length === 0,
+      'and every `:id` route answering GET answers the closing take exactly as it answered the open one',
+      differs.length ? `open vs closing: ${differs.map((d) => `${whileOpen[walk.answers.indexOf(d)]} -> ${d.split(' ').pop()}`).join(', ')}`
+        : `${whileOpen.length} routes: ${whileOpen.join(', ')}`);
+    // The gallery repaints when this list changes, so it has to change at each close, not only at B's.
+    const bothWriting = [takeA, takeB].sort();
+    const unlike = inside.filter((s) => !eq(s.writing, bothWriting));
+    check(inside.length > 0 && unlike.length === 0 && eq(afterA.writingIds, [takeB]) && afterA.takeId === takeB,
+      'the recorder reports both takes as being written for the whole overlap, and only the open one once the closing one is done - so a gallery following it repaints the finished take instead of refusing it until the next stop',
+      `${inside.length - unlike.length} of ${inside.length} inside said ${JSON.stringify(bothWriting)}`
+        + `${unlike.length ? ` (one said ${JSON.stringify(unlike[0].writing)})` : ''}, afterwards ${JSON.stringify(afterA.writingIds)}`);
+    const settled = (await getJson(`${overlapUrl}/library/takes`)).takes.find((t) => t.id === takeA);
+    const closedHash = /sha256:[0-9a-f]{64}/.exec(closed.get(takeA)?.line ?? '')?.[0] ?? null;
+    check(settled?.recording === false && closedHash !== null && settled.hash === closedHash,
+      'and once the close finishes the take is a library entry carrying the hash the close computed',
+      `${String(settled?.hash).slice(7, 19)} listed, ${String(closedHash).slice(7, 19)} closed`);
+
+    // Two ids differing only in case are two cache keys and one file where the volume folds case,
+    // so asking for the closed take under four spellings at once runs four scans of one file, each
+    // writing its sidecar. A take this size keeps them overlapping for about a second.
+    const variants = [takeA, takeA?.toUpperCase(), takeA?.replace('take', 'Take'), takeA?.replace('take', 'tAKE')];
+    if (!takeA || !existsSync(join(overlapDir, `${variants[1]}.knct`))) {
+      console.log('  ...  this volume does not fold case, so two ids cannot name one take here and the concurrent-scan row has nothing to ask');
+      skipped.push('concurrent sidecar writes (needs a case-insensitive volume)');
+    } else {
+      rmSync(join(overlapDir, `${takeA}.idx`), { force: true });
+      const logBefore = servers.find((sv) => sv.port === MAC_PORT + 17).log.join('').length;
+      const scans = await Promise.all(variants.map(async (id) => {
+        const res = await fetch(`${overlapUrl}/capture/${id}/index`);
+        return { id, status: res.status, hash: (await res.json().catch(() => null))?.hash ?? null };
+      }));
+      await new Promise((done) => { setTimeout(done, 200); });
+      const logDuring = servers.find((sv) => sv.port === MAC_PORT + 17).log.join('').slice(logBefore);
+      const failedWrites = logDuring.split('\n').filter((l) => /could not write/.test(l));
+      let sidecar = 'absent';
+      try {
+        sidecar = JSON.parse(readFileSync(join(overlapDir, `${takeA}.idx`), 'utf8')).hash === closedHash ? 'parses' : 'parses, wrong hash';
+      } catch (err) {
+        sidecar = existsSync(join(overlapDir, `${takeA}.idx`)) ? `does not parse (${err.message.slice(0, 40)})` : 'absent';
+      }
+      const leftovers = readdirSync(overlapDir).filter((f) => f.endsWith('.tmp'));
+      check(scans.every((s) => s.status === 200 && s.hash === closedHash) && failedWrites.length === 0
+        && sidecar === 'parses' && leftovers.length === 0,
+        'four scans of one closed take at once, under ids differing only in case, each write their sidecar - no failed rename, one sidecar that parses, no scratch file left behind',
+        `${scans.map((s) => `${s.id}:${s.status}`).join(' ')}; sidecar ${sidecar}; `
+          + `${failedWrites.length ? `log: ${failedWrites[0].slice(0, 90)}` : 'no failed write'}; leftovers ${leftovers.join(' ') || 'none'}`);
+    }
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 17)) p.child.kill('SIGKILL');
+    rmSync(overlapDir, { recursive: true, force: true });
+  }
+
+  console.log('\n[library] two machines shooting on one day: nothing here reads the take this machine is recording');
+  {
+    // Both recorders name takes `<day>-take<n>` off their own directory, so the names collide as
+    // the ordinary case. The node holds a finished `<day>-take1` and records `<day>-take2`; this
+    // machine starts empty and records `<day>-take1`.
+    const now = new Date();
+    const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const take1 = `${day}-take1`;
+    const take2 = `${day}-take2`;
+    const shootNodeDir = join(WORK, 'shooting-node');
+    const shootMacDir = join(WORK, 'shooting-mac');
+    for (const d of [shootNodeDir, shootMacDir]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    cpSync(SAMPLE, join(shootNodeDir, `${take1}.knct`));
+    // A log with records already in it for the name the node's open take gets: what a node reaches
+    // on its own when it deletes a take, which leaves the log, and the next take reuses the name.
+    const orphaned = [
+      { id: 'm-orphan-1', sourceMs: 1000, label: 'from a take the node deleted', at: 1 },
+      { id: 'm-orphan-2', sourceMs: 2000, label: 'and another from it', at: 2 },
+    ];
+    writeFileSync(join(shootNodeDir, `${take2}.marks.jsonl`), orphaned.map((r) => `${JSON.stringify(r)}\n`).join(''));
+    const grabbing = `${join(REPO, 'tools/fake-grabber.mjs')} --source ${SAMPLE} --fps 40`;
+    await exitedOn(MAC_PORT + 17);
+    const shootNodeUrl = await startServer(root, [
+      '--captures', shootNodeDir, '--name', 'pi-shooting', '--record', '--no-color', '--grabber', grabbing,
+    ], MAC_PORT + 17);
+    const shootMacUrl = await startServer(root, [
+      '--captures', shootMacDir, '--name', 'mac-shooting', '--record', '--no-color', '--grabber', grabbing,
+      '--node', shootNodeUrl, '--node-name', 'pi-shooting',
+    ], MAC_PORT + 18);
+    const bothShooting = async () => {
+      let pair = [null, null];
+      for (let i = 0; i < 60; i++) {
+        pair = await Promise.all([getJson(`${shootNodeUrl}/record/state`), getJson(`${shootMacUrl}/record/state`)]);
+        if (pair.every((s) => s.recording && s.frames > 5)) break;
+        await new Promise((done) => { setTimeout(done, 250); });
+      }
+      return pair;
+    };
+    const [nodeShot, macShot] = await bothShooting();
+    check(nodeShot?.takeId === take2 && macShot?.takeId === take1,
+      `both machines are recording, the node ${take2} beside a finished ${take1} and this machine ${take1}`,
+      `node ${nodeShot?.takeId} (recording ${nodeShot?.recording}), here ${macShot?.takeId} (recording ${macShot?.recording})`);
+
+    // The download's name probe is a full read plus sha256 of whatever holds the plain name, which
+    // here is the take being recorded. The sidecar is the tell that it ran.
+    const pulled = await post(`${shootMacUrl}/library/download/${take1}`);
+    const stillShooting = await getJson(`${shootMacUrl}/record/state`);
+    check(/being recorded on this machine/.test(pulled.error ?? '') && (pulled.error ?? '').includes(take1),
+      'downloading the node\'s finished take of the same name is refused while this machine records under that name, and the refusal names the take being shot',
+      (pulled.error ?? `ACCEPTED: ${JSON.stringify(pulled)}`).slice(0, 110));
+    check(!existsSync(join(shootMacDir, `${take1}.idx`)) && stillShooting.takeId === take1,
+      'and nothing scanned the take being recorded to decide that - no sidecar beside it, and it is still being written',
+      `${readdirSync(shootMacDir).sort().join(' ')}; recording ${stillShooting.takeId}`);
+
+    // Neither open take has a hash, so a join on the hash field joins them on its absence and the
+    // node's log for its own open take lands in this one's sidecar.
+    const sidecarOf = (dir, id) => (existsSync(join(dir, `${id}.marks.jsonl`)) ? readFileSync(join(dir, `${id}.marks.jsonl`)) : Buffer.alloc(0));
+    const macSidecarBefore = sidecarOf(shootMacDir, take1);
+    const [nodeNow, macNow] = await Promise.all([getJson(`${shootNodeUrl}/record/state`), getJson(`${shootMacUrl}/record/state`)]);
+    const syncedOpen = await fetch(`${shootMacUrl}/library/sync-marks/${take1}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    const syncedOpenBody = await syncedOpen.json().catch(() => null);
+    const macSidecarAfter = sidecarOf(shootMacDir, take1);
+    check(nodeNow.recording === true && macNow.recording === true && macNow.takeId === take1,
+      'both machines had a take open when the sync was asked for, which is what makes the two rows below about two unhashed takes rather than a finished one',
+      `node ${nodeNow.takeId} (recording ${nodeNow.recording}), here ${macNow.takeId} (recording ${macNow.recording})`);
+    check(Buffer.compare(macSidecarBefore, macSidecarAfter) === 0,
+      'a marks sync while both machines are recording appends nothing to the take being recorded here',
+      macSidecarAfter.length === macSidecarBefore.length ? `${macSidecarAfter.length} bytes before and after`
+        : `the sidecar gained ${macSidecarAfter.length - macSidecarBefore.length} bytes: ${macSidecarAfter.toString('utf8').trim().split('\n').slice(0, 2).join(' | ').slice(0, 120)}`);
+    check(syncedOpen.status === 409 && /being recorded right now/.test(syncedOpenBody?.error ?? ''),
+      'and it is refused as the take being recorded, rather than answered as a node that does not hold it',
+      `HTTP ${syncedOpen.status}: ${JSON.stringify(syncedOpenBody).slice(0, 110)}`);
+
+    await post(`${shootMacUrl}/record/stop`);
+    const closedSidecarBefore = sidecarOf(shootMacDir, take1);
+    const syncedClosed = await post(`${shootMacUrl}/library/sync-marks/${take1}`);
+    check(syncedClosed.merged === 0 && Buffer.compare(sidecarOf(shootMacDir, take1), closedSidecarBefore) === 0,
+      'and a finished take here is never joined to the node\'s open one: nothing merged and nothing appended',
+      `merged ${syncedClosed.merged}, ${syncedClosed.note ?? syncedClosed.error ?? ''}`.slice(0, 110));
+    const pulledAfter = await post(`${shootMacUrl}/library/download/${take1}`);
+    check(typeof pulledAfter.downloaded === 'string' && pulledAfter.downloaded !== `${take1}.knct`
+      && existsSync(join(shootMacDir, pulledAfter.downloaded)),
+      'and once this machine\'s take has closed the same download goes through, beside it under a name of its own - so the refusal was about the recording and not a download that could not work',
+      pulledAfter.downloaded ?? String(pulledAfter.error).slice(0, 100));
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 17 || sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
+  }
+
+  console.log('\n[library] a marks sync says what the node answered, and nothing else');
+  {
+    // The node is a stub, so what it answers is decided here, on the port the section above used.
+    await exitedOn(MAC_PORT + 17);
+    await exitedOn(MAC_PORT + 18);
+    // `stubTakes` answers `/library/takes`, or returns null to hold the request in `heldTakes`.
+    let stubTakes = () => ({ status: 500, body: { error: 'the stub cannot read its captures directory' } });
+    const heldTakes = [];
+    const stubLog = [{ id: 'm-from-the-node', sourceMs: 500, label: 'pressed on the node', at: 5 }];
+    // This build answers a log with the hash it was asked for; an older one answers by name, with none.
+    let stubEchoesHash = true;
+    const answer = (res, { status, body }) => {
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(body));
+    };
+    const stub = createServer((req, res) => {
+      if (req.url.startsWith('/library/takes')) {
+        const now = stubTakes();
+        if (now === null) heldTakes.push(res);
+        else answer(res, now);
+      } else if (req.url.startsWith('/record/state')) {
+        answer(res, { status: 200, body: { recording: false, takeId: null, writingIds: [] } });
+      } else if (/^\/capture\/[^/]+\/marks\/log(\?|$)/.test(req.url)) {
+        const asked = new URL(req.url, 'http://stub').searchParams.get('hash');
+        answer(res, { status: 200, body: stubEchoesHash ? { log: stubLog, hash: asked } : { log: stubLog } });
+      } else {
+        answer(res, { status: 404, body: { error: 'not a stub route' } });
+      }
+    });
+    await new Promise((done) => { stub.listen(MAC_PORT + 17, '127.0.0.1', done); });
+    const syncDir = join(WORK, 'syncing-mac');
+    rmSync(syncDir, { recursive: true, force: true });
+    mkdirSync(syncDir, { recursive: true });
+    cpSync(SAMPLE, join(syncDir, 'sync-stub-take.knct'));
+    try {
+      const syncUrl = await startServer(root, [
+        '--captures', syncDir, '--name', 'mac-syncing',
+        '--node', `http://127.0.0.1:${MAC_PORT + 17}`, '--node-name', 'stub-node',
+      ], MAC_PORT + 18);
+
+      const unasked = await fetch(`${syncUrl}/library/sync-marks/sync-stub-take`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const unaskedBody = await unasked.json().catch(() => null);
+      check(!unasked.ok && /could not be asked/.test(unaskedBody?.error ?? '') && /500/.test(unaskedBody?.error ?? '')
+        && unaskedBody?.merged === undefined,
+        'a marks sync against a node that could not be reached says so rather than saying the node does not hold the take',
+        `HTTP ${unasked.status}: ${JSON.stringify(unaskedBody).slice(0, 120)}`);
+
+      // The node's answer is held while the take is renamed here, so the sync resumes onto a name
+      // that no longer names the take. The stub's manifest is this machine's own description of the
+      // take, which is a real one and joins by hash.
+      const mine = (await getJson(`${syncUrl}/library/takes`)).takes.find((t) => t.id === 'sync-stub-take');
+      stubTakes = () => null;
+      let raceSettled = false;
+      const racing = fetch(`${syncUrl}/library/sync-marks/sync-stub-take`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      }).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }))
+        .finally(() => { raceSettled = true; });
+      for (let i = 0; i < 100 && heldTakes.length === 0; i++) await new Promise((done) => { setTimeout(done, 50); });
+      await new Promise((done) => { setTimeout(done, 50); });
+      check(heldTakes.length === 1 && !raceSettled,
+        'the sync is waiting on the node\'s answer, which is the window the rename below lands in',
+        `${heldTakes.length} held, sync ${raceSettled ? 'already answered' : 'still waiting'}`);
+      const renamed = await post(`${syncUrl}/library/rename/sync-stub-take`, { hash: mine?.hash, to: 'sync-stub-renamed' });
+      stubTakes = () => ({ status: 200, body: { takes: [mine] } });
+      for (const res of heldTakes.splice(0)) answer(res, stubTakes());
+      const raced = await racing;
+      const leftBehind = readdirSync(syncDir).filter((f) => f.endsWith('.marks.jsonl'));
+      check(!renamed.error && raced.status === 409 && /changed underneath/.test(raced.body?.error ?? '') && leftBehind.length === 0,
+        'a take renamed while its sync waited on the node is refused, and no marks sidecar is written under the old name or the new',
+        `rename ${renamed.error ?? 'done'}; HTTP ${raced.status}: ${JSON.stringify(raced.body).slice(0, 90)}; sidecars ${leftBehind.join(' ') || 'none'}`);
+
+      // A node on an older build ignores the hash and answers whatever the name holds.
+      const renamedMine = (await getJson(`${syncUrl}/library/takes`)).takes.find((t) => t.id === 'sync-stub-renamed');
+      stubTakes = () => ({ status: 200, body: { takes: [renamedMine] } });
+      stubEchoesHash = false;
+      const byName = await fetch(`${syncUrl}/library/sync-marks/sync-stub-renamed`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const byNameBody = await byName.json().catch(() => null);
+      check(!byName.ok && /older build/.test(byNameBody?.error ?? '') && !existsSync(join(syncDir, 'sync-stub-renamed.marks.jsonl')),
+        'a marks sync against a node whose log answers by name, naming no hash, is refused and merges nothing',
+        `HTTP ${byName.status}: ${JSON.stringify(byNameBody).slice(0, 110)}`);
+      stubEchoesHash = true;
+      const echoed = await post(`${syncUrl}/library/sync-marks/sync-stub-renamed`);
+      check(echoed.merged === 1,
+        'and the same node answering with the hash it was asked for is merged, so the refusal above was about the hash',
+        `merged ${echoed.merged ?? echoed.error}`);
+      for (const p of servers.filter((sv) => sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
+    } finally {
+      stub.close();
+    }
+  }
+
+  console.log('\n[library] a node\'s marks are asked for by what the take is, not by what it is called');
+  {
+    // A real node behind a link this check holds: the node's log is requested by a name read from
+    // its listing, and the node renames between the two. The link listens on a port the kernel
+    // picks, since nothing can be there before it binds.
+    await exitedOn(MAC_PORT + 17);
+    await exitedOn(MAC_PORT + 18);
+    const byContentNode = join(WORK, 'by-content-node');
+    const byContentMac = join(WORK, 'by-content-mac');
+    for (const d of [byContentNode, byContentMac]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    cpSync(SAMPLE, join(byContentNode, 'shot-x.knct'));
+    cpSync(SAMPLE, join(byContentNode, 'other.knct'));
+    // Under a message header's twelve bytes, so the scan reads it as a torn tail and hashes a
+    // different take rather than refusing a desynced one.
+    appendFileSync(join(byContentNode, 'other.knct'), Buffer.from('other'));
+    cpSync(SAMPLE, join(byContentMac, 'shared.knct'));
+    const markA = { id: 'm-on-a', sourceMs: 10, label: 'on the shared take', at: 1 };
+    const markB = { id: 'm-on-b', sourceMs: 20, label: 'on the other take', at: 2 };
+    writeFileSync(join(byContentNode, 'shot-x.marks.jsonl'), `${JSON.stringify(markA)}\n`);
+    writeFileSync(join(byContentNode, 'other.marks.jsonl'), `${JSON.stringify(markB)}\n`);
+    const nodeUrlHere = await startServer(root, ['--captures', byContentNode, '--name', 'pi-by-content'], MAC_PORT + 17);
+    const heldLogs = [];
+    const link = await new Promise((done) => {
+      const srv = createServer(async (req, res) => {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        if (/\/marks\/log(\?|$)/.test(req.url) && heldLogs.hold) await new Promise((r) => { heldLogs.push(r); });
+        if (req.url.startsWith('/library/delete/') && heldLogs.holdDelete) await new Promise((r) => { heldLogs.push(r); });
+        try {
+          const up = await fetch(`${nodeUrlHere}${req.url}`, {
+            method: req.method,
+            headers: { 'content-type': req.headers['content-type'] ?? 'application/json' },
+            body: req.method === 'GET' || req.method === 'HEAD' ? undefined : Buffer.concat(chunks),
+          });
+          res.writeHead(up.status, { 'content-type': up.headers.get('content-type') ?? 'application/json' })
+            .end(Buffer.from(await up.arrayBuffer()));
+        } catch {
+          res.writeHead(502).end();
+        }
+      });
+      srv.listen(0, '127.0.0.1', () => done(srv));
+    });
+    try {
+      const macUrlHere = await startServer(root, ['--captures', byContentMac, '--name', 'mac-by-content',
+        '--node', `http://127.0.0.1:${link.address().port}`, '--node-name', 'pi-by-content'], MAC_PORT + 18);
+      const onNode = (await getJson(`${nodeUrlHere}/library/takes`)).takes;
+      const takeA = onNode.find((t) => t.id === 'shot-x');
+      const takeB = onNode.find((t) => t.id === 'other');
+      if (!takeA || !takeB || takeA.hash === takeB.hash) {
+        throw new Error(`the node lists ${onNode.map((t) => t.id).join(', ') || 'nothing'}, not two different takes to rename`);
+      }
+      const macLog = () => (existsSync(join(byContentMac, 'shared.marks.jsonl'))
+        ? readFileSync(join(byContentMac, 'shared.marks.jsonl'), 'utf8') : '');
+      // The node renames the shared take away and the other take into its name while the log
+      // request is held, then puts them back.
+      // Each arm starts from an empty log here, so each one's reading is its own.
+      const renamedWhileHeld = async (kind) => {
+        rmSync(join(byContentMac, 'shared.marks.jsonl'), { force: true });
+        heldLogs.hold = true;
+        let settled = false;
+        const asked = fetch(`${macUrlHere}/library/${kind}/shared`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        }).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }),
+          (err) => ({ status: null, body: { error: err.message } }))
+          .finally(() => { settled = true; });
+        for (let i = 0; i < 200 && heldLogs.length === 0; i++) await new Promise((done) => { setTimeout(done, 50); });
+        const away = await post(`${nodeUrlHere}/library/rename/shot-x`, { hash: takeA.hash, to: 'shot-y' });
+        const into = await post(`${nodeUrlHere}/library/rename/other`, { hash: takeB.hash, to: 'shot-x' });
+        const window = heldLogs.length === 1 && !settled && !away.error && !into.error;
+        heldLogs.hold = false;
+        for (const release of heldLogs.splice(0)) release();
+        const answer = await asked;
+        const nodeHolds = (await getJson(`${nodeUrlHere}/library/takes`)).takes.map((t) => t.id).sort();
+        await post(`${nodeUrlHere}/library/rename/shot-x`, { hash: takeB.hash, to: 'other' });
+        await post(`${nodeUrlHere}/library/rename/shot-y`, { hash: takeA.hash, to: 'shot-x' });
+        return { window, answer, nodeHolds, detail: `${away.error ?? 'renamed away'}, ${into.error ?? 'renamed into its name'}` };
+      };
+
+      const synced = await renamedWhileHeld('sync-marks');
+      check(synced.window,
+        'the log request was held while the node renamed the take away and another take into its name, which is the window the rows below are about',
+        synced.detail);
+      check(!/m-on-b/.test(macLog()) && synced.answer.status !== 200 && /409/.test(synced.answer.body?.error ?? ''),
+        'a marks sync in that window brings nothing across: the node refuses the name, which no longer holds the take the sync asked for',
+        `HTTP ${synced.answer.status}: ${JSON.stringify(synced.answer.body).slice(0, 90)}; log here: ${macLog().trim() || '(none)'}`.slice(0, 200));
+      const reclaimed = await renamedWhileHeld('reclaim');
+      check(reclaimed.window && !/m-on-b/.test(macLog()) && reclaimed.answer.status !== 200
+        && eq(reclaimed.nodeHolds, ['shot-x', 'shot-y']),
+        'and a reclaim in that window merges nothing and removes nothing: both takes are still on the node',
+        `HTTP ${reclaimed.answer.status}; node holds ${reclaimed.nodeHolds.join(' ')}; log here: ${macLog().trim() || '(none)'}`.slice(0, 200));
+      rmSync(join(byContentMac, 'shared.marks.jsonl'), { force: true });
+      const plain = await post(`${macUrlHere}/library/sync-marks/shared`);
+      check(plain.merged === 1 && /m-on-a/.test(macLog()) && !/m-on-b/.test(macLog()),
+        'and with nothing renamed the same sync brings the shared take\'s mark across, so the refusals above were about the rename',
+        `merged ${plain.merged ?? plain.error}`);
+
+      // A mark pressed on the node between the reclaim's read of its log and its delete.
+      heldLogs.holdDelete = true;
+      let reclaimSettled = false;
+      const reclaiming = post(`${macUrlHere}/library/reclaim/shared`).finally(() => { reclaimSettled = true; });
+      for (let i = 0; i < 400 && heldLogs.length === 0; i++) await new Promise((done) => { setTimeout(done, 50); });
+      const late = { id: 'm-late-on-node', sourceMs: 30, label: 'pressed while the reclaim ran', at: 3 };
+      const pressed = await post(`${nodeUrlHere}/capture/shot-x/marks`, { marks: [late] });
+      const heldDeletes = heldLogs.length;
+      const lateWindow = heldDeletes === 1 && !reclaimSettled && !pressed.error;
+      heldLogs.holdDelete = false;
+      for (const release of heldLogs.splice(0)) release();
+      const lateReclaim = await reclaiming;
+      const stillThere = (await getJson(`${nodeUrlHere}/library/takes`)).takes.find((t) => t.id === 'shot-x');
+      check(lateWindow,
+        'the reclaim\'s delete was held while a mark was pressed on the node\'s copy, after the reclaim had read that copy\'s marks',
+        pressed.error ?? `${heldDeletes} delete held, the mark written`);
+      check(lateReclaim.error !== undefined && stillThere?.marks?.some((m) => m.id === late.id),
+        'and the node keeps its copy and the late mark, rather than deleting a mark nothing here has',
+        `${String(lateReclaim.error ?? JSON.stringify(lateReclaim)).slice(0, 110)}; node ${stillThere ? 'still holds shot-x' : 'removed shot-x'}`);
+      const again = await post(`${macUrlHere}/library/reclaim/shared`);
+      check(again.reclaimed?.removed === 'shot-x.knct' && /m-late-on-node/.test(macLog()),
+        'and reclaiming again brings the late mark across and removes the node\'s copy, so the refusal was about the mark',
+        String(again.error ?? JSON.stringify(again.reclaimed)).slice(0, 110));
+    } finally {
+      link.close();
+      link.closeAllConnections();
+      for (const p of servers.filter((sv) => sv.port === MAC_PORT + 17 || sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
+    }
+  }
+
   console.log('\n[library] a node with no captures directory makes one and says so');
   {
     const fresh = join(WORK, 'never-existed', 'captures');
@@ -5613,9 +6516,9 @@ async function runChecks() {
       `painted mid-write ${paintedMidWrite}, ${heldTicks.length} /record/state held`);
     await post(`${liveUrl}/record/stop`);
     const restedAfter = await getJson(`${liveUrl}/record/state`);
-    check(restedAfter.writingId === null,
+    check(eq(restedAfter.writingIds, []),
       'and the take finished underneath it - index, hash and all - before the tick was let go, so the tick answers about a world that moved while it waited',
-      `writingId ${restedAfter.writingId}, recording ${restedAfter.recording}`);
+      `writingIds ${JSON.stringify(restedAfter.writingIds)}, recording ${restedAfter.recording}`);
     releaseTicks = true;
     for (const route of heldTicks) await route.continue().catch(() => {});
     const cameBack = await blind.waitForFunction(

@@ -2,12 +2,12 @@
 // is library entry is hash - is what the project model, the frame API and the library assume. One
 // take is one continuous stream, one hello, monotonic stamps; a grabber restart splits it.
 
-import { createWriteStream, openSync, readdirSync } from 'node:fs';
+import { createWriteStream, fstatSync, openSync, readdirSync } from 'node:fs';
 import { once } from 'node:events';
 import { join } from 'node:path';
 import { encodeMessage, TYPE_HELLO } from './protocol.js';
 import { buildIndex, forgetCapture } from './capture.js';
-import { appendMarks, remaining, MIN_TAKE_SEC, durationLabel } from './library.js';
+import { appendMarks, remaining, MIN_TAKE_SEC, durationLabel, sameTake, takeIdentity } from './library.js';
 
 // `2026-07-31-take3`. Synchronous, because opening a take must finish in the same turn as the
 // hello or the frames behind it find no file.
@@ -83,9 +83,9 @@ export class Recorder {
     // intention is unchanged, so the next hello opens the next take with nobody pressing.
     this.armed = false;
     this.take = null;
-    // `close` nulls `this.take` before it awaits the flush, so without this "is the recorder still
-    // holding this file" answered no while it still was.
-    this.finalizing = null;
+    // Every take whose close is still running. A set, because `split()` closes the old take
+    // unawaited while the replacement's hello opens the next, so a restart holds two at once.
+    this.closing = new Set();
   }
 
   get state() {
@@ -102,15 +102,27 @@ export class Recorder {
       buffered: take ? take.stream.writableLength : 0,
       cannotRecord: this.cannotRecord(),
       // A longer window than `recording`: a library tile may not offer Download or Remove until
-      // the index and the hash exist. An id, so a surface can compare it against what it drew.
-      writingId: take?.id ?? this.finalizing?.id ?? null,
+      // the index and the hash exist. Every owned take, because a restart owns two and a tile has
+      // to repaint when either close finishes; sorted, so a surface compares it as a set.
+      writingIds: this.ownedTakes().map((owned) => owned.id).sort(),
     };
   }
 
-  // A known hole: this is one path and a grabber restart can own two, because `split()` closes the
-  // old take unawaited while the replacement's hello opens the next about 250ms later.
-  get openPath() {
-    return this.take?.path ?? this.finalizing?.path ?? null;
+  /** The open take and every take whose close is still running. */
+  ownedTakes() {
+    return [this.take, ...this.closing].filter((take) => take !== null);
+  }
+
+  /** Whether `path` is a file this recorder is still writing: the open take, or one still closing. */
+  owns(path) {
+    // The file rather than the name: an id is joined into a path as given, and a volume that folds
+    // case opens one take under many spellings of it.
+    return Boolean(path) && this.ownedTakes().length > 0 && this.ownsFile(takeIdentity(path));
+  }
+
+  /** The same question about a file already opened, by its `dev` and `ino`. */
+  ownsFile(identity) {
+    return identity !== null && this.ownedTakes().some((take) => sameTake(identity, take.identity));
   }
 
   // Refuses when the disk cannot hold a sensible minimum, because with manual-only deletion the
@@ -196,6 +208,8 @@ export class Recorder {
     this.take = {
       id: take.id,
       path: take.path,
+      // Off the descriptor, which the stream closes at the end of the take.
+      identity: fstatSync(take.fd),
       stream,
       startedAt,
       frames: 0,
@@ -251,7 +265,7 @@ export class Recorder {
     const take = this.take;
     if (!take) return null;
     this.take = null;
-    this.finalizing = take;
+    this.closing.add(take);
     take.stream.end();
     let closeError = null;
     try {
@@ -272,8 +286,9 @@ export class Recorder {
       index = await buildIndex(take.path);
     } finally {
       // In a `finally`, or an index build that threw leaves this process claiming a file it had
-      // stopped working on, with the library refusing to open or remove it until a restart.
-      this.finalizing = null;
+      // stopped working on, with the library refusing to open or remove it until a restart. This
+      // take and no other: a shared slot cleared here handed a later take's guard away mid-close.
+      this.closing.delete(take);
     }
     console.log(
       `[recorder] take ${take.id} closed (${reason}): ${index.frames.offset.length} frames, ${index.hash}`

@@ -133,7 +133,7 @@ Read the assertion count, never the exit code.
 **Ports.** `cli-check` probes port 8401 before staging under `.cli-check/`. These tools spawn their own server and need the port free:
 `guard-check` 8321, `jobs-check` 8231 and 8232, `effect-check` 8281, `level-check` 8377,
 `monitor-check` 8341, `vcam-check` 8361, `boot-check` 8391, `library-check` 8210 (`--node-port`)
-and 8211..8227 (`--mac-port`..`+16`), `index-check` 8251 under `--stage` or `--mutate` only, and
+and 8211..8229 (`--mac-port`..`+18`), `index-check` 8251 under `--stage` or `--mutate` only, and
 `sensor-view-check` 8131 for the section needing its own capture. A stranger on the port answers
 the tool, and its green run proves nothing. `library-check`, `boot-check`, `effect-check` and
 `index-check` probe the port first and exit 2 naming what answers. Everywhere else, run

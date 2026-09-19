@@ -88,7 +88,7 @@ fixture, server or browser first (`timeline-check`, `keyframe-check`, `export-ch
 A mutated run prints the expected failure row when its entry carries a `fails:` field.
 For other entries, read the catch from the assertions that fired.
 
-Four tables are too large to reproduce here — `editor-check` declares 207, `library-check` 121,
+Four tables are too large to reproduce here — `editor-check` declares 207, `library-check` 138,
 `registry-check` 60 and `effect-check` 42. Their sections give the count and the enumerate
 command prints the names.
 
@@ -649,7 +649,7 @@ node tools/library-check.mjs
 
 | needs | |
 | --- | --- |
-| ports | `--node-port` (8210) and `--mac-port`..`+16` (8211..8227), all free |
+| ports | `--node-port` (8210) and `--mac-port`..`+18` (8211..8229), all free |
 | fixture | `captures/sample.knct`, or `--capture` |
 | browser | a GPU browser |
 
@@ -659,7 +659,15 @@ machines reconciling and several of its mutations are in server code no served p
 naming what is held: a stranger already listening answers `/library/takes` just as well, so a
 borrowed port is a green run proving nothing.
 
-114 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
+The restart-overlap section shoots 5000 frames at 400fps on `+17`, about 2.2 GB removed when the
+section ends, restarts the grabber with a colour toggle, and needs five samples to land between
+the next take's open and the closing take's close; fewer fails its window row rather than passing
+the rows after it. Its concurrent-scan row and its other-spelling row need a volume that folds
+case, and name themselves in the verdict as unproven on one that does not. The two-machine section
+shoots on `+17` and `+18` at once, and the marks-sync section answers as the node from a stub
+inside the check on `+17`.
+
+131 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
 
 **Known reds.** Three rows are flaky under machine contention. Two are
 in the marks-on-the-scrubber section and are one race between a seek, `settled()` and the mark's

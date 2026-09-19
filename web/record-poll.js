@@ -46,16 +46,16 @@ const EVERY_MS = 5000;
  * so the link that admits a node can require exactly them.
  *
  * **A list rather than a spelling inside the expression below, because the boundary is
- * on the other machine's build and had no way to know what this reads.** `NodeLink`
- * fills a missing field in with `?? null`, which is right for a node that is simply not
- * writing and wrong for one that has never heard of the field: a build one older than
- * this one answers `/record/state` without `writingId` at all, passes the manifest gate
+ * on the other machine's build and had no way to know what this reads.** A missing
+ * field read as empty is right for a node that is simply not writing and wrong for one
+ * that has never heard of the field: a build one older than this one answers
+ * `/record/state` without `writingIds` at all, passes the manifest gate
  * `takes()` applies, and then reads as an idle recorder on every tick forever - so the
  * fingerprint is constant, no remote start or stop ever changes it, and the gallery
  * stops following the recorder it is drawing. Exported, so `server/library.js` requires
  * what this actually reads rather than a copy of it somebody has to remember to widen.
  */
-export const POLLED_NODE_FIELDS = ['writingId'];
+export const POLLED_NODE_FIELDS = ['writingIds'];
 
 /**
  * What a tick has to differ in for the answer drawn from it to be worth redrawing.
@@ -65,14 +65,18 @@ export const POLLED_NODE_FIELDS = ['writingId'];
  * constantly and are deliberately not in it, or the flag would be true on every tick
  * and mean nothing.
  *
- * **`writingId` rather than the recording flag and the take id, and the difference is
+ * **`writingIds` rather than the recording flag and the take id, and the difference is
  * the several seconds between them.** A take stops being recorded well before it stops
  * being the recorder's: the stream still has to flush, the marks still have to land and
  * the index and the content hash - which are what make the take a gallery entry at all
  * - are built after that. The flag went false at the front of that window, so a gallery
  * following it reread the library into the middle of a close and drew Download, Rename
- * and Remove over a take with no hash yet. `writingId` spans the whole of it, so the
+ * and Remove over a take with no hash yet. `writingIds` spans the whole of it, so the
  * one repaint this poll pays for lands where the answer actually changed.
+ *
+ * **Every id rather than one, because a grabber restart owns two takes.** One id names
+ * the new take and does not move when the old one's close finishes, so the old tile
+ * would go on refusing every action until the new take stopped.
  *
  * **Both recorders, because the gallery is a view of both libraries.** A station with
  * a `--node` draws the node's takes into the same grid, and it is the machine the
@@ -83,9 +87,9 @@ export const POLLED_NODE_FIELDS = ['writingId'];
  * dropping or coming back changes what is on screen.
  */
 const fingerprint = (state) => [
-  state.writingId ?? '',
+  String(state.writingIds ?? ''),
   state.node
-    ? [state.node.reachable, ...POLLED_NODE_FIELDS.map((f) => state.node[f] ?? '')].join(':')
+    ? [state.node.reachable, ...POLLED_NODE_FIELDS.map((f) => String(state.node[f] ?? ''))].join(':')
     : '',
 ].join('|');
 

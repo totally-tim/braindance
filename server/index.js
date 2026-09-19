@@ -12,9 +12,9 @@ import { MessageParser, encodeMessage, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, TYPE_
 import { openCapture, withCapture, captureIdFor, openCaptureCount, decimatePayload, cloudExtent } from './capture.js';
 import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
 import {
-  VALID_ID, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, downloadTake,
-  downloadsInFlight, hashFile, markWriteCount, readMarkLog, readMarks, reconcile, remaining,
-  removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes,
+  VALID_ID, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, checkedMarkLog, copyOnNode, downloadTake,
+  downloadsInFlight, hashFile, markLogFor, markLogPath, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
+  removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeIdentity,
 } from './library.js';
 import { EffectStore } from './effect-store.js';
 import { RESERVED_EFFECT_IDS, doorRefusal, forkRefusal } from './effect-door.js';
@@ -153,12 +153,15 @@ function capturePathFor(id) {
 // same decoder the same input; a run is the file's own slice, framing included, because
 // concatenated payloads have no boundaries left to parse back.
 
-// The take the recorder has open is refused through this API until it closes: a scan of a growing
-// file is a full read plus sha256 against the disk being written to, and the hash it would carry
-// names a take that no longer exists a frame later.
+// A take the recorder still owns is refused through this API until its close finishes: a scan of
+// a growing file is a full read plus sha256 against the disk being written to, and the hash it
+// would carry names a take that no longer exists a frame later.
 function beingRecorded(path) {
-  return path !== null && path === recorder.openPath;
+  return path !== null && recorder.owns(path);
 }
+
+// The refusal for a take the recorder still owns, said once so every route that refuses it agrees.
+const recordingRefusal = (id) => `${id} is being recorded right now: it has no settled index or hash until the take closes`;
 
 async function withOpenCapture(res, id, fn) {
   const path = capturePathFor(id);
@@ -167,7 +170,7 @@ async function withOpenCapture(res, id, fn) {
     return;
   }
   if (beingRecorded(path)) {
-    sendJson(res, { error: `${id} is being recorded right now: it has no settled index or hash until the take closes` }, 409);
+    sendJson(res, { error: recordingRefusal(id) }, 409);
     return;
   }
   await withCapture(path, fn).catch((err) => {
@@ -315,17 +318,7 @@ function serveTakeFile(req, res, [id]) {
 }
 
 // Marks are a sidecar beside the take, and a write is an append - so moving, renaming and
-// deleting a mark are one operation and the two-machine merge is concatenate-and-resolve. `dev`
-// and `ino` rather than the path, because a later take renamed into a freed id is a different take.
-const takeIdentity = (path) => {
-  try {
-    const st = statSync(path ?? '');
-    return { dev: st.dev, ino: st.ino };
-  } catch {
-    return null;
-  }
-};
-const sameTake = (a, b) => a !== null && b !== null && a.dev === b.dev && a.ino === b.ino;
+// deleting a mark are one operation and the two-machine merge is concatenate-and-resolve.
 const takeIsHere = (path) => {
   try {
     return takeIdentity(path) !== null;
@@ -340,8 +333,25 @@ async function serveMarks(req, res, [id], query, { log = false } = {}) {
     res.writeHead(404).end('unknown capture');
     return;
   }
-  const entries = await readMarkLog(path);
-  sendJson(res, log ? { log: entries } : { marks: resolveMarks(entries) });
+  // Asked for by content, the log is refused unless the name still holds that take: another
+  // machine read the hash from a listing, and a rename here since then moves the name onto
+  // another take. The take being recorded has no hash to match.
+  const hash = log ? query.get('hash') : null;
+  if (hash !== null && beingRecorded(path)) {
+    sendJson(res, { error: recordingRefusal(id) }, 409);
+    return;
+  }
+  const entries = hash === null ? await readMarkLog(path) : await markLogFor(path, hash, { ownsFile: (identity) => recorder.ownsFile(identity) })
+    .catch((err) => (err.code === 'ENOENT' ? null : Promise.reject(err)));
+  if (entries === null) {
+    sendJson(res, {
+      error: `${id} here is not the take ${hash}: it was renamed or replaced since that was read, so its marks are not that take's`,
+    }, 409);
+    return;
+  }
+  // With the hash it was asked for, so the caller can refuse an answer that checked none; null
+  // when asked by name, because nothing here checked what the name holds.
+  sendJson(res, log ? { log: entries, hash } : { marks: resolveMarks(entries) });
 }
 
 async function serveMarkWrite(req, res, [id]) {
@@ -354,22 +364,22 @@ async function serveMarkWrite(req, res, [id]) {
     return;
   }
   const body = await readBody(req);
-  // Asked again, and asked *which* take: the check above is before an await of up to four
-  // megabytes over a room's wifi, and a rename landing in that gap recreates the old sidecar.
-  if (!sameTake(wasThere, takeIdentity(path))) {
-    sendJson(res, {
-      error: `${id} changed underneath this request - it was renamed or replaced while the marks `
-        + 'were being sent, and they have not been written to anything',
-    }, 409);
-    return;
-  }
   const now = Date.now();
   const records = (body.marks ?? []).map((m) => ({
     ...m,
     // `at` is what orders two machines' edits, and the resolver drops a record without one.
     at: Number.isFinite(m.at) ? m.at : now,
   }));
-  await appendMarks(path, records);
+  // Asked again, and asked *which* take, under the take's lock: the check above is before an await
+  // of up to four megabytes over a room's wifi, and a rename landing in that gap recreates the old
+  // sidecar.
+  if (!await appendMarks(path, records, { identity: wasThere })) {
+    sendJson(res, {
+      error: `${id} changed underneath this request - it was renamed or replaced while the marks `
+        + 'were being sent, and they have not been written to anything',
+    }, 409);
+    return;
+  }
   sendJson(res, { marks: resolveMarks(await readMarkLog(path)) });
 }
 
@@ -430,8 +440,8 @@ function readBody(req) {
   });
 }
 
-// The take being written is named on the way in, so the manifest can describe it without scanning.
-const localTakes = () => scanTakes(CAPTURES_DIR, recorder.openPath);
+// The takes the recorder still owns are named on the way in, so the manifest describes them unscanned.
+const localTakes = () => scanTakes(CAPTURES_DIR, (path) => recorder.owns(path));
 
 // Per request rather than per server, because the answer is about the socket: Reveal opens a window
 // on the machine running this process, which is only the operator's when the browser is on it.
@@ -491,7 +501,7 @@ async function serveRename(req, res, [id]) {
   try {
     const done = await renameTake(CAPTURES_DIR, id, body.to, {
       hash: body.hash,
-      recordingPath: recorder.openPath,
+      ownsFile: (identity) => recorder.ownsFile(identity),
     });
     sendJson(res, done);
   } catch (err) {
@@ -548,7 +558,6 @@ async function serveRemoval(req, res, [id], kind) {
     return;
   }
   const there = node ? await node.takes(left) : null;
-  const theirs = (there ?? []).find((t) => t.hash === (mine?.hash ?? body.hash));
 
   if (kind === 'reclaim') {
     // The surviving copy is the local one, re-hashed rather than trusted: a file truncated since
@@ -557,10 +566,19 @@ async function serveRemoval(req, res, [id], kind) {
       sendJson(res, { error: `${id} is not on this machine, so there is nothing here to keep` }, 409);
       return;
     }
+    let theirs;
+    try {
+      theirs = node ? copyOnNode(node, there, mine.hash) : null;
+    } catch (err) {
+      sendJson(res, { error: `${err.message}, so its copy of ${id} can be neither found nor removed` }, 409);
+      return;
+    }
     if (!theirs) {
       sendJson(res, { error: `${id} is not on ${node?.name ?? 'any node'}: there is nothing to reclaim` }, 409);
       return;
     }
+    const keptPath = join(CAPTURES_DIR, mine.file);
+    const kept = takeIdentity(keptPath);
     const verified = await hashFile(join(CAPTURES_DIR, mine.file));
     if (verified !== mine.hash) {
       sendJson(res, {
@@ -569,16 +587,36 @@ async function serveRemoval(req, res, [id], kind) {
       }, 409);
       return;
     }
+    // The node's marks come here before its copy goes, because removing a take removes its log.
+    let theirLog;
+    try {
+      theirLog = checkedMarkLog(await node.fetchJson(markLogPath(theirs), { signal: left }), theirs);
+    } catch (err) {
+      sendJson(res, {
+        error: `refusing to reclaim ${id}: the marks on ${node.name}'s copy could not be read (${err.message}), `
+          + 'and removing that copy would remove them with it',
+      }, 502);
+      return;
+    }
+    const marksMerged = await mergeMarkLog(keptPath, theirLog, { identity: kept, hash: mine.hash });
+    if (marksMerged === null) {
+      sendJson(res, {
+        error: `${id} was renamed or replaced here while the reclaim ran, so ${node.name}'s marks were not `
+          + 'written and its copy was not removed',
+      }, 409);
+      return;
+    }
     try {
       const done = await node.fetchJson(`/library/delete/${encodeURIComponent(theirs.id)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hash: theirs.hash, confirm: true, verifiedElsewhere: verified }),
+        // With the count of the node's marks merged here, so the node keeps a copy that gained one since.
+        body: JSON.stringify({ hash: theirs.hash, confirm: true, verifiedElsewhere: verified, marksRead: theirLog.length }),
         // A reclaim that hangs here has already asked the node to unlink its copy, so the signal
         // ends this side waiting rather than the request.
         signal: left,
       });
-      sendJson(res, { reclaimed: done, keptHere: verified });
+      sendJson(res, { reclaimed: done, keptHere: verified, marksMerged });
     } catch (err) {
       sendJson(res, { error: `the node refused the reclaim: ${err.message}` }, 502);
     }
@@ -596,17 +634,31 @@ async function serveRemoval(req, res, [id], kind) {
     return;
   }
   // `verifiedElsewhere` is what a reclaim from the other machine carries, and it turns this route
-  // into the recoverable action.
-  if (!body.verifiedElsewhere && theirs) {
-    sendJson(res, {
-      error: `${id} exists on ${node.name} as well: reclaim removes a copy, delete removes the last one`,
-    }, 409);
-    return;
+  // into the recoverable action. Without it, a node that could not be asked refuses the delete:
+  // the second-copy rule needs its answer, and an unlinked take cannot wait for the node to return.
+  if (!body.verifiedElsewhere && node) {
+    let theirs;
+    try {
+      theirs = copyOnNode(node, there, mine.hash);
+    } catch (err) {
+      sendJson(res, {
+        error: `${err.message}, so whether ${id} has a second copy there is unknown - delete is refused rather than guessed at`,
+      }, 409);
+      return;
+    }
+    if (theirs) {
+      sendJson(res, {
+        error: `${id} exists on ${node.name} as well: reclaim removes a copy, delete removes the last one`,
+      }, 409);
+      return;
+    }
   }
   try {
     const done = await removeTake(CAPTURES_DIR, id, {
       hash: body.hash,
       verifiedElsewhere: body.verifiedElsewhere ?? null,
+      marksRead: body.marksRead ?? null,
+      ownsFile: (identity) => recorder.ownsFile(identity),
     });
     sendJson(res, done);
   } catch (err) {
@@ -736,7 +788,7 @@ async function serveDownload(req, res, [id]) {
     return;
   }
   try {
-    const path = await downloadTake(node, take, CAPTURES_DIR);
+    const path = await downloadTake(node, take, CAPTURES_DIR, { ownsFile: (identity) => recorder.ownsFile(identity) });
     sendJson(res, { downloaded: basename(path), hash: take.hash, bytes: take.bytes });
   } catch (err) {
     sendJson(res, { error: err.message }, 502);
@@ -891,24 +943,40 @@ async function serveMarkSync(req, res, [id]) {
     sendJson(res, { error: `unusable take id ${id}` }, 400);
     return;
   }
+  // The take being recorded has no hash, so no take on the node can be its copy, and the node's
+  // own open take has none either: joined on that absence, the node's log for an unrelated take
+  // lands in this take's sidecar, which is append-only. Refused here as the frame API refuses it.
+  if (beingRecorded(path)) {
+    sendJson(res, { error: recordingRefusal(id) }, 409);
+    return;
+  }
+  // Which file the marks will go to, asked again under the take's lock before they are written: a
+  // rename can land in any of the awaits below, and appending under the old name recreates a
+  // sidecar beside nothing.
+  const mergingInto = takeIdentity(path);
   try {
     // The node's *name* for this take, resolved by hash: asking under this machine's name returns
     // nothing whenever the two named the same footage differently, which is the ordinary case.
     const here = (await localTakes()).takes.find((t) => t.id === id);
     const theirTakes = await node.takes(left);
-    const match = here && (theirTakes ?? []).find((t) => t.hash === here.hash);
+    // A node that could not be asked throws here and the catch names why: it is not a node that
+    // does not hold this take.
+    const match = here ? copyOnNode(node, theirTakes, here.hash) : null;
+    // Ungated, because this answer only reads.
     if (!match) {
       sendJson(res, { merged: 0, marks: await readMarks(path), note: `${node.name} does not hold this take` });
       return;
     }
-    const theirs = await node.fetchJson(`/capture/${encodeURIComponent(match.id)}/marks/log`, { signal: left });
-    const mine = await readMarkLog(path);
-    // Appended rather than rewritten, which is what makes this safe to run twice and
-    // from both machines.
-    const known = new Set(mine.map((r) => `${r.id}@${r.at}`));
-    const fresh = (theirs.log ?? []).filter((r) => !known.has(`${r.id}@${r.at}`));
-    await appendMarks(path, fresh);
-    sendJson(res, { merged: fresh.length, marks: await readMarks(path) });
+    const theirLog = checkedMarkLog(await node.fetchJson(markLogPath(match), { signal: left }), match);
+    const merged = await mergeMarkLog(path, theirLog, { identity: mergingInto, hash: match.hash });
+    if (merged === null) {
+      sendJson(res, {
+        error: `${id} changed underneath this request - it was renamed or replaced while the marks `
+          + 'were being merged, and they have not been written to anything',
+      }, 409);
+      return;
+    }
+    sendJson(res, { merged, marks: await readMarks(path) });
   } catch (err) {
     sendJson(res, { error: err.message }, 502);
   }
