@@ -21,6 +21,7 @@
 // on. Needs a GPU browser and a free port.
 
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createConnection } from 'node:net';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -45,6 +46,8 @@ const RECORDER_PATH = '/record';
 
 /** The take this run synthesises for itself, and the project it writes naming it. */
 const PROBE_TAKE = 'bootprobe';
+// What the capture routes name the probe take by, once it has been synthesised: its content hash.
+let PROBE_KEY = null;
 const NULL_TAKE_PROJECT = 'bootprobenulltake';
 
 /**
@@ -266,15 +269,15 @@ const MUTATIONS = {
     file: 'web/main.js',
     edits: [
       [
-        '  const take = openTakes.get(id) ?? await IndexedTake.open(id);\n  const res = await fetch(',
-        '  const take = openTakes.get(id) ?? await IndexedTake.open(id);\n  openTakes.set(id, take);\n  const res = await fetch(',
+        '  const take = openTakes.get(hash) ?? await IndexedTake.open({ id, hash });\n  const res = await fetch(',
+        '  const take = openTakes.get(hash) ?? await IndexedTake.open({ id, hash });\n  openTakes.set(hash, take);\n  const res = await fetch(',
       ],
       [
         '  const hello = await res.json();\n  // Which generation wrote this, before anything is done with the take it describes.\n',
         '  const hello = await res.json();\n  take.hello = hello;\n',
       ],
       [
-        '  take.hello = hello;\n  openTakes.set(id, take);\n  return { id, take, hello };\n',
+        '  take.hello = hello;\n  openTakes.set(hash, take);\n  return { id, take, hello };\n',
         '  return { id, take, hello };\n',
       ],
     ],
@@ -410,6 +413,7 @@ async function main() {
       throw new Error(`make-sample could not stage ${id}: ${(made.stderr || made.stdout || '').trim()}`);
     }
   }
+  PROBE_KEY = encodeURIComponent(`sha256:${createHash('sha256').update(readFileSync(join(work, `${PROBE_TAKE}.knct`))).digest('hex')}`);
   // The projects directory too, and for a sharper reason than tidiness: the checkout's
   // `projects/` is where the editor's own autosave lives and where every other tool on this
   // machine stages documents, so writing this run's fixture there would hand the next tool a
@@ -489,7 +493,7 @@ async function main() {
     // to refuse footage. Fetched through rather than invented, so the take under test is the one
     // on disk and the single field named here is the whole of the difference.
     if (hello) {
-      await it.route((url) => url.pathname === `/capture/${PROBE_TAKE}/hello`, async (route) => {
+      await it.route((url) => url.pathname === `/capture/${PROBE_KEY}/hello`, async (route) => {
         const real = await (await route.fetch()).json();
         // Awaited, because this handler has already done async work before it answers: a
         // `fulfill` that loses its race to a closing page rejects with nobody holding it, and an

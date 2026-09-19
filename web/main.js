@@ -609,9 +609,9 @@ let BYPASSED_SET = new Set(BYPASSED);
 /** How far outside the cloud the fitted faces sit, as a share of the extent they bound. */
 const CROP_FIT_PAD = 0.15;
 
-/** Fits the four lateral faces to the take's own cloud. */
-async function fitCropToTake(id, near, far, clip = selectedClip, generation = null) {
-  const res = await fetch(`/capture/${encodeURIComponent(id)}/extent`
+/** Fits the four lateral faces to the take's own cloud, asked for by its content hash. */
+async function fitCropToTake(hash, near, far, clip = selectedClip, generation = null) {
+  const res = await fetch(`/capture/${encodeURIComponent(hash)}/extent`
     + `?near=${encodeURIComponent(near)}&far=${encodeURIComponent(far)}`);
   if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 200)}`);
   const extent = await res.json();
@@ -3203,7 +3203,7 @@ function restoreProject(project) {
   for (const [at, planned] of plan.clips.entries()) {
     const held = clips[at]?.source?.index?.hash ?? null;
     if ((planned.take?.hash ?? null) === held) continue;
-    const open = planned.take ? takeOpenedAs(planned.take.hash) : null;
+    const open = planned.take ? takeOpenedAs(planned.take.hash, planned.take.id) : null;
     if (open) {
       sources.set(at, open);
       continue;
@@ -4606,16 +4606,23 @@ class StampedPairSource {
  * other half, and lives in `IndexedPairSource` below.
  */
 class IndexedTake {
-  static async open(id) {
-    const res = await fetch(`/capture/${encodeURIComponent(id)}/index`);
+  static async open({ id, hash }) {
+    const res = await fetch(`/capture/${encodeURIComponent(hash)}/index`);
     if (!res.ok) throw new Error(`capture ${id}: ${res.status} ${res.statusText}`);
-    return new IndexedTake(id, await res.json());
+    const index = await res.json();
+    // Refused rather than drawn: every frame request below is by this hash, so an index that is
+    // another take's would put its frames under this clip.
+    if (index.hash !== hash) throw new Error(`capture ${id} answered as ${index.hash}, not the ${hash} it was asked for`);
+    return new IndexedTake({ id, hash }, index);
   }
 
-  constructor(id, index) {
+  constructor({ id, hash }, index) {
     const stamps = index.frames.stampMs;
     if (stamps.length < 2) throw new Error(`capture ${id} has ${stamps.length} frames, need two to bracket`);
     this.times = sourceTimes(stamps);
+    // Every request goes by the hash. The id is the name the take had when it was opened, which a
+    // rename leaves behind: it labels and never addresses.
+    this.hash = hash;
     this.id = id;
     this.index = index;
     this.cache = new Map();
@@ -4722,8 +4729,8 @@ class IndexedTake {
     counters.requests++;
     const single = lo === hi;
     const url = single
-      ? `/capture/${encodeURIComponent(this.id)}/frame/${lo}`
-      : `/capture/${encodeURIComponent(this.id)}/frames/${lo}-${hi}`;
+      ? `/capture/${encodeURIComponent(this.hash)}/frame/${lo}`
+      : `/capture/${encodeURIComponent(this.hash)}/frames/${lo}-${hi}`;
     const res = await fetch(url);
     if (!res.ok) throw new Error(`${url}: ${res.status} ${res.statusText}`);
     const buffer = await res.arrayBuffer();
@@ -7810,7 +7817,7 @@ function paintMarks() {
   }
 }
 
-async function loadMarks(id) {
+async function loadMarks(hash) {
   const generation = ++markLoadGeneration;
   selectedMark = null;
   takeMarks = [];
@@ -7818,18 +7825,18 @@ async function loadMarks(id) {
   paintMarkButton();
   let marks;
   try {
-    const res = await fetch(`/capture/${encodeURIComponent(id)}/marks`);
+    const res = await fetch(`/capture/${encodeURIComponent(hash)}/marks`);
     marks = res.ok ? (await res.json()).marks : [];
   } catch {
     marks = [];
   }
-  if (generation !== markLoadGeneration || openTakeId() !== id) return false;
-  return adoptMarks(id, Array.isArray(marks) ? marks : []);
+  if (generation !== markLoadGeneration || openTakeHash() !== hash) return false;
+  return adoptMarks(hash, Array.isArray(marks) ? marks : []);
 }
 
-/** Writes mark records and returns the complete sidecar the server accepted. */
-async function writeMarks(id, records) {
-  const res = await fetch(`/capture/${encodeURIComponent(id)}/marks`, {
+/** Writes mark records and returns the complete log the server accepted. */
+async function writeMarks(hash, records) {
+  const res = await fetch(`/capture/${encodeURIComponent(hash)}/marks`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ marks: records }),
@@ -7841,8 +7848,8 @@ async function writeMarks(id, records) {
 }
 
 /** Adopts a mark response only while its take is still selected. */
-function adoptMarks(id, marks, updateSelection = null) {
-  if (openTakeId() !== id) return false;
+function adoptMarks(hash, marks, updateSelection = null) {
+  if (openTakeHash() !== hash) return false;
   takeMarks = marks;
   updateSelection?.();
   paintMarks();
@@ -7856,12 +7863,12 @@ async function markHere() {
     say('select a clip before adding a mark');
     return false;
   }
-  const id = openTakeId();
-  if (!id || !timeline) return false;
+  const hash = openTakeHash();
+  if (!hash || !timeline) return false;
   const sourceMs = Math.round(markSourceSecOfProgram(timeline.programSec) * 1000);
   const rec = { id: `m${Date.now().toString(36)}`, sourceMs, label: `mark ${takeMarks.length + 1}`, at: Date.now() };
-  const marks = await writeMarks(id, [rec]);
-  return adoptMarks(id, marks);
+  const marks = await writeMarks(hash, [rec]);
+  return adoptMarks(hash, marks);
 }
 
 /** Deletes the given mark by writing a tombstone. */
@@ -7870,11 +7877,11 @@ async function deleteMark(mark) {
     say('select a clip before deleting a mark');
     return false;
   }
-  const id = openTakeId();
-  if (!id || !mark) return false;
+  const hash = openTakeHash();
+  if (!hash || !mark) return false;
   const rec = { id: mark.id, deleted: true, at: Date.now() };
-  const marks = await writeMarks(id, [rec]);
-  return adoptMarks(id, marks, () => {
+  const marks = await writeMarks(hash, [rec]);
+  return adoptMarks(hash, marks, () => {
     if (selectedMark?.id === mark.id) selectedMark = null;
   });
 }
@@ -7893,12 +7900,12 @@ async function moveMark(mark, newSourceMs) {
     say('select a clip before moving a mark');
     return false;
   }
-  const id = openTakeId();
-  if (!id || !mark) return false;
+  const hash = openTakeHash();
+  if (!hash || !mark) return false;
   if (mark.sourceMs === newSourceMs) { paintMarks(); return true; }
   const rec = { ...mark, sourceMs: newSourceMs, at: Date.now() };
-  const marks = await writeMarks(id, [rec]);
-  return adoptMarks(id, marks, () => {
+  const marks = await writeMarks(hash, [rec]);
+  return adoptMarks(hash, marks, () => {
     if (selectedMark?.id === mark.id) {
       selectedMark = takeMarks.find((m) => m.id === mark.id) ?? null;
     }
@@ -8768,7 +8775,7 @@ function selectClipRow(clip) {
   // `timingChanged` already puts back together.
   timingChanged();
   syncCropOutside();
-  if (timeline && clip.take !== null) loadMarks(clip.take.id).catch(showTimelineError);
+  if (timeline && clip.take !== null) loadMarks(clip.take.hash).catch(showTimelineError);
   requestRepaint();
 }
 
@@ -8811,11 +8818,11 @@ function paintClipCommands() {
 }
 
 /**
- * A clip of `id`, starting at `start`, on a row of its own.
+ * A clip of `take`, an `{id, hash}`, starting at `start`, on a row of its own.
  *
  * It comes up on the selected clip's look, or the first clip's when the stack has no selection.
  */
-async function addClipFromTake(id, start) {
+async function addClipFromTake(take, start) {
   if (refuseEdit('adding a clip')) return null;
   const initiating = selectedClipRow() ?? clips[0];
   if (clips.length + pendingClipAdds >= CLIP_CEILING) {
@@ -8828,7 +8835,7 @@ async function addClipFromTake(id, start) {
   paintClipCommands();
   let opened;
   try {
-    opened = await openSource(id);
+    opened = await openSource(take);
   } finally {
     pendingClipAdds--;
     paintClipCommands();
@@ -8863,11 +8870,11 @@ async function addClipFromTake(id, start) {
  * second and the third go after it rather than on top of it, because a pick of three that landed
  * three clips on one second is three clips nobody can see past the top one.
  */
-async function addClipsFromTakes(ids, from) {
+async function addClipsFromTakes(takes, from) {
   let at = from;
   const added = [];
-  for (const id of ids) {
-    const clip = await addClipFromTake(id, at);
+  for (const take of takes) {
+    const clip = await addClipFromTake(take, at);
     // Whatever refused it has already said so, and the ones after it would be refused the same.
     if (clip === null) break;
     added.push(clip);
@@ -8925,7 +8932,7 @@ ui.addClip.addEventListener('click', () => {
   pickTakes({ ceiling: CLIP_CEILING, taken: clips.length, title: 'Add clips', confirmLabel: 'Add to the edit' })
     .then((picked) => {
       if (picked === null || picked.length === 0) return null;
-      return addClipsFromTakes(picked.map((take) => take.id), start);
+      return addClipsFromTakes(picked.map((take) => ({ id: take.id, hash: take.hash })), start);
     })
     .catch(showTimelineError);
 });
@@ -10258,12 +10265,12 @@ if (ui.cropFit) {
     const clip = selectedClipRow();
     if (!clip?.take) return;
     const generation = documentGeneration;
-    const id = clip.take.id;
+    const { hash } = clip.take;
     const near = withClip(clip, () => params.get('near'));
     const far = withClip(clip, () => params.get('far'));
     ui.cropFit.disabled = true;
     try {
-      const fitted = await fitCropToTake(id, near, far, clip, generation);
+      const fitted = await fitCropToTake(hash, near, far, clip, generation);
       if (fitted?.cancelled) return;
       if (!fitted) {
         say('nothing inside the near/far range to fit the box to');
@@ -10562,7 +10569,7 @@ function mintName(ids, taken) {
  */
 async function mintProjectFrom(ids) {
   await openTake(ids[0]);
-  if (ids.length > 1) await addClipsFromTakes(ids.slice(1), clips[0].end);
+  if (ids.length > 1) await addClipsFromTakes(await takesNamed(ids.slice(1)), clips[0].end);
   const saved = await createProjectUnder((taken) => mintName(ids, taken), serialiseProjectBody());
   enterProject(saved);
   // From the document, the way a load starts: the clips this mint just laid down are what the
@@ -11111,7 +11118,7 @@ async function sourcesFor(plan) {
         + 'footage, so the edit would render against material it was never authored against',
       );
     }
-    const source = await openSource(match.id);
+    const source = await openSource({ id: match.id, hash: match.hash });
     if (source.take.index.hash !== planned.take.hash) {
       throw new Error(
         `clip ${planned.id} asks for ${planned.take.hash.slice(0, 22)}… but ${match.id} opened as `
@@ -11287,17 +11294,18 @@ function releaseUnusedFrames() {
   }
 }
 
-/** Footage this page already holds open, by content hash. Opening one that is not here is a fetch. */
-function takeOpenedAs(hash) {
-  for (const [id, take] of openTakes) {
-    if (take.index.hash === hash && take.hello) return { id, take, hello: take.hello };
-  }
-  return null;
+/**
+ * Footage this page already holds open, by content hash, under the name `id` - which is the
+ * name the document asking gave it. Opening one that is not here is a fetch.
+ */
+function takeOpenedAs(hash, id) {
+  const take = openTakes.get(hash);
+  return take?.hello ? { id, take, hello: take.hello } : null;
 }
 
-async function openSourceNow(id) {
-  const take = openTakes.get(id) ?? await IndexedTake.open(id);
-  const res = await fetch(`/capture/${encodeURIComponent(id)}/hello`);
+async function openSourceNow({ id, hash }) {
+  const take = openTakes.get(hash) ?? await IndexedTake.open({ id, hash });
+  const res = await fetch(`/capture/${encodeURIComponent(hash)}/hello`);
   if (!res.ok) {
     throw new Error(
       `take ${id} carries no sensor hello (${res.status}): its intrinsics are unknown, and `
@@ -11323,21 +11331,40 @@ async function openSourceNow(id) {
   // holds open, so a take cached under a hello that was rejected is one the synchronous restore
   // adopts on the strength of a door that refused it.
   take.hello = hello;
-  openTakes.set(id, take);
+  openTakes.set(hash, take);
   return { id, take, hello };
 }
 
-async function openSource(id) {
-  const held = openTakes.get(id);
-  if (held?.hello) return { id, take: held, hello: held.hello };
-  if (openingTakes.has(id)) return openingTakes.get(id);
-  const opening = openSourceNow(id);
-  openingTakes.set(id, opening);
+/** Opens the footage `take` names by its content hash; `take.id` is only what to call it. */
+async function openSource({ id, hash }) {
+  const held = takeOpenedAs(hash, id);
+  if (held) return held;
+  const opening = openingTakes.get(hash) ?? openSourceNow({ id, hash });
+  openingTakes.set(hash, opening);
   try {
-    return await opening;
+    const opened = await opening;
+    return { ...opened, id };
   } finally {
-    if (openingTakes.get(id) === opening) openingTakes.delete(id);
+    if (openingTakes.get(hash) === opening) openingTakes.delete(hash);
   }
+}
+
+/**
+ * The takes these names hold here now, as `{id, hash}`, read off the library listing: how a door
+ * that was given names finds the footage, which every request after it asks for by hash.
+ */
+async function takesNamed(ids) {
+  const listed = await fetch('/library/takes');
+  const library = await listed.json().catch(() => null);
+  if (!listed.ok || !Array.isArray(library?.takes)) {
+    throw new Error(library?.error ?? `the media library could not be read: HTTP ${listed.status}`);
+  }
+  return ids.map((id) => {
+    const take = library.takes.find((t) => t.id === id);
+    if (!take) throw new Error(`no take is named ${id} here`);
+    if (take.hash === null) throw new Error(`${id} is still being recorded, so it has no content hash to open it by yet`);
+    return { id, hash: take.hash };
+  });
 }
 
 /**
@@ -11349,7 +11376,7 @@ function adoptSource(clip, opened) {
   // A walk of its own over a take that may be shared: where a clip is in the footage is the
   // clip's, and the footage itself is the take's.
   clip.source = new IndexedPairSource(opened.take);
-  clip.take = { id: opened.id, hash: opened.take.index.hash };
+  clip.take = { id: opened.id, hash: opened.take.hash };
   // Into this clip's table and not the selected one's: intrinsics belong to the take, so two
   // clips on different footage unproject through different numbers.
   const was = selectedClip ? selectedClip.cloud : null;
@@ -11379,7 +11406,7 @@ async function paintOpenTake() {
   // A new take gets the whole clip. The window is deliberately not saved anywhere.
   view.fit();
   // Awaited, so the first paint of the ruler already has the ticks on it.
-  await loadMarks(clip.take.id);
+  await loadMarks(clip.take.hash);
 }
 
 async function enterEditor() {
@@ -11425,7 +11452,8 @@ async function finishEditor() {
 
 /** `/edit?take=` : a new project holding one clip of this take. */
 async function openTake(id) {
-  const opened = await openSource(id);
+  const [named] = await takesNamed([id]);
+  const opened = await openSource(named);
   adoptSource(selectedClip, opened);
   openedProjectName = null;
   openedProjectRev = null;
@@ -11434,7 +11462,7 @@ async function openTake(id) {
   selectClipRow(selectedClip);
   await enterEditor();
   // Before the lists, because everything after this reads a clip the fit has finished writing.
-  await fitCropToTake(id, params.get('near'), params.get('far'))
+  await fitCropToTake(named.hash, params.get('near'), params.get('far'))
     .catch((err) => { say(`the crop box could not be fitted to this take: ${err.message}`); });
   await listLibrary();
   ensureActiveDeliverable();
@@ -11927,8 +11955,8 @@ globalThis.__kinect = {
     /** How many takes are open, which is what says two clips of one take share its cache. */
     takes: () => openTakes.size,
     /** Each open take's cache state, including entries retained for undo. */
-    takeCaches: () => [...openTakes].map(([id, take]) => ({
-      id, demand: take.demand, capacity: take.capacity, cached: take.cache.size,
+    takeCaches: () => [...openTakes].map(([hash, take]) => ({
+      hash, id: take.id, demand: take.demand, capacity: take.capacity, cached: take.cache.size,
     })),
     /** What a take's cache is sized against: the budget, what it buys, and the floor under it. */
     cache: () => ({

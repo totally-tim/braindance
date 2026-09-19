@@ -6,7 +6,7 @@ import { createWriteStream, fstatSync, openSync, readdirSync } from 'node:fs';
 import { once } from 'node:events';
 import { join } from 'node:path';
 import { encodeMessage, TYPE_HELLO, TYPE_COLOR } from './protocol.js';
-import { buildIndex, forgetCapture } from './capture.js';
+import { buildIndex, cachedIndex, forgetCapture } from './capture.js';
 import { appendMarks, remaining, MIN_TAKE_SEC, durationLabel, sameTake, takeIdentity } from './library.js';
 
 // `2026-07-31-take3`. Synchronous, because opening a take must finish in the same turn as the
@@ -61,8 +61,10 @@ function settle(take) {
 }
 
 // Marks hang off the take rather than the recorder, or a take that failed mid-write leaves them
-// for whichever take closes next.
-async function flushMarks(take) {
+// for whichever take closes next. Until the scan gives the take its hash they are the take object's
+// own, and the hash is what files them - once the hello has landed, because its `startedAt` is what
+// makes one take's bytes differ from another's: two takes that died before it hash alike.
+async function flushMarks(dir, take, index) {
   // The drop count goes into the marks log because it is the one sidecar neither derived from the
   // take's bytes nor thrown away with them, and a count held in memory is gone at the next restart.
   // Only when frames were dropped: a take that lost nothing gains no sidecar it did not have.
@@ -70,8 +72,13 @@ async function flushMarks(take) {
     ? [{ id: `drop:${take.id}`, at: Date.now(), kind: 'drop', dropped: take.dropped }]
     : [];
   if (!take.pendingMarks.length && !drop.length) return;
+  if (!index.hello) {
+    console.error(`[recorder] take ${take.id}: ${take.pendingMarks.splice(0).length + drop.length} record(s) not filed, `
+      + 'because its hello never reached the file and nothing else tells this take from another');
+    return;
+  }
   try {
-    await appendMarks(take.path, [...take.pendingMarks.splice(0), ...drop]);
+    await appendMarks(dir, index.hash, [...take.pendingMarks.splice(0), ...drop]);
   } catch (err) {
     console.error(`[recorder] take ${take.id}: could not write its marks: ${err.message}`);
   }
@@ -198,10 +205,13 @@ export class Recorder {
         const failed = this.take;
         this.take = null;
         this.armed = false;
-        // Into *this* take's sidecar, even though it ended badly: nulling the take without
+        // Into *this* take's log, even though it ended badly: nulling the take without
         // flushing left them for the next take, at a source time meaningless there.
         settle(failed);
-        flushMarks(failed);
+        cachedIndex(failed.path).then(
+          (index) => flushMarks(this.dir, failed, index),
+          (err) => console.error(`[recorder] take ${failed.id}: its marks have no hash to be filed under: ${err.message}`),
+        );
         this.onChange(this.state);
       }
     });
@@ -290,14 +300,19 @@ export class Recorder {
       // this last flush used to throw straight out of `close`, past the index and the hash.
       console.error(`[recorder] take ${take.id}: the file did not close cleanly (${err.message}) - indexing what landed`);
     }
-    // Past the catch rather than inside a branch of it: the take has already been nulled, so a
-    // flush skipped here sends the marks forward into whichever take closes next.
+    // Past the catch rather than inside a branch of it: a close that failed still scans what
+    // landed, and the scan is what gives the marks a hash to be filed under.
     let index;
     try {
       settle(take);
-      await flushMarks(take);
       forgetCapture(take.path);
-      index = await buildIndex(take.path);
+      index = await buildIndex(take.path).catch((err) => {
+        if (take.pendingMarks.length) {
+          console.error(`[recorder] take ${take.id}: ${take.pendingMarks.length} mark(s) not filed, because the scan that gives them a hash failed`);
+        }
+        throw err;
+      });
+      await flushMarks(this.dir, take, index);
     } finally {
       // In a `finally`, or an index build that threw leaves this process claiming a file it had
       // stopped working on, with the library refusing to open or remove it until a restart. This

@@ -74,8 +74,8 @@ sliders, and the OBS output settings with both source URLs.](media/viewer.png)
 
 - **mark** drops a mark at the current frame. Marks show up on the media library's scrub bar
   and the editor's ruler.
-- **stop** closes the take. The `.knct` capture and its `.idx` index land in `captures/`,
-  with a `.marks.jsonl` sidecar if you marked anything or the disk dropped frames.
+- **stop** closes the take. The `.knct` capture and its `.idx` index land in `captures/`, and
+  the marks log in `captures/marks/` if you marked anything or the disk dropped frames.
 - `R` and `M` do the same two things from the keyboard.
 
 The panel has four tabs. **Record** arms the sensor and points the OBS output somewhere.
@@ -116,7 +116,7 @@ node.](media/library.png)
 Every take is a tile with its poster, duration, size, frame count, mark count and date. Skim a
 poster to scrub it. Tap to open it large, then arrow keys step a frame and up and down move
 between takes. The **⋯** menu holds **rename**, **show in the file manager** and **reclaim on
-node**. Started with `--node http://<capture-node>:8080`, the library also lists that node's
+node**. A take flagged **2 names** is one take filed under two names; its menu removes either one. Started with `--node http://<capture-node>:8080`, the library also lists that node's
 takes, and the filter row splits it into *local*, *node only* and *both*.
 
 ### 3. Start a project

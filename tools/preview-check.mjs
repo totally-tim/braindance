@@ -145,6 +145,11 @@ const MUTATIONS = {
     edits: [['    if (run.last >= 0 && run.last === frame - 1) await timeline.runTo(frame);', '    if (run.last === frame - 1) await timeline.runTo(frame);']],
     fails: 'a range containing only frame zero renders that frame',
   },
+  'renderer-never-idles': {
+    file: 'web/previews.js',
+    edits: [['(releaseWorker || now - workerUsedAt > RENDERER_IDLE_MS)', '(releaseWorker || false)']],
+    fails: 'an idle preview renderer removes its hidden frame',
+  },
   'late-decode-survives-camera-change': {
     file: 'web/previews.js',
     edits: [['        if (mine !== generation || closed) { image.close(); return; }', '        /* mutation: accept a bitmap decoded for the previous view */']],
@@ -158,7 +163,11 @@ const MUTATIONS = {
 };
 const ADVANCED = !MUTATE || ['cache-boundary-stays-cold', 'corrupt-frame-stops-idle', 'clear-allows-stale-render',
   'preview-error-stops-loop', 'manual-render-skips-settle', 'camera-drag-rebuilds-identity', 'storage-changes-stay-local',
-  'stale-storage-error-survives', 'late-decode-forces-live-seek', 'preview-error-stays-in-menu'].includes(MUTATE);
+  'stale-storage-error-survives', 'late-decode-forces-live-seek', 'preview-error-stays-in-menu',
+  'renderer-never-idles'].includes(MUTATE);
+// The hidden renderer's idle release, shortened through `testTimer` for the one row that waits on it.
+// It ships at 30 seconds, and every other row runs with that value keeping the renderer warm.
+const RENDERER_IDLE_MS = 1500;
 
 if (MUTATE && !MUTATIONS[MUTATE]) {
   console.error(`unknown mutation ${MUTATE} - have ${Object.keys(MUTATIONS).join(', ')}`);
@@ -906,9 +915,26 @@ try {
       await waitFor(() => __kinect.previews.state().loaded);
       check(heldStatus && changedGeneration && !(await read()).error,
         'a delayed storage error cannot disable previews for a newer edit', `held ${heldStatus}; edit changed ${changedGeneration}; error ${(await read()).error}`);
-      await renderRange();
-      if (!MUTATE) check(await waitFor(() => !document.querySelector('.preview-renderer'), 35000),
-        'an idle preview renderer removes its hidden frame');
+      if (!MUTATE || MUTATE === 'renderer-never-idles') {
+        // A fresh load carrying the shortened release, and an edit no stored frame answers.
+        await page.goto(`${BROWSER_BASE.origin}/edit?take=${encodeURIComponent(TAKE)}`
+          + `&test-timers=${encodeURIComponent(JSON.stringify({ 'renderer-idle': RENDERER_IDLE_MS }))}`);
+        await waitFor(() => window.__kinect?.previews.state()?.loaded);
+        await page.evaluate(async () => {
+          __kinect.params.set('exposure', __kinect.params.get('exposure') + .37);
+          await __kinect.timeline.settled();
+        });
+        await range(0, 0);
+        const rendered = await renderRange();
+        const renderers = await page.evaluate(() => document.querySelectorAll('.preview-renderer').length);
+        check(rendered && renderers === 1, 'a finished render leaves its hidden renderer in place',
+          `rendered ${rendered}; ${renderers} renderers`);
+        const renderedAt = Date.now();
+        // The wiring row: at the shipped thirty seconds the frame outlives this wait.
+        check(await waitFor(() => !document.querySelector('.preview-renderer'), RENDERER_IDLE_MS + 8000),
+          'an idle preview renderer removes its hidden frame',
+          `${Date.now() - renderedAt}ms after the render, at a planted ${RENDERER_IDLE_MS}ms`);
+      }
     }
   }
   await page.screenshot({ path: join(TMP, 'editor.png') });

@@ -222,9 +222,11 @@ if (!onDisk) {
   console.log(`[sensor-view] DID NOT RUN - no take ${TAKE} in the library (have ${takes.map((t) => t.id).join(', ')})`);
   process.exit(2);
 }
+// The capture routes name a take by its content hash, never by its name.
+const TAKE_KEY = encodeURIComponent(onDisk.hash);
 let hello;
 try {
-  hello = await (await fetch(`${URL_BASE}/capture/${encodeURIComponent(TAKE)}/hello`)).json();
+  hello = await (await fetch(`${URL_BASE}/capture/${TAKE_KEY}/hello`)).json();
 } catch (err) {
   console.log(`[sensor-view] DID NOT RUN - the take's hello could not be read (${err.message})`);
   process.exit(2);
@@ -641,7 +643,7 @@ const STORE_ROUTES = {
   projects: '/projects/all',
   presets: '/presets',
   deliverables: '/deliverables',
-  marks: `/capture/${encodeURIComponent(TAKE)}/marks/log`,
+  marks: `/capture/${TAKE_KEY}/marks/log`,
   ...MUTATIONS[MUTATE]?.stores,
 };
 
@@ -688,7 +690,7 @@ async function startPrivateServer() {
   for (let i = 0; i < 300; i++) {
     await new Promise((done) => { setTimeout(done, 100); });
     try {
-      const r = await fetch(`${PRIVATE_BASE}/capture/${encodeURIComponent(TAKE)}/hello`);
+      const r = await fetch(`${PRIVATE_BASE}/capture/${TAKE_KEY}/hello`);
       if (r.ok) return;
     } catch { /* not up yet */ }
   }

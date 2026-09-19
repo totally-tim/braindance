@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { IdleDeadline } from '../server/idle.js';
+import { IDLE_TICK_MS, IdleDeadline } from '../server/idle.js';
 
 const AFTER = 600_000;
 
@@ -47,6 +47,14 @@ test('a sensor that has never been seen in a waited-for state begins no count', 
     assert.deepEqual(rule.ask({ idle: true, state: 'starting', now: i * 5_000 }), { waitingMs: 0, expired: false });
   }
   assert.equal(rule.since, null);
+});
+
+test('asked at the shipped tick, a sensor idle from boot stands down on the tick after the setting runs out', () => {
+  const rule = new IdleDeadline({ afterMs: AFTER });
+  let now = 0;
+  do now += IDLE_TICK_MS; while (!rule.ask({ idle: true, state: 'live', now }).expired);
+  // The first tick, five seconds in, starts the count, and the setting is a whole number of ticks.
+  assert.equal(now, 605_000);
 });
 
 test('a wake begins the count again', () => {

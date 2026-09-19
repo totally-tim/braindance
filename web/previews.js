@@ -1,7 +1,8 @@
 import { PreviewImages, PreviewStore, previewIdentity, previewRanges } from './preview-cache.js';
+import { testTimer } from './test-timers.js';
 
 const IDLE_MS = 2500;
-const RENDERER_IDLE_MS = 30000;
+const RENDERER_IDLE_MS = testTimer('renderer-idle', 30000);
 const AUTO_KEY = 'braindance.preview.auto';
 const cancelled = () => new DOMException('Preview rendering was interrupted.', 'AbortError');
 

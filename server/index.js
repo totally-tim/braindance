@@ -9,12 +9,12 @@ import { fileURLToPath } from 'node:url';
 import { basename, dirname, join, normalize, extname, sep, resolve } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { MessageParser, encodeMessage, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, TYPE_KEY, MAX_PAYLOAD_BYTES } from './protocol.js';
-import { openCapture, withCapture, captureIdFor, openCaptureCount, decimatePayload, cloudExtent, colourAfterFrames } from './capture.js';
+import { openCapture, withCapture, forgetCapture, openCaptureCount, decimatePayload, cloudExtent, colourAfterFrames } from './capture.js';
 import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
 import {
-  VALID_ID, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, checkedMarkLog, copyOnNode, downloadTake,
-  downloadsInFlight, hashFile, markLogFor, markLogPath, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
-  removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeIdentity,
+  VALID_HASH, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, checkedMarkLog, copyOnNode, downloadTake,
+  downloadsInFlight, hashFile, markLogPath, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
+  adoptNamedMarkLogs, removeName, removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeFileFor,
 } from './library.js';
 import { COLOUR_FRAME_BYTES, nominalTakeRate } from './library.js';
 import { EffectStore } from './effect-store.js';
@@ -26,7 +26,9 @@ import { Recorder } from './recorder.js';
 import { JobStore } from './jobs.js';
 import { renderVersion } from './render-version.js';
 import { Webcam } from './webcam.js';
-import { IdleDeadline } from './idle.js';
+import { IDLE_TICK_MS, IdleDeadline } from './idle.js';
+import { ABSENT_DELAY, RESTART_DELAYS, retryAfter } from './backoff.js';
+import { testTimer } from '../web/test-timers.js';
 import { Output } from './output.js';
 import { KeyStream } from './key-stream.js';
 import { requireMutation, originAllowed, sameOriginBrowser } from './http-guard.js';
@@ -115,8 +117,6 @@ const realOrLexical = (dir) => {
   }
 };
 
-// `--replay` may name a file anywhere, so the replayed take registers its own id here.
-const captureAliases = new Map();
 
 // The node keeps its own preset library on disk: it may be shooting with nothing connected, where
 // a push-per-session scheme leaves a standalone node with an empty selector.
@@ -145,45 +145,55 @@ const DELIVERABLES = new DocumentStore(resolve(flag('--deliverables', join(CAPTU
 const JOBS = new JobStore(resolve(flag('--jobs', join(ROOT, 'jobs'))));
 const node = NODE_URL ? new NodeLink(NODE_URL, NODE_NAME) : null;
 
-function capturePathFor(id) {
-  if (captureAliases.has(id)) return captureAliases.get(id);
-  return VALID_ID.test(id) ? join(CAPTURES_DIR, `${id}.knct`) : null;
-}
+// `--replay` may name a file anywhere, and the take it replays counts as here wherever it is.
+const REPLAY_PATH = REPLAY ? resolve(REPLAY) : null;
+
+/**
+ * The file here holding the take whose content hash is `hash`, or null: how every `/capture/`
+ * route finds its take. By content rather than by name, because a rename frees a name and the
+ * next take given it is other footage. The take the recorder still owns has no hash yet.
+ */
+const takeFile = (hash) => takeFileFor(CAPTURES_DIR, hash, {
+  owns: (path) => recorder.owns(path),
+  also: REPLAY_PATH ? [REPLAY_PATH] : [],
+});
 
 // The frame API: a single frame is the payload alone, so the pulled and pushed paths hand the
 // same decoder the same input; a run is the frames' own messages, framing included, because
 // concatenated payloads have no boundaries left to parse back, and nothing that lay between them.
 
-// A take the recorder still owns is refused through this API until its close finishes: a scan of
-// a growing file is a full read plus sha256 against the disk being written to, and the hash it
-// would carry names a take that no longer exists a frame later.
-function beingRecorded(path) {
-  return path !== null && recorder.owns(path);
-}
+const unknownTake = (res) => res.writeHead(404).end('no take here has that content hash');
 
-// The refusal for a take the recorder still owns, said once so every route that refuses it agrees.
-const recordingRefusal = (id) => `${id} is being recorded right now: it has no settled index or hash until the take closes`;
-
-async function withOpenCapture(res, id, fn) {
-  const path = capturePathFor(id);
-  if (!path) {
-    res.writeHead(404).end('unknown capture');
-    return;
+async function withOpenCapture(res, hash, fn) {
+  // Twice at most: the name found can move before it is opened, and the open capture is asked
+  // which take it is. One held open across a rename made outside this process is let go.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const path = await takeFile(hash);
+    if (!path) {
+      unknownTake(res);
+      return;
+    }
+    let moved = false;
+    await withCapture(path, async (capture) => {
+      if (capture.index.hash !== hash) {
+        moved = true;
+        return;
+      }
+      await fn(capture);
+    }).catch((err) => {
+      if (res.headersSent) return;
+      if (err.code === 'ENOENT') moved = true;
+      else res.writeHead(500).end(`capture unreadable: ${err.message}`);
+    });
+    if (!moved) return;
+    if (path !== REPLAY_PATH) forgetCapture(path);
   }
-  if (beingRecorded(path)) {
-    sendJson(res, { error: recordingRefusal(id) }, 409);
-    return;
-  }
-  await withCapture(path, fn).catch((err) => {
-    if (res.headersSent) return;
-    if (err.code === 'ENOENT') res.writeHead(404).end('unknown capture');
-    else res.writeHead(500).end(`capture unreadable: ${err.message}`);
-  });
+  if (!res.headersSent) unknownTake(res);
 }
 
 // The take's own intrinsics: unprojecting on the boot defaults is wrong in a way nothing on screen
 // can show, because every point translates together.
-const serveHello = (req, res, [id]) => withOpenCapture(res, id, async (capture) => {
+const serveHello = (req, res, [hash]) => withOpenCapture(res, hash, async (capture) => {
   const payload = await capture.readHello();
   if (!payload) {
     res.writeHead(404).end('this capture carries no hello');
@@ -197,7 +207,7 @@ const serveHello = (req, res, [id]) => withOpenCapture(res, id, async (capture) 
   res.end(payload);
 });
 
-const serveIndex = (req, res, [id]) => withOpenCapture(res, id, (capture) => {
+const serveIndex = (req, res, [hash]) => withOpenCapture(res, hash, (capture) => {
   const body = Buffer.from(JSON.stringify(capture.index));
   res.writeHead(200, {
     'Content-Type': MIME['.json'],
@@ -209,7 +219,7 @@ const serveIndex = (req, res, [id]) => withOpenCapture(res, id, (capture) => {
 
 const inCapture = (capture, n) => Number.isInteger(n) && n >= 0 && n < capture.frameCount;
 
-const serveFrame = (req, res, [id, index], query) => withOpenCapture(res, id, async (capture) => {
+const serveFrame = (req, res, [hash, index], query) => withOpenCapture(res, hash, async (capture) => {
   const n = Number(index);
   if (!inCapture(capture, n)) {
     res.writeHead(404).end('no such frame');
@@ -246,7 +256,7 @@ const extentCache = new Map();
 // Four numbers per entry, so the bound is about not growing with every range anybody scrubbed.
 const MAX_EXTENTS = 32;
 
-const serveExtent = (req, res, [id], query) => withOpenCapture(res, id, async (capture) => {
+const serveExtent = (req, res, [hash], query) => withOpenCapture(res, hash, async (capture) => {
   const near = Number(query.get('near'));
   const far = Number(query.get('far'));
   // Both required, because a range picked here would be a second declaration of the clip defaults.
@@ -260,17 +270,15 @@ const serveExtent = (req, res, [id], query) => withOpenCapture(res, id, async (c
     return;
   }
   const hello = JSON.parse(payload.toString('utf8'));
-  // The index hash rather than the id, so a take renamed onto an existing name cannot be answered
-  // with the other one's fit.
-  const key = `${capture.index.hash}|${near}|${far}`;
+  const key = `${hash}|${near}|${far}`;
   if (!extentCache.has(key)) {
     if (extentCache.size >= MAX_EXTENTS) extentCache.delete(extentCache.keys().next().value);
     extentCache.set(key, await cloudExtent(capture, hello, near, far));
   }
-  sendJson(res, { id, near, far, ...extentCache.get(key) });
+  sendJson(res, { hash, near, far, ...extentCache.get(key) });
 });
 
-const serveFrameRun = (req, res, [id, from, to]) => withOpenCapture(res, id, async (capture) => {
+const serveFrameRun = (req, res, [hash, from, to]) => withOpenCapture(res, hash, async (capture) => {
   const a = Number(from);
   const b = Number(to);
   if (!inCapture(capture, a) || !inCapture(capture, b) || a > b) {
@@ -287,25 +295,21 @@ const serveFrameRun = (req, res, [id, from, to]) => withOpenCapture(res, id, asy
   // read error as an unhandled stream event. Awaited, because the lease lasts as long as this does.
   await new Promise((done) => {
     pipeline(capture.createFrameRunStream(a, b), res, (err) => {
-      if (err) console.error(`[server] frame run ${id} ${a}-${b} failed: ${err.message}`);
+      if (err) console.error(`[server] frame run ${hash.slice(0, 15)} ${a}-${b} failed: ${err.message}`);
       done();
     });
   });
 });
 
-// Streamed: a take is routinely past the 2 GiB `readFileSync` refuses.
-function serveTakeFile(req, res, [id]) {
-  const path = capturePathFor(id);
-  // A take still being written has no length that will still be true when the transfer ends.
-  if (beingRecorded(path)) {
-    sendJson(res, { error: `${id} is being recorded right now: it is still growing, so there is no whole file to send` }, 409);
-    return;
-  }
+// Streamed: a take is routinely past the 2 GiB `readFileSync` refuses. The copy is hashed where it
+// lands, so the name read here is checked there.
+async function serveTakeFile(req, res, [hash]) {
+  const path = await takeFile(hash);
   let stat;
   try {
     stat = statSync(path ?? '');
   } catch {
-    res.writeHead(404).end('unknown capture');
+    unknownTake(res);
     return;
   }
   res.writeHead(200, {
@@ -314,54 +318,28 @@ function serveTakeFile(req, res, [id]) {
     'Cache-Control': 'no-cache',
   });
   pipeline(createReadStream(path), res, (err) => {
-    if (err) console.error(`[server] serving ${id} failed: ${err.message}`);
+    if (err) console.error(`[server] serving ${basename(path)} failed: ${err.message}`);
   });
 }
 
-// Marks are a sidecar beside the take, and a write is an append - so moving, renaming and
-// deleting a mark are one operation and the two-machine merge is concatenate-and-resolve.
-const takeIsHere = (path) => {
-  try {
-    return takeIdentity(path) !== null;
-  } catch {
-    return false;
-  }
-};
-
-async function serveMarks(req, res, [id], query, { log = false } = {}) {
-  const path = capturePathFor(id);
-  if (!takeIsHere(path)) {
-    res.writeHead(404).end('unknown capture');
+// Marks are an append-only log filed by the take's content hash, so moving, renaming and deleting
+// a mark are one operation, the two-machine merge is concatenate-and-resolve, and a rename moves
+// nothing. The take being recorded has no hash, and its marks are the recorder's until it closes.
+async function serveMarks(req, res, [hash], query, { log = false } = {}) {
+  if (!await takeFile(hash)) {
+    unknownTake(res);
     return;
   }
-  // Asked for by content, the log is refused unless the name still holds that take: another
-  // machine read the hash from a listing, and a rename here since then moves the name onto
-  // another take. The take being recorded has no hash to match.
-  const hash = log ? query.get('hash') : null;
-  if (hash !== null && beingRecorded(path)) {
-    sendJson(res, { error: recordingRefusal(id) }, 409);
-    return;
-  }
-  const entries = hash === null ? await readMarkLog(path) : await markLogFor(path, hash, { ownsFile: (identity) => recorder.ownsFile(identity) })
-    .catch((err) => (err.code === 'ENOENT' ? null : Promise.reject(err)));
-  if (entries === null) {
-    sendJson(res, {
-      error: `${id} here is not the take ${hash}: it was renamed or replaced since that was read, so its marks are not that take's`,
-    }, 409);
-    return;
-  }
-  // With the hash it was asked for, so the caller can refuse an answer that checked none; null
-  // when asked by name, because nothing here checked what the name holds.
+  const entries = await readMarkLog(CAPTURES_DIR, hash);
+  // With the hash it was asked for, so the caller can refuse an answer that checked none.
   sendJson(res, log ? { log: entries, hash } : { marks: resolveMarks(entries) });
 }
 
-async function serveMarkWrite(req, res, [id]) {
-  const path = capturePathFor(id);
-  // Marks hang off a take, so the take has to exist first: without this the route created a
-  // sidecar for a name nothing holds, with tombstones waiting for a real take of that name.
-  const wasThere = takeIdentity(path);
-  if (wasThere === null) {
-    sendJson(res, { error: `no take ${id} here, so there is nothing to mark` }, 404);
+async function serveMarkWrite(req, res, [hash]) {
+  // Marks hang off a take, so the take has to exist first: a log for footage nothing here holds
+  // would wait for that footage to come back.
+  if (!await takeFile(hash)) {
+    sendJson(res, { error: 'no take here has that content hash, so there is nothing to mark' }, 404);
     return;
   }
   const body = await readBody(req);
@@ -371,17 +349,15 @@ async function serveMarkWrite(req, res, [id]) {
     // `at` is what orders two machines' edits, and the resolver drops a record without one.
     at: Number.isFinite(m.at) ? m.at : now,
   }));
-  // Asked again, and asked *which* take, under the take's lock: the check above is before an await
-  // of up to four megabytes over a room's wifi, and a rename landing in that gap recreates the old
-  // sidecar.
-  if (!await appendMarks(path, records, { identity: wasThere })) {
+  // Asked again under the log's lock: the question above is before an await of up to four
+  // megabytes over a room's wifi, and a delete landing in that gap takes the take and its log.
+  if (!await appendMarks(CAPTURES_DIR, hash, records, { present: () => takeFile(hash) })) {
     sendJson(res, {
-      error: `${id} changed underneath this request - it was renamed or replaced while the marks `
-        + 'were being sent, and they have not been written to anything',
+      error: 'the take was deleted while the marks were being sent, and they have not been written to anything',
     }, 409);
     return;
   }
-  sendJson(res, { marks: resolveMarks(await readMarkLog(path)) });
+  sendJson(res, { marks: await readMarks(CAPTURES_DIR, hash) });
 }
 
 
@@ -510,6 +486,20 @@ async function serveRename(req, res, [id]) {
   }
 }
 
+// A take filed under a second name, which `reconcile` lists and a rename that did not finish leaves.
+async function serveRemoveName(req, res, [id]) {
+  const body = await readBody(req);
+  try {
+    sendJson(res, await removeName(CAPTURES_DIR, id, {
+      keep: body.keep,
+      hash: body.hash,
+      owns: (path) => recorder.owns(path),
+    }));
+  } catch (err) {
+    sendJson(res, { error: err.message }, err.code === 'ENOENT' ? 404 : 409);
+  }
+}
+
 // `requireMutation` has already asked whether this came from this program's page; what is left is
 // whether the window would open where the person asking is, which `isLoopback`
 // reads off the socket.
@@ -578,9 +568,8 @@ async function serveRemoval(req, res, [id], kind) {
       sendJson(res, { error: `${id} is not on ${node?.name ?? 'any node'}: there is nothing to reclaim` }, 409);
       return;
     }
-    const keptPath = join(CAPTURES_DIR, mine.file);
-    const kept = takeIdentity(keptPath);
-    const verified = await hashFile(join(CAPTURES_DIR, mine.file));
+    const keptPath = await takeFile(mine.hash);
+    const verified = keptPath ? await hashFile(keptPath).catch((err) => `unreadable (${err.code ?? err.message})`) : 'gone';
     if (verified !== mine.hash) {
       sendJson(res, {
         error: `refusing to reclaim ${id}: the copy here hashes ${verified}, not the ${mine.hash} `
@@ -599,10 +588,10 @@ async function serveRemoval(req, res, [id], kind) {
       }, 502);
       return;
     }
-    const marksMerged = await mergeMarkLog(keptPath, theirLog, { identity: kept, hash: mine.hash });
+    const marksMerged = await mergeMarkLog(CAPTURES_DIR, mine.hash, theirLog, { present: () => takeFile(mine.hash) });
     if (marksMerged === null) {
       sendJson(res, {
-        error: `${id} was renamed or replaced here while the reclaim ran, so ${node.name}'s marks were not `
+        error: `${id} was removed here while the reclaim ran, so ${node.name}'s marks were not `
           + 'written and its copy was not removed',
       }, 409);
       return;
@@ -632,6 +621,15 @@ async function serveRemoval(req, res, [id], kind) {
   }
   if (!mine) {
     sendJson(res, { error: `${id} is not on this machine` }, 404);
+    return;
+  }
+  // Delete promises the last copy, and a second name here is the same take staying behind.
+  const alsoNamed = here.takes.filter((t) => t.hash !== null && t.hash === mine.hash && t.id !== id);
+  if (alsoNamed.length) {
+    sendJson(res, {
+      error: `${id} is also filed here as ${alsoNamed.map((t) => t.id).join(', ')}: delete would remove one name `
+        + 'and leave the take under the other, so remove the extra name first',
+    }, 409);
     return;
   }
   // `verifiedElsewhere` is what a reclaim from the other machine carries, and it turns this route
@@ -723,8 +721,8 @@ async function readFromNode(res, path, what, cap) {
   }
 }
 
-async function serveRemoteFrame(req, res, [id, n], query) {
-  if (!node || !VALID_ID.test(id) || !/^\d+$/.test(n)) {
+async function serveRemoteFrame(req, res, [hash, n], query) {
+  if (!node || !VALID_HASH.test(hash) || !/^\d+$/.test(n)) {
     res.writeHead(404).end('not found');
     return;
   }
@@ -734,7 +732,7 @@ async function serveRemoteFrame(req, res, [id, n], query) {
     return;
   }
   // Bounded by what the format allows a payload to be. A real decimated frame is under 486KB.
-  const body = await readFromNode(res, `/capture/${encodeURIComponent(id)}/frame/${n}?decimate=${divisor}`,
+  const body = await readFromNode(res, `/capture/${encodeURIComponent(hash)}/frame/${n}?decimate=${divisor}`,
     'frame', MAX_PAYLOAD_BYTES);
   if (body === null) return;
   res.writeHead(200, {
@@ -752,12 +750,12 @@ const MAX_REMOTE_INDEX_BYTES = 64 * 1024 * 1024;
 // A node-only take's index, for its frame stamps: the library resolves a mark through them, so a
 // take on the node lands a mark on the frame a take here would. Passed through untouched; the
 // page checks the hash against the listing.
-async function serveRemoteIndex(req, res, [id]) {
-  if (!node || !VALID_ID.test(id)) {
+async function serveRemoteIndex(req, res, [hash]) {
+  if (!node || !VALID_HASH.test(hash)) {
     res.writeHead(404).end('not found');
     return;
   }
-  const body = await readFromNode(res, `/capture/${encodeURIComponent(id)}/index`, 'index', MAX_REMOTE_INDEX_BYTES);
+  const body = await readFromNode(res, `/capture/${encodeURIComponent(hash)}/index`, 'index', MAX_REMOTE_INDEX_BYTES);
   if (body === null) return;
   res.writeHead(200, {
     'Content-Type': MIME['.json'],
@@ -931,7 +929,7 @@ async function renameDocument(req, res, store, name) {
 
 // Two machines can hold the same take and different marks, and the merge needs no algorithm: the
 // log is append-only and every record carries an id, so the resolver keeps the highest `at`.
-async function serveMarkSync(req, res, [id]) {
+async function serveMarkSync(req, res, [hash]) {
   // Bound before the refusals below as well as before the walk - see `serveLibrary`. After them
   // it would be correct today and rot the moment one of them learns to await something.
   const left = untilCallerLeaves(res);
@@ -939,45 +937,30 @@ async function serveMarkSync(req, res, [id]) {
     sendJson(res, { error: 'no capture node is linked' }, 409);
     return;
   }
-  const path = capturePathFor(id);
-  if (!path) {
-    sendJson(res, { error: `unusable take id ${id}` }, 400);
+  // The take being recorded has no hash, so it is never asked for here.
+  if (!await takeFile(hash)) {
+    sendJson(res, { error: 'no take here has that content hash, so there is nothing to merge marks into' }, 404);
     return;
   }
-  // The take being recorded has no hash, so no take on the node can be its copy, and the node's
-  // own open take has none either: joined on that absence, the node's log for an unrelated take
-  // lands in this take's sidecar, which is append-only. Refused here as the frame API refuses it.
-  if (beingRecorded(path)) {
-    sendJson(res, { error: recordingRefusal(id) }, 409);
-    return;
-  }
-  // Which file the marks will go to, asked again under the take's lock before they are written: a
-  // rename can land in any of the awaits below, and appending under the old name recreates a
-  // sidecar beside nothing.
-  const mergingInto = takeIdentity(path);
   try {
-    // The node's *name* for this take, resolved by hash: asking under this machine's name returns
-    // nothing whenever the two named the same footage differently, which is the ordinary case.
-    const here = (await localTakes()).takes.find((t) => t.id === id);
     const theirTakes = await node.takes(left);
     // A node that could not be asked throws here and the catch names why: it is not a node that
     // does not hold this take.
-    const match = here ? copyOnNode(node, theirTakes, here.hash) : null;
+    const match = copyOnNode(node, theirTakes, hash);
     // Ungated, because this answer only reads.
     if (!match) {
-      sendJson(res, { merged: 0, marks: await readMarks(path), note: `${node.name} does not hold this take` });
+      sendJson(res, { merged: 0, marks: await readMarks(CAPTURES_DIR, hash), note: `${node.name} does not hold this take` });
       return;
     }
     const theirLog = checkedMarkLog(await node.fetchJson(markLogPath(match), { signal: left }), match);
-    const merged = await mergeMarkLog(path, theirLog, { identity: mergingInto, hash: match.hash });
+    const merged = await mergeMarkLog(CAPTURES_DIR, hash, theirLog, { present: () => takeFile(hash) });
     if (merged === null) {
       sendJson(res, {
-        error: `${id} changed underneath this request - it was renamed or replaced while the marks `
-          + 'were being merged, and they have not been written to anything',
+        error: 'the take was deleted here while the marks were being merged, and they have not been written to anything',
       }, 409);
       return;
     }
-    sendJson(res, { merged, marks: await readMarks(path) });
+    sendJson(res, { merged, marks: await readMarks(CAPTURES_DIR, hash) });
   } catch (err) {
     sendJson(res, { error: err.message }, 502);
   }
@@ -1309,15 +1292,15 @@ const ROUTES = [
     sendJson(res, { version: await renderVersion(WEB_DIR, THREE_DIR) });
   } },
   // ---- a capture, read
-  { path: '/capture/:id/hello', pattern: /^\/capture\/([^/]+)\/hello$/, read: serveHello },
-  { path: '/capture/:id/index', pattern: /^\/capture\/([^/]+)\/index$/, read: serveIndex },
-  { path: '/capture/:id/extent', pattern: /^\/capture\/([^/]+)\/extent$/, read: serveExtent },
-  { path: '/capture/:id/file', pattern: /^\/capture\/([^/]+)\/file$/, read: serveTakeFile },
-  { path: '/capture/:id/frame/:n', pattern: /^\/capture\/([^/]+)\/frame\/(\d+)$/, read: serveFrame },
-  { path: '/capture/:id/frames/:a-:b', pattern: /^\/capture\/([^/]+)\/frames\/(\d+)-(\d+)$/, read: serveFrameRun },
-  { path: '/capture/:id/marks/log', pattern: /^\/capture\/([^/]+)\/marks\/log$/, read: (req, res, args, query) => serveMarks(req, res, args, query, { log: true }) },
+  { path: '/capture/:hash/hello', pattern: /^\/capture\/([^/]+)\/hello$/, read: serveHello },
+  { path: '/capture/:hash/index', pattern: /^\/capture\/([^/]+)\/index$/, read: serveIndex },
+  { path: '/capture/:hash/extent', pattern: /^\/capture\/([^/]+)\/extent$/, read: serveExtent },
+  { path: '/capture/:hash/file', pattern: /^\/capture\/([^/]+)\/file$/, read: serveTakeFile },
+  { path: '/capture/:hash/frame/:n', pattern: /^\/capture\/([^/]+)\/frame\/(\d+)$/, read: serveFrame },
+  { path: '/capture/:hash/frames/:a-:b', pattern: /^\/capture\/([^/]+)\/frames\/(\d+)-(\d+)$/, read: serveFrameRun },
+  { path: '/capture/:hash/marks/log', pattern: /^\/capture\/([^/]+)\/marks\/log$/, read: (req, res, args, query) => serveMarks(req, res, args, query, { log: true }) },
   // ---- a capture, written
-  { path: '/capture/:id/marks', pattern: /^\/capture\/([^/]+)\/marks$/, read: serveMarks, write: { methods: ['POST'], run: serveMarkWrite } },
+  { path: '/capture/:hash/marks', pattern: /^\/capture\/([^/]+)\/marks$/, read: serveMarks, write: { methods: ['POST'], run: serveMarkWrite } },
 
   // ---- the library, read
   { path: '/library/takes', pattern: /^\/library\/takes$/, read: serveLocalTakes },
@@ -1331,15 +1314,16 @@ const ROUTES = [
   { path: '/library/writes', pattern: /^\/library\/writes$/, read: serveWriteCounts },
   // A frame of a node-only take, fetched through here rather than by the browser reaching across:
   // one origin for the page, and the decimation decision stays on the side that knows the link.
-  { path: '/library/remote-frame/:id/:n', pattern: /^\/library\/remote-frame\/([^/]+)\/([^/]+)$/, read: serveRemoteFrame },
-  { path: '/library/remote-index/:id', pattern: /^\/library\/remote-index\/([^/]+)$/, read: serveRemoteIndex },
+  { path: '/library/remote-frame/:hash/:n', pattern: /^\/library\/remote-frame\/([^/]+)\/([^/]+)$/, read: serveRemoteFrame },
+  { path: '/library/remote-index/:hash', pattern: /^\/library\/remote-index\/([^/]+)$/, read: serveRemoteIndex },
 
   // ---- the library, written
   { path: '/library/download/:id', pattern: /^\/library\/download\/([^/]+)$/, write: { methods: ['POST'], run: serveDownload } },
   { path: '/library/delete/:id', pattern: /^\/library\/delete\/([^/]+)$/, write: { methods: ['POST'], run: (req, res, args) => serveRemoval(req, res, args, 'delete') } },
   { path: '/library/reclaim/:id', pattern: /^\/library\/reclaim\/([^/]+)$/, write: { methods: ['POST'], run: (req, res, args) => serveRemoval(req, res, args, 'reclaim') } },
-  { path: '/library/sync-marks/:id', pattern: /^\/library\/sync-marks\/([^/]+)$/, write: { methods: ['POST'], run: serveMarkSync } },
+  { path: '/library/sync-marks/:hash', pattern: /^\/library\/sync-marks\/([^/]+)$/, write: { methods: ['POST'], run: serveMarkSync } },
   { path: '/library/rename/:id', pattern: /^\/library\/rename\/([^/]+)$/, write: { methods: ['POST'], run: serveRename } },
+  { path: '/library/remove-name/:id', pattern: /^\/library\/remove-name\/([^/]+)$/, write: { methods: ['POST'], run: serveRemoveName } },
   // A `write` although no byte of the library moves, because the slot declares "this route makes
   // something happen" and this is the one route in the program that starts a process.
   { path: '/library/reveal/:id', pattern: /^\/library\/reveal\/([^/]+)$/, write: { methods: ['POST'], run: serveReveal } },
@@ -2059,15 +2043,6 @@ setInterval(() => {
   console.log(`[server] ${fps} fps  ${mbs} MB/s  dropped=${closed.dropped}  clients=${wss.clients.size}`);
 }, 5000);
 
-// The Kinect v2 drops off the bus under sustained load on a marginal USB link, so a dead grabber
-// is an expected condition rather than a fatal one.
-const RESTART_DELAYS = [1000, 2000, 4000, 8000];
-
-// How long to leave between attempts once the conclusion is that there is no sensor here. Long,
-// because the enumeration will not find one - but not never, so a sensor plugged in
-// later is picked up.
-const ABSENT_DELAY = 30000;
-
 function startLive() {
   const bin = GRABBER_BIN ? resolve(GRABBER_BIN) : join(ROOT, 'native/build/grabber');
   const buildArgs = () => {
@@ -2124,12 +2099,8 @@ function startLive() {
   // Written out only in the exit handler before, which is why the second way had no backoff.
   const scheduleRetry = () => {
     if (standby || shuttingDown) return;
-    // A grabber that has *never* handshaken is a machine with no sensor rather than the flaky USB
-    // link this backoff is for. The full table is spent first, because a node whose sensor is slow
-    // to enumerate at boot is the same shape for a few seconds.
-    const absent = !everLive && attempt >= RESTART_DELAYS.length;
+    const { absent, delayMs: delay } = retryAfter({ attempt, everLive });
     setSensorState(absent ? 'absent' : 'lost');
-    const delay = absent ? ABSENT_DELAY : RESTART_DELAYS[Math.min(attempt, RESTART_DELAYS.length - 1)];
     attempt++;
     // Once absent, said once, or this line and libfreenect2's enumeration run every few seconds
     // for as long as the editing station is up.
@@ -2296,7 +2267,7 @@ function startLive() {
   };
 
   // Conservative bounds; physical teardown and first-frame measurements belong in performance.md.
-  const STANDBY_GRACE_MS = 15000;
+  const STANDBY_GRACE_MS = testTimer('standby-grace', 15000);
   standbySensor = async () => {
     if (recordingStarts || recorder.armed || recorder.take) throw new Error('cannot enter standby while a take is armed or recording');
     if (standbyPending) return standbyPending;
@@ -2332,7 +2303,7 @@ function startLive() {
     if (idleRule.ask({ idle, state: sensorState }).expired) {
       standbySensor().catch((err) => console.error(`[server] ${err.message}`));
     }
-  }, 5000).unref();
+  }, IDLE_TICK_MS).unref();
 
   // Armed at boot rather than recording at boot, so there is one path into a take file. Armed
   // *before* the grabber is spawned, because a hello arriving during that disk read would find the
@@ -2390,10 +2361,6 @@ async function startReplay() {
   // Retained, because this reader outlives every request and holds no lease of its own. A replay
   // whose descriptor is evicted reports every read afterwards as a lost sensor.
   capture.retain();
-
-  // The replayed take is reachable over the frame API under its own id even from outside the
-  // captures directory.
-  captureAliases.set(captureIdFor(REPLAY), resolve(REPLAY));
 
   const stamps = capture.index.frames.stampMs;
   if (stamps.length === 0) {
@@ -2496,6 +2463,12 @@ httpServer.listen(PORT, HOST, () => {
   if (HOST !== LOOPBACK) {
     console.log(`[server] reachable from the network on ${HOST} - anyone who can route here can drive the recorder`);
   }
+  // Inside the bind for the same reason: this moves files in the captures directory.
+  adoptNamedMarkLogs(CAPTURES_DIR, { owns: (path) => recorder.owns(path) }).then((adopted) => {
+    for (const { file, take, hash, records } of adopted) {
+      console.log(`[library] moved ${file} into the marks log of ${take} (${hash.slice(0, 15)}…), ${records} new record(s)`);
+    }
+  }, (err) => console.error(`[library] marks logs filed by take name were not moved: ${err.message}`));
   if (REPLAY) startReplay().catch((err) => console.error(`[server] replay failed: ${err.message}`));
   else startLive();
 });

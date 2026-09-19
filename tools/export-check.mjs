@@ -466,8 +466,11 @@ const check = (ok, label, detail = '') => {
 const note = (label, detail = '') => console.log(`  ....  ${label}${detail ? `   ${detail}` : ''}`);
 const fixed = (x, n = 3) => (Number.isFinite(x) ? x.toFixed(n) : String(x));
 
-const hello = await (await fetch(`${URL_BASE}/capture/${TAKE}/hello`)).json();
-const index = await (await fetch(`${URL_BASE}/capture/${TAKE}/index`)).json();
+// The capture routes name a take by its content hash, and the listing is where a name becomes one.
+const TAKE_KEY = await fetch(`${URL_BASE}/library/takes`).then((res) => res.json())
+  .then((body) => encodeURIComponent(body.takes.find((t) => t.id === TAKE)?.hash ?? TAKE), () => encodeURIComponent(TAKE));
+const hello = await (await fetch(`${URL_BASE}/capture/${TAKE_KEY}/hello`)).json();
+const index = await (await fetch(`${URL_BASE}/capture/${TAKE_KEY}/index`)).json();
 const stamps = index.frames.stampMs;
 const DURATION = (stamps[stamps.length - 1] - stamps[0]) / 1000;
 

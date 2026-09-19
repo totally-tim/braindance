@@ -707,7 +707,7 @@ const MUTATIONS = {
   // while it was in flight. Must redden the response-order row of 22.
   'mark-response-follows-selection': {
     file: 'web/main.js',
-    edits: [['  if (openTakeId() !== id) return false;\n  takeMarks = marks;',
+    edits: [['  if (openTakeHash() !== hash) return false;\n  takeMarks = marks;',
              '  takeMarks = marks;']],
     fails: 'a mark write started on one take replacing the mark list after another take was '
       + 'selected. The response-order row of section 22 is the catch',
@@ -755,7 +755,7 @@ const MUTATIONS = {
   'restore-refuses-a-regrown-slot': {
     file: 'web/main.js',
     edits: [[
-      '    const open = planned.take ? takeOpenedAs(planned.take.hash) : null;',
+      '    const open = planned.take ? takeOpenedAs(planned.take.hash, planned.take.id) : null;',
       '    const open = null;',
     ]],
     fails: 'the synchronous restore refusing a clip slot that grew back, which is what the undo '
@@ -1378,14 +1378,14 @@ const MUTATIONS = {
   'fit-lands-after-history-begins': {
     file: 'web/main.js',
     edits: [
-      ['  await fitCropToTake(id, params.get(\'near\'), params.get(\'far\'))\n'
+      ['  await fitCropToTake(named.hash, params.get(\'near\'), params.get(\'far\'))\n'
         + '    .catch((err) => { say(`the crop box could not be fitted to this take: ${err.message}`); });\n',
       ''],
       // Anchored through the comment above it rather than on the call alone: a load starts its
       // own stack now, so `history.begin()` appears twice and the bare line names both.
       ['  // somewhere to land.\n  history.begin();\n',
       '  // somewhere to land.\n  history.begin();\n'
-        + '  await fitCropToTake(id, params.get(\'near\'), params.get(\'far\'))\n'
+        + '  await fitCropToTake(named.hash, params.get(\'near\'), params.get(\'far\'))\n'
         + '    .catch((err) => { say(`the crop box could not be fitted to this take: ${err.message}`); });\n'
         + '  history.commit();\n'],
     ],
@@ -1732,10 +1732,10 @@ const MUTATIONS = {
         "    say('select a clip before deleting a mark');",
         '    return false;',
         '  }',
-        '  const id = openTakeId();',
+        '  const hash = openTakeHash();',
       ].join('\n'), [
         'async function deleteMark(mark) {',
-        '  const id = openTakeId();',
+        '  const hash = openTakeHash();',
       ].join('\n')],
     ],
     fails: 'deselection keeping the mark object selected and the delete door accepting it. '
@@ -10918,6 +10918,8 @@ try {
         + 'weaker thing about the picker');
     }
     const pickId = other ? other.id : TAKE;
+    // What the capture routes name a take by: its content hash off this listing, never its name.
+    const keyOf = (id) => encodeURIComponent((library.takes ?? []).find((take) => take.id === id)?.hash ?? id);
     const raceTake = (library.takes ?? []).find((take) => take.id !== TAKE
       && take.id !== pickId && take.openable !== false) ?? null;
     const movingAddChoices = (library.takes ?? []).filter((take) => take.id !== TAKE
@@ -10944,14 +10946,14 @@ try {
         contentType: 'application/json',
         body: JSON.stringify(renamedLibrary),
       });
+      // Every capture request the reload makes, which a rename must not reach: each names the
+      // take by its hash, and the renamed listing only changes the name beside it.
       const serveRenamedTake = (route) => {
-        const url = new URL(route.request().url());
-        renamedRequests.push(url.pathname);
-        url.pathname = url.pathname.replace(`/capture/${renamedId}/`, `/capture/${TAKE}/`);
-        return route.continue({ url: url.href });
+        renamedRequests.push(decodeURIComponent(new URL(route.request().url()).pathname));
+        return route.continue();
       };
       await page.route('**/library/takes', serveRenamedLibrary);
-      await page.route(`**/capture/${renamedId}/**`, serveRenamedTake);
+      await page.route('**/capture/**', serveRenamedTake);
       try {
         const offered = structuredClone(renameRestore.project);
         offered.clips[0].take.id = renamedId;
@@ -10964,22 +10966,22 @@ try {
           return {
             id: clip.take?.id ?? null,
             hash: clip.take?.hash ?? null,
-            openIds: __kinect.timeline.takeCaches().map((take) => take.id),
+            openHashes: __kinect.timeline.takeCaches().map((take) => take.hash),
           };
         })()`);
         check(renamed.hash === currentTake.hash && renamed.id === renamedId
-          && renamed.openIds.includes(renamedId),
-        'loading a project after its take was renamed rebinds the clip to the current route even when the hash is unchanged',
-        `clip ${renamed.id}, open ${renamed.openIds.join(', ')}, hash ${String(renamed.hash).slice(0, 22)}…`);
-        check(renamedRequests.some((path) => path.endsWith('/index'))
-          && renamedRequests.some((path) => /\/frames\//.test(path))
+          && renamed.openHashes.includes(currentTake.hash),
+        'loading a project after its take was renamed takes the new name as the clip\'s label and keeps its footage open by hash',
+        `clip ${renamed.id}, open ${renamed.openHashes.map((h) => String(h).slice(7, 19)).join(', ')}, hash ${String(renamed.hash).slice(0, 22)}…`);
+        check(renamedRequests.every((path) => path.startsWith(`/capture/${currentTake.hash}/`))
+          && !renamedRequests.some((path) => path.includes(renamedId))
           && errors.length === errorsBeforeRename,
-        'and the reopened index and rendered frames use the renamed route without a page error',
-        `${renamedRequests.join(', ') || 'no renamed requests'}; errors `
+        'and every capture request it makes still names the footage by its hash, never by the new name, without a page error',
+        `${renamedRequests.length} capture requests${renamedRequests.find((path) => !path.startsWith(`/capture/${currentTake.hash}/`)) ? `, one to ${renamedRequests.find((path) => !path.startsWith(`/capture/${currentTake.hash}/`)).slice(0, 40)}` : ', all by hash'}; errors `
           + `${errors.slice(errorsBeforeRename).join(' | ') || 'none'}`);
       } finally {
         await page.unroute('**/library/takes', serveRenamedLibrary);
-        await page.unroute(`**/capture/${renamedId}/**`, serveRenamedTake);
+        await page.unroute('**/capture/**', serveRenamedTake);
         await page.evaluate(async ({ project, selection }) => {
           await __kinect.library.loadProject('editor-check-rename-restore', project);
           if (selection) __kinect.editor.selectClipRow(selection);
@@ -11068,7 +11070,7 @@ try {
         await route.continue();
       };
       await page.route('**/presets/blackwall', holdPreset);
-      await page.route(`**/capture/${raceTake.id}/index`, holdSource);
+      await page.route(`**/capture/${keyOf(raceTake.id)}/index`, holdSource);
       try {
         await page.evaluate(`(() => {
           globalThis.__editorGuardPreset = fetch('/presets/blackwall')
@@ -11279,7 +11281,7 @@ try {
         releaseProjectSources();
         await page.evaluate('__kinect.editor.setGizmoMode(null)').catch(() => {});
         await page.unroute('**/presets/blackwall', holdPreset);
-        await page.unroute(`**/capture/${raceTake.id}/index`, holdSource);
+        await page.unroute(`**/capture/${keyOf(raceTake.id)}/index`, holdSource);
         await page.unroute('**/library/takes', holdProjectSources);
         await page.evaluate(({ project, selection }) => {
           __kinect.library.restoreProject(project);
@@ -11319,7 +11321,7 @@ try {
         await new Promise((resolve) => { releaseMovingSource = resolve; });
         await route.continue();
       };
-      await page.route(`**/capture/${movingAddTake.id}/index`, holdMovingSource);
+      await page.route(`**/capture/${keyOf(movingAddTake.id)}/index`, holdMovingSource);
       try {
         await page.evaluate('__kinect.timeline.transport().play()');
         await page.waitForFunction('__kinect.timeline.transport().playing', null, { timeout: 15000 });
@@ -11389,7 +11391,7 @@ try {
           `playing ${afterMovingAdd.playing}`);
       } finally {
         releaseMovingSource();
-        await page.unroute(`**/capture/${movingAddTake.id}/index`, holdMovingSource);
+        await page.unroute(`**/capture/${keyOf(movingAddTake.id)}/index`, holdMovingSource);
         await page.evaluate(({ project, selection }) => {
           __kinect.timeline.transport().pause();
           __kinect.library.restoreProject(project);
@@ -11559,7 +11561,7 @@ try {
     const selectedMarksLoaded = page.waitForResponse((response) => {
       const url = new URL(response.url());
       return response.request().method() === 'GET'
-        && url.pathname === `/capture/${encodeURIComponent(pickId)}/marks`;
+        && url.pathname === `/capture/${keyOf(pickId)}/marks`;
     });
     await page.mouse.click((await boxAt(1)).x, (await boxAt(1)).y);
     await selectedMarksLoaded;
@@ -11638,7 +11640,7 @@ try {
       const draggedResponse = page.waitForResponse((response) => {
         const url = new URL(response.url());
         return response.request().method() === 'POST'
-          && url.pathname === `/capture/${encodeURIComponent(pickId)}/marks`;
+          && url.pathname === `/capture/${keyOf(pickId)}/marks`;
       });
       await page.mouse.move(tickBox.x + tickBox.width / 2, tickBox.y + tickBox.height / 2);
       await page.mouse.down();

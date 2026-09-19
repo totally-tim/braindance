@@ -477,11 +477,13 @@ const BIG = FIXTURES[FIXTURES.length - 1];
 {
   const capture = await loadIndex(BIG);
   const id = captureIdFor(BIG);
+  // A take is asked for by its content hash, never by its name.
+  const key = encodeURIComponent(capture.hash);
   const n = capture.frames.offset.length;
   const walk = await parserWalk(BIG);
   const fh = await open(BIG, 'r');
 
-  const served = JSON.parse((await getBytes(`${URL_BASE}/capture/${id}/index`)).toString('utf8'));
+  const served = JSON.parse((await getBytes(`${URL_BASE}/capture/${key}/index`)).toString('utf8'));
   check(served.hash === capture.hash, `${id}: /index serves the sidecar's hash`);
   check(served.frames.offset.length === n, `${id}: /index serves ${n} frames`);
 
@@ -500,7 +502,7 @@ const BIG = FIXTURES[FIXTURES.length - 1];
     // Reported rather than thrown: a build that cannot reach this offset answers 500, and a
     // throw here would end the run with zero failed assertions - which is a crash to investigate
     // rather than the catch it actually is.
-    const overHttp = await getBytes(`${URL_BASE}/capture/${id}/frame/${k}`)
+    const overHttp = await getBytes(`${URL_BASE}/capture/${key}/frame/${k}`)
       .catch((err) => ({ failed: String(err.message ?? err) }));
     check(
       !overHttp.failed && overHttp.length === onDisk.length && overHttp.equals(onDisk),
@@ -513,7 +515,7 @@ const BIG = FIXTURES[FIXTURES.length - 1];
   // endpoint serves.
   const a = Math.floor(n / 2);
   const b = a + 7;
-  const run = await getBytes(`${URL_BASE}/capture/${id}/frames/${a}-${b}`);
+  const run = await getBytes(`${URL_BASE}/capture/${key}/frames/${a}-${b}`);
   const runParser = new MessageParser();
   const got = [...runParser.push(run)].filter((m) => m.type === TYPE_FRAME);
   check(got.length === b - a + 1, `frames/${a}-${b} parses back to ${b - a + 1} frames (got ${got.length})`);
@@ -526,13 +528,15 @@ const BIG = FIXTURES[FIXTURES.length - 1];
   }
   check(runBad === 0, `every payload in the run is byte-identical (${runBad} mismatches)`);
 
-  check((await fetch(`${URL_BASE}/capture/${id}/frame/${n}`)).status === 404, 'a frame past the end is 404');
-  check((await fetch(`${URL_BASE}/capture/${id}/frames/${n - 1}-${n - 4}`)).status === 404, 'a backwards range is 404');
+  check((await fetch(`${URL_BASE}/capture/${key}/frame/${n}`)).status === 404, 'a frame past the end is 404');
+  check((await fetch(`${URL_BASE}/capture/${key}/frames/${n - 1}-${n - 4}`)).status === 404, 'a backwards range is 404');
   // Encoded so the separators survive URL normalisation and the whole thing arrives as
   // one path segment.
   const traversal = await fetch(`${URL_BASE}/capture/..%2f..%2fetc%2fpasswd/index`);
-  check(traversal.status === 404, `a traversing id is refused by the id guard (${traversal.status})`);
-  check((await fetch(`${URL_BASE}/capture/nosuch/index`)).status === 404, 'an unknown capture is 404');
+  check(traversal.status === 404, `a traversing key is refused, because only a content hash names a take (${traversal.status})`);
+  check((await fetch(`${URL_BASE}/capture/${encodeURIComponent(id)}/index`)).status === 404,
+    `and so is ${id}'s own name, which is not an address`);
+  check((await fetch(`${URL_BASE}/capture/sha256%3A${'0'.repeat(64)}/index`)).status === 404, 'an unknown capture is 404');
 
   await fh.close();
 }
@@ -640,45 +644,65 @@ console.log('\n== a take with the colour camera between its frames ==');
 
 console.log('\n== the run endpoint survives the file moving underneath it ==');
 {
-  // The run used to be reopened by path while everything else read a retained handle: ENOENT inside
-  // a stream, after the headers had gone out, killed the process.
+  // A run streams off the descriptor it opened, so a take deleted after its headers went out
+  // finishes off that handle: ENOENT inside a stream, after the headers had gone out, killed the
+  // process. The take is its own footage - one byte flipped - so its hash names it and nothing else.
   const id = `index-check-victim-${process.pid}`;
   const victim = `captures/${id}.knct`;
   const replacement = `${SCRATCH}/index-check-replacement.knct`;
 
   const src = FIXTURES[0];
   const srcIndex = await loadIndex(src);
+  const flipped = async (path, at) => {
+    const fh = await open(path, 'r+');
+    const one = Buffer.alloc(1);
+    await fh.read(one, 0, 1, at);
+    one[0] ^= 0xff;
+    await fh.write(one, 0, 1, at);
+    await fh.close();
+  };
   await copyFile(src, victim);
-  // Same length, one byte different inside frame 0's payload, so a wrong answer can only
-  // mean the wrong file.
+  await flipped(victim, srcIndex.frames.offset[0] + 40);
+  // Same length again, and one byte different from the victim, so a wrong answer can only mean the
+  // wrong file.
   await copyFile(src, replacement);
-  const rfh = await open(replacement, 'r+');
-  const one = Buffer.alloc(1);
-  await rfh.read(one, 0, 1, srcIndex.frames.offset[0] + 40);
-  one[0] ^= 0xff;
-  await rfh.write(one, 0, 1, srcIndex.frames.offset[0] + 40);
-  await rfh.close();
+  await flipped(replacement, srcIndex.frames.offset[0] + 41);
+  const victimKey = encodeURIComponent((await buildIndex(victim)).hash);
+  const lastFrame = srcIndex.frames.offset.length - 1;
 
-  const original = await getBytes(`${URL_BASE}/capture/${id}/frame/0`);
+  const original = await getBytes(`${URL_BASE}/capture/${victimKey}/frame/0`);
   check(original.length === srcIndex.frames.length[0], `${id}: opened and served frame 0`);
 
+  // Headers and the first bytes of the whole take as one run, then the file goes.
+  const streaming = await fetch(`${URL_BASE}/capture/${victimKey}/frames/0-${lastFrame}`);
+  const reader = streaming.body.getReader();
+  const chunks = [];
+  const first = await reader.read();
+  if (!first.done) chunks.push(Buffer.from(first.value));
   await unlink(victim);
-  const afterDelete = await getBytes(`${URL_BASE}/capture/${id}/frame/0`);
-  check(afterDelete.equals(original), 'with the file deleted, /frame still serves it off the retained handle');
-  const runAfterDelete = await getBytes(`${URL_BASE}/capture/${id}/frames/0-3`);
-  const deletedRun = [...new MessageParser().push(runAfterDelete)].filter((m) => m.type === TYPE_FRAME);
-  check(deletedRun.length === 4 && deletedRun[0].payload.equals(original), 'and /frames does too, rather than killing the server');
+  for (;;) {
+    const { done, value } = await reader.read().catch(() => ({ done: true }));
+    if (done) break;
+    chunks.push(Buffer.from(value));
+  }
+  const whole = [...new MessageParser().push(Buffer.concat(chunks))].filter((m) => m.type === TYPE_FRAME);
+  check(streaming.ok && whole.length === lastFrame + 1 && whole[0].payload.equals(original),
+    `with the file deleted mid-run, the run finishes off the handle it opened (${whole.length} of ${lastFrame + 1} frames)`);
+  const afterDelete = await fetch(`${URL_BASE}/capture/${victimKey}/frame/0`);
+  check(afterDelete.status === 404, `and once it is gone its hash names nothing here (${afterDelete.status})`);
 
   await copyFile(replacement, victim);
-  const afterSwap = await getBytes(`${URL_BASE}/capture/${id}/frame/0`);
-  const runAfterSwap = await getBytes(`${URL_BASE}/capture/${id}/frames/0-3`);
+  const replacementKey = encodeURIComponent((await buildIndex(victim)).hash);
+  const stillGone = await fetch(`${URL_BASE}/capture/${victimKey}/frame/0`);
+  const afterSwap = await getBytes(`${URL_BASE}/capture/${replacementKey}/frame/0`);
+  const runAfterSwap = await getBytes(`${URL_BASE}/capture/${replacementKey}/frames/0-3`);
   const swappedRun = [...new MessageParser().push(runAfterSwap)].filter((m) => m.type === TYPE_FRAME);
   check(
-    afterSwap.equals(original) && swappedRun[0].payload.equals(original),
-    'after a same-name re-record, /frame and /frames still agree with each other',
+    stillGone.status === 404 && !afterSwap.equals(original) && swappedRun[0].payload.equals(afterSwap),
+    'after a same-name re-record the old hash still names nothing, and /frame and /frames agree on the new one',
   );
 
-  const alive = await fetch(`${URL_BASE}/capture/${id}/index`);
+  const alive = await fetch(`${URL_BASE}/capture/${replacementKey}/index`);
   check(alive.status === 200, `the server is still up afterwards (${alive.status})`);
   check((await fetch(`${URL_BASE}/%zz`)).status === 400, 'a malformed percent escape is 400, not a dead process');
 
@@ -692,6 +716,7 @@ console.log('\n== per-frame fetch latency over loopback ==');
 {
   const id = captureIdFor(BIG);
   const idx = await loadIndex(BIG);
+  const key = encodeURIComponent(idx.hash);
   const n = idx.frames.offset.length;
   console.log(
     `method: ${id}, ${n} frames, ${SAMPLES} samples per arm, first ${WARMUP} discarded,\n` +
@@ -702,8 +727,8 @@ console.log('\n== per-frame fetch latency over loopback ==');
   let seq = 0;
   let bytes = 0;
   for (let i = 0; i < SAMPLES + WARMUP; i++) {
-    const r = await timedGet(`${URL_BASE}/capture/${id}/frame/${Math.floor(Math.random() * n)}`);
-    const s = await timedGet(`${URL_BASE}/capture/${id}/frame/${seq++ % n}`);
+    const r = await timedGet(`${URL_BASE}/capture/${key}/frame/${Math.floor(Math.random() * n)}`);
+    const s = await timedGet(`${URL_BASE}/capture/${key}/frame/${seq++ % n}`);
     if (i >= WARMUP) {
       random.push(r.dt);
       sequential.push(s.dt);
@@ -722,10 +747,10 @@ console.log('\n== per-frame fetch latency over loopback ==');
   for (let i = 0; i < 24; i++) {
     const a = Math.floor(Math.random() * (n - RUN));
     let t0 = performance.now();
-    for (let k = 0; k < RUN; k++) await getBytes(`${URL_BASE}/capture/${id}/frame/${a + k}`);
+    for (let k = 0; k < RUN; k++) await getBytes(`${URL_BASE}/capture/${key}/frame/${a + k}`);
     perFrame.push(performance.now() - t0);
     t0 = performance.now();
-    await getBytes(`${URL_BASE}/capture/${id}/frames/${a}-${a + RUN - 1}`);
+    await getBytes(`${URL_BASE}/capture/${key}/frames/${a}-${a + RUN - 1}`);
     asRun.push(performance.now() - t0);
   }
   console.log(`\n  ${RUN} frames, one request each   p50 ${ms(pct(perFrame.slice(4), 50))}   p90 ${ms(pct(perFrame.slice(4), 90))}`);
