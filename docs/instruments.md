@@ -40,6 +40,14 @@ cannot see. The control defuses both terms, which is the smallest edit that repr
 The shape to recognise is a guard downstream of the line a mutation edits: it turns the mutation
 into a no-op, and a no-op mutation and a blind instrument print the same verdict.
 
+Give each input its own row, or the row cannot say which input carried the catch. `guard-check`
+claims a `Host` carrying userinfo, a path, a query or a fragment does not upgrade, and
+`host-parsed-loosely` removes the shape check that refuses all four. A build with a second check
+behind it, comparing the parsed URL's components, refuses three of them by itself, so one row over
+all four goes red through the fragment alone, and a client that stops sending the fragment turns
+the control NOT CAUGHT with nothing naming the input that went quiet. The rows are one per
+spelling, and the control fires all four.
+
 ## Count failed assertions, never exit codes
 
 Read the line the tool printed and which assertions fired. Zero failed assertions on a non-zero
@@ -52,6 +60,11 @@ mutation verdict: one assertion fires, the line reads `caught, as required (1 as
 and nothing about sample placement has been put to that build. A throw sets `crashed` now, the
 verdict is DID NOT RUN at exit 2, and it is decided before the mutation verdict and before
 UNTESTED. A proof tool may not count its own crash as a finding in either direction.
+
+A caller grading a run holds to the same rule. A `FAIL` row printed on the way to a crash reads,
+to anything counting rows, exactly like a catch, so `tools/mutation-verdict.mjs` reads only the
+line a tool prints once it reaches its verdict, its count or, for a tool with none, its tally or
+its `PASS` or `FAIL` line, and a run without one did not run.
 
 ## Place a probe where its answer would differ
 
@@ -80,6 +93,13 @@ the recorder's state field tracks the recorder and not the file. Each exclusion 
 and together they leave the most valuable object in the system unwatched. The sweep asserts bytes
 written against on-disk size once the take closes, where nothing is in flight and the identity is
 exact.
+
+The reference a check compares against is the easiest object to skip. `vendor-check` claims the
+vendored tree is upstream plus the declared edits, and its rows take the manifest as upstream, so
+a file edited with its manifest line rewritten to the new hash passes every one of them. A last
+row rebuilds the manifest's lines into git tree objects, and the root has to equal the tree of
+upstream's commit, read from upstream. A constant taken from the tool's own output would prove only
+that the tool agrees with itself.
 
 ## Close the class, not the instance
 
@@ -131,8 +151,8 @@ is the normal state.
   control to become actionable; read the disabled state and assert on it instead.
 - A driver pressing a control the page also presses on a timer is turned away by the reentrancy
   guard, so wait for the state the row is about and never for your own call to return.
-- A seek can resolve without moving: `settled()` can return before the seek it waited on has been
-  applied, so a seek-then-assert row is suspect before it is a finding.
+- `settled()` rejects while the last seek asked for has not landed, so a row that makes a seek
+  fail on purpose lands another seek before anything else settles.
 - A gitignored fixture is a term in the assertion — a literal in seconds or pixels is a claim about
   that machine's `captures/`, so take it as a fraction of the measured duration and read the page's
   own scale back off where it drew.

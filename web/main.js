@@ -31,9 +31,9 @@ import { pickDepth, sensorPoint } from './depth-pick.js';
 import { ZOOM_PER_NOTCH, rulerTickSeconds, tickLabel, makeViewWindow } from './view-window.js';
 import { clipIn, clipOut, clipBoundOrThrow, writeClipRange } from './clip-range.js';
 import {
-  RATE_MIN, RATE_MAX, clipAffordedSec, clipProgramSecAt, clipSourceSecAt, frameLoadByTake,
-  framesBackFor, headFramesFor, headTrim, integerMidpoint, rescaleClipKeys, snapshotClipKeys,
-  usableClipRate,
+  RATE_MIN, RATE_MAX, clipAffordedSec, clipProgramSecAt, clipSourceSecAt, frameAtOrBefore,
+  frameLoadByTake, framesBackFor, headFramesFor, headTrim, integerMidpoint, rescaleClipKeys,
+  snapshotClipKeys, sourceTimes, usableClipRate,
 } from './clip-plan.js';
 import {
   EFFECT_BIND_TRANSFORMS, EFFECT_GATED_TABLES, EFFECT_BOUNDED_TABLES, effectBindUniformType,
@@ -44,12 +44,13 @@ import {
   depthCurr, colorPrev, bindDepth, bindColor, resetColorSource, plantColor, boundColorImages,
 } from './gpu-textures.js';
 import {
-  statePrev, stateNext, stepSurfaceMemory, refuseAgeCeiling,
+  statePrev, stateTexture, stepSurfaceMemory, refuseAgeCeiling, memoryTargets,
 } from './surface-memory.js';
 import {
-  composer, renderPass, afterimage, mosh, bloom, grade, buildPostChain, setGradeProgram,
+  composer, renderPass, afterimage, mosh, bloom, grade, chainType, buildPostChain, setGradeProgram,
   setMoshProgram,
 } from './post-chain.js';
+import { renderTargetCaps, typeName } from './render-targets.js';
 import {
   geometry, uniforms, material, cloud, level, levelAngles, transform, setAdditive,
   setCloudProgram, cropReach, croppedOut,
@@ -294,6 +295,27 @@ function applyWorldTilt() {
 
 buildPostChain(shaderPrograms.grade, shaderPrograms.mosh);
 
+/**
+ * Says what this browser cannot draw, once, and leaves it standing: the decision behind it is
+ * made once per page, so the line stays true until the page is loaded somewhere else.
+ */
+function paintRenderLimits() {
+  const line = document.getElementById('tGpu');
+  if (!line) return;
+  const noFloat = [
+    ...(bootCloud.memory.live ? [] : ['ghost and wake are off']),
+    ...(chainType === THREE.UnsignedByteType ? ['trails, bloom and the grade run at 8 bits'] : []),
+  ];
+  const lines = [
+    ...(noFloat.length ? [`this browser cannot render to float: ${noFloat.join(', and ')}`] : []),
+    ...(chainType === null ? ['this browser cannot render offscreen: trails, bloom and the grade are off'] : []),
+  ];
+  line.textContent = lines.join(' · ');
+  line.title = line.textContent;
+  line.hidden = lines.length === 0;
+}
+paintRenderLimits();
+
 let renderScale = 1;
 
 // The drawing buffer an export has taken over, or null while the window owns it.
@@ -473,7 +495,11 @@ function resize() {
     cam.aspect = width / height;
     cam.updateProjectionMatrix();
   }
-  const ratio = outputSize ? 1 : Math.min(devicePixelRatio, 2) * renderScale;
+  // Capped so the chain's targets fit the largest one this context allocates. An export is refused
+  // at the door instead, because its size is the deliverable's.
+  const ratio = outputSize
+    ? 1
+    : Math.min(Math.min(devicePixelRatio, 2) * renderScale, renderTargetCaps().maxSize / Math.max(width, height));
   renderer.setPixelRatio(ratio);
   // The canvas keeps its CSS box while an export runs. Only the buffer becomes the output's.
   renderer.setSize(width, height, !outputSize);
@@ -508,7 +534,7 @@ addEventListener('resize', () => {
 resize();
 
 function postEnabled() {
-  return afterimage.enabled || mosh.enabled || bloom.enabled || grade.enabled;
+  return chainType !== null && (afterimage.enabled || mosh.enabled || bloom.enabled || grade.enabled);
 }
 
 // Which uniform table each binding writes into. A map rather than a ternary per site, so a
@@ -3643,7 +3669,7 @@ function adoptProgramOut(patch) {
   if (patch.size && Number.isInteger(patch.size.w) && Number.isInteger(patch.size.h)
       && patch.size.w > 0 && patch.size.h > 0) {
     programOutSize = { w: patch.size.w, h: patch.size.h };
-    if (PROGRAM_OUT) { outputSize = { ...programOutSize }; resize(); }
+    if (PROGRAM_OUT) { outputSize = programOutDrawSize(); resize(); }
     if (progSizeEl) progSizeEl.value = `${programOutSize.w}x${programOutSize.h}`;
   }
   if (patch.mode === 'mirror' || patch.mode === 'camera') {
@@ -3659,6 +3685,18 @@ function adoptProgramOut(patch) {
       freeCamera.updateProjectionMatrix();
     }
   }
+}
+
+/**
+ * The size the source draws at: the setting, scaled down whole to the largest target this context
+ * allocates. Never cropped, because a smaller picture of the shot beats a black one.
+ */
+function programOutDrawSize() {
+  const scale = Math.min(1, renderTargetCaps().maxSize / Math.max(programOutSize.w, programOutSize.h));
+  return {
+    w: Math.max(1, Math.floor(programOutSize.w * scale)),
+    h: Math.max(1, Math.floor(programOutSize.h * scale)),
+  };
 }
 
 /** Draw one output frame, called when a depth frame arrives rather than on a clock. */
@@ -3689,8 +3727,11 @@ function paintProgramOutReadout() {
   const decim = monitorState && (monitorState.divisor > 1 || monitorState.stride > 1)
     ? `  ÷${monitorState.divisor} ×${monitorState.stride}`
     : '';
+  const drawn = programOutDrawSize();
+  const capped = drawn.w !== programOutSize.w || drawn.h !== programOutSize.h
+    ? ` capped to ${drawn.w}x${drawn.h}` : '';
   programOutReadout.textContent = `PROGRAM OUT  ${programOutMode}  `
-    + `${programOutSize.w}x${programOutSize.h}  ${programOutFps.toFixed(1)} fps  `
+    + `${programOutSize.w}x${programOutSize.h}${capped}  ${programOutFps.toFixed(1)} fps  `
     + `${programOutMissed} missed${decim}`;
 }
 
@@ -4111,7 +4152,7 @@ function boundBitmaps() {
 
 /** Every clip's ping-pong pair, which is what an accumulator reset has to reach. */
 function clipStateTargets() {
-  return clips.flatMap((clip) => [clip.cloud.memory.statePrev, clip.cloud.memory.stateNext]);
+  return clips.flatMap((clip) => memoryTargets(clip.cloud.memory));
 }
 
 /**
@@ -4168,7 +4209,7 @@ function advanceSurfaceState(dtSec) {
     Math.min(DISCONTINUITY_MS / 1000, Math.max(0.001, dtSec)),
     uniforms.snapDelta.value,
   );
-  uniforms.stateTex.value = statePrev.texture;
+  uniforms.stateTex.value = stateTexture;
 }
 
 let lastProgramTime = 0;
@@ -4259,7 +4300,7 @@ function enterClip(clip, t) {
   counters.clipEntries++;
   if (clip.drawnSinceReset) counters.clipReEntries++;
   clearFeedback(
-    [statePrev, stateNext],
+    memoryTargets(clip.cloud.memory),
     'the surface memory moved: a clip can no longer be cleared on the frame it enters',
   );
   // A stream has no walk to position: its frames arrive rather than being addressed by time.
@@ -4515,14 +4556,7 @@ class StampedPairSource {
 
   /** The frame at or before `sourceSec`, as the lower half of a bracketing pair. */
   bracket(sourceSec) {
-    let lo = 0;
-    let hi = this.count - 2;
-    while (lo < hi) {
-      const mid = integerMidpoint(lo, hi, true);
-      if (this.times[mid] <= sourceSec) lo = mid;
-      else hi = mid - 1;
-    }
-    return lo;
+    return frameAtOrBefore(this.times, sourceSec, this.count - 2);
   }
 
   /** Puts the walk back at frame `i`, so the next `at` emits `i` and `i + 1` as its steps. */
@@ -4581,7 +4615,7 @@ class IndexedTake {
   constructor(id, index) {
     const stamps = index.frames.stampMs;
     if (stamps.length < 2) throw new Error(`capture ${id} has ${stamps.length} frames, need two to bracket`);
-    this.times = stamps.map((s) => (s - stamps[0]) / 1000);
+    this.times = sourceTimes(stamps);
     this.id = id;
     this.index = index;
     this.cache = new Map();
@@ -4805,10 +4839,11 @@ const AFTERIMAGE_RESIDUAL = 0.01;
 
 // The most output frames one tick may render to catch up.
 const CATCHUP_FRAMES = 4;
-// How far behind real time playback has to fall before it says so.
-const SEEK_REPLANS = 2;
-// How many stand-downs in a row before this is a seek that cannot converge.
-const SEEK_OVERTAKEN_LIMIT = 12;
+// How many times a draft re-plans around a moving clip before it refuses.
+const DRAFT_REPLANS = 2;
+// How many times one seek re-plans before its span is taken as never becoming resident. A hand on
+// the clip overtakes the plan for as long as it moves, and the seek outlasts the hand.
+const SEEK_REPLAN_LIMIT = 24;
 
 // The arithmetic of the last cap said out loud, so a seek that keeps capping says it once.
 let cappedSeekSaid = '';
@@ -4854,7 +4889,8 @@ class TimelineTransport {
     this.lastCostMs = 0;
     // How far playback is behind real time, in wall milliseconds. Reported, never skipped.
     this.behindMs = 0;
-    this.overtaken = 0;
+    // The position the last `seek` asked for, held until that seek answers with a landing.
+    this.owed = null;
     this.queue = null;
     this.working = false;
     this.faults = 0;
@@ -5052,7 +5088,14 @@ class TimelineTransport {
    * far enough back.
    */
   seek(programSec, options = {}) {
-    return this.exclusive(() => this.seekNow(programSec, options));
+    const owed = { programSec };
+    this.owed = owed;
+    return this.exclusive(async () => {
+      const landed = await this.seekNow(programSec, options);
+      // Only a landing pays: `settled` refuses to call the transport idle while this is owed.
+      if (landed && this.owed === owed) this.owed = null;
+      return landed;
+    });
   }
 
   /** An accurate render at wherever the playhead is when this runs, not when it was called. */
@@ -5107,28 +5150,23 @@ class TimelineTransport {
   }
 
   async seekNow(programSec, options = {}) {
-    // Planned, fetched, then planned again: a clip's speed, in-point or start can move under
-    // the await.
+    // Planned, fetched, then planned again until the plan is resident: a clip's speed, in-point
+    // or start can move under the await. Standing down would lose the target: the repaint
+    // behind it draws wherever the playhead already was.
     let planned = this.planSeek(programSec, options.frames);
     this.askFor(planned.spans);
-    for (let attempt = 0; !this.resident(planned.spans); attempt++) {
-      // Standing down is for a transport playing on regardless - playback paints the frame
-      // either way. Paused, this seek is the only hand drawing it, so it waits for the bytes.
-      if (attempt >= SEEK_REPLANS && this.playing) {
-        this.overtaken++;
-        if (this.overtaken > SEEK_OVERTAKEN_LIMIT) {
-          this.overtaken = 0;
-          throw new Error(
-            `${SEEK_OVERTAKEN_LIMIT} seeks in a row were overtaken before they could land: `
-            + 'the span a seek plans is not becoming resident, which is not a moving clip',
-          );
-        }
-        requestRepaint();
-        return null;
+    let replans = 0;
+    while (!this.resident(planned.spans)) {
+      if (replans >= SEEK_REPLAN_LIMIT) {
+        throw new Error(
+          `a seek to ${programSec}s re-planned ${SEEK_REPLAN_LIMIT} times and its span never became `
+          + 'resident: the clip never held still, or the cache is not keeping what it fetched',
+        );
       }
       await this.fetch(planned.spans);
       planned = this.planSeek(programSec, options.frames);
       this.askFor(planned.spans);
+      replans++;
     }
     const { target, t, plan, asked, spans, bound } = planned;
     const { length, start } = planned;
@@ -5145,12 +5183,11 @@ class TimelineTransport {
     }
 
     this.lastCostMs = performance.now() - began;
-    this.overtaken = 0;
     this.frame = target;
     this.drafted = false;
     this.previewed = false;
     this.lastSeek = {
-      target, start, frames: length, plan,
+      target, start, frames: length, plan, replans,
       clamped: asked > target,
       capped: length < Math.min(asked, target),
       shortfall: Math.min(asked, target) - length,
@@ -5181,8 +5218,8 @@ class TimelineTransport {
     let spans = this.spansOver(target, target);
     this.askFor(spans);
     for (let attempt = 0; !this.resident(spans); attempt++) {
-      if (attempt >= SEEK_REPLANS) {
-        throw new Error(`a clip's timing moved under ${SEEK_REPLANS} plans of a draft at ${programSec}s`);
+      if (attempt >= DRAFT_REPLANS) {
+        throw new Error(`a clip's timing moved under ${DRAFT_REPLANS} plans of a draft at ${programSec}s`);
       }
       await this.fetch(spans);
       target = this.frameAt(programSec);
@@ -5779,6 +5816,10 @@ async function exportClip(options = {}) {
       + `${effective.join(':')}: pick a resolution of the project's shape in Export, or change `
       + 'the shape in Project settings',
     );
+  }
+  const { maxSize } = renderTargetCaps();
+  if (Math.max(width, height) > maxSize) {
+    throw new Error(`this browser renders at most ${maxSize} pixels on a side, so it cannot export ${width}x${height}`);
   }
   const fps = options.fps ?? timeline.outputFps;
   const codec = options.codec ?? d.codec ?? 'h264';
@@ -11372,8 +11413,7 @@ class PinnedPairSource extends StampedPairSource {
       });
       off += 16 + depthBytes + colorBytes;
     }
-    const first = frames[0].stampMs;
-    super(frames.map((f) => (f.stampMs - first) / 1000));
+    super(sourceTimes(frames.map((f) => f.stampMs)));
     this.frames = frames;
   }
 
@@ -11471,7 +11511,7 @@ if (EDITING && !REQUESTED_TAKE && !REQUESTED_PROJECT && !REQUESTED_NEW) {
   // `resize()` ran before this branch added program-out, so the canvas sat below no appbar.
   renderer.domElement.style.top = '0px';
   renderer.domElement.style.left = '0px';
-  outputSize = { ...programOutSize };
+  outputSize = programOutDrawSize();
   resize();
   setViewCamera(programCamera);
 
@@ -11581,6 +11621,19 @@ globalThis.__kinect = {
 
   params, applyPreset,
   readings: () => READINGS.slice(),
+
+  /** What this context renders into, and what the page chose from it. */
+  renderCaps: () => {
+    const { types, maxSize } = renderTargetCaps();
+    return {
+      types: types.map(typeName),
+      maxSize,
+      chain: typeName(chainType),
+      memory: selectedClip.cloud.memory.live ? typeName(statePrev.texture.type) : null,
+      buffer: renderer.getDrawingBufferSize(new THREE.Vector2()).toArray(),
+      chainSize: [composer.renderTarget1.width, composer.renderTarget1.height],
+    };
+  },
 
   presetValueNames,
   coreLookNames,
@@ -11763,15 +11816,24 @@ globalThis.__kinect = {
     open: openTake,
     transport: () => timeline,
     counters,
-    /** Resolves once every scheduled repaint has run and the transport's queue has drained. */
+    /**
+     * Resolves once every scheduled repaint has run and the transport's queue has drained, and
+     * rejects if the last seek asked for ended without landing.
+     */
     async settled() {
       for (let i = 0; i < 200; i++) {
         // A macrotask, so a repaint on the microtask queue has been enqueued by the
         // time this returns.
         await new Promise((resolve) => { setTimeout(resolve, 0); });
-        await timeline?.idle();
+        const queue = timeline?.queue;
+        await queue;
+        // Work queued while that drained has not run yet, however idle the flags read.
+        if (timeline?.queue !== queue) continue;
         if (!repaintWanted && !repaintBusy && !repaintScheduled && !timeline?.working
-          && draftWanted === null && !draftBusy && !orbitRedrawWanted && !orbitSettling) return;
+          && draftWanted === null && !draftBusy && !orbitRedrawWanted && !orbitSettling) {
+          if (timeline?.owed) throw new Error(`a seek to ${timeline.owed.programSec}s ended without landing`);
+          return;
+        }
       }
       throw new Error('the transport never settled');
     },
@@ -11860,7 +11922,6 @@ globalThis.__kinect = {
         settling: orbitSettling,
         lastSeek: t.lastSeek,
         lastCostMs: t.lastCostMs,
-        overtaken: t.overtaken,
         behindMs: t.behindMs,
         preroll: t.preroll(),
         applied: t.clip.source.applied,
@@ -11985,6 +12046,7 @@ globalThis.__kinect = {
 
   // Reads the surface memory back off the GPU.
   stateStats() {
+    if (!statePrev) return null;
     const buf = new Float32Array(POINTS * 4);
     renderer.readRenderTargetPixels(statePrev, 0, 0, DEPTH_W, DEPTH_H, buf);
     let ghosts = 0, hard = 0, soft = 0, fresh = 0;

@@ -13,17 +13,18 @@ import { CopyShader } from 'three/addons/shaders/CopyShader.js';
  *
  * Two targets and a swap, the shape three's own `AfterimagePass` uses: the program draws into
  * `comp` reading `old`, the result is copied on to whatever the chain asked for, and the two
- * swap so `old` holds what was just drawn. Half float rather than byte, because a pixel that
- * has been through the feedback a dozen times has been quantised a dozen times, and eight bits
- * of it band visibly on the smear.
+ * swap so `old` holds what was just drawn. Half float where the context renders it, because a
+ * pixel that has been through the feedback a dozen times has been quantised a dozen times, and
+ * eight bits of it band visibly on the smear.
  *
- * The program is handed in rather than built here, for the reason `buildPostChain` is handed
- * the grade's: this module never learns there is an effect store, which is what lets the gate
- * assemble the same text under bare node.
+ * The program and the pixel type are handed in rather than decided here, for the reason
+ * `buildPostChain` is handed the grade's: this module never learns there is an effect store or
+ * a context, which is what lets the gate assemble the same text under bare node.
  */
 export class MoshPass extends Pass {
-  constructor({ uniforms, vertexShader, fragmentShader }) {
+  constructor({ uniforms, vertexShader, fragmentShader, type }) {
     super();
+    if (type === undefined) throw new Error('the mosh pass needs the pixel type its history holds');
     this.uniforms = uniforms;
     this.material = new THREE.ShaderMaterial({ uniforms, vertexShader, fragmentShader });
     this.copyMaterial = new THREE.ShaderMaterial({
@@ -37,7 +38,7 @@ export class MoshPass extends Pass {
     const target = () => new THREE.WebGLRenderTarget(1, 1, {
       magFilter: THREE.NearestFilter,
       minFilter: THREE.NearestFilter,
-      type: THREE.HalfFloatType,
+      type,
     });
     this.comp = target();
     this.old = target();

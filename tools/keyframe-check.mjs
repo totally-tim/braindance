@@ -207,35 +207,25 @@ const MUTATIONS = {
     "      input.addEventListener('input', () => { writeFromControl(name, Number(input.value)); history.commit(); });",
   ]] },
   // A seek plans its span once and never looks again.
-  'seek-plans-once': { file: 'web/main.js', edits: [
-    [`        this.overtaken++;
-        if (this.overtaken > SEEK_OVERTAKEN_LIMIT) {
-          this.overtaken = 0;
-          throw new Error(
-            \`\${SEEK_OVERTAKEN_LIMIT} seeks in a row were overtaken before they could land: \`
-            + 'the span a seek plans is not becoming resident, which is not a moving clip',
-          );
-        }
-        requestRepaint();
-        return null;
+  'seek-plans-once': { file: 'web/main.js', edits: [[
+    `    let replans = 0;
+    while (!this.resident(planned.spans)) {
+      if (replans >= SEEK_REPLAN_LIMIT) {
+        throw new Error(
+          \`a seek to \${programSec}s re-planned \${SEEK_REPLAN_LIMIT} times and its span never became \`
+          + 'resident: the clip never held still, or the cache is not keeping what it fetched',
+        );
       }
       await this.fetch(planned.spans);
       planned = this.planSeek(programSec, options.frames);
       this.askFor(planned.spans);
+      replans++;
     }
-`, ''],
-    [`    let planned = this.planSeek(programSec, options.frames);
-    this.askFor(planned.spans);
-    for (let attempt = 0; !this.resident(planned.spans); attempt++) {
-      // Standing down is for a transport playing on regardless - playback paints the frame
-      // either way. Paused, this seek is the only hand drawing it, so it waits for the bytes.
-      if (attempt >= SEEK_REPLANS && this.playing) {
 `,
-    `    const planned = this.planSeek(programSec, options.frames);
-    this.askFor(planned.spans);
+    `    const replans = 0;
     await this.fetch(planned.spans);
-`],
-  ] },
+`,
+  ]] },
   // The pre-roll reads the uniforms, which hold the look where the playhead was parked.
   // The surface half alone; `trails-damp-at-target` is the trails half.
   'preroll-reads-uniforms': { file: 'web/main.js', edits: [[
@@ -553,10 +543,13 @@ function bracketOf(sourceSec) {
   return lo;
 }
 
+let assertions = 0;
 let failures = 0;
+const fired = [];
 const check = (ok, label, detail = '') => {
+  assertions++;
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? `   ${detail}` : ''}`);
-  if (!ok) failures++;
+  if (!ok) { failures++; fired.push(label); }
 };
 const show = (d) => `max ${d.max}/255, mean ${d.mean.toFixed(4)}, ${d.pct.toFixed(3)}% of pixels differ`;
 const worst = (xs) => xs.reduce((a, b) => Math.max(a, b), 0);
@@ -702,6 +695,8 @@ await page.waitForFunction(() => globalThis.__kinect.takeOpened(), null, { timeo
 // pass. At three it stopped at 626x352 and the guard below threw before the first assertion -
 // on this branch and on a `git archive HEAD` tree alike, so it was never a regression and the
 // only thing wrong was the iteration count.
+// A pass waits for the buffer to move or to land, because every pass before the last lands short
+// of 640x360: a wait for the target alone spends its whole timeout on each of them.
 for (let attempt = 0; attempt < 12; attempt++) {
   await page.evaluate('globalThis.__kinect.timeline.settled()').catch(() => {});
   const furniture = await page.evaluate(`(() => {
@@ -712,6 +707,10 @@ for (let attempt = 0; attempt < 12; attempt++) {
       shell: appBar && !appBar.hidden ? Math.round(appBar.getBoundingClientRect().height) : 0,
     };
   })()`);
+  const was = await page.evaluate(() => {
+    const gl = globalThis.__kinect?.renderer?.getContext?.();
+    return gl ? { w: gl.drawingBufferWidth, h: gl.drawingBufferHeight } : null;
+  });
   await page.setViewportSize({
     width: STAGE.width,
     height: STAGE.height + furniture.strip + furniture.shell,
@@ -719,12 +718,22 @@ for (let attempt = 0; attempt < 12; attempt++) {
   // `setViewportSize` returning is not the renderer having resized. The predicate answers false on
   // a page with no renderer rather than throwing, because a throw inside `waitForFunction` is
   // not caught by it.
-  const landed = await page.waitForFunction((want) => {
+  const landed = await page.waitForFunction(({ want, was }) => {
     const gl = globalThis.__kinect?.renderer?.getContext?.();
-    return !!gl && gl.drawingBufferWidth === want.w && gl.drawingBufferHeight === want.h;
-  }, { w: STAGE.width, h: STAGE.height }, { timeout: 15000 }).then(() => true).catch(() => false);
-  if (landed) break;
+    if (!gl) return false;
+    const w = gl.drawingBufferWidth;
+    const h = gl.drawingBufferHeight;
+    if (w === want.w && h === want.h) return 'target';
+    return !was || w !== was.w || h !== was.h ? 'moved' : false;
+  }, { want: { w: STAGE.width, h: STAGE.height }, was }, { timeout: 15000 })
+    .then((handle) => handle.jsonValue()).catch(() => 'timeout');
+  if (landed === 'target') break;
 }
+// The stage lands seconds after the take opens, with the open's garbage still uncollected, and a
+// collection that falls inside a `page.evaluate` loses its promise: `Resulting promise was garbage
+// collected`, after the page has finished the work. One forced collection here; timeline-check's
+// section 1b measured 5 of 8 runs dying without it and 0 of 8 with it.
+await (await page.context().newCDPSession(page)).send('HeapProfiler.collectGarbage');
 await page.evaluate(INSTALL);
 
 const gpu = await page.evaluate(() => {
@@ -776,12 +785,14 @@ if (!(SOURCE_DURATION >= NEEDS_TAKE_SEC)) {
 }
 
 // An evaluator that announced its writes never settles, and takes the page down rather
-// than failing a row. Reported as what it is rather than left to crash the tool.
+// than failing a row. A lost page is the run not finishing, never a failed assertion, which
+// sweep-all would read as a caught mutation.
 const lost = (err) => {
   const line = String(err?.message ?? err).split('\n')[0];
-  console.log(`  FAIL  the page stopped answering, so the run could not finish   ${line}`);
-  console.log('\n[keyframe] FAIL (the page was lost)');
-  process.exit(1);
+  console.log(`\n[keyframe] DID NOT RUN - the page stopped answering: ${line}`);
+  console.log(`[keyframe] ${assertions} assertions ran, ${failures} failed before the crash`);
+  if (fired.length) console.log(`[keyframe] rows that had already fired: ${fired.join('; ')}`);
+  process.exit(2);
 };
 process.on('unhandledRejection', lost);
 process.on('uncaughtException', lost);
@@ -869,7 +880,8 @@ console.log('\n== 0. an evaluated frame schedules no work of its own ==');
   }
   if (failures) {
     console.log('\n  the remaining sections were not run: a build that storms cannot be measured');
-    console.log(`\n[keyframe] FAIL (${failures})`);
+    console.log(`\n[keyframe] ${assertions} assertions, ${failures} failed`);
+    console.log('[keyframe] FAIL');
     await browser.close();
     process.exit(1);
   }
@@ -1576,14 +1588,22 @@ console.log('\n== 4e. clip timing moving while a seek is fetching ==');
         armed = false;
         source.ensure = real;
       }
-      const overtaken = t.overtaken;
-      await k.timeline.settled();
+      // A seek that threw leaves settled() refusing, which is read here rather than lost, and
+      // then paid with a seek that lands so the next case can settle.
+      let refused = null;
+      try {
+        await k.timeline.settled();
+      } catch (err) {
+        refused = String(err.message ?? err);
+      }
       const read = k.timeline.read();
       const clip = k.timeline.clips()[0];
+      if (refused) await t.seek(12.0);
       return {
         threw,
+        refused,
         hits,
-        overtaken,
+        replans: landed?.replans ?? null,
         landed: landed !== null,
         at: read.programSec,
         sourceAt: read.sourceSec,
@@ -1596,8 +1616,8 @@ console.log('\n== 4e. clip timing moving while a seek is fetching ==');
     const wantSource = c.after.sourceStart + (got.at - got.start) * c.after.speed;
     const drift = Math.abs(got.sourceAt - wantSource);
     console.log(`  ${c.label}: timing changed on fetch ${got.hits > 0 ? 'yes' : 'NO'}, `
-      + `seek ${got.threw ? `threw: ${got.threw}` : (got.landed ? 'landed' : 'STOOD DOWN')} `
-      + `with ${got.overtaken} stand-downs; ${got.sourceStart}s at ${got.speed}x maps `
+      + `seek ${got.threw ? `threw: ${got.threw}` : (got.landed ? 'landed' : 'RESOLVED WITHOUT LANDING')} `
+      + `after ${got.replans} re-plans; ${got.sourceStart}s at ${got.speed}x maps `
       + `${got.at.toFixed(3)}s to source ${got.sourceAt.toFixed(4)}s`);
 
     check(got.hits > 0,
@@ -1608,10 +1628,10 @@ console.log('\n== 4e. clip timing moving while a seek is fetching ==');
       `${got.sourceStart}s at ${got.speed}x`);
     check(got.threw === null,
       `${c.label}: the seek re-planned around it instead of refusing`,
-      got.threw ?? '');
-    check(got.landed === true && got.overtaken === 0,
-      `${c.label}: and the seek itself landed rather than standing down for a repaint`,
-      `landed ${got.landed}, ${got.overtaken} stand-downs`);
+      got.threw ? `${got.threw}; settled() ${got.refused ?? 'resolved'}` : '');
+    check(got.landed === true,
+      `${c.label}: and the seek itself answered with a landing`,
+      `landed ${got.landed} after ${got.replans} re-plans`);
     check(Math.abs(got.at - 12.0) < 1e-6,
       `${c.label}: at the program position it was asked for`,
       `${got.at.toFixed(4)}s of 12s`);
@@ -2558,7 +2578,8 @@ if (SHOTS) {
   await page.screenshot({ path: join(SHOTS, 'keyframe-page.png') });
 }
 
-console.log(`\n[keyframe] ${failures ? `FAIL (${failures})` : 'PASS'}`);
+console.log(`\n[keyframe] ${assertions} assertions, ${failures} failed`);
+console.log(`[keyframe] ${failures ? 'FAIL' : 'PASS'}`);
 await browser.close();
 if (MUTATE && MUTATIONS[MUTATE]?.fails) console.log(`[keyframe] it should redden: ${MUTATIONS[MUTATE].fails}`);
 process.exit(failures ? 1 : 0);

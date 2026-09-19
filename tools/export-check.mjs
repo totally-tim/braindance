@@ -89,6 +89,15 @@ const RES_LOOK = { far: 4.0, near: 0.05, pointSize: 12 };
 const CONTROL_MARGIN = 5;
 
 const MUTATIONS = {
+  // The size door taken out, so an export larger than the context's target limit starts. The
+  // oversize request is one whose frame range is empty, so the mutated build refuses it inside the
+  // render instead, having encoded nothing.
+  'export-ignores-the-size-cap': {
+    file: 'web/main.js',
+    edits: [['  if (Math.max(width, height) > maxSize) {', '  if (false) {']],
+    fails: 'the first row of section 10 alone: the oversize export gets as far as its empty frame '
+      + 'range. The second row stays green, because the door never stood in its way',
+  },
   // The guard removed at its source rather than door by door: one predicate answers for all
   // eighteen call sites, so this is the whole of it and no door can be left accidentally armed.
   // Must redden **ten** rows of section 9, measured: the six door rows, the render-finished row,
@@ -889,7 +898,7 @@ const pageErrors = [];
  * rather than one browser with several pages: a second page in the same browser reliably loses
  * its execution context while an export is reading pixels back.
  */
-async function openPage(viewport, source = mutatedBody, html = null) {
+async function openPage(viewport, source = mutatedBody, html = null, initScript = null) {
   // The full chromium build rather than the headless shell: the shell can land on
   // SwiftShader, which has no EXT_color_buffer_float, and a run that silently fell
   // back to a software rasteriser would agree with itself for the wrong reason.
@@ -899,6 +908,7 @@ async function openPage(viewport, source = mutatedBody, html = null) {
     deviceScaleFactor: 1,
   });
   await context.addInitScript(() => localStorage.setItem('braindance.preview.auto', 'off'));
+  if (initScript) await context.addInitScript(initScript);
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (err) => { errors.push(String(err)); pageErrors.push(String(err)); });
@@ -1067,6 +1077,7 @@ console.log('\n[1] the take carries its own intrinsics');
 
   if (failures > 0) {
     console.log('\n[export] the intrinsics claim failed; everything below renders geometry, so the run stops here');
+    console.log(`[export] ${checks} assertions, ${failures} failed`);
     await main.close();
     process.exit(1);
   }
@@ -2399,6 +2410,46 @@ console.log('\n[9] an edit is refused while a render runs, and the file is the d
   }
 }
 
+console.log('\n[10] an export larger than this browser renders is refused at the door, with the reason');
+// Firefox's privacy.resistFingerprinting holds both target limits at 2048, where a 4K export would
+// render its post chain into targets that never allocate. The limits are spoofed on this page
+// alone. Each request names an empty frame range, so one the door lets through is refused inside
+// the render and nothing is encoded either way.
+{
+  const CAP = 2048;
+  const capped = await openPage(STAGE, mutatedBody, null, `(() => {
+    for (const C of [WebGLRenderingContext, WebGL2RenderingContext]) {
+      const getParameter = C.prototype.getParameter;
+      C.prototype.getParameter = function (p) {
+        return p === this.MAX_TEXTURE_SIZE || p === this.MAX_RENDERBUFFER_SIZE ? ${CAP} : getParameter.call(this, p);
+      };
+    }
+  })();`);
+  try {
+    const doors = await capped.page.evaluate(`(async () => {
+      const k = globalThis.__kinect;
+      const [a, b] = k.outputSize().aspect;
+      const size = (m) => \`\${a * m}x\${b * m}\`;
+      const ask = async (outputSize) => {
+        try {
+          await k.export.run({ outputSize, from: 10, to: 5 });
+          return 'rendered';
+        } catch (err) { return String(err.message); }
+      };
+      const over = size(Math.ceil((${CAP} + 1) / Math.max(a, b)));
+      const under = size(Math.floor(${CAP} / Math.max(a, b)));
+      return { maxSize: k.renderCaps().maxSize, over, under, overSaid: await ask(over), underSaid: await ask(under) };
+    })()`);
+    check(doors.maxSize === CAP && /at most 2048 pixels on a side/.test(doors.overSaid),
+      `a ${doors.over} export under a ${CAP} limit is refused before it starts, naming the limit`,
+      `limit ${doors.maxSize}: ${doors.overSaid}`);
+    check(/has nothing in it/.test(doors.underSaid),
+      `and a ${doors.under} export passes the same door, so the refusal is about the size`, doors.underSaid);
+  } finally {
+    await capped.close();
+  }
+}
+
 {
   const blind = ARMS.filter(([, a]) => chainOf(a) === '').map(([label]) => label);
   check(ARMS.length > 0 && blind.length === 0,
@@ -2410,6 +2461,6 @@ console.log('\n[9] an edit is refused while a render runs, and the file is the d
 
 check(pageErrors.length === 0, 'no page errors', pageErrors.slice(0, 3).join(' | '));
 
-console.log(`\n[export] ${checks - failures}/${checks} passed, ${failures} failed`);
+console.log(`\n[export] ${checks} assertions, ${failures} failed`);
 if (MUTATE && MUTATIONS[MUTATE]?.fails) console.log(`[export] it should redden: ${MUTATIONS[MUTATE].fails}`);
 process.exit(failures > 0 ? 1 : 0);

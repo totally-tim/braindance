@@ -17,7 +17,7 @@ commitment. Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 ## What you need
 
 - **A Kinect v2.** Without one you can still replay a capture and work on the browser side.
-- **Node 18.15 or newer.**
+- **Node 26 or newer.**
 - **macOS on Apple Silicon, or Debian / Raspberry Pi OS** for a capture node.
 - **ffmpeg** for video out, expected at `/opt/homebrew/bin/ffmpeg`. Set `FFMPEG=` to override.
 
@@ -189,6 +189,8 @@ foot.](media/export.png)
 | PNG sequence | one file per frame in a directory | compositing |
 
 The render runs in the page and lands in its own directory under `exports/` on the server.
+LibreWolf, and Firefox with `privacy.resistFingerprinting` on, refuse an export larger than 2048
+pixels on a side. Export those from another browser.
 **save a copy…** puts the file anywhere through the browser's file picker. It is disabled in a
 browser without one, and for a PNG sequence, which is a directory.
 

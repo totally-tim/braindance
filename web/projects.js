@@ -55,15 +55,6 @@ function clipAt(spans, programSec) {
   return null;
 }
 
-/** The frame of a take a program second lands on. */
-function frameAt(span, programSec) {
-  const { clip, take } = span;
-  const sourceSec = clipSourceSecAt(clip, programSec - span.start);
-  if (!Number.isFinite(sourceSec) || !(take.durationSec > 0)) return 0;
-  const at = sourceSec / take.durationSec;
-  return Math.round(Math.max(0, Math.min(1, at)) * Math.max(0, take.frames - 1));
-}
-
 /** The takes a project names and has not got, by the id the document remembers them under. */
 const missingIn = (body) => body.clips
   .filter((clip) => clip.take && !takeFor(clip))
@@ -339,7 +330,10 @@ function attachSkim(row, spans, length) {
     doneEl.style.width = `${length > 0 ? (at / length) * 100 : 0}%`;
     row.dataset.at = at.toFixed(3);
     row.dataset.showing = take?.id ?? '';
-    skim.setIndex(take ? frameAt(hit, at) : 0);
+    // The source second the clip plays here; the skim finds its frame through the take's stamps.
+    const sourceSec = take ? clipSourceSecAt(hit.clip, at - hit.start) : NaN;
+    if (Number.isFinite(sourceSec)) skim.seek(sourceSec);
+    else skim.setIndex(0);
   };
 
   const fromX = (clientX, el) => {
