@@ -1030,8 +1030,9 @@ export const revealSupport = () => {
 
 /**
  * Opens the file manager on a take - the only route that starts a process on the operator's behalf.
+ * `command` replaces the platform's program with another and the arguments it leads with.
  */
-export async function revealTake(dir, id, { program = null } = {}) {
+export async function revealTake(dir, id, { command = [] } = {}) {
   if (!VALID_ID.test(id)) throw new Error(`unusable take id ${id}`);
   const shape = REVEAL[process.platform];
   if (!shape) {
@@ -1042,9 +1043,9 @@ export async function revealTake(dir, id, { program = null } = {}) {
   if (resolve(path) !== join(root, `${id}.knct`)) throw new Error(`refusing to reveal outside ${root}`);
   await stat(path);
   const args = shape.args(path);
-  const bin = program ?? shape.program;
+  const [bin, ...prefix] = command.length ? command : [shape.program];
   return new Promise((settle, fail) => {
-    const child = spawn(bin, args, { stdio: 'ignore', detached: true });
+    const child = spawn(bin, [...prefix, ...args], { stdio: 'ignore', detached: true });
     child.on('error', (err) => fail(new Error(`${bin} could not be started: ${err.message}`)));
     child.on('spawn', () => {
       child.unref();

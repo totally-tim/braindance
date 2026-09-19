@@ -31,7 +31,7 @@ The tools disagree about what a caught mutation exits. Four exit **0** on a catc
 — `registry-check`, `vendor-check`, `registration-check` and `release-gate-check` — so anything
 gating on "non-zero means caught" reads a genuine miss by these four as a catch. Thirteen exit 1 on
 a catch *and* 1 on a miss, so the code carries no information and only the printed sentence
-separates them. Six carry no miss branch at all and exit on the failure count, so a mutation they
+separates them. Seven carry no miss branch at all and exit on the failure count, so a mutation they
 fail to catch exits 0 and reads as a clean pass.
 
 Per tool, read from the source:
@@ -52,13 +52,14 @@ Per tool, read from the source:
 | `sensor-view-check` | pass | a failed assertion, a catch, or a miss | `UNTESTED`: no sensor hello; `DID NOT RUN`: a stale anchor, no browser |
 | `level-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8377 held, no GPU browser |
 | `vcam-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`, or section 6 unproven without an IPv4 |
-| `guard-check` | pass | a failed assertion, a catch, or a miss | `PASS, with claims untested here`: no non-internal IPv4 |
+| `guard-check` | pass | a failed assertion, a catch, or a miss | `PASS, with claims untested here`: no non-internal IPv4; `DID NOT RUN`: a crash |
 | `jobs-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a port held, a crash |
 | `effect-check` | pass | a failed assertion, a catch, or a miss | `UNTESTED`, or `DID NOT RUN` |
 | `effect-conformance-check` | pass | a failed assertion, a catch, or a miss | `UNTESTED`, or `DID NOT RUN` |
 | `module-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a stale anchor |
 | `syntax-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor |
 | `cpp-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor, no compiler or headers |
+| `decoder-check` | pass, or a missed mutation | a failed assertion, a catch, or a probe that will not build or run | `DID NOT RUN`: no compiler, no built library or grabber, a stale anchor, a failed rebuild, or a mutated rebuild that changed nothing |
 | `grabber-args-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no `vendor/prefix`, build-native failed, a mutation the binary did not change, a stale anchor |
 | `vendor-check` | pass, or a **catch** | a failed assertion, a miss, or a stale anchor | `PASS on the source, with the artifact untested` |
 | `registration-check` | pass, or a **catch** | a failed assertion, or a miss | a build or tooling failure |
@@ -88,7 +89,7 @@ fixture, server or browser first (`timeline-check`, `keyframe-check`, `export-ch
 A mutated run prints the expected failure row when its entry carries a `fails:` field.
 For other entries, read the catch from the assertions that fired.
 
-Four tables are too large to reproduce here — `editor-check` declares 207, `library-check` 154,
+Four tables are too large to reproduce here — `editor-check` declares 207, `library-check` 181,
 `registry-check` 60 and `effect-check` 42. Their sections give the count and the enumerate
 command prints the names.
 
@@ -227,6 +228,11 @@ node tools/determinism-check.mjs --clock --before HEAD~1
 | server | `--url`, default `http://localhost:8080` |
 | fixture | a capture; `--capture` names it |
 | browser | a GPU browser |
+
+Each page's live socket is accepted and never connected upstream, so no sensor hello and no output
+state from the server reaches a pinned run, and the verdict requires both pages to hold the page's
+own default focal of 366 and every value of the applied look. Connected, the hello lands whenever
+the grabber answers, and a server in standby wakes on the first page after its run is pinned.
 
 `--frames`, `--stride` and `--substeps` size the run; `--headed` shows it. `--clock` is the
 before-half and reads `uniforms.time` off an untouched `git show <rev>` page, so it refuses a rev
@@ -696,7 +702,15 @@ case, and name themselves in the verdict as unproven on one that does not. The t
 shoots on `+17` and `+18` at once, and the marks-sync section answers as the node from a stub
 inside the check on `+17`.
 
-154 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
+The control sweep runs on its own node and editing machine on `+17` and `+18`. It lists every
+control the library renders, requires a driver for each, and presses each one for the first thing
+the press changes: a tab filters the grid, Rename opens the box on that take, Reveal puts an argv
+line in a recorder, the confirm's Delete removes the file. Every driven control has a
+`dead-<key>` mutation that leaves it rendered and inert and reddens that key's row, and the sweep
+requires the drivers and the `dead-` mutations to name the same controls. A dialog's buttons are
+reached through the control that opens the dialog, so a dead opener reddens their rows as well.
+
+181 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
 
 **Known reds.** Three rows are flaky under machine contention. Two are
 in the marks-on-the-scrubber section and are one race between a seek, `settled()` and the mark's
@@ -705,8 +719,9 @@ reading `real 19 against a baseline of 18`: its settle is a fixed 250ms against 
 takes 300ms to 1s. All three fail on unmutated trees as well as mutated ones and disagree with
 themselves across runs of one tree, so a run reddening only these is a re-run and not a finding.
 
-The fatal-log sweep matches `/Error|throw|unhandled/i`, so a checkout whose own path contains the
-word reddens the sweep on every server it started.
+The fatal-log sweep tests each line a server printed with its paths taken out, so a checkout
+whose path contains `error` reads clean, and each server it started is a row of its own, so a
+fatal line is a `FAIL` row that quotes it.
 
 ## `boot-check`
 
@@ -1024,7 +1039,9 @@ node tools/guard-check.mjs
 | network | a non-internal IPv4, or the bind half is unproven and it exits 2 |
 
 It spawns its own servers and needs none running. Every refusal row has a positive twin, so a
-server that refused every upgrade fails.
+server that refused every upgrade fails. A run that stops before its verdict, such as a server
+that never comes up, prints `DID NOT RUN` with the count so far and the rows already fired, and
+exits 2, because a crash counted as a failed assertion reads under `--mutate` as a catch.
 
 - **`reads-answer-any-page`** — the reads a cross-origin `<img>` can start, which `originAllowed`
   cannot see: an `<img>` sends no Origin, so the header that separates it from the capture node is
@@ -1405,12 +1422,18 @@ One table in the tool carries the enumerator, the macro, the processor's own `na
 flag spelling, and the probe, the expectations and the grabber rows are all read off it, so a
 decoder added to libfreenect2 is asked by this tool as it stands.
 
-Both controls edit a file the build reads and rebuild, because asking a mutated library anything
-means building one. Each restores the source and rebuilds again on the way out, including out of a
-refusal. Ctrl-C kills the rebuild in flight rather than the script, which runs on to its end and
-restores from its `exit` hook, so the tree comes back either way. Two states it cannot put right
-on its own: a `SIGKILL`, and a restore whose rebuild itself fails, which prints what to do. Both
-leave `vendor/prefix` built from something `git status` no longer shows, and
+Every control edits a file the build reads and rebuilds, because asking a mutated library
+anything means building one. `mutateNative` in `tools/native-mutation.mjs` does it: it builds the
+tree as it stands, writes the mutation in the second after that build, rebuilds, and refuses as
+`DID NOT RUN` a rebuild that left the grabber and the library byte for byte as they were. The make
+cmake drives on macOS compares timestamps to the second, so a source written in the second its
+object was built in reads as up to date, and a control run straight after another reads as a miss
+against the unmutated grabber. The source goes back and is rebuilt on the way out, including out
+of a refusal, in the second after the mutated build for the same reason, and a restore that leaves
+the mutated build in place says so. Ctrl-C kills the rebuild in flight rather than the script,
+which runs on to its end and restores from its `exit` hook, so the tree comes back either way. Two
+states it cannot put right on its own: a `SIGKILL`, and a restore whose rebuild itself fails,
+which prints what to do. Both leave `vendor/prefix` built from something `git status` no longer shows, and
 `npm run build:native` is what puts it back.
 
 - **`decoder-mapping-swapped`** — `ColorDecoder::TurboJPEG` builds the VideoToolbox processor. It

@@ -1,8 +1,8 @@
 // Proves that the same program time produces the same image. Every input is pinned - a fixed
-// run of real capture frames, a fixed camera pose, colour off - with all three feedback paths
-// left switched on, since they are the only things that could carry state between two runs. The
-// frames are sampled every fourth frame, because a static scene makes the afterimage converge
-// to its own input and return the same hash whether the accumulator ran or not.
+// run of real capture frames, a fixed camera pose, colour off, no live socket - with all three
+// feedback paths left switched on, since they are the only things that could carry state between
+// two runs. The frames are sampled every fourth frame, because a static scene makes the
+// afterimage converge to its own input and return the same hash whether the accumulator ran or not.
 //
 // --clock is the before-half. It reads `uniforms.time` off an untouched `git show <rev>` page,
 // because instrumenting the old page to read pixels back would measure code that never shipped.
@@ -261,6 +261,10 @@ console.log(`[determinism] pinned ${SOURCE_FRAMES} frames from ${CAPTURE} `
 
 async function openPage() {
   const page = await context.newPage();
+  // The live socket is accepted and never connected upstream, as `clockCheck` does. Connected, it
+  // delivers the sensor's intrinsics whenever the grabber answers: a server in standby wakes on the
+  // first page, whose run is pinned before the hello lands, and the second page gets it at once.
+  await page.routeWebSocket(/.*/, () => { /* accepted, never connected */ });
   const errors = [];
   page.on('pageerror', (err) => errors.push(String(err)));
   page.on('console', (msg) => { if (msg.type() === 'error') errors.push(msg.text()); });
@@ -302,7 +306,15 @@ async function openPage() {
     globalThis.__pinnedFrames = frames;
   });
 
-  return { page, errors, gpu };
+  // Read back rather than assumed: no hello reached the page, so it unprojects with its own
+  // default focal of exactly 366, and the look in the registry is the one applied above.
+  const held = await page.evaluate(`(() => {
+    const k = globalThis.__kinect;
+    const look = ${JSON.stringify(RIFT_LOOK)};
+    const off = Object.keys(look).filter((n) => JSON.stringify(k.params.get(n)) !== JSON.stringify(look[n]));
+    return { focal: k.uniforms.focal.value.x, off };
+  })()`);
+  return { page, errors, gpu, held };
 }
 
 // Called immediately rather than handed over: playwright evaluates a string as an expression.
@@ -379,10 +391,16 @@ if (!ab.same || !ac.same) {
   }
 }
 
+const held = [first.held, second.held];
+const inputsHeld = held.every((h) => h.focal === 366 && h.off.length === 0);
+console.log(`[determinism] inputs the socket could have changed, on both pages: focal ${held.map((h) => h.focal).join(' and ')}, `
+  + `${held.map((h) => (h.off.length ? `${h.off.length} look values off (${h.off.slice(0, 3).join(' ')})` : `all ${Object.keys(RIFT_LOOK).length} look values as applied`)).join(' and ')}`
+  + `${inputsHeld ? '' : '  <-- a live input reached a pinned run'}`);
+
 const pageErrors = [...first.errors, ...second.errors];
 if (pageErrors.length) console.log(`\n[determinism] page errors:\n  ${pageErrors.join('\n  ')}`);
 
-const pass = ab.same && ac.same && !ad.same
+const pass = ab.same && ac.same && !ad.same && inputsHeld
   && varied > runA.out.length / 2
   && p.afterimage && p.mosh && p.bloom && p.grade && runA.ghosts > 0;
 console.log(`\n[determinism] ${pass ? 'PASS' : 'FAIL'}`);

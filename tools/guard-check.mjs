@@ -116,9 +116,10 @@ if (MUTATE) {
 }
 
 let checked = 0, failed = 0, unproven = 0;
+const fired = [];
 const ok = (label, pass, detail = '') => {
   checked++;
-  if (!pass) failed++;
+  if (!pass) { failed++; fired.push(label); }
   console.log(`  ${pass ? 'PASS' : 'FAIL'}  ${label}${detail ? `  ${detail}` : ''}`);
 };
 
@@ -204,6 +205,7 @@ const SAMPLE = join(REPO, 'captures', 'sample.knct');
 const SAMPLE_KEY = existsSync(SAMPLE)
   ? encodeURIComponent(`sha256:${createHash('sha256').update(readFileSync(SAMPLE)).digest('hex')}`) : 'no-sample';
 
+let crashed = null;
 try {
   console.log(`[guard] ${MUTATE ? `MUTATED: ${MUTATE} (${MUTATIONS[MUTATE].file})` : 'unmutated tree'}`);
   console.log(`[guard] lan address ${LAN ?? '(none - the bind rows cannot be tested here)'}\n`);
@@ -330,11 +332,18 @@ try {
   ok('the origin guard is unchanged by widening - the bind is not the thing protecting the socket',
     await upgrade('http://evil.example') === 'refused 403');
 } catch (err) {
-  failed++;
-  console.log(`\n  FAIL  the run did not finish: ${err.message}`);
+  // Apart from the assertions: counted as a failed one, a crash reads under --mutate as a catch.
+  crashed = err;
 } finally {
   stopAll();
   rmSync(WORK, { recursive: true, force: true });
+}
+
+if (crashed) {
+  console.log(`\n[guard] DID NOT RUN - ${crashed.message}`);
+  console.log(`[guard] ${checked} assertions ran, ${failed} failed before the crash`);
+  if (fired.length) console.log(`[guard] rows that had already fired: ${fired.join('; ')}`);
+  process.exit(2);
 }
 
 console.log(`\n[guard] ${checked} assertions, ${failed} failed${unproven ? `, ${unproven} unproven` : ''}`);

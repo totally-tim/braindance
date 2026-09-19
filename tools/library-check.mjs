@@ -85,6 +85,64 @@ const REVEAL_EDITS = {
 };
 const REVEAL_EDIT = REVEAL_EDITS[process.platform] ?? REVEAL_EDITS.darwin;
 
+// Every control the library renders, keyed as `__library.controls()` keys it, and the edit that
+// leaves it on screen doing nothing. The control sweep drives each key and requires this table and
+// its drivers to name the same keys, so `dead-<key>` is the control that key's row can go red.
+const tabGoesDead = (filter) => ({ file: 'web/library.js', edits: [[
+  "  tab.addEventListener('click', () => { filter = tab.dataset.filter; paint(); });",
+  `  tab.addEventListener('click', () => { if (tab.dataset.filter === '${filter}') return; filter = tab.dataset.filter; paint(); });`,
+]] });
+const DEAD_CONTROLS = {
+  toMenu: { file: 'web/library.html', edits: [['id="toMenu" href="/"', 'id="toMenu" href="#"']] },
+  toProjects: { file: 'web/library.html', edits: [['id="toProjects" href="/projects"', 'id="toProjects" href="#"']] },
+  toLibrary: { file: 'web/library.html', edits: [['id="toLibrary" href="/library"', 'id="toLibrary" href="#"']] },
+  all: tabGoesDead('all'),
+  local: tabGoesDead('local'),
+  remote: tabGoesDead('remote'),
+  both: tabGoesDead('both'),
+  'new-project': { file: 'web/library.js', edits: [[
+    '      run: () => { location.href = `/edit?new=${encodeURIComponent(take.id)}`; },', '      run: () => {},',
+  ]] },
+  download: { file: 'web/library.js', edits: [[
+    '        () => post(`/library/download/${encodeURIComponent(take.id)}`),', '        () => Promise.resolve({}),',
+  ]] },
+  delete: { file: 'web/library.js', edits: [['    run: (host) => askDelete(host, take),', '    run: () => {},']] },
+  more: { file: 'web/library.js', edits: [[
+    "  buildMenu(tile.querySelector('.meta'), more, take, () => tile);",
+    "  buildMenu(tile.querySelector('.meta'), document.createElement('button'), take, () => tile);",
+  ]] },
+  rename: { file: 'web/library.js', edits: [['      run: (tile) => askRename(tile, take),', '      run: () => {},']] },
+  reveal: { file: 'web/library.js', edits: [[
+    '      run: (tile) => run(tile, `showing ${take.id} in ${label}`, () => post(`/library/reveal/${encodeURIComponent(take.id)}`), null, { refresh: false }),',
+    '      run: () => {},',
+  ]] },
+  reclaim: { file: 'web/library.js', edits: [['      run: (tile) => askReclaim(tile, take),', '      run: () => {},']] },
+  vMore: { file: 'web/library.js', edits: [[
+    "  buildMenu(viewer.querySelector('.vhead'), freshMore, take, hostOf);",
+    "  buildMenu(viewer.querySelector('.vhead'), document.createElement('button'), take, hostOf);",
+  ]] },
+  mark: { file: 'web/library.js', edits: [['  paintMarks(vBar, take, timed && !timed.error ? (sourceSec) => skim.seek(sourceSec) : null);', '  paintMarks(vBar, take, () => {});']] },
+  vClose: { file: 'web/library.js', edits: [[
+    "document.getElementById('vClose').addEventListener('click', () => viewer.close());",
+    "document.getElementById('vClose').addEventListener('click', () => {});",
+  ]] },
+  cCancel: { file: 'web/library.js', edits: [[
+    "document.getElementById('cCancel').addEventListener('click', () => dlg.close());",
+    "document.getElementById('cCancel').addEventListener('click', () => {});",
+  ]] },
+  cGo: { file: 'web/library.js', edits: [['  dlg.close();\n  confirmAction?.();\n});', '  dlg.close();\n});']] },
+  rName: { file: 'web/library.js', edits: [[
+    "renameInput.addEventListener('input', validateRename);", '/* dead: nothing listens for typing */',
+  ]] },
+  rCancel: { file: 'web/library.js', edits: [[
+    "document.getElementById('rCancel').addEventListener('click', () => renameDlg.close());",
+    "document.getElementById('rCancel').addEventListener('click', () => {});",
+  ]] },
+  rGo: { file: 'web/library.js', edits: [[
+    "renameGo.addEventListener('click', () => commitRename());", "renameGo.addEventListener('click', () => {});",
+  ]] },
+};
+
 const MUTATIONS = {
   // The library joins on the filename instead of the hash.
   'reconcile-by-filename': { file: 'server/library.js', edits: [[
@@ -365,6 +423,11 @@ const MUTATIONS = {
     'grabberRestarts++; ', '',
   ]] },
 
+  // A launch that never made a process counts as a grabber the sensor went through.
+  'respawns-count-a-failed-launch': { file: 'server/index.js', edits: [
+    ["    proc.on('spawn', () => { grabberSpawns++; });\n", ''],
+    ['    const grabberArgs = buildArgs();', '    grabberSpawns++;\n    const grabberArgs = buildArgs();'],
+  ] },
   // The requested restart is counted where it is learned rather than beside the spawn it
   // excuses, which is where it used to be.
   'respawns-dip-before-the-spawn': { file: 'server/index.js', edits: [[
@@ -604,6 +667,10 @@ const MUTATIONS = {
   // separate declarations of one token invite.
   'faint-fixed-in-one-page': { file: 'web/library.html', edits: [[
     '    --faint: #828c99;', '    --faint: #6d7683;',
+  ]] },
+  // A second declaration of the token in the same block, which is the one the browser renders.
+  'faint-declared-twice': { file: 'web/library.html', edits: [[
+    '    --faint: #828c99;', '    --faint: #828c99;\n    --faint: #6d7683;',
   ]] },
 
   'namespaces-hardcoded': { file: 'server/index.js', edits: [[
@@ -945,8 +1012,11 @@ const MUTATIONS = {
     '  <a class="appback" id="toMenu" href="/"><span class="arrow">&lt;</span><span>Menu</span></a>',
     '  <!-- mutation: no way back -->',
   ]] },
-  // The falsification control for the enumeration, and the only mutation here that is not a
-  // bug being put back.
+  // One per control the sweep drives, each leaving that control rendered and inert.
+  ...Object.fromEntries(Object.entries(DEAD_CONTROLS).map(([key, spec]) => [`dead-${key}`, {
+    ...spec, fails: `the "${key}" row of the control sweep`,
+  }])),
+  // The falsification control for the enumeration: a control the sweep has no driver for.
   'plant-unswept-menu-item': { file: 'web/library.js', edits: [[
     "      item: 'reclaim',",
     `      item: 'planted',
@@ -1085,6 +1155,11 @@ const MUTATIONS = {
   // The path is dropped from the arguments, so the file manager is started on nothing - a route
   // that answers 200 having done something that is not what it says.
   'reveal-drops-the-path': { file: 'server/library.js', edits: [REVEAL_EDIT] },
+  // `--reveal-with` keeps its program and loses the arguments it leads with, so a recorder run by
+  // `node` is never named and `node` is handed the file manager's arguments instead.
+  'reveal-drops-the-prefix': { file: 'server/library.js', edits: [[
+    'const child = spawn(bin, [...prefix, ...args],', 'const child = spawn(bin, args,',
+  ]] },
   // The library page goes back to composing its own refusal.
   'open-decides-its-own-reason': { file: 'web/library.js', edits: [[
     "const cannotOpen = (take) => take.openRefusals[0]?.why ?? '';",
@@ -1780,7 +1855,13 @@ const FATAL_LOG = [
   /recording is off/, // every recorder failure ends here, and none of them says "Error"
   /no free take name/,
 ];
-const looksFatal = (line) => FATAL_LOG.some((re) => re.test(line)) && !BENIGN_LOG.some((re) => re.test(line));
+// A path is not a diagnosis, and the server prints absolute ones, so a checkout whose directory
+// name holds `error` would otherwise read every `starting grabber:` line as fatal.
+const withoutPaths = (line) => line.replace(/[^\s'"]*[\\/][^\s'"]*/g, '');
+const looksFatal = (line) => {
+  const message = withoutPaths(line);
+  return FATAL_LOG.some((re) => re.test(message)) && !BENIGN_LOG.some((re) => re.test(message));
+};
 
 // The predicate's own falsification control, run before anything else so a sweep that has been
 // quietly blinded says so in the first three lines rather than by passing a mutated tree.
@@ -1797,6 +1878,11 @@ function checkLogPredicate() {
     ['[recorder] 2026-07-31-take1 is already taken, trying the next name', false],
     ['[server] 24.8 fps  12.2 MB/s  dropped=0  clients=1', false],
     ['[recorder] take 2026-07-31-take3 open', false],
+    // The paths a checkout lends every line, and the fatal lines that must survive losing them.
+    ['[server] starting grabber: /w/fixes-an-error-channel/native/build/grabber --source /w/throw/sample.knct', false],
+    ['[server] cannot open /w/unhandled-errors/missing.knct: ENOENT: no such file or directory', false],
+    ['[recorder] cannot open /caps/error-dir/take1.knct: EIO: i/o error - recording is off', true],
+    ['[server] capture request failed: Error: short read at 4096 in /caps/an-error-take.knct', true],
   ];
   const wrong = cases.filter(([line, want]) => looksFatal(line) !== want);
   check(wrong.length === 0,
@@ -3395,28 +3481,6 @@ async function runChecks() {
         .catch(() => {});
     }
 
-    await page.evaluate(`globalThis.__library.viewer.open(${JSON.stringify(clipHash2)})`);
-    await page.evaluate('globalThis.__library.viewer.drawn(1)');
-    const DRIVERS = new Set([
-      'toMenu', 'toProjects', 'toLibrary', 'all', 'local', 'remote', 'both',
-      'new-project', 'download', 'delete', 'more',
-      'rename', 'reveal', 'reclaim',
-      'vMore', 'vClose', 'mark',
-      'cCancel', 'cGo', 'rCancel', 'rGo', 'rName',
-    ]);
-    const rendered = await page.evaluate('globalThis.__library.controls()');
-    const unswept = rendered.filter((c) => !DRIVERS.has(c.key));
-    check(unswept.length === 0,
-      `every interactive control the library renders has a driver in this file (${rendered.length} controls)`,
-      unswept.length ? `no driver for ${[...new Set(unswept.map((c) => `${c.where}:${c.key}`))].join(' ')}`
-        : [...new Set(rendered.map((c) => c.key))].join(' '));
-    const present = new Set(rendered.map((c) => c.key));
-    const missing = [...DRIVERS].filter((k) => !present.has(k));
-    check(missing.length === 0,
-      'and every control this file names is one the library still renders',
-      missing.join(' ') || `${present.size} distinct controls on screen`);
-    await page.evaluate('globalThis.__library.viewer.close()');
-
     check(errors.length === 0, 'the library raises no page errors', errors.slice(0, 2).join(' | '));
     await page.close();
   }
@@ -3675,9 +3739,12 @@ async function runChecks() {
       markLine({ id: 'r1', sourceMs: 40, label: 'the moment', at: 1000 }));
 
     const revealLog = join(WORK, 'reveal-argv.log');
-    const fakeOpener = join(WORK, 'fake-file-manager.sh');
-    writeFileSync(fakeOpener, `#!/bin/sh\nprintf '%s\\n' "$@" >> ${JSON.stringify(revealLog)}\n`);
-    chmodSync(fakeOpener, 0o755);
+    // A script run by this process's own `node`, which starts on every platform the server spawns
+    // on without a shell, where a shebang script cannot start on Windows at all.
+    const recorder = join(WORK, 'fake-file-manager.mjs');
+    writeFileSync(recorder, "import { appendFileSync } from 'node:fs';\n"
+      + `appendFileSync(${JSON.stringify(revealLog)}, process.argv.slice(2).map((a) => \`\${a}\\n\`).join(''));\n`);
+    const fakeOpener = `"${process.execPath}" "${recorder}"`;
     const argvSeen = () => (existsSync(revealLog) ? readFileSync(revealLog, 'utf8').trim().split('\n') : []);
 
     const renameUrl = await startServer(root, [
@@ -6706,9 +6773,13 @@ async function runChecks() {
     check(health.dropped === undefined,
       'and nothing on it is called `dropped` unqualified, since the only count here is monitors failing to keep up with the output rather than the sensor failing to deliver',
       `dropped=${JSON.stringify(health.dropped)}, monitorDropped=${health.monitorDropped}`);
-    check(['lost', 'absent', 'starting'].includes(health.state) && health.respawns >= 1,
-      'a server with no sensor says so and counts the grabbers it has been through, which is the flapping question the backoff\'s own counter cannot answer',
-      `state ${health.state}, ${health.respawns} respawns`);
+    // The staged tree has no `native/`, so every launch on this server fails before a process exists.
+    const macLog = servers.find((sv) => sv.port === MAC_PORT).log.join('');
+    const refusedLaunches = macLog.split('\n').filter((l) => l.includes('[server] grabber could not start')).length;
+    const grabberExits = macLog.split('\n').filter((l) => l.includes('[server] grabber exited')).length;
+    check(['lost', 'absent'].includes(health.state) && refusedLaunches >= 2 && grabberExits === 0 && health.respawns === 0,
+      'a server whose grabber cannot even be launched says the sensor is lost and counts no respawns, because a launch that made no process is not a sensor that dropped',
+      `state ${health.state}, ${health.respawns} respawns, over ${refusedLaunches} launches refused and ${grabberExits} grabbers exited`);
 
     // The window that closed last, on a server where no window has ever carried a frame.
     let closed = null;
@@ -7435,6 +7506,323 @@ async function runChecks() {
       late.length ? late.join(', ') : `${reaching.length} handlers, all bound ahead of their first await`);
   }
 
+  console.log('\n[library] every control the library renders is driven, and pressing it does what it says');
+  {
+    // Its own pair of machines, because half of these presses delete, rename or copy a take, and a
+    // driver that asserted only a name would pass a control wired to nothing.
+    await exitedOn(MAC_PORT + 17);
+    await exitedOn(MAC_PORT + 18);
+    const sweepNode = join(WORK, 'sweep-node');
+    const sweepMac = join(WORK, 'sweep-mac');
+    for (const d of [sweepNode, sweepMac]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    // One take per press that changes the library, so no driver reads another's aftermath.
+    const at = (minute) => ({ startedAt: Date.UTC(2026, 7, 1, 10, minute) });
+    writeTake(sweepNode, 'sweep-remote', { frames: 6, ...at(0) });
+    writeTake(sweepNode, 'sweep-both', { frames: 7, ...at(1) });
+    writeTake(sweepMac, 'sweep-both', { frames: 7, ...at(1) });
+    writeTake(sweepMac, 'sweep-marked', { frames: 30, ...at(2) });
+    writeTake(sweepMac, 'sweep-kept', { frames: 5, ...at(3) });
+    writeTake(sweepMac, 'sweep-doomed', { frames: 4, ...at(4) });
+    writeTake(sweepMac, 'sweep-renamed', { frames: 3, ...at(5) });
+    writeFileSync(join(sweepMac, 'sweep-marked.marks.jsonl'),
+      markLine({ id: 's1', sourceMs: 500, label: 'halfway', at: 1000 }));
+    const sweepLog = join(WORK, 'sweep-reveal-argv.log');
+    const sweepRecorder = join(WORK, 'sweep-file-manager.mjs');
+    writeFileSync(sweepRecorder, "import { appendFileSync } from 'node:fs';\n"
+      + `appendFileSync(${JSON.stringify(sweepLog)}, process.argv.slice(2).map((a) => \`\${a}\\n\`).join(''));\n`);
+    rmSync(sweepLog, { force: true });
+
+    const sweepNodeUrl = await startServer(root, ['--captures', sweepNode, '--name', 'sweep-node',
+      '--projects', join(WORK, 'sweep-node-projects'), '--presets', join(WORK, 'sweep-node-presets')], MAC_PORT + 17);
+    const sweepUrl = await startServer(root, ['--captures', sweepMac, '--name', 'sweep-mac',
+      '--node', sweepNodeUrl, '--node-name', 'sweep-node', '--reveal-with', `"${process.execPath}" "${sweepRecorder}"`,
+      '--projects', join(WORK, 'sweep-projects'), '--presets', join(WORK, 'sweep-presets')], MAC_PORT + 18);
+    const { page } = await openPage(browser, libraryPage(sweepUrl));
+    const ready = async () => {
+      await page.waitForFunction('globalThis.__library !== undefined && document.querySelectorAll(".tile").length > 0',
+        null, { timeout: 20000 });
+    };
+    await ready();
+
+    const listing = async () => (await getJson(`${sweepUrl}/library/all`)).takes;
+    const takeCalled = async (id) => (await listing()).find((t) => t.id === id) ?? null;
+    const until = async (test, ms = 15000) => {
+      for (const end = Date.now() + ms; Date.now() < end;) {
+        if (await test()) return true;
+        await new Promise((done) => { setTimeout(done, 150); });
+      }
+      return test();
+    };
+    // A DOM click on the control itself, which runs the listener a press runs and nothing else,
+    // so a dead opener does not stop the control behind it from being reached by the next driver.
+    const press = (selector) => page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return false;
+      el.click();
+      return true;
+    }, selector);
+    const tileSel = (id, rest) => `.tile[data-id="${id}"] ${rest}`;
+    const dialogOpen = (id) => page.evaluate((d) => document.getElementById(d).open, id);
+    // Back to a page with nothing open and every take shown, whatever the last driver left.
+    const settle = async () => {
+      try {
+        await page.evaluate(() => {
+          for (const d of document.querySelectorAll('dialog[open]')) d.close();
+          document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+          globalThis.__library.filter('all');
+        });
+      } catch {
+        await page.goto(libraryPage(sweepUrl), { waitUntil: 'domcontentloaded' });
+        await ready();
+      }
+    };
+    // Pressing a link is a page load, or it is nothing.
+    const follow = async (selector, wantPath) => {
+      await page.evaluate(() => { globalThis.__beforePress = true; });
+      const loaded = page.waitForEvent('load', { timeout: 8000 }).then(() => true, () => false);
+      const pressed = await press(selector);
+      const landed = pressed && await loaded;
+      const path = new URL(page.url()).pathname;
+      const fresh = landed && await page.evaluate(() => globalThis.__beforePress !== true).catch(() => false);
+      const ok = landed && fresh && path === wantPath;
+      await page.goto(libraryPage(sweepUrl), { waitUntil: 'domcontentloaded' });
+      await ready();
+      return { ok, detail: `${pressed ? 'pressed' : 'not found'}, ${landed ? `loaded ${path}` : `no page load, still ${path}`}` };
+    };
+    const filterTo = async (filter) => {
+      await page.evaluate((f) => globalThis.__library.filter(f === 'all' ? 'local' : 'all'), filter);
+      await press(`.tab[data-filter="${filter}"]`);
+      const shown = await page.evaluate(() => globalThis.__library.tiles().map((t) => t.state));
+      const pressedTab = await page.evaluate((f) => document.querySelector(`.tab[data-filter="${f}"]`)
+        .getAttribute('aria-pressed'), filter);
+      const everyState = new Set((await listing()).map((t) => t.state));
+      const ok = pressedTab === 'true' && shown.length > 0 && (filter === 'all'
+        ? shown.length === (await listing()).length && new Set(shown).size === everyState.size
+        : shown.every((s) => s === filter));
+      return { ok, detail: `aria-pressed ${pressedTab}, tiles ${shown.join(' ') || 'none'}` };
+    };
+    const openRename = async (id) => {
+      await press(tileSel(id, '.mi[data-item="rename"]'));
+      return dialogOpen('rename');
+    };
+    const openDelete = async (id) => {
+      await press(tileSel(id, '.act[data-act="delete"]'));
+      return dialogOpen('confirm');
+    };
+    const openViewerOn = async (id) => {
+      // The key comes off the page's own listing, the one `takeByKey` searches, so a listing in
+      // flight cannot hand `open` a key it does not hold and leave the viewer shut.
+      await until(() => page.evaluate((wanted) => {
+        const take = globalThis.__library.state().takes.find((t) => t.id === wanted);
+        if (!take) return false;
+        globalThis.__library.viewer.open(take.hash ?? take.id);
+        return globalThis.__library.viewer.state()?.id === wanted;
+      }, id));
+      await page.evaluate('globalThis.__library.viewer.drawn(1)');
+    };
+    const markedPath = join(sweepMac, 'sweep-marked.knct');
+
+    // In the order they run. Each presses its control and reads the first thing a press changes.
+    const DRIVERS = {
+      all: { does: 'shows every take again', run: () => filterTo('all') },
+      local: { does: 'shows only the takes on this machine', run: () => filterTo('local') },
+      remote: { does: 'shows only the takes on the node', run: () => filterTo('remote') },
+      both: { does: 'shows only the takes on both', run: () => filterTo('both') },
+      more: {
+        does: 'opens the tile\'s menu',
+        run: async () => {
+          await press(tileSel('sweep-kept', '.act[data-act="more"]'));
+          const open = await page.evaluate(() => [...document.querySelectorAll('.tile')]
+            .find((t) => t.dataset.id === 'sweep-kept').querySelector('.menu').hidden === false);
+          return { ok: open, detail: open ? 'menu shown' : 'menu still hidden' };
+        },
+      },
+      delete: {
+        does: 'asks to delete that take',
+        run: async () => {
+          const open = await openDelete('sweep-kept');
+          const body = await page.evaluate(() => document.getElementById('cBody').textContent);
+          return { ok: open && body === 'sweep-kept', detail: `confirm ${open ? 'open' : 'shut'}, naming ${body || 'nothing'}` };
+        },
+      },
+      cCancel: {
+        does: 'shuts the confirm and deletes nothing',
+        run: async () => {
+          const opened = await openDelete('sweep-kept');
+          await press('#cCancel');
+          const shut = !(await dialogOpen('confirm'));
+          const kept = existsSync(join(sweepMac, 'sweep-kept.knct'));
+          return { ok: opened && shut && kept, detail: `${opened ? 'opened' : 'never opened'}, ${shut ? 'shut' : 'still open'}, take ${kept ? 'kept' : 'gone'}` };
+        },
+      },
+      cGo: {
+        does: 'deletes the take the confirm names',
+        run: async () => {
+          const opened = await openDelete('sweep-doomed');
+          await press('#cGo');
+          const gone = await until(async () => !existsSync(join(sweepMac, 'sweep-doomed.knct'))
+            && !(await takeCalled('sweep-doomed')));
+          return { ok: opened && gone, detail: `${opened ? 'confirm opened' : 'confirm never opened'}, take ${gone ? 'deleted' : 'still there'}` };
+        },
+      },
+      rename: {
+        does: 'opens the rename box on that take',
+        run: async () => {
+          const open = await openRename('sweep-kept');
+          const value = await page.evaluate(() => document.getElementById('rName').value);
+          return { ok: open && value === 'sweep-kept', detail: `box ${open ? 'open' : 'shut'}, holding ${value || 'nothing'}` };
+        },
+      },
+      rName: {
+        does: 'checks the name as it is typed',
+        run: async () => {
+          const opened = await openRename('sweep-kept');
+          const read = () => page.evaluate(() => ({
+            why: document.getElementById('rWhy').textContent,
+            blocked: document.getElementById('rGo').disabled,
+          }));
+          await page.locator('#rName').fill('not a name!', { timeout: 3000 }).catch(() => {});
+          const bad = await read();
+          await page.locator('#rName').fill('sweep-typed-name', { timeout: 3000 }).catch(() => {});
+          const good = await read();
+          const ok = opened && /letters, digits/.test(bad.why) && bad.blocked && good.why === '' && !good.blocked;
+          return { ok, detail: `${opened ? 'opened' : 'never opened'}; "not a name!" -> ${bad.blocked ? 'blocked' : 'allowed'} "${bad.why.slice(0, 30)}"; a legal name -> ${good.blocked ? 'blocked' : 'allowed'}` };
+        },
+      },
+      rCancel: {
+        does: 'shuts the rename box and renames nothing',
+        run: async () => {
+          const opened = await openRename('sweep-kept');
+          await press('#rCancel');
+          const shut = !(await dialogOpen('rename'));
+          const kept = existsSync(join(sweepMac, 'sweep-kept.knct'));
+          return { ok: opened && shut && kept, detail: `${opened ? 'opened' : 'never opened'}, ${shut ? 'shut' : 'still open'}, name ${kept ? 'kept' : 'changed'}` };
+        },
+      },
+      rGo: {
+        does: 'renames the take to what was typed',
+        run: async () => {
+          const opened = await openRename('sweep-renamed');
+          await page.locator('#rName').fill('sweep-renamed-after', { timeout: 3000 }).catch(() => {});
+          await press('#rGo');
+          const moved = await until(async () => existsSync(join(sweepMac, 'sweep-renamed-after.knct'))
+            && Boolean(await takeCalled('sweep-renamed-after')) && !(await takeCalled('sweep-renamed')));
+          return { ok: opened && moved, detail: `${opened ? 'opened' : 'never opened'}, ${moved ? 'listed under the new name' : 'still under the old name'}` };
+        },
+      },
+      reveal: {
+        does: 'starts the file manager on that take',
+        run: async () => {
+          const wanted = REVEAL[process.platform]?.args(markedPath) ?? [markedPath];
+          const seen = () => (existsSync(sweepLog) ? readFileSync(sweepLog, 'utf8').trim().split('\n') : []);
+          await press(tileSel('sweep-marked', '.mi[data-item="reveal"]'));
+          const started = await until(() => wanted.every((arg) => seen().includes(arg)), 6000);
+          return { ok: started, detail: `wanted ${JSON.stringify(wanted).slice(-50)}, saw ${JSON.stringify(seen()).slice(-50)}` };
+        },
+      },
+      reclaim: {
+        does: 'asks to reclaim the node\'s copy',
+        run: async () => {
+          await press(tileSel('sweep-both', '.mi[data-item="reclaim"]'));
+          const open = await dialogOpen('confirm');
+          const said = await page.evaluate(() => `${document.getElementById('cTitle').textContent} / ${document.getElementById('cGo').textContent}`);
+          return { ok: open && said === 'Reclaim on sweep-node / Reclaim', detail: `confirm ${open ? 'open' : 'shut'}: ${said}` };
+        },
+      },
+      download: {
+        does: 'copies the node\'s take to this machine',
+        run: async () => {
+          await press(tileSel('sweep-remote', '.act[data-act="download"]'));
+          const copied = await until(async () => existsSync(join(sweepMac, 'sweep-remote.knct'))
+            && (await takeCalled('sweep-remote'))?.state === 'both');
+          return { ok: copied, detail: `sweep-remote is ${(await takeCalled('sweep-remote'))?.state ?? 'unlisted'}` };
+        },
+      },
+      vMore: {
+        does: 'opens the viewer\'s menu',
+        run: async () => {
+          await openViewerOn('sweep-marked');
+          await press('#vMore');
+          const open = await page.evaluate(() => document.querySelector('#viewer .vhead .menu')?.hidden === false);
+          return { ok: open, detail: open ? 'menu shown' : 'menu still hidden' };
+        },
+      },
+      mark: {
+        does: 'moves the viewer to that mark',
+        run: async () => {
+          await openViewerOn('sweep-marked');
+          const before = (await page.evaluate('globalThis.__library.viewer.state()'))?.index;
+          await press('#viewer .mk');
+          const after = (await page.evaluate('globalThis.__library.viewer.state()'))?.index;
+          return { ok: before === 0 && after > 0, detail: `frame ${before} -> ${after}` };
+        },
+      },
+      vClose: {
+        does: 'shuts the viewer',
+        run: async () => {
+          await openViewerOn('sweep-marked');
+          const opened = await page.evaluate('globalThis.__library.viewer.isOpen()');
+          await press('#vClose');
+          const shut = await page.evaluate('globalThis.__library.viewer.isOpen()') === false;
+          return { ok: opened && shut, detail: `${opened ? 'opened' : 'never opened'}, ${shut ? 'shut' : 'still open'}` };
+        },
+      },
+      'new-project': {
+        does: 'opens the editor on a new project from that take',
+        run: async () => {
+          // The editor itself is not what this presses: a stub answers, so the row is the address.
+          await page.route(/\/edit\?/, (route) => route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>stub</title>' }));
+          const loaded = page.waitForEvent('load', { timeout: 8000 }).then(() => true, () => false);
+          const pressed = await press(tileSel('sweep-marked', '.act[data-act="new-project"]'));
+          const landed = pressed && await loaded;
+          const url = new URL(page.url());
+          await page.unroute(/\/edit\?/);
+          const ok = landed && url.pathname === '/edit' && url.searchParams.get('new') === 'sweep-marked';
+          await page.goto(libraryPage(sweepUrl), { waitUntil: 'domcontentloaded' });
+          await ready();
+          return { ok, detail: landed ? `${url.pathname}${url.search}` : 'no page load' };
+        },
+      },
+      toLibrary: { does: 'reloads the media library', run: () => follow('#toLibrary', '/library') },
+      toProjects: { does: 'goes to the projects', run: () => follow('#toProjects', '/projects') },
+      toMenu: { does: 'goes back to the menu', run: () => follow('#toMenu', '/') },
+    };
+
+    // What the page renders with the viewer open on a marked take, which is when every kind shows.
+    await openViewerOn('sweep-marked');
+    const rendered = await page.evaluate('globalThis.__library.controls()');
+    await settle();
+    const unswept = rendered.filter((c) => !Object.hasOwn(DRIVERS, c.key));
+    check(unswept.length === 0,
+      `every interactive control the library renders has a driver in this file (${rendered.length} controls)`,
+      unswept.length ? `no driver for ${[...new Set(unswept.map((c) => `${c.where}:${c.key}`))].join(' ')}`
+        : [...new Set(rendered.map((c) => c.key))].join(' '));
+    const present = new Set(rendered.map((c) => c.key));
+    const missing = Object.keys(DRIVERS).filter((k) => !present.has(k));
+    check(missing.length === 0,
+      'and every control this file drives is one the library still renders',
+      missing.join(' ') || `${present.size} distinct controls on screen`);
+    check(eq(Object.keys(DRIVERS).sort(), Object.keys(DEAD_CONTROLS).sort()),
+      'and every driven control has a `dead-` mutation leaving it inert, so each row below is one a dead control can redden',
+      `${Object.keys(DRIVERS).length} driven, ${Object.keys(DEAD_CONTROLS).length} with a dead- mutation`);
+
+    for (const [key, driver] of Object.entries(DRIVERS)) {
+      let result;
+      try {
+        result = await driver.run();
+      } catch (err) {
+        result = { ok: false, detail: `the driver threw: ${String(err.message).split('\n')[0]}` };
+      }
+      check(result.ok, `pressing ${key} ${driver.does}`, result.detail);
+      await settle();
+    }
+    await page.close();
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 17 || sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
+  }
+
   console.log('\n[library] the faint token clears AA on every page that declares it');
   {
     const channel = (c) => (c / 255 <= 0.04045 ? c / 255 / 12.92 : ((c / 255 + 0.055) / 1.055) ** 2.4);
@@ -7448,7 +7836,10 @@ async function runChecks() {
     };
     // The floor WCAG AA sets for body text, and these are 9px readouts.
     const AA = 4.5;
-    const tokenIn = (css, name) => (css.match(new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{6})`)) ?? [])[1] ?? null;
+    // Every declaration of a token, comments aside. The browser takes the last one in a block, so
+    // a reading of the first measures a value the page may not render.
+    const declarationsOf = (css, name) => [...css.replace(/\/\*[\s\S]*?\*\//g, '')
+      .matchAll(new RegExp(`(?<![\\w-])--${name}\\s*:\\s*([^;}]*)`, 'g'))].map((m) => m[1].trim());
 
     // The build under test, which on a mutated run is not the repo's own tree.
     const sourceOf = (rel) => readFileSync(join(root, rel), 'utf8');
@@ -7456,16 +7847,21 @@ async function runChecks() {
     const pages = readdirSync(join(REPO, 'web')).filter((f) => f.endsWith('.html')).sort();
     const declaring = pages
       .map((file) => ({ file, css: sourceOf(`web/${file}`) }))
-      .filter((p) => tokenIn(p.css, 'faint') !== null);
+      .map((p) => ({ ...p, faints: declarationsOf(p.css, 'faint') }))
+      .filter((p) => p.faints.length > 0);
     check(declaring.length >= 3,
       `every page declaring --faint is measured rather than three being named (${pages.length} pages in web/, ${declaring.length} declaring it)`,
       declaring.map((p) => p.file).join(' '));
 
-    for (const { file, css } of declaring) {
-      const faint = tokenIn(css, 'faint');
+    for (const { file, css, faints } of declaring) {
+      check(faints.length === 1 && /^#[0-9a-fA-F]{6}$/.test(faints[0]),
+        `${file}: declares --faint exactly once, as a colour this can measure`,
+        faints.join(', '));
+      // The one that renders, which is the last whatever the row above found.
+      const faint = faints.at(-1);
       const surfaces = [...css.matchAll(/--(paper(?:-\d)?):\s*(#[0-9a-fA-F]{6})/g)]
         .map((m) => ({ name: m[1], hex: m[2] }));
-      const measured = surfaces.map((s) => ({ ...s, ratio: ratio(faint, s.hex) }));
+      const measured = /^#[0-9a-fA-F]{6}$/.test(faint) ? surfaces.map((s) => ({ ...s, ratio: ratio(faint, s.hex) })) : [];
       const worst = measured.reduce((a, b) => (a.ratio <= b.ratio ? a : b), measured[0]);
       check(measured.length >= 2 && worst.ratio >= AA,
         `${file}: --faint clears ${AA}:1 against every surface the page declares`,
@@ -7473,14 +7869,15 @@ async function runChecks() {
     }
 
     // And the restating itself, which is the finding the contrast is a symptom of.
-    const values = new Set(declaring.map((p) => tokenIn(p.css, 'faint')));
+    const values = new Set(declaring.map((p) => p.faints.at(-1)));
     check(values.size === 1,
       'and every page declares the same value, because nav.css reads the token without declaring one and cannot be right on two pages that disagree',
-      declaring.map((p) => `${p.file} ${tokenIn(p.css, 'faint')}`).join(', '));
+      declaring.map((p) => `${p.file} ${p.faints.at(-1)}`).join(', '));
     const navCss = sourceOf('web/nav.css');
-    check(/var\(--faint\)/.test(navCss) && tokenIn(navCss, 'faint') === null,
+    const navFaints = declarationsOf(navCss, 'faint');
+    check(/var\(--faint\)/.test(navCss) && navFaints.length === 0,
       'which is not a hypothetical: the shared stylesheet uses the token and declares none',
-      `nav.css reads it, declares ${tokenIn(navCss, 'faint') ?? 'nothing'}`);
+      `nav.css reads it, declares ${navFaints.join(', ') || 'nothing'}`);
   }
 
   // Every server this run started, and a row saying so.
@@ -7488,12 +7885,10 @@ async function runChecks() {
   check(swept.length === serversStarted,
     'the fatal-log sweep reads every server this run started, including the ones whose port was later reclaimed',
     `swept ${swept.length} of ${serversStarted} started`);
-  for (const { log } of swept) {
-    const text = log.join('');
-    const bad = text.split('\n').filter(looksFatal);
-    if (bad.length) {
-      console.log(`\n[library] server log:\n  ${bad.slice(0, 4).join('\n  ')}`);
-      failures++;
-    }
+  // A row per server, so a fatal line is a failure this run prints rather than one it counts.
+  for (const { log, port } of swept) {
+    const bad = log.join('').split('\n').filter(looksFatal);
+    check(bad.length === 0, `the server on port ${port} logged nothing that means this run went wrong`,
+      bad.length ? bad.slice(0, 3).join(' | ') : `${log.join('').split('\n').length} lines read`);
   }
 }

@@ -91,17 +91,22 @@ const MIME = {
 
 const WEB_DIR = join(ROOT, 'web');
 const THREE_DIR = join(ROOT, 'node_modules/three');
+// A program and the arguments it leads with, as one space-separated flag value. Double quotes keep
+// a path with a space in it whole, which the default Node install on Windows has.
+const commandOf = (value) => [...(value ?? '').matchAll(/"([^"]*)"|(\S+)/g)].map((m) => m[1] ?? m[2]);
+
 // The grabber binary, space-separated so the flag can carry the writer's own arguments.
-const [GRABBER_BIN, ...GRABBER_ARGS] = (flag('--grabber') ?? '').split(' ').filter(Boolean);
+const [GRABBER_BIN, ...GRABBER_ARGS] = commandOf(flag('--grabber'));
 
 // A flag, because a capture node and an editing machine are the same program and the only way to
 // run both on one host is separate directories.
 const CAPTURES_DIR = resolve(flag('--captures', join(ROOT, 'captures')));
 const EXPORTS_DIR = join(ROOT, 'exports');
 
-// The program `POST /library/reveal/:id` starts, substituting the program and nothing else, so a
-// proof tool measures the arguments the platform's file manager would have been given.
-const REVEAL_WITH = flag('--reveal-with', null);
+// The program `POST /library/reveal/:id` starts, and any arguments it leads with, substituting
+// those and nothing else, so a proof tool measures the arguments the platform's file manager
+// would have been given. A prefix is what lets that program be a script run by a named `node`.
+const REVEAL_WITH = commandOf(flag('--reveal-with'));
 
 // A bare startsWith would also match a sibling like `web-private`.
 const isInside = (dir, candidate) => candidate === dir || candidate.startsWith(dir + sep);
@@ -528,7 +533,7 @@ async function serveReveal(req, res, [id]) {
     return;
   }
   try {
-    sendJson(res, await revealTake(CAPTURES_DIR, id, { program: REVEAL_WITH }));
+    sendJson(res, await revealTake(CAPTURES_DIR, id, { command: REVEAL_WITH }));
   } catch (err) {
     sendJson(res, { error: err.message }, 409);
   }
@@ -2113,9 +2118,6 @@ function startLive() {
 
   const spawnGrabber = () => {
     if (standby || shuttingDown || child || spawnTimer) return;
-    // Counted here rather than in the backoff, because every road to a running grabber ends at
-    // this function, so a path added later is counted by going through it.
-    grabberSpawns++;
     const grabberArgs = buildArgs();
     console.log(`[server] starting grabber: ${bin} ${grabberArgs.join(' ')}`);
     setSensorState('starting');
@@ -2123,6 +2125,10 @@ function startLive() {
     const parser = new MessageParser();
     // stdin is a pipe, so settings that need no restart reach the running grabber.
     const proc = spawn(bin, grabberArgs, { stdio: ['pipe', 'pipe', 'inherit'] });
+    // Counted when a process exists: a binary that is missing or built for another machine never
+    // emits `spawn`, and counting the attempt reads each backoff retry as the sensor flapping.
+    // Here rather than in the backoff, so a path to a running grabber added later is counted too.
+    proc.on('spawn', () => { grabberSpawns++; });
     child = proc;
     child.stdin.on('error', () => { /* the grabber can exit mid-write */ });
     // A grabber that cannot be spawned at all arrives as an `error` rather than an exit, and an
