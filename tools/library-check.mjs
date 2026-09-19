@@ -739,7 +739,7 @@ const MUTATIONS = {
   // action carries the weaker check. Anchored on the descriptor's hash since `removeTake` stopped
   // hashing by name.
   'delete-trusts-sidecar': { file: 'server/library.js', edits: [[
-    '  const { identity: hashed, hash: actual } = await hashThrough(path);',
+    '  const { identity: hashed, hash: actual } = await hashThrough(path, { id, ownsFile });',
     '  const hashed = takeIdentity(path);\n  const actual = (await cachedIndex(path)).hash;',
   ]] },
   // Removal goes back to leaving the marks log under the freed name, where the next take given that
@@ -6288,7 +6288,7 @@ async function runChecks() {
       const reclaiming = post(`${macUrlHere}/library/reclaim/shared`).finally(() => { reclaimSettled = true; });
       for (let i = 0; i < 400 && heldLogs.length === 0; i++) await new Promise((done) => { setTimeout(done, 50); });
       const late = { id: 'm-late-on-node', sourceMs: 30, label: 'pressed while the reclaim ran', at: 3 };
-      const pressed = await post(`${nodeUrlHere}/capture/shot-x/marks`, { marks: [late] });
+      const pressed = await post(`${nodeUrlHere}/capture/${encodeURIComponent(takeA.hash)}/marks`, { marks: [late] });
       const heldDeletes = heldLogs.length;
       const lateWindow = heldDeletes === 1 && !reclaimSettled && !pressed.error;
       heldLogs.holdDelete = false;
