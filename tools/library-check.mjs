@@ -1526,7 +1526,8 @@ function buildFixture() {
 
   // Both ends of the capture format's band, and the second one is why there are two.
   writeTake(macCaps, 'future-format-take', { frames: 6, format: CAPTURE_FORMAT + 1 });
-  writeTake(macCaps, 'generation-zero-take', { frames: 6 });
+  // Seven frames rather than six, or it is `same-name`'s bytes and the two share one hash log.
+  writeTake(macCaps, 'generation-zero-take', { frames: 7 });
 
   // Mark counts the tile renders differently.
   writeMarkLog(macCaps, 'local-clip',
