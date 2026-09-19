@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import * as THREE from 'three';
 import {
   BloomPass, BLOOM_LEVELS, bloomChainSize, bloomWeights, BLOOM_COMPAT_GAIN,
 } from '../web/bloom-pass.js';
@@ -51,7 +52,7 @@ test('a buffer too narrow to halve stops at one texel rather than asking for non
 });
 
 test('the pass halves that chain five times and floors every level at one', () => {
-  const pass = new BloomPass(1.0, 0.6, 0.85);
+  const pass = new BloomPass(1.0, 0.6, 0.85, THREE.HalfFloatType);
   assert.equal(pass.targets.length, BLOOM_LEVELS);
 
   pass.setSize(533, 300);
@@ -102,7 +103,7 @@ test('the ratios the up chain carries telescope back into the weighted composite
 test('the pass holds autoClear down while it draws, and hands it back', () => {
   const seen = [];
   const target = { texture: {}, width: 960, height: 600 };
-  const pass = new BloomPass(0.5, 0.7, 0.2);
+  const pass = new BloomPass(0.5, 0.7, 0.2, THREE.HalfFloatType);
   pass.setSize(480, 300);
   const renderer = {
     autoClear: true,
@@ -147,7 +148,7 @@ test('the pass holds autoClear down while it draws, and hands it back', () => {
     clear() {},
     render() { refuses.push(this.autoClear); },
   };
-  const second = new BloomPass(0.5, 0.7, 0.2);
+  const second = new BloomPass(0.5, 0.7, 0.2, THREE.HalfFloatType);
   second.setSize(480, 300);
   second.render(stubborn, { texture: {} }, target);
   assert.ok(refuses.length === 10 && refuses.every((auto) => auto === true),
@@ -155,4 +156,12 @@ test('the pass holds autoClear down while it draws, and hands it back', () => {
 
   pass.dispose();
   second.dispose();
+});
+
+test('every level holds the pixel type it was handed, and a pass handed none refuses to build', () => {
+  for (const type of [THREE.HalfFloatType, THREE.UnsignedByteType]) {
+    const pass = new BloomPass(0.5, 0.7, 0.2, type);
+    assert.deepEqual(pass.targets.map((t) => t.texture.type), Array(BLOOM_LEVELS).fill(type));
+  }
+  assert.throws(() => new BloomPass(0.5, 0.7, 0.2), /pixel type/);
 });

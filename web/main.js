@@ -44,12 +44,13 @@ import {
   depthCurr, colorPrev, bindDepth, bindColor, resetColorSource, plantColor, boundColorImages,
 } from './gpu-textures.js';
 import {
-  statePrev, stateNext, stepSurfaceMemory, refuseAgeCeiling,
+  statePrev, stateTexture, stepSurfaceMemory, refuseAgeCeiling, memoryTargets,
 } from './surface-memory.js';
 import {
-  composer, renderPass, afterimage, mosh, bloom, grade, buildPostChain, setGradeProgram,
+  composer, renderPass, afterimage, mosh, bloom, grade, chainType, buildPostChain, setGradeProgram,
   setMoshProgram,
 } from './post-chain.js';
+import { renderTargetCaps, typeName } from './render-targets.js';
 import {
   geometry, uniforms, material, cloud, level, levelAngles, transform, setAdditive,
   setCloudProgram, cropReach, croppedOut,
@@ -294,6 +295,27 @@ function applyWorldTilt() {
 
 buildPostChain(shaderPrograms.grade, shaderPrograms.mosh);
 
+/**
+ * Says what this browser cannot draw, once, and leaves it standing: the decision behind it is
+ * made once per page, so the line stays true until the page is loaded somewhere else.
+ */
+function paintRenderLimits() {
+  const line = document.getElementById('tGpu');
+  if (!line) return;
+  const noFloat = [
+    ...(bootCloud.memory.live ? [] : ['ghost and wake are off']),
+    ...(chainType === THREE.UnsignedByteType ? ['trails, bloom and the grade run at 8 bits'] : []),
+  ];
+  const lines = [
+    ...(noFloat.length ? [`this browser cannot render to float: ${noFloat.join(', and ')}`] : []),
+    ...(chainType === null ? ['this browser cannot render offscreen: trails, bloom and the grade are off'] : []),
+  ];
+  line.textContent = lines.join(' · ');
+  line.title = line.textContent;
+  line.hidden = lines.length === 0;
+}
+paintRenderLimits();
+
 let renderScale = 1;
 
 // The drawing buffer an export has taken over, or null while the window owns it.
@@ -473,7 +495,11 @@ function resize() {
     cam.aspect = width / height;
     cam.updateProjectionMatrix();
   }
-  const ratio = outputSize ? 1 : Math.min(devicePixelRatio, 2) * renderScale;
+  // Capped so the chain's targets fit the largest one this context allocates. An export is refused
+  // at the door instead, because its size is the deliverable's.
+  const ratio = outputSize
+    ? 1
+    : Math.min(Math.min(devicePixelRatio, 2) * renderScale, renderTargetCaps().maxSize / Math.max(width, height));
   renderer.setPixelRatio(ratio);
   // The canvas keeps its CSS box while an export runs. Only the buffer becomes the output's.
   renderer.setSize(width, height, !outputSize);
@@ -508,7 +534,7 @@ addEventListener('resize', () => {
 resize();
 
 function postEnabled() {
-  return afterimage.enabled || mosh.enabled || bloom.enabled || grade.enabled;
+  return chainType !== null && (afterimage.enabled || mosh.enabled || bloom.enabled || grade.enabled);
 }
 
 // Which uniform table each binding writes into. A map rather than a ternary per site, so a
@@ -3643,7 +3669,7 @@ function adoptProgramOut(patch) {
   if (patch.size && Number.isInteger(patch.size.w) && Number.isInteger(patch.size.h)
       && patch.size.w > 0 && patch.size.h > 0) {
     programOutSize = { w: patch.size.w, h: patch.size.h };
-    if (PROGRAM_OUT) { outputSize = { ...programOutSize }; resize(); }
+    if (PROGRAM_OUT) { outputSize = programOutDrawSize(); resize(); }
     if (progSizeEl) progSizeEl.value = `${programOutSize.w}x${programOutSize.h}`;
   }
   if (patch.mode === 'mirror' || patch.mode === 'camera') {
@@ -3659,6 +3685,18 @@ function adoptProgramOut(patch) {
       freeCamera.updateProjectionMatrix();
     }
   }
+}
+
+/**
+ * The size the source draws at: the setting, scaled down whole to the largest target this context
+ * allocates. Never cropped, because a smaller picture of the shot beats a black one.
+ */
+function programOutDrawSize() {
+  const scale = Math.min(1, renderTargetCaps().maxSize / Math.max(programOutSize.w, programOutSize.h));
+  return {
+    w: Math.max(1, Math.floor(programOutSize.w * scale)),
+    h: Math.max(1, Math.floor(programOutSize.h * scale)),
+  };
 }
 
 /** Draw one output frame, called when a depth frame arrives rather than on a clock. */
@@ -3689,8 +3727,11 @@ function paintProgramOutReadout() {
   const decim = monitorState && (monitorState.divisor > 1 || monitorState.stride > 1)
     ? `  ÷${monitorState.divisor} ×${monitorState.stride}`
     : '';
+  const drawn = programOutDrawSize();
+  const capped = drawn.w !== programOutSize.w || drawn.h !== programOutSize.h
+    ? ` capped to ${drawn.w}x${drawn.h}` : '';
   programOutReadout.textContent = `PROGRAM OUT  ${programOutMode}  `
-    + `${programOutSize.w}x${programOutSize.h}  ${programOutFps.toFixed(1)} fps  `
+    + `${programOutSize.w}x${programOutSize.h}${capped}  ${programOutFps.toFixed(1)} fps  `
     + `${programOutMissed} missed${decim}`;
 }
 
@@ -4111,7 +4152,7 @@ function boundBitmaps() {
 
 /** Every clip's ping-pong pair, which is what an accumulator reset has to reach. */
 function clipStateTargets() {
-  return clips.flatMap((clip) => [clip.cloud.memory.statePrev, clip.cloud.memory.stateNext]);
+  return clips.flatMap((clip) => memoryTargets(clip.cloud.memory));
 }
 
 /**
@@ -4168,7 +4209,7 @@ function advanceSurfaceState(dtSec) {
     Math.min(DISCONTINUITY_MS / 1000, Math.max(0.001, dtSec)),
     uniforms.snapDelta.value,
   );
-  uniforms.stateTex.value = statePrev.texture;
+  uniforms.stateTex.value = stateTexture;
 }
 
 let lastProgramTime = 0;
@@ -4259,7 +4300,7 @@ function enterClip(clip, t) {
   counters.clipEntries++;
   if (clip.drawnSinceReset) counters.clipReEntries++;
   clearFeedback(
-    [statePrev, stateNext],
+    memoryTargets(clip.cloud.memory),
     'the surface memory moved: a clip can no longer be cleared on the frame it enters',
   );
   // A stream has no walk to position: its frames arrive rather than being addressed by time.
@@ -5778,6 +5819,10 @@ async function exportClip(options = {}) {
       + `${effective.join(':')}: pick a resolution of the project's shape in Export, or change `
       + 'the shape in Project settings',
     );
+  }
+  const { maxSize } = renderTargetCaps();
+  if (Math.max(width, height) > maxSize) {
+    throw new Error(`this browser renders at most ${maxSize} pixels on a side, so it cannot export ${width}x${height}`);
   }
   const fps = options.fps ?? timeline.outputFps;
   const codec = options.codec ?? d.codec ?? 'h264';
@@ -11470,7 +11515,7 @@ if (EDITING && !REQUESTED_TAKE && !REQUESTED_PROJECT && !REQUESTED_NEW) {
   // `resize()` ran before this branch added program-out, so the canvas sat below no appbar.
   renderer.domElement.style.top = '0px';
   renderer.domElement.style.left = '0px';
-  outputSize = { ...programOutSize };
+  outputSize = programOutDrawSize();
   resize();
   setViewCamera(programCamera);
 
@@ -11580,6 +11625,19 @@ globalThis.__kinect = {
 
   params, applyPreset,
   readings: () => READINGS.slice(),
+
+  /** What this context renders into, and what the page chose from it. */
+  renderCaps: () => {
+    const { types, maxSize } = renderTargetCaps();
+    return {
+      types: types.map(typeName),
+      maxSize,
+      chain: typeName(chainType),
+      memory: selectedClip.cloud.memory.live ? typeName(statePrev.texture.type) : null,
+      buffer: renderer.getDrawingBufferSize(new THREE.Vector2()).toArray(),
+      chainSize: [composer.renderTarget1.width, composer.renderTarget1.height],
+    };
+  },
 
   presetValueNames,
   coreLookNames,
@@ -11984,6 +12042,7 @@ globalThis.__kinect = {
 
   // Reads the surface memory back off the GPU.
   stateStats() {
+    if (!statePrev) return null;
     const buf = new Float32Array(POINTS * 4);
     renderer.readRenderTargetPixels(statePrev, 0, 0, DEPTH_W, DEPTH_H, buf);
     let ghosts = 0, hard = 0, soft = 0, fresh = 0;

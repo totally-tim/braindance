@@ -88,7 +88,7 @@ A mutated run prints the expected failure row when its entry carries a `fails:` 
 For other entries, read the catch from the assertions that fired.
 
 Four tables are too large to reproduce here — `editor-check` declares 202, `library-check` 114,
-`registry-check` 54 and `effect-check` 42. Their sections give the count and the enumerate
+`registry-check` 59 and `effect-check` 42. Their sections give the count and the enumerate
 command prints the names.
 
 ## The sweep
@@ -227,9 +227,40 @@ node tools/registry-check.mjs --url http://localhost:8080
 `--before` and `--against` drive the cross-build arm, which finds its revision by a content
 marker instead of a hash, so a rewritten history does not move it.
 
-54 controls, one per look term or per rule about how a term reaches the pixels.
+59 controls, one per look term or per rule about how a term reaches the pixels.
 `node tools/registry-check.mjs --mutate __enumerate__` prints the names. Read the fired rows and
 not the total.
+
+The last section renders every shipped preset on contexts that render less than this machine.
+Each arm is a browser context whose init script changes WebGL before the page runs, and every
+arm also counts each draw and clear that lands in a framebuffer that cannot complete.
+
+| arm | what it changes | presets |
+| --- | --- | --- |
+| a 2048 texture cap | `MAX_TEXTURE_SIZE` and `MAX_RENDERBUFFER_SIZE` read 2048 and a larger allocation is dropped, at a device pixel ratio of 2 on a 1400x800 viewport | all twelve |
+| neither colour-buffer extension | hides `EXT_color_buffer_float` and `EXT_color_buffer_half_float` | all twelve |
+| no `EXT_color_buffer_float` | hides that one | Blackwall and Ghost |
+| no `EXT_color_buffer_half_float` | hides that one, which is Firefox's own list | Blackwall and Ghost |
+
+The cap arm is Firefox's `privacy.resistFingerprinting`, which LibreWolf turns on by default. It
+also opens `/program` set to 3840x2160 and asks that Blackwall draws there inside the cap. The
+section's five controls, each with the rows it reddened:
+
+- **`targets-ignore-the-size-cap`** — `resize` stops capping the pixel ratio. Ten rows of the cap
+  arm: its buffer row, its eight composer presets, which draw black, and its incomplete-framebuffer
+  row. The four direct presets stay lit, which is the reporter's picture.
+- **`program-out-ignores-the-size-cap`** — `/program` draws at its setting whatever the limit.
+  The cap arm's `/program` row alone.
+- **`chain-assumes-half-float`** — the chain takes half-float without asking. Eleven rows of the
+  no-extension arm: its decision row, its eight composer presets, its incomplete-framebuffer row,
+  and its warning row, which loses the 8-bit clause.
+- **`memory-assumes-half-float`** — the surface memory falls back to half-float on the float
+  extension's name alone. Seven rows of the no-extension arm: its decision row, its
+  incomplete-framebuffer row, its warning row, which loses the ghost-and-wake clause, and the four
+  direct presets, which draw no point, because a memory that never completes reads as age zero.
+- **`types-read-from-extension-names`** — the decision reads extension names in place of
+  framebuffers. Two rows of the Firefox-shaped arm: its decision row, which reads 8-bit for a chain
+  that renders half-float, and its warning row.
 
 Section 1b's `readGhost` row carries a two-sided tolerance: it absorbs up to 64 bytes of 921,600
 and a single step, and the passing line names what it absorbed. A clean run reads
@@ -434,6 +465,8 @@ node tools/export-check.mjs --url http://localhost:8080
 | binaries | ffmpeg and ffprobe, resolved through PATH; `--ffmpeg` and `--ffprobe` override |
 
 Section 9 drives refused edits on purpose and its refusals are DOM-only, so it needs no render.
+Section 10 spoofs a 2048-pixel target limit on one page and asks for an export either side of it;
+each request names an empty frame range, so nothing is encoded whether the door holds or not.
 `--before` drives the cross-build arm.
 
 The lens rows compare the center half of a 50-degree frame with a full 26.25-degree frame
@@ -502,6 +535,8 @@ camera, requiring the smallest sprite above the 10.8-reference-pixel normalizati
 - **`scale-by-width`** — the reference becomes buffer width over 1728 rather than height over
   1080, and every term follows it.
 - **`export-fail-unlinks-output`** — the failure path reaches back to an output it did not write.
+- **`export-ignores-the-size-cap`** — the size door is taken out, so an export larger than the
+  context's target limit starts. Fails section 10's first row alone.
 
 **Known reds.** The recorded `make-sample` baseline has ten fixture-dependent failures.
 
