@@ -4,6 +4,7 @@
 
 import { VALID_ID } from '/format.js';
 import { pollRecordState } from '/record-poll.js';
+import { testTimer } from '/test-timers.js';
 import { createSkim, divisorFor, paintMarks, timesFor } from './take-draw.js';
 
 const grid = document.getElementById('grid');
@@ -77,6 +78,13 @@ function warningsOf(take) {
     });
     return out;
   }
+  if (secondNames(take).length) {
+    out.push({
+      key: 'names',
+      short: `${take.names.length} names`,
+      why: `this take is filed here as ${take.names.join(' and ')}: one take under ${take.names.length} names, so remove the ones you do not want`,
+    });
+  }
   if (take.truncated) {
     out.push({
       key: 'truncated',
@@ -96,6 +104,9 @@ function warningsOf(take) {
 }
 
 const cannotOpen = (take) => take.openRefusals[0]?.why ?? '';
+
+/** The names this take is filed under here besides the one it is listed as. */
+const secondNames = (take) => (Array.isArray(take.names) ? take.names.filter((name) => name !== take.id) : []);
 
 
 /** A button, built rather than interpolated, because a label is not markup either. */
@@ -126,6 +137,10 @@ function cannotDelete(take) {
   }
   if (take.state === 'remote') {
     return `${take.id} is only on ${library.node?.name ?? 'the node'}, and delete removes a file on this machine`;
+  }
+  if (secondNames(take).length) {
+    return `this take is filed here as ${take.names.join(' and ')}: delete would remove one name and leave the take `
+      + 'under the other, so remove the extra name first';
   }
   return unnameable(take);
 }
@@ -249,6 +264,15 @@ function menuItemsFor(take) {
         : `reclaim frees the copy on ${nodeName}, and this take is not in two places`,
       run: (tile) => askReclaim(tile, take),
     },
+    // One per name, so either can be the one kept. The server refuses unless both still hold this take.
+    ...(secondNames(take).length ? take.names : []).map((name) => ({
+      item: `remove-name:${name}`,
+      label: `Remove the name ${name}`,
+      enabled: VALID_ID.test(name),
+      why: VALID_ID.test(name) ? '' : unnameable({ id: name }),
+      run: (tile) => run(tile, `removing the name ${name}`, () => post(`/library/remove-name/${encodeURIComponent(name)}`,
+        { hash: take.hash, keep: take.names.find((other) => other !== name) })).catch(() => {}),
+    })),
   ];
 }
 
@@ -849,7 +873,7 @@ function paint() {
 
 // Bounded, because `NodeLink.takes` carries no timeout and the poll's single-flight guard
 // then skips every tick. Only the poll passes `bound`: a cold library takes minutes to index.
-const LISTING_TIMEOUT_MS = 15000;
+const LISTING_TIMEOUT_MS = testTimer('listing-timeout', 15000);
 
 // Which listing is newest: a poll refresh on the wire when Delete is pressed resolves later.
 let refreshGeneration = 0;

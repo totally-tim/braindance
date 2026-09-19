@@ -259,8 +259,8 @@ const MUTATIONS = {
   // Every clip opens its own copy of its take, so two clips of one take carry two indexes, two
   // caches and two decodes of every frame they both want.
   'take-not-shared': { file: 'web/main.js', edits: [[
-    '  const take = openTakes.get(id) ?? await IndexedTake.open(id);',
-    '  const take = await IndexedTake.open(id);',
+    '  const take = openTakes.get(hash) ?? await IndexedTake.open({ id, hash });',
+    '  const take = await IndexedTake.open({ id, hash });',
   ]],
     fails: 'every clip opening its own copy of its take, so two clips of one take carry two '
       + 'indexes, two caches and two decodes of every frame they both want',
@@ -363,7 +363,10 @@ async function loadPlaywright() {
 }
 
 
-const index = await (await fetch(`${URL_BASE}/capture/${TAKE}/index`)).json();
+// The capture routes name a take by its content hash, and the listing is where a name becomes one.
+const TAKE_KEY = await fetch(`${URL_BASE}/library/takes`).then((res) => res.json())
+  .then((body) => encodeURIComponent(body.takes.find((t) => t.id === TAKE)?.hash ?? TAKE), () => encodeURIComponent(TAKE));
+const index = await (await fetch(`${URL_BASE}/capture/${TAKE_KEY}/index`)).json();
 const stamps = index.frames.stampMs;
 const TIMES = stamps.map((s) => (s - stamps[0]) / 1000);
 const DURATION = TIMES[TIMES.length - 1];
@@ -817,7 +820,7 @@ console.log('\n== 1c. the image at a program position is the frame the index nam
     const tl = globalThis.__tl;
     // A bare request, not the source's cache: a shared fetch path could hand both
     // arms the same wrong frame.
-    const buf = await (await fetch('/capture/${TAKE}/frame/' + n)).arrayBuffer();
+    const buf = await (await fetch('/capture/${TAKE_KEY}/frame/' + n)).arrayBuffer();
     const depthBytes = new DataView(buf).getUint32(0, true);
     k.drive.injectDepth(new Uint16Array(buf.slice(16, 16 + depthBytes)));
     k.renderer.render(k.scene, k.viewCamera());

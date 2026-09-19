@@ -25,6 +25,10 @@ const WORK = join(REPO, '.jobs-check');
 const SAMPLE = flag('--source', join(REPO, 'captures', 'sample.knct'));
 // Not skipped by default: a queue whose jobs never turn into a file proves nothing.
 const SKIP_RENDER = has('--no-render');
+// The gap between the store-read workers' attempts, through `testTimer`; it ships at 2500ms. The
+// blip and outage rows count attempts and read sentences, so the length of the gap decides none.
+const STORE_READ_GAP_MS = 250;
+const STORE_READ_TIMERS = { ...process.env, BRAINDANCE_TEST_TIMERS: JSON.stringify({ 'store-read-gap': STORE_READ_GAP_MS }) };
 
 const METAL = 'ANGLE Metal / Apple M2 Max';
 const V3D = 'ANGLE (Broadcom, V3D 7.1.10.2, OpenGL ES 3.1)';
@@ -288,7 +292,8 @@ const MUTATIONS = {
       + 'perfectly well and a missing `effects` key read as an empty listing, so a 500 - or a '
       + '200 from a proxy reporting its own failure, which no status check can see - came '
       + 'back as the sentence about a worker that has no `rain`, from a machine that has '
-      + 'rain. Reddens **six** rows, measured, across both arms; the pair that discriminates '
+      + 'rain. Reddens **seven** rows, measured, across both arms, the outage arm\'s gap row among '
+      + 'them because the read sentence it quotes is gone; the pair that discriminates '
       + 'is *which sentence* each job came back under, because the state is `failed` on both '
       + 'builds. **Two fixtures and two proxy policies**: a 500 served once is the blip a '
       + 'retry clears, a 200 carrying an error body every time is the outage a status check '
@@ -1362,7 +1367,7 @@ try {
     const blipped = await enqueue({ project: SKEW_PROJECT, captures: [HASH_A], output: 'jobs-check-effects-blip' });
     const blipWorker = spawn(process.execPath, [join(root, 'tools/render-worker.mjs'),
       '--url', blipProxy.url, '--name', 'jobs-check-effects-blip', '--drain', '--max', '1'],
-    { stdio: ['ignore', 'pipe', 'pipe'] });
+    { stdio: ['ignore', 'pipe', 'pipe'], env: STORE_READ_TIMERS });
     const blipLog = [];
     blipWorker.stdout.on('data', (c) => blipLog.push(c.toString()));
     blipWorker.stderr.on('data', (c) => blipLog.push(c.toString()));
@@ -1395,7 +1400,7 @@ try {
     const outaged = await enqueue({ project: SKEW_PROJECT, captures: [HASH_A], output: 'jobs-check-effects-outage' });
     const outageWorker = spawn(process.execPath, [join(root, 'tools/render-worker.mjs'),
       '--url', outageProxy.url, '--name', 'jobs-check-effects-outage', '--drain', '--max', '1'],
-    { stdio: ['ignore', 'pipe', 'pipe'] });
+    { stdio: ['ignore', 'pipe', 'pipe'], env: STORE_READ_TIMERS });
     const outageLog = [];
     outageWorker.stdout.on('data', (c) => outageLog.push(c.toString()));
     outageWorker.stderr.on('data', (c) => outageLog.push(c.toString()));
@@ -1409,6 +1414,10 @@ try {
     check(/could not read/.test(outageError) && /\/effects/.test(outageError),
       'so the job fails naming the read it could not make, which is the one fact whoever reads the queue needs',
       `state ${outageRecord.state ?? 'never settled'}${outageError ? `, ${outageError.slice(0, 110)}` : ''}`);
+    // The wiring row: the worker's own sentence names the gap it waited, which ships at 2.5s.
+    check(outageError.includes(`attempts ${STORE_READ_GAP_MS / 1000}s apart`),
+      '  and it waited the planted gap between those attempts, so this arm runs the shipped retry with its timer shortened',
+      (outageError.match(/in \d+ attempts [\d.]+s apart/) ?? ['no gap named'])[0]);
     check(!/this worker has no/.test(outageError),
       '  and not as a worker missing a package, which is what a 200 carrying an error body used to be read as',
       outageError ? outageError.slice(0, 110) : 'no error recorded at all');

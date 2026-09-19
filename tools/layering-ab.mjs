@@ -88,7 +88,10 @@ const quantile = (xs, q) => {
   return s[Math.min(s.length - 1, Math.floor(q * s.length))];
 };
 
-const index = await (await fetch(`${URL_BASE}/capture/${TAKE}/index`)).json();
+// The capture routes name a take by its content hash, and the listing is where a name becomes one.
+const TAKE_KEY = await fetch(`${URL_BASE}/library/takes`).then((res) => res.json())
+  .then((body) => encodeURIComponent(body.takes.find((t) => t.id === TAKE)?.hash ?? TAKE), () => encodeURIComponent(TAKE));
+const index = await (await fetch(`${URL_BASE}/capture/${TAKE_KEY}/index`)).json();
 const stamps = index.frames.stampMs;
 const DURATION = (stamps[stamps.length - 1] - stamps[0]) / 1000;
 const NEEDS_TAKE_SEC = 12;

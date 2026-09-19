@@ -2,9 +2,11 @@
 // demand: the colour camera the webcam serves, and the keyed depth the /key page reads. One class
 // rather than a copy in each, because the linger and the reassert are the parts that drift.
 
+import { testTimer } from '../web/test-timers.js';
+
 // How long a stream stays up after the last subscriber leaves. OBS retries a dead source hard, and
 // without the linger every reconnect toggles the grabber's encoder.
-export const LINGER_MS = 6000;
+export const LINGER_MS = testTimer('linger', 6000);
 
 export class OnDemand {
   // `request` asks the grabber to start or stop producing, and is called only on a change. `count`

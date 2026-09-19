@@ -794,18 +794,19 @@ package or a take the machine has not got.
 
 Every route is on one table that is also the dispatcher, served at `GET /library/routes`. A
 route with a write method goes through the three checks under
-[Reaching it from another machine](#reaching-it-from-another-machine).
+[Reaching it from another machine](#reaching-it-from-another-machine). `:hash` is a take's content
+hash, `sha256:` and 64 hex digits, percent-encoded; `:id` is its name.
 
 | Route | Method | What it does |
 | --- | --- | --- |
-| `/capture/:id/hello` | GET | The capture's own hello stanza. |
-| `/capture/:id/index` | GET | The frame index. |
-| `/capture/:id/extent` | GET | How much of the capture is on disk. |
-| `/capture/:id/file` | GET | The capture's bytes. |
-| `/capture/:id/frame/:n` | GET | One frame's payload. |
-| `/capture/:id/frames/:a-:b` | GET | A run of frames as the file's own slice. |
-| `/capture/:id/marks` | GET, POST | Reads and writes the take's marks. |
-| `/capture/:id/marks/log` | GET | The marks with their write log. |
+| `/capture/:hash/hello` | GET | The capture's own hello stanza. |
+| `/capture/:hash/index` | GET | The frame index. |
+| `/capture/:hash/extent` | GET | How much of the capture is on disk. |
+| `/capture/:hash/file` | GET | The capture's bytes. |
+| `/capture/:hash/frame/:n` | GET | One frame's payload. |
+| `/capture/:hash/frames/:a-:b` | GET | A run of frames as the file's own slice. |
+| `/capture/:hash/marks` | GET, POST | Reads and writes the take's marks. |
+| `/capture/:hash/marks/log` | GET | The marks with their write log. |
 | `/library/takes` | GET | The takes on this machine, with storage left. |
 | `/library/all` | GET | Every take here and on the linked node. |
 | `/library/remaining` | GET | Recording time left at the current rate. |
@@ -813,13 +814,14 @@ route with a write method goes through the three checks under
 | `/library/descriptors` | GET | Open descriptors against captures held. |
 | `/library/routes` | GET | This table. |
 | `/library/writes` | GET | Write counts per store. |
-| `/library/remote-frame/:id/:n` | GET | One frame of a node-only take, fetched through here. |
-| `/library/remote-index/:id` | GET | The frame index of a node-only take, fetched through here. |
+| `/library/remote-frame/:hash/:n` | GET | One frame of a node-only take, fetched through here. |
+| `/library/remote-index/:hash` | GET | The frame index of a node-only take, fetched through here. |
 | `/library/download/:id` | POST | Pulls a take from the linked node. |
-| `/library/delete/:id` | POST | Deletes a take and its marks. Refused while the node holds a copy or cannot be asked. |
+| `/library/delete/:id` | POST | Deletes a take and its marks. Refused while the node holds a copy or cannot be asked, or while the take has a second name here. |
 | `/library/reclaim/:id` | POST | Merges the node's marks into the local copy, then deletes the node's copy. |
-| `/library/sync-marks/:id` | POST | Merges the node's marks for this take into its log here. |
+| `/library/sync-marks/:hash` | POST | Merges the node's marks for this take into its log here. |
 | `/library/rename/:id` | POST | Renames a take. |
+| `/library/remove-name/:id` | POST | Takes one of a take's two names away, keeping `keep`. Refused unless both names hold one file, or two files hashing to `hash`. |
 | `/library/reveal/:id` | POST | Starts the file manager on the take. |
 | `/projects/all` | GET | Lists project documents. |
 | `/projects/:name` | GET, PUT, POST, DELETE | Reads, writes and deletes one project. |

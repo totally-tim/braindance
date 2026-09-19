@@ -124,9 +124,20 @@ the take, and refuses while the node holds a copy or cannot say whether it does.
 — show as badges on the poster.
 
 **Renaming moves a label, and a reference is a hash.** Each clip records its take as `{id, hash}`
-and the loader resolves the hash against the library listing, so a rename carries the capture, its
-marks and its index to a new name and every project still opens. Two renames at one name are
-answered by the kernel, and the loser keeps its footage.
+and the loader resolves the hash against the library listing, so a rename carries the capture and
+its index to a new name and every project still opens. Every `/capture/` route names its take by
+content hash, and `takeFileFor` finds the file that holds it, so an editor open on a take keeps
+fetching it through a rename, and a take given the freed name is never answered in its place. Marks
+are an append-only log filed by hash in `captures/marks/`, so a rename moves none and a new take
+under a reused name starts with none. A take being recorded has no hash: its marks stay in the
+recorder until the close scans it, and the close files them under the hash it computed. A take that
+died before its hello landed files none, because every such take hashes alike. At start,
+`adoptNamedMarkLogs` moves each log an older build filed by name beside a take into that take's hash
+log; it cannot tell a log a deleted take left under the name from the marks of the take there now.
+Two renames at one name are answered by the kernel, and the loser keeps its footage. A rename links
+the new name before it unlinks the old, so a crash between the two leaves one take under two names:
+`reconcile` lists both on one entry, and `removeName` takes one away once both names are shown to
+hold that take.
 
 **Showing a take in the file manager is the only route that starts a process.** It is refused
 unless the browser is on the server's machine, and refused for the take being recorded, which a
