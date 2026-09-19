@@ -10,12 +10,13 @@
 // artifact happened to the picture on its way here, before anything displayed it. No opinion
 // about the passes themselves lives here.
 //
-// Nothing is allocated and no GL is touched while this module evaluates. `new
-// EffectComposer(renderer)` is the sharpest case: it reads the renderer's pixel ratio and
-// allocates a pair of full-size targets in its constructor.
+// Nothing is allocated and no GL is touched while this module evaluates: `buildPostChain` does
+// both, at the point in the boot order `web/main.js` writes out. Every target in the chain holds
+// the type `targetType` answers, because three's own default is half-float asked of nobody.
 
 import * as THREE from 'three';
 import { renderer, scene, viewCamera } from './scene.js';
+import { targetType } from './render-targets.js';
 import { BloomPass } from './bloom-pass.js';
 import { MoshPass } from './mosh-pass.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
@@ -33,6 +34,10 @@ export let afterimage = null;
 export let mosh = null;
 export let bloom = null;
 export let grade = null;
+// The pixel type every target in the chain holds: half-float where the context renders it, 8-bit
+// where it does not, and null where it renders neither - a chain that cannot be drawn, which the
+// viewer answers by drawing straight to the canvas and saying so.
+export let chainType = null;
 
 // Every cell the mosh's shader reads before a look lands. `tNew` and `tOld` are written by the
 // pass itself once a frame; `moshIFrame` is the render loop's, and it is 1 rather than 0 at rest
@@ -124,23 +129,39 @@ const GRADE_UNIFORMS = {
  * the same assembler under bare node.
  */
 export function buildPostChain(gradeProgram, moshProgram) {
-  composer = new EffectComposer(renderer);
+  chainType = targetType(THREE.HalfFloatType);
+  // Built on 8-bit when nothing renders, so the passes exist for the registry to write into; the
+  // viewer never draws through a chain whose `chainType` is null.
+  const type = chainType ?? THREE.UnsignedByteType;
+  const target = new THREE.WebGLRenderTarget(1, 1, { type });
+  target.texture.name = 'EffectComposer.rt1';
+  composer = new EffectComposer(renderer, target);
   renderPass = new RenderPass(scene, viewCamera);
   composer.addPass(renderPass);
 
   afterimage = new AfterimagePass(0.0);
   afterimage.enabled = false;
+  // Three builds both history targets as half-float in the constructor and takes no type, so they
+  // are replaced before anything has drawn into them.
+  for (const key of ['_textureComp', '_textureOld']) {
+    if (!afterimage[key]?.isWebGLRenderTarget) {
+      throw new Error('afterimage internals moved: its history targets can no longer be typed');
+    }
+    afterimage[key].dispose();
+    afterimage[key] = new THREE.WebGLRenderTarget(1, 1, { magFilter: THREE.NearestFilter, type });
+  }
   composer.addPass(afterimage);
 
   mosh = new MoshPass({
     uniforms: MOSH_UNIFORMS,
     vertexShader: moshProgram.vertexShader,
     fragmentShader: moshProgram.fragmentShader,
+    type,
   });
   mosh.enabled = false;
   composer.addPass(mosh);
 
-  bloom = new BloomPass(0.0, 0.7, 0.2);
+  bloom = new BloomPass(0.0, 0.7, 0.2, type);
   bloom.enabled = false;
   composer.addPass(bloom);
 
