@@ -7556,8 +7556,14 @@ async function runChecks() {
       return dialogOpen('confirm');
     };
     const openViewerOn = async (id) => {
-      const take = await takeCalled(id);
-      await page.evaluate((key) => globalThis.__library.viewer.open(key), take.hash ?? take.id);
+      // The key comes off the page's own listing, the one `takeByKey` searches, so a listing in
+      // flight cannot hand `open` a key it does not hold and leave the viewer shut.
+      await until(() => page.evaluate((wanted) => {
+        const take = globalThis.__library.state().takes.find((t) => t.id === wanted);
+        if (!take) return false;
+        globalThis.__library.viewer.open(take.hash ?? take.id);
+        return globalThis.__library.viewer.state()?.id === wanted;
+      }, id));
       await page.evaluate('globalThis.__library.viewer.drawn(1)');
     };
     const markedPath = join(sweepMac, 'sweep-marked.knct');
