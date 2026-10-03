@@ -4,25 +4,14 @@
 // reimplemented here. The renderer class is read from the browser this worker will actually render
 // in, never configured.
 import { execFileSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { JOB_VERSION } from '../server/jobs.js';
+import { BEAT_BUDGET, beatVerdict } from '../server/jobs.js';
 import { testTimer } from '../web/test-timers.js';
 
-const argv = process.argv.slice(2);
-const flag = (name, dflt = null) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : dflt);
-const has = (name) => argv.includes(name);
-
-const URL_ = flag('--url', 'http://localhost:8080');
-const NAME = flag('--name', 'worker');
-const MAX = Number(flag('--max', has('--once') ? '1' : '16'));
-const IDLE_EXIT = has('--drain');
-const POLL_MS = Number(flag('--poll', '2000'));
-const BEAT_MS = Number(flag('--beat', '15000'));
-
-if (has('--help')) {
-  console.log(`usage: render-worker.mjs [--url URL] [--name NAME] [--once | --max N]
+const USAGE = `usage: render-worker.mjs [--url URL] [--name NAME] [--once | --max N]
                         [--drain] [--poll MS] [--beat MS]
 
   Claims render jobs and runs them in headless Chrome, reporting each outcome
@@ -32,9 +21,7 @@ if (has('--help')) {
   --drain exits as soon as the queue has nothing for this worker, rather than
   polling. A queue holding work pinned to another renderer class is NOT nothing:
   it is reported and exits non-zero, because an idle worker beside a queue that
-  never drains is the failure the class pinning exists to make visible.`);
-  process.exit(0);
-}
+  never drains is the failure the class pinning exists to make visible.`;
 
 async function loadPlaywright() {
   const require = createRequire(import.meta.url);
@@ -55,33 +42,43 @@ async function loadPlaywright() {
   throw new Error('playwright not found - install it globally or in this project');
 }
 
-// A heartbeat unanswered by the time the next one is due has already failed, while a claim or a
-// finish report is worth waiting out. undici's default header timeout is around 300s, so an outage
-// that drops packets without an RST would leave the budget below counting something
-// other than seconds.
-const post = async (path, body, { timeoutMs = null } = {}) => {
-  const res = await fetch(URL_ + path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
-  });
-  return { status: res.status, body: await res.json().catch(() => ({})) };
-};
+/**
+ * The claim loop: claim a job, render it in `browser`, report back, until `max` jobs have been
+ * claimed or, under `drain`, the queue has nothing for this worker. Everything it touches arrives
+ * as an argument, so a test drives this very code with a scripted queue and a scripted browser.
+ * Returns `{ claimed, failed, cancelled, blockedExit }`.
+ */
+export async function runQueue({ browser, fetch: request, url: URL_, name: NAME, max: MAX, drain: IDLE_EXIT, pollMs: POLL_MS, beatMs: BEAT_MS }) {
+  // A heartbeat unanswered by the time the next one is due has already failed, while a claim or a
+  // finish report is worth waiting out. undici's default header timeout is around 300s, so an outage
+  // that drops packets without an RST would leave the budget below counting something
+  // other than seconds. `signal` is how a claim ends its own heartbeats.
+  const post = async (path, body, { timeoutMs = null, signal = null } = {}) => {
+    const signals = [signal, timeoutMs ? AbortSignal.timeout(timeoutMs) : null].filter(Boolean);
+    const res = await request(URL_ + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      ...(signals.length ? { signal: AbortSignal.any(signals) } : {}),
+    });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  };
 
-const { chromium } = await loadPlaywright();
-// `channel: 'chromium'` and not the bundled headless shell, which has no GPU and falls back to
-// SwiftShader - the software rasteriser the class guard below refuses.
-const browser = await chromium.launch({ channel: 'chromium', headless: !has('--headed') });
+  let claimed = 0;
+  let failed = 0;
+  let cancelled = 0;
+  let blockedExit = false;
 
-let claimed = 0;
-let failed = 0;
-let blockedExit = false;
-
-try {
-  const page = await browser.newPage();
   const errors = [];
-  page.on('pageerror', (e) => errors.push(e.message));
+  let page = null;
+  const openPage = async () => {
+    const opened = await browser.newPage();
+    // Only the page in use speaks for the claim in progress: an earlier page's late error is no
+    // reason to fail the next job.
+    opened.on('pageerror', (e) => { if (opened === page) errors.push(e.message); });
+    return opened;
+  };
+  page = await openPage();
   // The recorder rather than the root, which is the main menu now. This load exists only to read
   // the renderer class off a page with a WebGL context, and the menu has none.
   await page.goto(`${URL_}/record`, { waitUntil: 'domcontentloaded' });
@@ -114,7 +111,7 @@ try {
     for (let attempt = 0; attempt < STORE_READ_TRIES; attempt++) {
       if (attempt) await new Promise((r) => { setTimeout(r, STORE_READ_GAP_MS); });
       try {
-        const res = await fetch(`${URL_}${path}`, { signal: AbortSignal.timeout(5000) });
+        const res = await request(`${URL_}${path}`, { signal: AbortSignal.timeout(5000) });
         if (!res.ok) throw new Error(`it answered ${res.status}`);
         return held(await res.json());
       } catch (err) {
@@ -237,33 +234,43 @@ try {
     const job = claim.body.job;
     claimed++;
     console.log(`[worker] ${job.id} ${job.width}x${job.height} @${job.fps} -> ${job.output}`);
+    for (const w of job.warnings ?? []) console.log(`[worker] ${job.id} warning at ${w.at}: ${w.text}`);
     errors.length = 0;
+    // Everything below belongs to this claim alone. A reply to one of its heartbeats can land after
+    // the claim is over and the next one has begun, and must find nothing to act on: it would close
+    // the page the next claim renders in, and its signal is already spent.
     let beat = null;
-    let leaseLost = false;
-    const stopBeating = () => { if (beat) { clearInterval(beat); beat = null; } };
-    const BEAT_BUDGET = 7;
+    const beating = new AbortController();
+    let closing = Promise.resolve();
+    // Why this claim stopped rendering, once something has made it: { verdict, reason }.
+    let ending = null;
     let missed = 0;
-    const heartbeat = async () => {
-      if (leaseLost) return;
-      const res = await post(`/jobs/${job.id}/heartbeat`, { lease: job.lease }, { timeoutMs: BEAT_MS });
-      if (res.status === 409) {
-        leaseLost = true;
-        stopBeating();
-        console.error(`[worker] ${job.id} heartbeat refused: ${res.body?.error ?? 'lease lost'}`);
-        page.goto('about:blank').catch(() => { /* the page may already be gone */ });
-        return;
-      }
-      if (res.status !== 200) throw new Error(`the queue answered ${res.status}`);
-      missed = 0;
+    const stopBeating = () => {
+      if (beat) { clearInterval(beat); beat = null; }
+      beating.abort();
     };
-    const missedBeat = (message) => {
-      missed++;
-      console.error(`[worker] ${job.id} heartbeat failed (${missed}/${BEAT_BUDGET}): ${message}`);
-      if (missed < BEAT_BUDGET) return;
+    // Closing the page closes the export socket, and the server answers that by killing ffmpeg and
+    // removing the half-written file, so a stopped render leaves no partial artifact behind.
+    const stopRendering = (verdict, reason) => {
+      ending = { verdict, reason };
       stopBeating();
-      console.error(`[worker] ${job.id} ${BEAT_BUDGET} heartbeats failed in a row - this claim now goes quiet while it renders, and a requeue would put a second worker on it`);
+      console.error(`[worker] ${job.id} ${reason}`);
+      closing = page.close().catch(() => { /* the page may already be gone */ });
     };
-    const beatOnce = () => { heartbeat().catch((err) => missedBeat(err.message)); };
+    const heardBack = (answer) => {
+      if (beating.signal.aborted || ending) return;
+      const heard = beatVerdict(missed, answer);
+      missed = heard.missed;
+      if (heard.verdict !== 'continue') {
+        stopRendering(heard.verdict, heard.reason);
+      } else if (heard.reason) {
+        console.error(`[worker] ${job.id} heartbeat failed (${missed}/${BEAT_BUDGET}): ${heard.reason}`);
+      }
+    };
+    const beatOnce = () => {
+      post(`/jobs/${job.id}/heartbeat`, { lease: job.lease }, { timeoutMs: BEAT_MS, signal: beating.signal })
+        .then(heardBack, (err) => heardBack({ error: err.message }));
+    };
     const startBeating = () => {
       beat = setInterval(beatOnce, BEAT_MS);
       beat.unref?.();
@@ -273,16 +280,8 @@ try {
       // Inside the try, so a server that cannot be read is this job coming back `failed` naming the
       // read rather than the worker dying before its first claim.
       //
-      // The envelope first, before a field is read out of it: a record from another version names
-      // its footage somewhere else, and reading it would fail in a sentence about a field that is
-      // not there rather than about a job this build cannot run.
-      if (job.version !== JOB_VERSION) {
-        throw new Error(
-          `job ${job.id} is envelope version ${JSON.stringify(job.version)} and this worker runs `
-          + `version ${JOB_VERSION}: this repo ships no conversion, so it is refused rather than `
-          + 'rendered on a guess about which field holds the footage',
-        );
-      }
+      // A page an earlier stop closed is replaced before anything else uses it.
+      if (page.isClosed()) page = await openPage();
       // Opening every take can exceed the queue's stale window, so the lease starts speaking now.
       startBeating();
       const { installed, versions } = await readInstalledEffects();
@@ -375,7 +374,7 @@ try {
       }, job);
       if (errors.length) throw new Error(`the page errored during the render: ${errors[0]}`);
       if (!result?.output) throw new Error('the export did not return an output path');
-      if (leaseLost) throw new Error('the lease was lost during the render, so the outcome is not accepted');
+      if (ending?.verdict === 'lost') throw new Error('the lease was lost during the render, so the outcome is not accepted');
 
       // The frame count travels with the outcome, and `server/export.js` refuses a stream whose
       // count differs from the one the export declared. Stopped before the report rather than after
@@ -386,19 +385,72 @@ try {
         state: 'done', output: result.output, frames: result?.frames ?? null, lease: job.lease,
       });
       if (fin.status !== 200) throw new Error(`the queue refused the report: ${fin.body.error}`);
-      console.log(`[worker] ${job.id} done ${result.output} ${result?.frames ?? ''} frames`);
+      if (fin.body.state === 'done') {
+        console.log(`[worker] ${job.id} done ${result.output} ${result?.frames ?? ''} frames`);
+      } else {
+        // The queue took the report and recorded the job as something else, with its reason: the
+        // artifact it names could not take the version record. That record is the outcome, and
+        // there is nothing left to report against.
+        failed++;
+        console.error(`[worker] ${job.id} failed: ${fin.body.error ?? `the queue recorded it ${fin.body.state}`}`);
+      }
     } catch (err) {
-      failed++;
-      const message = String(err.message ?? err);
       stopBeating();
-      console.error(`[worker] ${job.id} failed: ${message}`);
-      await post(`/jobs/${job.id}/finish`, { state: 'failed', error: message, lease: job.lease }).catch(() => {});
+      if (ending?.verdict === 'cancel') {
+        cancelled++;
+        console.log(`[worker] ${job.id} cancelled`);
+        await post(`/jobs/${job.id}/finish`, { state: 'cancelled', lease: job.lease }).catch(() => {});
+      } else {
+        failed++;
+        // After a stop the page's own error says its target closed, which is not why.
+        const message = ending?.reason ?? String(err.message ?? err);
+        console.error(`[worker] ${job.id} failed: ${message}`);
+        // A claim the queue has taken back has nothing left to report against.
+        if (ending?.verdict !== 'lost') {
+          await post(`/jobs/${job.id}/finish`, { state: 'failed', error: message, lease: job.lease }).catch(() => {});
+        }
+      }
+    } finally {
+      // Whichever way the claim ended, its heartbeats end with it and its page is gone before the
+      // next claim looks at one.
+      stopBeating();
+      await closing;
     }
   }
-} finally {
-  await browser.close();
+  return { claimed, failed, cancelled, blockedExit };
 }
 
-console.log(`[worker] ${claimed} claimed, ${failed} failed`);
-if (blockedExit) process.exit(2);
-process.exit(failed ? 1 : 0);
+async function main() {
+  const argv = process.argv.slice(2);
+  const flag = (name, dflt = null) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : dflt);
+  const has = (name) => argv.includes(name);
+  if (has('--help')) {
+    console.log(USAGE);
+    process.exit(0);
+  }
+  const { chromium } = await loadPlaywright();
+  // `channel: 'chromium'` and not the bundled headless shell, which has no GPU and falls back to
+  // SwiftShader - the software rasteriser the class guard refuses.
+  const browser = await chromium.launch({ channel: 'chromium', headless: !has('--headed') });
+  let outcome;
+  try {
+    outcome = await runQueue({
+      browser,
+      fetch,
+      url: flag('--url', 'http://localhost:8080'),
+      name: flag('--name', 'worker'),
+      max: Number(flag('--max', has('--once') ? '1' : '16')),
+      drain: has('--drain'),
+      pollMs: Number(flag('--poll', '2000')),
+      beatMs: Number(flag('--beat', '15000')),
+    });
+  } finally {
+    await browser.close();
+  }
+  console.log(`[worker] ${outcome.claimed} claimed, ${outcome.failed} failed, ${outcome.cancelled} cancelled`);
+  if (outcome.blockedExit) process.exit(2);
+  process.exit(outcome.failed ? 1 : 0);
+}
+
+// Run as a script. A test imports `runQueue` and launches nothing.
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) await main();

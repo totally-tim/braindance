@@ -5,14 +5,15 @@
 // and a refusal is asserted by what it said, naming the blocked job and the class it wants,
 // rather than by an absence an empty queue would also produce.
 import { spawn } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createServer, request } from 'node:http';
 import { connect } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { PROJECT_VERSION } from '../web/format.js';
-import { JOB_VERSION } from '../server/jobs.js';
+import { BEAT_BUDGET, JOB_VERSION } from '../server/jobs.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -71,16 +72,14 @@ const MUTATIONS = {
       + 'stay green, because a caller whose list agrees with its document is taken on both '
       + 'builds - the two are not one control',
   },
-  'worker-reads-any-job-version': { file: 'tools/render-worker.mjs', edits: [[
-    '      if (job.version !== JOB_VERSION) {',
-    '      if (false) {',
+  'store-reads-any-job-version': { file: 'server/jobs.js', edits: [[
+    '        if (job?.version === JOB_VERSION) jobs.push(job);\n        else refused',
+    '        if (true) jobs.push(job);\n        else refused',
   ]],
-    fails: 'the worker\'s gate on the job envelope\'s own version. It needs the render block, '
-      + 'and its fixture is a planted version 1 record - one capture as a string where this '
-      + 'build reads a list. Reddens **one** row, measured: the *reason*. The state is '
-      + '`failed` on both builds, because a mutated worker reaches the missing field a step '
-      + 'later and dies on it - which is the whole argument for the gate, since that sentence '
-      + 'is about a field rather than about a job',
+    fails: 'the store\'s gate on a job file\'s own version. It needs the render block, and its '
+      + 'fixture is a planted version 1 record - one capture as a string where this build reads '
+      + 'a list. Not measured: the rows it should redden are the refusal listing and the worker '
+      + 'that must never be handed the file',
   },
   'worker-preflights-only-the-first-capture': { file: 'tools/render-worker.mjs', edits: [[
     '    const missing = [...new Set(captures)].filter((hash) => !byHash.has(hash));',
@@ -133,7 +132,7 @@ const MUTATIONS = {
     '      if (false) {',
   ]] },
   'requeue-refuses-all-running': { file: 'server/jobs.js', edits: [[
-    '        const quietFor = this.now() - (job.heartbeat ?? job.claimed ?? 0);\n        if (quietFor < this.staleMs) {',
+    '        const quietFor = this.#quietFor(job);\n        if (quietFor < this.staleMs) {',
     '        const quietFor = 0;\n        if (true) {',
   ]] },
   'heartbeat-ignores-lease': { file: 'server/jobs.js', edits: [[
@@ -165,8 +164,8 @@ const MUTATIONS = {
   },
   'envelope-takes-the-callers-requires': { file: 'server/jobs.js', edits: [
     [
-      "codec = 'h264', suppressEffects = [] }) {",
-      "codec = 'h264', suppressEffects = [], requires: asked = null }) {",
+      "codec = 'h264', suppressEffects = [], recorded = null }) {",
+      "codec = 'h264', suppressEffects = [], recorded = null, requires: asked = null }) {",
     ],
     [
       '    const requires = used.map((id) => ({ ...carried.find((e) => e?.id === id) }));',
@@ -264,10 +263,10 @@ const MUTATIONS = {
   },
   'preflight-reads-a-failure-as-an-empty-store': { file: 'tools/render-worker.mjs', edits: [
     [
-      '        const res = await fetch(`${URL_}${path}`, { signal: AbortSignal.timeout(5000) });\n'
+      '        const res = await request(`${URL_}${path}`, { signal: AbortSignal.timeout(5000) });\n'
       + '        if (!res.ok) throw new Error(`it answered ${res.status}`);\n'
       + '        return held(await res.json());',
-      '        return held(await (await fetch(`${URL_}${path}`)).json());',
+      '        return held(await (await request(`${URL_}${path}`)).json());',
     ],
     [
       '      if (!body || !Array.isArray(body.effects)) {\n'
@@ -302,9 +301,58 @@ const MUTATIONS = {
       + 'apart would be spent on a tick of that poll as readily as on the read it was staged '
       + 'for',
   },
+  'cancel-queued-does-nothing': { file: 'server/jobs.js', edits: [[
+    "      job.state = 'cancelled';\n      job.finished = this.now();\n      job.lease = null;\n      return this.#put(job);",
+    '      return job;',
+  ]],
+    fails: 'a cancel that answers 200 and leaves a queued job queued. Queue semantics, so `--no-render`. '
+      + 'Reddens the state row and the row that says no worker is handed it',
+  },
+  'claim-skips-environment': { file: 'server/jobs.js', edits: [[
+    '      job.versions.claimed = record;\n',
+    '',
+  ]],
+    fails: 'a claim that records no environment. Queue semantics, so `--no-render`. Reddens the one '
+      + 'row that reads the app build, the effect versions and the renderer off the claimed job',
+  },
+  'finish-skips-sidecar': { file: 'server/jobs.js', edits: [[
+    '          await this.#amendSidecar(job);\n',
+    '',
+  ]],
+    fails: 'a done render whose sidecar is never amended. Reddens the row that reads the version '
+      + 'record out of the sidecar of a staged artifact, and under the render block the same row '
+      + 'for a real one: the job still says done and still carries the record. Expected, not measured',
+  },
+  'finish-records-done-over-a-failed-sidecar': { file: 'server/jobs.js', edits: [[
+    "        } catch (err) {\n          job.state = 'failed';\n",
+    '        } catch (err) {\n          job.state = state;\n',
+  ]],
+    fails: 'a done report whose artifact cannot take the record, kept as done with the reason beside '
+      + 'it. Queue semantics, so `--no-render`. Expected, not measured: the rows about the report '
+      + 'naming an artifact outside the exports directory redden, and the ones about a finished '
+      + 'render stay green',
+  },
+  'worker-ignores-cancel': { file: 'server/jobs.js', edits: [[
+    "    if (typeof answer.body?.cancelRequested === 'number') {",
+    '    if (false) {',
+  ]],
+    fails: 'the heartbeat decision that reads a cancel request, which only the worker calls. It needs '
+      + 'the render block: the render runs to its end and the job comes back done. Expected, not '
+      + 'measured: the state row and the row that finds nothing left under exports/ redden, '
+      + 'because a finished render leaves its directory there',
+  },
+  'worker-ignores-budget': { file: 'tools/render-worker.mjs', edits: [[
+    "      if (heard.verdict !== 'continue') {",
+    "      if (heard.verdict !== 'continue' && heard.verdict !== 'abandon') {",
+  ]],
+    fails: 'the worker acting on every verdict but the seventh failed heartbeat. It needs the render '
+      + 'block: cancellation and lease loss still work, and the render runs to its end and reports '
+      + 'done while its queue is unreachable. Expected, not measured: both arms of the budget '
+      + 'section redden on the state, the exit code and the artifact left behind',
+  },
   'heartbeat-stops-on-first-error': { file: 'tools/render-worker.mjs', edits: [[
-    '    const beatOnce = () => { heartbeat().catch((err) => missedBeat(err.message)); };',
-    '    const beatOnce = () => { heartbeat().catch((err) => { stopBeating(); console.error(`[worker] ${job.id} heartbeat: ${err.message}`); }); };',
+    '        .then(heardBack, (err) => heardBack({ error: err.message }));',
+    '        .then(heardBack, (err) => { stopBeating(); console.error(`[worker] ${job.id} heartbeat: ${err.message}`); });',
   ]] },
 };
 if (MUTATE && !MUTATIONS[MUTATE]) {
@@ -626,6 +674,36 @@ const failsWorkerEffectReads = ({ times = 1, answer = null } = {}) => (req, res,
   return true;
 };
 
+/**
+ * Every heartbeat failed from the moment `armed()` says so, and the rest carried as they come.
+ * `silent` leaves the request unanswered, so only the worker's own timeout ends it; otherwise it
+ * is answered 500 at once. A refusal and a silence time differently, and the worker's budget has to
+ * hold for both.
+ */
+const failsHeartbeats = ({ armed, silent }) => (req, res, state) => {
+  if (req.method !== 'POST' || !/^\/jobs\/[^/]+\/heartbeat$/.test(req.url ?? '') || !armed()) return false;
+  state.failed++;
+  if (silent) return true;
+  res.writeHead(500, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'the queue is not answering' }));
+  return true;
+};
+
+// What an export has under `exports/` for `name` while it is running: its scratch directory, which
+// exists from the moment the encoder starts and goes when the export socket closes early.
+const scratchOf = (name) => (existsSync(exportsDir) ? readdirSync(exportsDir) : [])
+  .filter((entry) => entry.startsWith(`${name}.`));
+
+// The files an export leaves, so a done report has an artifact and a sidecar to name.
+const stageArtifact = (name) => {
+  const folder = join(exportsDir, `${name}.1-1`);
+  mkdirSync(folder, { recursive: true });
+  const artifact = join(folder, `${name}.mp4`);
+  writeFileSync(artifact, 'video');
+  writeFileSync(`${artifact}.job.json`, `${JSON.stringify({ output: name })}\n`);
+  return artifact;
+};
+
 try {
   const serverLog = await startServer();
 
@@ -881,7 +959,7 @@ try {
 
   const victim = claims.find((c) => c.body.job).body.job;
   const reports = await Promise.all([
-    post(`/jobs/${victim.id}/finish`, { state: 'done', output: 'winner', lease: victim.lease }),
+    post(`/jobs/${victim.id}/finish`, { state: 'done', output: stageArtifact('winner'), lease: victim.lease }),
     post(`/jobs/${victim.id}/finish`, { state: 'failed', error: 'loser', lease: victim.lease }),
   ]);
   const accepted = reports.filter((r) => r.status === 200);
@@ -917,17 +995,24 @@ try {
     output: 'planted', width: 64, height: 36, fps: 30, codec: 'h264',
     state: 'running', created: 1, claimed: 2, finished: null, worker: 'ghost',
     error: null, attempts: 1, lease: null,
+    cancelRequested: null, versions: { recorded: null, claimed: null, finished: null }, warnings: [],
   }, null, 2)}\n`);
   const ghost = await post(`/jobs/${plantedId}/finish`, { state: 'done', output: 'planted' });
   check(ghost.status === 409,
     'a running record carrying no lease cannot be finished by anybody - that is a record no claim could have written, so it is unusable rather than open',
     `${ghost.status} ${(ghost.body.error ?? '').slice(0, 60)}`);
-  const rightLease = await post(`/jobs/${held.id}/finish`, { state: 'done', lease: held.lease });
-  check(rightLease.status === 200, 'while the claim that holds the lease is taken, which is the positive half of that');
+  const rightLease = await post(`/jobs/${held.id}/finish`, { state: 'done', output: stageArtifact('held'), lease: held.lease });
+  check(rightLease.status === 200 && rightLease.body.state === 'done',
+    'while the claim that holds the lease is taken, which is the positive half of that');
 
   section('a finished job is finished');
-  const fin = await post(`/jobs/${good.body.id}/finish`, { state: 'done', output: 'check', lease: c1.body.job.lease });
+  const checkArtifact = stageArtifact('check');
+  const fin = await post(`/jobs/${good.body.id}/finish`, { state: 'done', output: checkArtifact, lease: c1.body.job.lease });
   check(fin.status === 200 && fin.body.state === 'done', 'a worker reports an outcome and the record takes it');
+  const staged = JSON.parse(readFileSync(`${checkArtifact}.job.json`, 'utf8'));
+  check(staged.output === 'check' && staged.versions?.finished?.app === fin.body.versions?.finished?.app && Array.isArray(staged.warnings),
+    'and the sidecar beside the artifact it named gained the job\'s version record and warnings, which the export had written without',
+    JSON.stringify(Object.keys(staged)));
   const again = await post(`/jobs/${good.body.id}/finish`, { state: 'failed', error: 'the loser of a race', lease: c1.body.job.lease });
   check(again.status === 409, 'a second report on the same job is refused, so two workers racing cannot leave the last one to speak as the record',
     `${again.status}`);
@@ -950,6 +1035,7 @@ try {
     output: 'orphan', width: 64, height: 36, fps: 30, codec: 'h264',
     state: 'running', created: 1, claimed: 1, heartbeat: 1, finished: null,
     worker: 'killed-mid-render', error: null, attempts: 1, lease: 'lease-that-died-with-it',
+    cancelRequested: null, versions: { recorded: null, claimed: null, finished: null }, warnings: [],
   }, null, 2)}\n`);
   const rescued = await post(`/jobs/${deadId}/requeue`, {});
   check(rescued.status === 200 && rescued.body.state === 'queued',
@@ -977,6 +1063,68 @@ try {
     String(rq.body.renderer).slice(0, 40));
   const c4 = await post('/jobs/claim', { worker: 'pi', renderer: V3D });
   check(c4.status === 409, 'so the V3D worker cannot pick up the Metal retry', `${c4.status}`);
+
+  section('a job records what it ran on, and a cancel reaches it');
+  // What the sections above left queued is cancelled through the route under test, so the claims
+  // below can only be handed the jobs this section makes.
+  for (const leftover of (await get('/jobs')).jobs.filter((j) => j.state === 'queued')) {
+    await post(`/jobs/${leftover.id}/cancel`, {});
+  }
+  const stopQueued = await enqueue({ output: 'jobs-check-stop-queued', renderer: METAL });
+  const cancelQueued = await post(`/jobs/${stopQueued.body.id}/cancel`, {});
+  check(cancelQueued.status === 200 && cancelQueued.body.state === 'cancelled',
+    'a queued job is cancelled where it stands', `${cancelQueued.status} ${cancelQueued.body.state ?? cancelQueued.body.error}`);
+  const nothingLeft = await post('/jobs/claim', { worker: 'cancel-check', renderer: METAL });
+  check(nothingLeft.status === 200 && nothingLeft.body.job === null,
+    '  and no worker is handed it', `${nothingLeft.status} ${nothingLeft.body.job?.id ?? 'no job'}`);
+  const noSuchJob = await post(`/jobs/job-${'0'.repeat(16)}/cancel`, {});
+  check(noSuchJob.status === 404, 'a cancel of a job that does not exist is a 404', `${noSuchJob.status}`);
+
+  await enqueue({ output: 'jobs-check-stop-running', renderer: METAL });
+  const underway = (await post('/jobs/claim', { worker: 'cancel-check', renderer: METAL })).body.job;
+  const ranOn = underway?.versions?.claimed;
+  check(/^[0-9a-f]{64}$/.test(ranOn?.app ?? '') && ranOn?.renderer === METAL
+      && Object.keys(ranOn?.effects ?? {}).length > 0 && Object.values(ranOn.effects).every((v) => typeof v === 'string'),
+  'a claim records the app build, the version of each installed effect and the renderer class it will render on',
+  JSON.stringify(ranOn ?? null).slice(0, 90));
+  const marked = await post(`/jobs/${underway.id}/cancel`, {});
+  check(marked.status === 200 && marked.body.state === 'running'
+      && typeof marked.body.cancelRequested === 'number' && !('lease' in marked.body),
+  'a cancel of a running job marks it and leaves the render to its worker, without handing out the lease',
+  `${marked.status} ${marked.body.state ?? marked.body.error} ${marked.body.cancelRequested ?? 'unmarked'}`);
+  const sawMark = await post(`/jobs/${underway.id}/heartbeat`, { lease: underway.lease });
+  check(sawMark.status === 200 && typeof sawMark.body.cancelRequested === 'number',
+    '  and the worker finds the mark in its next heartbeat, which is the only way it hears',
+    `${sawMark.status} ${sawMark.body.cancelRequested ?? 'no mark'}`);
+  const stopped = await post(`/jobs/${underway.id}/finish`, { state: 'cancelled', lease: underway.lease });
+  check(stopped.status === 200 && stopped.body.state === 'cancelled' && stopped.body.artifactPath === null,
+    '  and reports cancelled, which leaves no artifact on the record', `${stopped.status} ${stopped.body.state ?? stopped.body.error}`);
+
+  await enqueue({ output: 'jobs-check-unasked', renderer: METAL });
+  const unasked = (await post('/jobs/claim', { worker: 'cancel-check', renderer: METAL })).body.job;
+  const invented = await post(`/jobs/${unasked.id}/finish`, { state: 'cancelled', lease: unasked.lease });
+  check(invented.status === 409,
+    'a worker cannot report cancelled for a job nobody asked to cancel', `${invented.status}`);
+  await post(`/jobs/${unasked.id}/finish`, { state: 'failed', error: 'tidying', lease: unasked.lease });
+  const tooLate = await post(`/jobs/${unasked.id}/cancel`, {});
+  check(tooLate.status === 409, '  and a job that has already finished cannot be cancelled', `${tooLate.status}`);
+
+  // A job is done when its artifact can take the record. The artifact here exists and so does its
+  // sidecar, which is why the only thing wrong with the report is where it points.
+  await enqueue({ output: 'jobs-check-unfiled', renderer: METAL });
+  const unfiled = (await post('/jobs/claim', { worker: 'cancel-check', renderer: METAL })).body.job;
+  const stray = join(WORK, 'stray.mp4');
+  writeFileSync(stray, 'video');
+  writeFileSync(`${stray}.job.json`, '{"output":"stray"}\n');
+  const misfiled = await post(`/jobs/${unfiled.id}/finish`, { state: 'done', output: stray, lease: unfiled.lease });
+  check(misfiled.status === 200 && misfiled.body.state === 'failed'
+      && String(misfiled.body.error).includes(stray) && /outside the exports directory/.test(String(misfiled.body.error)),
+  'a done report naming an artifact outside the exports directory is recorded as failed, naming the path and the cause',
+  `${misfiled.status} ${misfiled.body.state ?? misfiled.body.error} ${String(misfiled.body.error ?? '').slice(0, 60)}`);
+  check((await get(`/jobs/${unfiled.id}`)).state === 'failed',
+    '  and a read of the job says failed as well, so it was never stored as done');
+  check(readFileSync(`${stray}.job.json`, 'utf8') === '{"output":"stray"}\n' && existsSync(stray),
+    '  and the file and the sidecar it named are where they were, untouched');
 
   section('the queue is behind the same guard every mutating route is');
   const noType = await fetch(`${URL_}/jobs`, { method: 'POST', body: '{}' });
@@ -1031,6 +1179,16 @@ try {
     check(/ANGLE/.test(String(record.renderer)),
       'and the class on the record is the one the browser actually reported, not one the worker was told',
       String(record.renderer).slice(0, 46));
+
+    // The sidecar is the export's own file, amended by the queue after the render lands.
+    let sidecar = null;
+    try {
+      sidecar = JSON.parse(readFileSync(`${record.artifactPath}.job.json`, 'utf8'));
+    } catch { /* the row below says it was not there */ }
+    check(sidecar?.versions?.finished?.app === record.versions?.finished?.app
+        && sidecar?.versions?.finished?.renderer === record.renderer && Array.isArray(sidecar?.warnings),
+    'and the sidecar beside the file carries the job\'s version record and warnings, so a re-render built from it has something to be compared against',
+    sidecar ? `${String(sidecar.versions?.finished?.app).slice(0, 12)}, ${sidecar.warnings?.length ?? 'no'} warnings` : `no sidecar at ${record.artifactPath}.job.json`);
 
     // The door, asserted rather than assumed: a worker adopting with a bare
     // `setActiveDeliverable` would render every job here and nothing would say a gate had gone.
@@ -1152,6 +1310,9 @@ try {
         error: null,
         attempts: 0,
         lease: null,
+        cancelRequested: null,
+        versions: { recorded: null, claimed: null, finished: null },
+        warnings: [],
         ...over,
       }, null, 2)}\n`);
       return id;
@@ -1242,15 +1403,47 @@ try {
       '  and nothing was written for it, so the refusal came before the export rather than after it',
       `${JSON.stringify(liarRecord.artifactPath)}, ${liarRecord.frames ?? 'no frame count'}`);
 
-    // The envelope itself, refused at the same door: this build reads a list of captures where
-    // version 1 named one string, and reading that record would fail about a missing field.
+    // The file itself, refused by the store: this build reads a list of captures where version 1
+    // named one string, and reading that record would fail about a missing field.
     const oldEnvelope = plantJob(`job-${'9a'.repeat(8)}`, { version: 1, captures: undefined, capture: take.hash });
     const oldRun = await drainOne('jobs-check-old-envelope');
-    const oldRecord = await get(`/jobs/${oldEnvelope}`);
-    const oldError = String(oldRecord.error ?? '');
-    check(oldRecord.state === 'failed' && /envelope version 1/.test(oldError),
-      'a job record from an envelope version this build does not read is refused naming the version, rather than rendered on a guess about which field holds the footage',
-      `exit ${oldRun.code}, state ${oldRecord.state}, ${oldError.slice(0, 110)}`);
+    const listing = await get('/jobs');
+    const oldRefusal = (listing.refused ?? []).find((r) => r.id === oldEnvelope);
+    check(oldRefusal !== undefined && /envelope version 1/.test(oldRefusal.reason) && /no conversion/.test(oldRefusal.reason),
+      'a job file from a version this build does not read is listed as refused naming the version, rather than read on a guess about which field holds the footage',
+      oldRefusal ? oldRefusal.reason.slice(0, 110) : 'not listed under refused');
+    check(oldRun.code === 0 && !oldRun.log.includes(oldEnvelope) && !(listing.jobs ?? []).some((j) => j.id === oldEnvelope),
+      '  and no worker was handed it, so the queue behind it drains instead of failing a job about a field',
+      `exit ${oldRun.code}`);
+
+    section('a cancel stops a render that is under way');
+    const doomed = await enqueue({ captures: [take.hash], output: 'jobs-check-cancel', width: 320, height: 180 });
+    const doomedWorker = spawn(process.execPath, [join(root, 'tools/render-worker.mjs'),
+      '--url', URL_, '--name', 'jobs-check-cancel', '--drain', '--max', '1', '--beat', '1000'],
+    { stdio: ['ignore', 'pipe', 'pipe'] });
+    const doomedLog = [];
+    doomedWorker.stdout.on('data', (c) => doomedLog.push(c.toString()));
+    doomedWorker.stderr.on('data', (c) => doomedLog.push(c.toString()));
+    const doomedExit = new Promise((done) => { doomedWorker.on('close', done); });
+    const scratch = () => scratchOf('jobs-check-cancel');
+    // The export's scratch directory exists from the moment the encoder is started, so waiting for
+    // it is waiting for a render that is under way rather than one still loading its page.
+    for (const started = Date.now(); scratch().length === 0 && Date.now() - started < 90_000;) await sleep(100);
+    const underWay = scratch().length > 0;
+    const cancelRun = await post(`/jobs/${doomed.body.id}/cancel`, {});
+    const doomedCode = await doomedExit;
+    // The server removes the scratch when the export socket closes, a moment after the page does.
+    for (const settled = Date.now(); scratch().length > 0 && Date.now() - settled < 10_000;) await sleep(100);
+    const doomedRecord = await get(`/jobs/${doomed.body.id}`);
+    check(underWay && cancelRun.status === 200,
+      'the cancel is made while the encoder is running, which is when the export has a scratch directory',
+      `scratch ${underWay ? 'seen' : 'never seen'}, cancel ${cancelRun.status}`);
+    check(doomedRecord.state === 'cancelled' && doomedRecord.artifactPath === null,
+      'and the worker stops rendering and the job ends cancelled with no artifact on it',
+      `exit ${doomedCode}, state ${doomedRecord.state}, ${doomedLog.join('').trim().split('\n').slice(-2).join(' | ').slice(0, 120)}`);
+    check(doomedCode === 0 && scratch().length === 0,
+      '  and nothing of the export is left under exports/, because closing the page closes the export socket and the server answers by discarding the scratch',
+      `exit ${doomedCode}, ${scratch().length} entries left`);
 
     section('a dropped connection does not silence a claim that is still rendering');
     // The whole render goes through the proxy, because a worker has one `--url`. A row here
@@ -1276,6 +1469,43 @@ try {
       `heartbeat ${beatRecord.heartbeat ?? 'null'} against claimed ${beatRecord.claimed ?? 'null'}`
       + `, ${((beatRecord.heartbeat ?? 0) - (beatRecord.claimed ?? 0)) / 1000}s apart`);
     await proxy.close();
+
+    section('a worker whose queue stops answering mid-render gives the claim up');
+    // Armed once the export's scratch directory exists, so every failed heartbeat lands on a render
+    // that is under way: failing them from the start spends the budget on the page loading, and
+    // there is then no half-written file for the stop to be shown to clean up. `--beat 200` makes
+    // seven failures about a second and a half, which the render has to outlast.
+    for (const arm of [
+      { output: 'jobs-check-budget-refused', silent: false, how: 'answered 500' },
+      { output: 'jobs-check-budget-silent', silent: true, how: 'never answered' },
+    ]) {
+      const budgetProxy = await startInterferingProxy(PROXY_PORT, PORT,
+        failsHeartbeats({ armed: () => scratchOf(arm.output).length > 0, silent: arm.silent }));
+      proxies.push(budgetProxy);
+      const budgeted = await enqueue({ captures: [take.hash], output: arm.output, width: 320, height: 180 });
+      const budgetWorker = spawn(process.execPath, [join(root, 'tools/render-worker.mjs'),
+        '--url', budgetProxy.url, '--name', arm.output, '--drain', '--max', '1', '--beat', '200'],
+      { stdio: ['ignore', 'pipe', 'pipe'] });
+      const budgetLog = [];
+      budgetWorker.stdout.on('data', (c) => budgetLog.push(c.toString()));
+      budgetWorker.stderr.on('data', (c) => budgetLog.push(c.toString()));
+      const budgetCode = await new Promise((done) => { budgetWorker.on('close', done); });
+      // The server removes the scratch when the export socket closes, a moment after the page does.
+      for (const settled = Date.now(); scratchOf(arm.output).length > 0 && Date.now() - settled < 10_000;) await sleep(100);
+      const budgetRecord = await get(`/jobs/${budgeted.body.id}`);
+      await budgetProxy.close();
+      check(budgetProxy.state.failed >= BEAT_BUDGET,
+        `heartbeats were ${arm.how} once the export was under way, at least ${BEAT_BUDGET} of them, so what follows is about a worker whose queue went away mid-render`,
+        `${budgetProxy.state.failed} failed`);
+      check(budgetRecord.state === 'failed' && new RegExp(`${BEAT_BUDGET} heartbeats failed in a row`).test(String(budgetRecord.error)),
+        '  and the worker stopped rendering and reported failed naming the budget, rather than rendering on to a done the queue cannot confirm',
+        `exit ${budgetCode}, state ${budgetRecord.state}, ${String(budgetRecord.error ?? budgetLog.join('').trim().split('\n').slice(-1)).slice(0, 110)}`);
+      check(budgetCode === 1,
+        '  and exited failing, because a job it took did not finish', `exit ${budgetCode}`);
+      check(budgetRecord.artifactPath === null && scratchOf(arm.output).length === 0,
+        '  and nothing of the export is left under exports/, because closing the page closes the export socket and the server answers by discarding the scratch',
+        `${scratchOf(arm.output).length} entries left, artifact ${JSON.stringify(budgetRecord.artifactPath)}`);
+    }
 
     section('the store a worker answers from is read per job, not per worker');
     // A worker takes up to sixteen jobs and used to answer for all of them out of one reading of

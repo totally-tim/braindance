@@ -1167,8 +1167,9 @@ exits 2, because a crash counted as a failed assertion reads under `--mutate` as
 
 ## `jobs-check`
 
-The queue only hands a job to a machine that can reproduce it, and a job carries enough to be
-reproduced at all.
+The queue only hands a job to a machine that can reproduce it, a job carries enough to be
+reproduced at all, a cancel reaches a queued job and a render under way, a worker whose queue stops
+answering gives its claim up, and a render records what it ran on.
 
 ```
 node tools/jobs-check.mjs
@@ -1187,6 +1188,14 @@ copy of `server/`, not the repo's, and it reads its renderer class out of the br
 render in. Some mutations are queue semantics and take `--no-render`; others need the render
 block, so reading every mutation run as `--no-render` is wrong.
 
+The budget section runs the worker twice behind the forwarding proxy, once with every heartbeat
+answered 500 and once with every heartbeat left unanswered, so only the worker's own timeout ends
+it. Each starts failing when the export's scratch directory appears, and `--beat 200` turns the
+seven failures into about a second and a half, which the render has to outlast.
+`test/render-worker.test.mjs` drives the same `runQueue` with a scripted queue and a scripted
+browser and needs no port: the budget in both timings, a cancel, a lost lease, a report the queue
+records as failed, and heartbeat replies that arrive after their job has ended.
+
 - **`claim-ignores-renderer`** — `rendererMatches` returns true for every pairing, so a job pinned
   to one renderer class is handed to any worker.
 - **`claim-hides-blocked`** — a claim with nothing to hand out returns an empty blocked list and a
@@ -1195,7 +1204,8 @@ block, so reading every mutation run as `--no-render` is wrong.
   rule, so a take id reaches the queue.
 - **`envelope-takes-the-callers-captures`** — the footage a job renders comes from the caller's
   list instead of being derived from the clips.
-- **`worker-reads-any-job-version`** — the worker's gate on the job envelope's version goes.
+- **`store-reads-any-job-version`** — the store hands out a job file of another version instead of
+  listing it as refused.
 - **`worker-preflights-only-the-first-capture`** — the worker asks its library about the first
   hash a job names instead of every one.
 - **`attestation-passes-on-a-mismatch`** — the worker stops comparing what the page opened against
@@ -1213,6 +1223,15 @@ block, so reading every mutation run as `--no-render` is wrong.
   reclaims one whose worker is gone.
 - **`heartbeat-ignores-lease`** — the heartbeat's lease comparison goes, so another claim's beat
   renews the job.
+- **`cancel-queued-does-nothing`** — a cancel of a queued job answers 200 and leaves it queued.
+- **`claim-skips-environment`** — a claim records no app build, effect versions or renderer class.
+- **`finish-skips-sidecar`** — a done render's sidecar is never amended with the version record.
+- **`finish-records-done-over-a-failed-sidecar`** — a done report whose artifact cannot take the
+  record is kept as done instead of stored as failed.
+- **`worker-ignores-cancel`** — the heartbeat decision stops reading a cancel request, so a cancelled
+  render runs to its end.
+- **`worker-ignores-budget`** — the worker acts on every verdict but the seventh failed heartbeat, so
+  a render whose queue went away runs to its end and reports done.
 - **`heartbeat-stops-on-first-error`** — the worker stops beating on the first failed beat instead
   of reporting a missed one.
 - **`static-serves-nothing`** — the static route throws after its `stat`, so the worker's page
