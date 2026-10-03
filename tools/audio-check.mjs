@@ -46,6 +46,10 @@ const MUTATIONS = {
       "    const bytes = new Uint8Array(await response.arrayBuffer());\n    await crypto.subtle.digest('SHA-256', bytes);\n    const pcm = readAudioWav(bytes);"]],
     fails: 'a project with audio cannot open on a plain-HTTP origin, which has no crypto.subtle',
   },
+  'reset-retains-before-refusal': {
+    file: 'web/main.js', edits: [["    if (refuseEdit(`resetting ${name}`)) return;\n", '']],
+    fails: 'a reset pressed during an export adds its effect to the document and commits an undo step',
+  },
   'undo-leaves-spectrum-empty': {
     file: 'web/audio-session.js', edits: [['if (!inspection && inspectionFailure !== clip.hash)', 'if (false && !inspection && inspectionFailure !== clip.hash)']],
     fails: 'undoing a replacement cannot restore the earlier audio spectrum while paused',
@@ -251,6 +255,28 @@ async function main() {
   check(plain.secure === false && plain.subtle === 'undefined' && plain.hash === expected.hash && plain.signal > 0 && !lanErrors.length,
     'a project with audio opens on a plain-HTTP LAN origin', JSON.stringify({ ...plain, errors: lanErrors }));
   await lan.close();
+  const reset = await page.evaluate(async () => {
+    const k = __kinect; const name = 'halation.amount';
+    k.params.set(name, k.params.spec(name).max);
+    k.keyframes.undo.commit();
+    await new Promise((done) => requestAnimationFrame(done));
+    const effects = () => { const body = k.library.serialiseProjectBody(); return [...(body.look.effects ?? []), ...body.clips.flatMap((c) => c.effects ?? [])].sort(); };
+    const state = () => ({ effects: effects(), depth: k.keyframes.undo.depth(), edits: k.export.editsDuringExport(), value: k.params.get(name) });
+    const button = document.querySelector(`[data-reset="${name}"]`);
+    const before = state();
+    const run = k.export.run({ width: 320, height: 180, fps: 30, from: 0, to: 3, name: 'reset-during-export', codec: 'lossless' });
+    const running = k.export.running();
+    const enabled = Boolean(button) && !button.disabled;
+    button?.click();
+    await run;
+    const after = state();
+    k.params.set(name, k.params.spec(name).default);
+    k.keyframes.undo.commit();
+    return { enabled, running, before, after };
+  });
+  check(reset.enabled && reset.running && !reset.before.effects.includes('halation')
+    && JSON.stringify(reset.after) === JSON.stringify(reset.before),
+  'a reset pressed during an export changes neither the effects, the value, nor undo', JSON.stringify(reset));
   await page.locator('#panelTabAudio').click();
   const exportOptions = { width: 320, height: 180, fps: 30, from: 15, to: 29, name: 'audio-proof', codec: 'lossless' };
   const done = await page.evaluate((options) => __kinect.export.run(options), exportOptions);

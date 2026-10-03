@@ -1274,8 +1274,8 @@ const MUTATIONS = {
   'effect-rack-reset-forgets-effect': {
     file: 'web/main.js',
     edits: [[
-      "  button.addEventListener('click', () => {\n    retainEffectFor(name);\n    params.set(name, resetTarget(name));",
-      "  button.addEventListener('click', () => {\n    params.set(name, resetTarget(name));",
+      "    retainEffectFor(name);\n    params.set(name, resetTarget(name));",
+      "    params.set(name, resetTarget(name));",
     ]],
   },
 

@@ -1312,6 +1312,8 @@ function makeResetButton(name) {
   button.setAttribute('aria-label', `${name} reset to default`);
   button.append(resetGlyph());
   button.addEventListener('click', () => {
+    // Asked before the rack: retaining the effect is itself a document edit.
+    if (refuseEdit(`resetting ${name}`)) return;
     retainEffectFor(name);
     params.set(name, resetTarget(name));
     history.commit();
