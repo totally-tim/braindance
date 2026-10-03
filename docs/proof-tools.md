@@ -631,16 +631,18 @@ node tools/audio-check.mjs --queue
 | binaries | ffmpeg, resolved as the server resolves it |
 
 It stages `web/`, `server/` and both builtin roots in a temporary directory, runs its own server
-there, and deletes the tree on the way out, so no store resolves into the checkout. It drives the
-real file chooser, the destination list, every conditioning control, depth, placement, undo,
-reload, a missing asset, a clip deleted under a pending audio edit, a reset pressed during an
-export, and removal. It opens the saved project a second time from `braindance.local`, which the
-browser resolves to loopback and gives no secure context, as a LAN editor's plain-HTTP origin has
-none. Its export rows compare the lossless file's PCM sample for sample against the stored asset,
-once starting inside the audio clip and once before it. `--queue` adds a job through `POST /jobs`
-and `render-worker --once`, and compares that file's samples too. `--shots DIRECTORY` saves the
-panel and an MP4 outside the checkout. A run that does not finish prints `DID NOT FINISH` with its
-stack and exits 2.
+there, and deletes the tree on the way out, so no store resolves into the checkout. Its main tone
+is quiet for two seconds and loud after. It drives the real file chooser, the destination list,
+every conditioning control, depth, placement, undo, reload, a missing asset, a clip deleted under a
+pending audio edit, a reset pressed during an export, and removal. It renders previews and plays
+from the quiet half into the loud half on cached frames, and reads the audio readouts and spectrum
+there. It opens the saved project a second time from `braindance.local`, which the browser resolves
+to loopback and gives no secure context, as a LAN editor's plain-HTTP origin has none. Its export
+rows compare the lossless file's PCM sample for sample against the stored asset, once starting
+inside the audio clip and once before it. `--queue` adds a job through `POST /jobs` and
+`render-worker --once`, and compares that file's samples too. `--shots DIRECTORY` saves the panel
+and an MP4 outside the checkout. A run that does not finish prints `DID NOT FINISH` with its stack
+and exits 2.
 
 - **`signal-disconnected`** — the renderer stops applying the audio. Fails the rows that need
   depth to change the frame and the result.
@@ -656,6 +658,8 @@ stack and exits 2.
   the plain-HTTP page cannot open the project.
 - **`reset-retains-before-refusal`** — a reset pressed during an export adds its effect to the
   document before the edit is refused, and commits an undo step.
+- **`cached-frame-skips-audio`** — a frame shown from the preview cache skips the audio, so the
+  readouts and the spectrum stay at the last frame the renderer drew.
 - **`undo-leaves-spectrum-empty`** — the paused spectrum is never rebuilt after an undo restores
   the earlier song.
 

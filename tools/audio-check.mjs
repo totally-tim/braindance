@@ -18,7 +18,7 @@ const SHOTS = flag('--shots');
 const MUTATE = flag('--mutate');
 const MUTATIONS = {
   'signal-disconnected': {
-    file: 'web/main.js', edits: [['    applyAudio(t);', '    /* audio deliberately disconnected */']],
+    file: 'web/main.js', edits: [['    evaluateTracks(t);\n    applyAudio(t);\n', '    evaluateTracks(t);\n']],
     fails: 'the rendered frame and the displayed result no longer change with modulation depth',
   },
   'mux-ignores-start': {
@@ -49,6 +49,10 @@ const MUTATIONS = {
   'reset-retains-before-refusal': {
     file: 'web/main.js', edits: [["    if (refuseEdit(`resetting ${name}`)) return;\n", '']],
     fails: 'a reset pressed during an export adds its effect to the document and commits an undo step',
+  },
+  'cached-frame-skips-audio': {
+    file: 'web/main.js', edits: [['          evaluateTracks(t);\n          applyAudio(t);\n', '          evaluateTracks(t);\n']],
+    fails: 'playback through rendered previews leaves the audio readouts and spectrum at an earlier frame',
   },
   'undo-leaves-spectrum-empty': {
     file: 'web/audio-session.js', edits: [['if (!inspection && inspectionFailure !== clip.hash)', 'if (false && !inspection && inspectionFailure !== clip.hash)']],
@@ -86,7 +90,8 @@ async function main() {
   if (SOURCE) symlinkSync(resolve(SOURCE), join(captures, 'audioprobe.knct'));
   else command(process.execPath, [join(ROOT, 'tools/make-sample.mjs'), join(captures, 'audioprobe.knct'), '--frames', '120']);
   const tone = join(work, 'tone.wav');
-  command(FFMPEG, ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=125:sample_rate=48000:duration=4', '-ac', '2', tone]);
+  // Quiet for two seconds and loud after, so a readout left at an earlier frame shows.
+  command(FFMPEG, ['-v', 'error', '-f', 'lavfi', '-i', 'aevalsrc=exprs=if(lt(t\\,2)\\,0.1\\,0.8)*sin(2*PI*125*t):s=48000:d=4', '-ac', '2', tone]);
   const replacement = join(work, 'replacement.wav');
   command(FFMPEG, ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=8000:sample_rate=48000:duration=2', '-ac', '2', replacement]);
   const origin = `http://127.0.0.1:${PORT}`;
@@ -222,6 +227,29 @@ async function main() {
     mkdirSync(SHOTS, { recursive: true }); await page.screenshot({ path: join(SHOTS, 'audio-panel.png') });
     await change('#audio-mid', 0); await change('#audio-high', 0);
   }
+  await page.locator('#panelTabAudio').click();
+  await page.evaluate(() => __kinect.previews.render());
+  const covered = await page.waitForFunction(() => {
+    const ready = __kinect.previews.state()?.ready ?? [];
+    for (let n = 40; n <= 100; n++) if (!ready.includes(n)) return false;
+    return true;
+  }, null, { timeout: 90000 }).then(() => true, () => false);
+  const meterNow = () => page.evaluate(() => {
+    const t = __kinect.timeline.transport();
+    return { frame: t.frame, previewed: t.previewed, playing: t.playing, shown: Number(document.getElementById('audioValue').value),
+      expect: __kinect.audio.signal(t.frame / t.outputFps), spectrum: document.querySelector('[data-spectrum=output]').getAttribute('points') };
+  });
+  await page.evaluate(async () => { await __kinect.timeline.transport().seek(1.5); });
+  const beforePlay = await meterNow();
+  await page.locator('#tPlay').click();
+  await page.waitForFunction(() => { const t = __kinect.timeline.transport(); return t.playing && t.previewed && t.frame >= 75; }, null, { timeout: 15000 }).catch(() => {});
+  const cached = await meterNow();
+  await page.locator('#tPlay').click();
+  check(covered && cached.previewed && cached.playing && cached.frame >= 75 && Math.abs(cached.shown - cached.expect) < 0.0015
+    && Math.abs(cached.expect - beforePlay.shown) > 0.05 && cached.spectrum !== beforePlay.spectrum,
+  'playback through rendered previews keeps the audio readouts and spectrum at the playhead',
+  JSON.stringify({ covered, beforePlay: { frame: beforePlay.frame, shown: beforePlay.shown }, cached: { ...cached, spectrum: cached.spectrum === beforePlay.spectrum ? 'unchanged' : 'moved' } }));
+  await page.evaluate(() => __kinect.previews.clear());
   await change('#audioStart', 0.5);
   await page.keyboard.press('Meta+z');
   await page.waitForFunction(() => __kinect.audio.clip().start === 0);

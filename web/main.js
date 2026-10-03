@@ -5428,7 +5428,10 @@ class TimelineTransport {
       if (previews?.show(next)) {
         noteViewportFrame();
         evaluating = true;
-        try { evaluateTracks(t); } finally { evaluating = false; }
+        try {
+          evaluateTracks(t);
+          applyAudio(t);
+        } finally { evaluating = false; }
         this.frame = next;
         this.previewed = true;
         chromeStale = true;
