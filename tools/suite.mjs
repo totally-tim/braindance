@@ -67,6 +67,7 @@ const ON_ONE_SERVER = [
 const LEFT_OUT = {
   'desktop-check': 'opens Electron windows on the display, and needs `npm ci --prefix desktop`',
   'hd-encoder-check': 'compiles and runs native code against TurboJPEG',
+  'grabber-stdin-check': 'builds the grabber against a fake sensor and runs it',
   'decoder-check': 'needs vendor/prefix and the built grabber',
   'registration-check': 'needs a corpus from grabber --dump-corpus',
 };

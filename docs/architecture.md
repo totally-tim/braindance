@@ -35,6 +35,21 @@ always with its zeroes. The colour count explains a stale-looking image, and the
 are frames libfreenect2 marked failed itself, which separates a failing GPU readback from a
 degraded USB link.
 
+The grabber reads one command per line from stdin: `low-light`, `hd-color`, `key` and `stop`.
+End-of-file on stdin stops it as `stop` does, so a grabber whose parent is gone ends through the
+same teardown. Only a read of zero bytes is end-of-file. Stdin is non-blocking, and a pipe with
+nothing in it yet is not a closed one.
+
+Stdout is non-blocking too, so a write to a full pipe waits in a 100 ms poll rather than in the
+kernel. The wait reads stdin, so the grabber sees a `stop` behind a stalled frame at once and
+applies any other command while the write waits. A write gives up when a stop is set and a whole
+interval passes with nothing moving, so a parent that stopped reading cannot hold the run. A parent
+that reads again within that interval gets the frame whole, and one that pauses longer can lose it.
+A write that gave up part-way closes the output. Both writers refuse every later message, so the
+stream the parent reads ends on a whole message or at one cut. The encoder thread's writes give up
+the same way. The grabber sets the flag that ends them before the join, on every way out of the
+loop.
+
 `--min-depth` and `--max-depth` clip on the GPU before a frame is built, so they decide what exists
 at all. The viewer's `nearClip` and `farClip` only hide points that already arrived, and the
 recorder's preview range drives that pair, never the grabber's.
@@ -80,8 +95,12 @@ and nothing is running to turn it on, and `applyCamera` re-derives that refusal 
 changes, so a request made servable by switching colour on is not refused on the reason it was
 refused before. A key page attached while there is no colour to key is a socket waiting for a reason
 rather than demand. MJPEG holds transient outages for up to 45 seconds and refuses permanent
-unavailability with 503. SIGINT and SIGTERM wait for grabber teardown and recorder close whichever of
-the two fails, and say which of the two failed.
+unavailability with 503. SIGINT, SIGTERM and, under `--stop-on-stdin`, a `stop` line or the end of
+stdin run one shutdown. It waits for grabber teardown and for every take the recorder owns, the open
+one and any a restart left closing (`closeAll`), whichever of the two fails, and says which of the
+two failed. A replay server has its own shutdown behind the same triggers: it closes the retained
+capture and the listener, then exits. After the bind the server prints `[server] ready` with its
+origin and roots, which is how a host learns a port it did not choose.
 
 `server/output.js` owns output state for the server process. Preset reads and patches are
 serialized in arrival order. The record page writes mode and size through HTTP and parameter
@@ -153,8 +172,13 @@ for as long as the clip moves under its fetch, and either lands where it was ask
 
 **The render queue** produces video from finished edits. A job is a self-contained project body
 plus the captures it names and an output spec, claimed by a worker pinned to the renderer class it
-draws with, because bit-exactness does not survive a change of GPU. `tools/render-worker.mjs`
-brings a page up on `/edit?take=`, which opens no document, so that page writes nothing.
+draws with, because a different GPU draws a different picture. A re-render is promised to look the
+same. The job records the app build, the installed effects' versions, the GPU renderer and the
+ffmpeg version at claim and at finish, and a render whose record differs from the one before it
+runs anyway, with the difference written into the job and its sidecar. A worker's heartbeat is
+also how a cancel reaches it, and a worker whose heartbeats keep failing stops rendering.
+`tools/render-worker.mjs` brings a page up on `/edit?take=`, which opens no
+document, so that page writes nothing.
 
 ## The desktop shell
 

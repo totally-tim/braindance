@@ -1,0 +1,327 @@
+// The readings and the rules `tools/native-stage.mjs` audits a staged grabber by. The otool text is
+// what this repo's own build printed for the grabber before staging; the ldd and readelf text is
+// glibc's format. Every rule has a case that must come back as a problem, so a rule that stopped
+// asking leaves a test red.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import {
+  LINUX_BUNDLED, isLinuxSystem, isMacSystem, linuxLibrariesToStage, linuxViolations, macViolations,
+  parseLdd, parseOtoolDeps, parseOtoolId, parseOtoolRpaths, parseReadelfDynamic, stage, stageLinux,
+} from '../tools/native-stage.mjs';
+
+const BUILT_GRABBER = `native/build/grabber:
+\t@rpath/libfreenect2.0.2.dylib (compatibility version 0.2.0, current version 0.2.0)
+\t/opt/homebrew/opt/jpeg-turbo/lib/libturbojpeg.0.dylib (compatibility version 0.0.0, current version 0.5.0)
+\t/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2200.27.0)
+\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1359.0.0)
+`;
+const DYLIB = `lib/libusb-1.0.0.dylib:
+\t@rpath/libusb-1.0.0.dylib (compatibility version 7.0.0, current version 7.0.0)
+\t/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)
+\t/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit (compatibility version 1.0.0, current version 275.0.0)
+`;
+const LOAD_COMMANDS = `Load command 14
+          cmd LC_LOAD_DYLIB
+      cmdsize 64
+Load command 15
+          cmd LC_RPATH
+      cmdsize 96
+         path /home/build/braindance/vendor/prefix/lib (offset 12)
+Load command 16
+          cmd LC_RPATH
+      cmdsize 56
+         path /opt/homebrew/Cellar/jpeg-turbo/3.2.0/lib (offset 12)
+`;
+
+test('otool -L reads the install names, and a dylib lists its own first', () => {
+  assert.deepEqual(parseOtoolDeps(BUILT_GRABBER), [
+    '@rpath/libfreenect2.0.2.dylib',
+    '/opt/homebrew/opt/jpeg-turbo/lib/libturbojpeg.0.dylib',
+    '/usr/lib/libc++.1.dylib',
+    '/usr/lib/libSystem.B.dylib',
+  ]);
+  assert.equal(parseOtoolDeps(DYLIB)[0], '@rpath/libusb-1.0.0.dylib');
+  assert.equal(parseOtoolId('lib/libusb-1.0.0.dylib:\n@rpath/libusb-1.0.0.dylib\n'), '@rpath/libusb-1.0.0.dylib');
+});
+
+test('otool -l reads every LC_RPATH and nothing else', () => {
+  assert.deepEqual(parseOtoolRpaths(LOAD_COMMANDS), [
+    '/home/build/braindance/vendor/prefix/lib',
+    '/opt/homebrew/Cellar/jpeg-turbo/3.2.0/lib',
+  ]);
+  assert.deepEqual(parseOtoolRpaths('Load command 3\n          cmd LC_LOAD_DYLIB\n'), []);
+});
+
+test('the system owns /usr/lib and /System/Library on a Mac, and the library directories on Linux', () => {
+  assert.ok(isMacSystem('/usr/lib/libc++.1.dylib'));
+  assert.ok(isMacSystem('/System/Library/Frameworks/OpenCL.framework/Versions/A/OpenCL'));
+  assert.ok(!isMacSystem('/opt/homebrew/opt/libusb/lib/libusb-1.0.0.dylib'));
+  assert.ok(!isMacSystem('/usr/local/lib/libusb-1.0.0.dylib'));
+  assert.ok(isLinuxSystem('/lib/x86_64-linux-gnu/libc.so.6'));
+  assert.ok(isLinuxSystem('/usr/lib/aarch64-linux-gnu/libstdc++.so.6'));
+  assert.ok(!isLinuxSystem('/usr/local/lib/libusb-1.0.so.0'));
+  assert.ok(!isLinuxSystem('/home/runner/work/braindance/vendor/prefix/lib/libfreenect2.so.0.2'));
+});
+
+const cleanMac = () => [
+  { path: 'bin/grabber', kind: 'bin', id: null, rpaths: ['@loader_path/../lib'],
+    deps: ['@rpath/libfreenect2.0.2.dylib', '@rpath/libturbojpeg.0.dylib', '/usr/lib/libc++.1.dylib'] },
+  { path: 'lib/libfreenect2.0.2.dylib', kind: 'lib', id: '@rpath/libfreenect2.0.2.dylib', rpaths: ['@loader_path'],
+    deps: ['@rpath/libusb-1.0.0.dylib', '/System/Library/Frameworks/OpenCL.framework/Versions/A/OpenCL'] },
+  { path: 'lib/libusb-1.0.0.dylib', kind: 'lib', id: '@rpath/libusb-1.0.0.dylib', rpaths: [], deps: ['/usr/lib/libobjc.A.dylib'] },
+  { path: 'lib/libturbojpeg.0.dylib', kind: 'lib', id: '@rpath/libturbojpeg.0.dylib', rpaths: [], deps: [] },
+];
+const STAGED = new Set(['libfreenect2.0.2.dylib', 'libusb-1.0.0.dylib', 'libturbojpeg.0.dylib']);
+
+test('a macOS stage that reaches only its own lib/ and the system has no violations', () => {
+  assert.deepEqual(macViolations(cleanMac(), STAGED), []);
+});
+
+test('a macOS stage is refused for each path that would only work on the machine that built it', () => {
+  const broken = (edit) => { const f = cleanMac(); edit(f); return macViolations(f, STAGED); };
+  const cases = [
+    ['an absolute rpath on the grabber', (f) => { f[0].rpaths.push('/opt/homebrew/lib'); }, /carries the rpath \/opt\/homebrew\/lib/],
+    ['the build prefix left as the grabber\'s only rpath', (f) => { f[0].rpaths = ['/home/build/braindance/vendor/prefix/lib']; }, /carries the rpath \/home\/build/],
+    ['a dependency still named by its Homebrew path', (f) => { f[1].deps[0] = '/opt/homebrew/opt/libusb/lib/libusb-1.0.0.dylib'; }, /neither the system's nor relative/],
+    ['a dependency on a library that was never staged', (f) => { f[1].deps.push('@rpath/libglfw.3.dylib'); }, /lib\/ holds no such file/],
+    ['a library that keeps its Homebrew install name', (f) => { f[2].id = '/opt/homebrew/opt/libusb/lib/libusb-1.0.0.dylib'; }, /names itself/],
+    ['an rpath Homebrew built into a library', (f) => { f[3].rpaths = ['/opt/homebrew/Cellar/jpeg-turbo/3.2.0/lib']; }, /carries the rpath/],
+    ['a library that loads a neighbour and carries no rpath to find it', (f) => { f[1].rpaths = []; }, /carries no rpath to find it/],
+    ['a grabber that loads a neighbour and carries no rpath', (f) => { f[0].rpaths = []; }, /carries no rpath to find it/],
+  ];
+  for (const [what, edit, expected] of cases) {
+    const problems = broken(edit);
+    assert.ok(problems.some((p) => expected.test(p)), `${what} should be refused, got ${JSON.stringify(problems)}`);
+  }
+});
+
+const LDD = `\tlinux-vdso.so.1 (0x00007ffd4b5f6000)
+\tlibfreenect2.so.0.2 => /tmp/stage/lib/libfreenect2.so.0.2 (0x00007f1b4a000000)
+\tlibusb-1.0.so.0 => /tmp/stage/lib/libusb-1.0.so.0 (0x00007f1b49f00000)
+\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007f1b49c00000)
+\tlibudev.so.1 => not found
+\t/lib64/ld-linux-x86-64.so.2 (0x00007f1b4b2a0000)
+`;
+
+test('ldd gives the name asked for and where it came to, or null when it did not', () => {
+  assert.deepEqual(parseLdd(LDD), [
+    { name: 'libfreenect2.so.0.2', path: '/tmp/stage/lib/libfreenect2.so.0.2' },
+    { name: 'libusb-1.0.so.0', path: '/tmp/stage/lib/libusb-1.0.so.0' },
+    { name: 'libstdc++.so.6', path: '/lib/x86_64-linux-gnu/libstdc++.so.6' },
+    { name: 'libudev.so.1', path: null },
+    { name: '/lib64/ld-linux-x86-64.so.2', path: '/lib64/ld-linux-x86-64.so.2' },
+  ]);
+});
+
+test('ldd paths are bounded by the address, so a path with spaces comes back whole', () => {
+  const text = '\tlibfreenect2.so.0.2 => /tmp/stage space/lib/libfreenect2.so.0.2 (0x00007f1b4a000000)\n'
+    + '\t/tmp/build host/libusb-1.0.so.0 (0x00007f1b49f00000)\n';
+  assert.deepEqual(parseLdd(text), [
+    { name: 'libfreenect2.so.0.2', path: '/tmp/stage space/lib/libfreenect2.so.0.2' },
+    { name: '/tmp/build host/libusb-1.0.so.0', path: '/tmp/build host/libusb-1.0.so.0' },
+  ]);
+});
+
+test('readelf -d reads the needed names and every rpath entry, RPATH or RUNPATH', () => {
+  const text = ` 0x0000000000000001 (NEEDED)             Shared library: [libfreenect2.so.0.2]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
+ 0x000000000000001d (RUNPATH)            Library runpath: [$ORIGIN/../lib]
+ 0x000000000000000f (RPATH)              Library rpath: [/a/lib:/b/lib]
+`;
+  assert.deepEqual(parseReadelfDynamic(text), {
+    needed: ['libfreenect2.so.0.2', 'libc.so.6'],
+    rpath: ['$ORIGIN/../lib', '/a/lib', '/b/lib'],
+  });
+  assert.deepEqual(parseReadelfDynamic('Dynamic section at offset 0x2d40 contains 28 entries:\n').rpath, []);
+});
+
+test('the four libraries that travel on Linux are named, and a distribution\'s other libraries are not', () => {
+  for (const name of ['libfreenect2.so.0.2', 'libusb-1.0.so.0', 'libturbojpeg.so.0', 'libglfw.so.3']) {
+    assert.ok(LINUX_BUNDLED.test(name), name);
+  }
+  for (const name of ['libc.so.6', 'libstdc++.so.6', 'libGL.so.1', 'libudev.so.1', 'libusbmuxd.so.6', 'libglfwx.so.3']) {
+    assert.ok(!LINUX_BUNDLED.test(name), name);
+  }
+});
+
+// What ldd prints for a grabber built against libfreenect2 with VA-API found on the build host:
+// the four libraries that travel by name, one that travels because nothing on the target
+// supplies it, and the system's own.
+const LDD_WITH_VAAPI = `\tlinux-vdso.so.1 (0x00007ffd4b5f6000)
+\tlibfreenect2.so.0.2 => /home/runner/vendor/prefix/lib/libfreenect2.so.0.2 (0x00007f1b4a000000)
+\tlibusb-1.0.so.0 => /usr/lib/x86_64-linux-gnu/libusb-1.0.so.0 (0x00007f1b49f00000)
+\tlibturbojpeg.so.0 => /usr/lib/x86_64-linux-gnu/libturbojpeg.so.0 (0x00007f1b49e00000)
+\tlibglfw.so.3 => /usr/lib/x86_64-linux-gnu/libglfw.so.3 (0x00007f1b49d00000)
+\tlibva.so.2 => /opt/media/lib/libva.so.2 (0x00007f1b49c00000)
+\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007f1b49b00000)
+\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f1b49a00000)
+\t/lib64/ld-linux-x86-64.so.2 (0x00007f1b4b2a0000)
+`;
+
+test('Linux staging carries the four named libraries and every other one that resolves outside the system', () => {
+  const carried = linuxLibrariesToStage(parseLdd(LDD_WITH_VAAPI));
+  assert.deepEqual(carried.map((l) => l.name),
+    ['libfreenect2.so.0.2', 'libusb-1.0.so.0', 'libturbojpeg.so.0', 'libglfw.so.3', 'libva.so.2']);
+  assert.equal(carried.find((l) => l.name === 'libva.so.2').path, '/opt/media/lib/libva.so.2');
+  const local = linuxLibrariesToStage([{ name: 'libfoo.so.2', path: '/usr/local/lib/libfoo.so.2.1' }]);
+  assert.deepEqual(local, [{ name: 'libfoo.so.2', path: '/usr/local/lib/libfoo.so.2.1' }],
+    '/usr/local/lib is not a system directory, and the real file travels under the name asked for');
+  assert.deepEqual(linuxLibrariesToStage([{ name: 'libc.so.6', path: '/usr/lib/x86_64-linux-gnu/libc.so.6' }]), []);
+});
+
+test('Linux staging refuses what it cannot carry: an unresolved library, a shared name, an absolute dependency', () => {
+  const message = (loaded) => { try { linuxLibrariesToStage(loaded); } catch (e) { return e.message; } return ''; };
+  assert.match(message([{ name: 'libva.so.2', path: null }]), /libva\.so\.2 does not resolve/);
+  assert.match(message([{ name: 'libudev.so.1', path: null }]), /libudev\.so\.1 does not resolve/,
+    'a system library the build host cannot find is as unrunnable as a bundled one');
+  assert.match(message([{ name: 'libfoo.so.1', path: '/opt/a/lib/libfoo.so.1' }, { name: 'libfoo.so.1', path: '/opt/b/lib/libfoo.so.1' }]),
+    /two libraries are both called libfoo\.so\.1: \/opt\/a\/lib\/libfoo\.so\.1 and \/opt\/b\/lib\/libfoo\.so\.1/);
+  assert.match(message([{ name: '/opt/media/lib/libva.so.2', path: '/opt/media/lib/libva.so.2' }]),
+    /by an absolute path, which no rpath redirects/);
+  assert.match(message([{ name: '/usr/lib/x86_64-linux-gnu/libusb-1.0.so.0', path: '/usr/lib/x86_64-linux-gnu/libusb-1.0.so.0' }]),
+    /by an absolute path/, 'a bundled library named by an absolute path is not the stage\'s copy even in a system directory');
+  const same = [{ name: 'libfoo.so.1', path: '/opt/a/lib/libfoo.so.1' }, { name: 'libfoo.so.1', path: '/opt/a/lib/libfoo.so.1' }];
+  assert.equal(linuxLibrariesToStage(same).length, 1, 'one file listed twice is one library');
+  assert.deepEqual(linuxLibrariesToStage([{ name: '/lib64/ld-linux-x86-64.so.2', path: '/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2' }]), [],
+    'the loader, named by its absolute system path, is the system\'s');
+});
+
+// stageLinux against a grabber whose ldd output names a library outside the system. `ldd` and
+// `patchelf` are stand-ins on PATH: ldd prints the text, patchelf writes down the call.
+test('the Linux stage copies a dependency from outside the system and gives it its own $ORIGIN search path', () => {
+  const root = mkdtempSync(join(tmpdir(), 'braindance-linux-stage-'));
+  const saved = { ...process.env };
+  try {
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    const tool = (name, body) => { writeFileSync(join(bin, name), `#!/bin/sh\n[ "$1" = --version ] && exit 0\n${body}\n`); chmodSync(join(bin, name), 0o755); };
+    tool('ldd', 'cat "$FAKE_LDD_OUTPUT"');
+    tool('patchelf', 'echo "$@" >> "$FAKE_PATCHELF_LOG"');
+    const host = (rel, text) => {
+      const path = join(root, 'host', rel);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, text);
+      return path;
+    };
+    const grabber = host('build/grabber', 'grabber');
+    const libs = {
+      'libfreenect2.so.0.2': host('prefix/libfreenect2.so.0.2', 'freenect2'),
+      'libusb-1.0.so.0': host('prefix/libusb-1.0.so.0', 'usb'),
+      'libva.so.2': host('opt/libva.so.2.1900.0', 'va'),
+    };
+    const lines = Object.entries(libs).map(([name, path]) => `\t${name} => ${path} (0x00007f1b4a000000)`);
+    writeFileSync(join(root, 'ldd.txt'), `\tlinux-vdso.so.1 (0x00007ffd4b5f6000)\n${lines.join('\n')}\n`);
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+    process.env.FAKE_LDD_OUTPUT = join(root, 'ldd.txt');
+    process.env.FAKE_PATCHELF_LOG = join(root, 'patchelf.log');
+    const dir = join(root, 'stage');
+    mkdirSync(join(dir, 'bin'), { recursive: true });
+    mkdirSync(join(dir, 'lib'));
+    const names = stageLinux(grabber, dir);
+    assert.deepEqual(names, Object.keys(libs));
+    assert.deepEqual(readdirSync(join(dir, 'lib')).sort(), Object.keys(libs).sort(), 'the dependency outside the system is in lib/');
+    assert.equal(readFileSync(join(dir, 'lib', 'libva.so.2'), 'utf8'), 'va', 'under the name the loader asks for, holding the real file');
+    const calls = readFileSync(join(root, 'patchelf.log'), 'utf8').trim().split('\n').map((l) => l.replace(`${dir}/`, ''));
+    assert.deepEqual(calls.sort(), [
+      '--set-rpath $ORIGIN lib/libfreenect2.so.0.2',
+      '--set-rpath $ORIGIN lib/libusb-1.0.so.0',
+      '--set-rpath $ORIGIN lib/libva.so.2',
+      '--set-rpath $ORIGIN/../lib bin/grabber',
+    ]);
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const STAGE_LIB = '/tmp/stage/lib';
+const cleanLinux = () => ({
+  files: [
+    { path: 'bin/grabber', kind: 'bin', needed: ['libfreenect2.so.0.2', 'libc.so.6'], rpath: ['$ORIGIN/../lib'] },
+    { path: 'lib/libfreenect2.so.0.2', kind: 'lib', needed: ['libusb-1.0.so.0'], rpath: ['$ORIGIN'] },
+    { path: 'lib/libusb-1.0.so.0', kind: 'lib', needed: ['libudev.so.1'], rpath: ['$ORIGIN'] },
+  ],
+  loaded: [
+    { name: 'libfreenect2.so.0.2', path: `${STAGE_LIB}/libfreenect2.so.0.2` },
+    { name: 'libusb-1.0.so.0', path: `${STAGE_LIB}/libusb-1.0.so.0` },
+    { name: 'libc.so.6', path: '/lib/x86_64-linux-gnu/libc.so.6' },
+  ],
+});
+
+test('a Linux stage whose own libraries resolve inside it and the rest in the system has no violations', () => {
+  const { files, loaded } = cleanLinux();
+  assert.deepEqual(linuxViolations(files, loaded, STAGE_LIB), []);
+});
+
+test('a Linux stage is refused when a library that has to travel resolves somewhere else, because that run proves nothing', () => {
+  const broken = (edit) => { const s = cleanLinux(); edit(s); return linuxViolations(s.files, s.loaded, STAGE_LIB); };
+  const cases = [
+    ['a bundled library found on the host\'s own library path', (s) => { s.loaded[1].path = '/lib/x86_64-linux-gnu/libusb-1.0.so.0'; }, /libusb-1\.0\.so\.0 resolves to \/lib\/x86_64-linux-gnu.*outside the stage/],
+    ['a bundled library found under the build prefix', (s) => { s.loaded[0].path = '/home/runner/vendor/prefix/lib/libfreenect2.so.0.2'; }, /outside the stage/],
+    ['a library that is not found', (s) => { s.loaded.push({ name: 'libglfw.so.3', path: null }); }, /libglfw\.so\.3 is not found/],
+    ['a system library resolved from a non-system directory', (s) => { s.loaded[2].path = '/usr/local/lib/libc.so.6'; }, /neither the system's nor in the stage/],
+    ['an absolute rpath on the grabber', (s) => { s.files[0].rpath = ['/home/runner/vendor/prefix/lib']; }, /carries the rpath \/home\/runner/],
+    ['no rpath on a library', (s) => { s.files[1].rpath = []; }, /carries no rpath/],
+    ['the grabber\'s rpath on a library', (s) => { s.files[2].rpath = ['$ORIGIN/../lib']; }, /not \$ORIGIN/],
+    ['a library that needs another by an absolute path', (s) => { s.files[1].needed = ['/tmp/build-host/libusb-1.0.so.0']; }, /needs \/tmp\/build-host\/libusb-1\.0\.so\.0 by an absolute path/],
+    ['an absolute dependency on a library of the build host\'s', (s) => { s.loaded.push({ name: '/tmp/build-host/libfoo.so.1', path: '/tmp/build-host/libfoo.so.1' }); }, /neither the system's nor in the stage/],
+    ['an absolute dependency on the build host\'s copy of a library that has to travel', (s) => { s.loaded.push({ name: '/tmp/build-host/libusb-1.0.so.0', path: '/tmp/build-host/libusb-1.0.so.0' }); }, /outside the stage/],
+    ['an absolute dependency on the host\'s own copy of a library that has to travel', (s) => { s.loaded.push({ name: '/usr/lib/x86_64-linux-gnu/libusb-1.0.so.0', path: '/usr/lib/x86_64-linux-gnu/libusb-1.0.so.0' }); }, /outside the stage/],
+  ];
+  for (const [what, edit, expected] of cases) {
+    const problems = broken(edit);
+    assert.ok(problems.some((p) => expected.test(p)), `${what} should be refused, got ${JSON.stringify(problems)}`);
+  }
+});
+
+const stageInto = (dir) => stage({ grabber: join(dir, 'no-such-grabber'), dir });
+
+test('stage refuses a directory it did not write, before it touches it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'braindance-stage-'));
+  try {
+    mkdirSync(join(dir, 'bin'));
+    mkdirSync(join(dir, 'lib'));
+    writeFileSync(join(dir, 'bin', 'keep'), 'x');
+    writeFileSync(join(dir, 'lib', 'keep'), 'x');
+    assert.throws(() => stageInto(dir), /not empty and is not a stage this wrote/);
+    assert.ok(existsSync(join(dir, 'bin', 'keep')) && existsSync(join(dir, 'lib', 'keep')),
+      'a directory holding only bin/ and lib/ is somebody\'s install and is left as it was');
+    writeFileSync(join(dir, 'notes.txt'), 'x');
+    assert.throws(() => stageInto(dir), /not empty and is not a stage this wrote/);
+    const file = join(dir, 'notes.txt');
+    assert.throws(() => stage({ grabber: file, dir: file }), /is not a directory/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stage replaces a directory that carries its marker, and refuses one with strays beside it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'braindance-stage-'));
+  try {
+    mkdirSync(join(dir, 'bin'));
+    writeFileSync(join(dir, 'bin', 'old'), 'x');
+    writeFileSync(join(dir, '.braindance-stage'), '');
+    assert.throws(() => stageInto(dir), (e) => !/refusing/.test(e.message), 'it got past the directory check');
+    assert.ok(!existsSync(join(dir, 'bin', 'old')), 'the earlier stage is gone');
+    assert.ok(existsSync(join(dir, '.braindance-stage')), 'and the new one is marked');
+    writeFileSync(join(dir, 'notes.txt'), 'x');
+    assert.throws(() => stageInto(dir), /notes\.txt beside a stage/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stage takes an empty directory', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'braindance-stage-'));
+  try {
+    assert.throws(() => stageInto(dir), (e) => !/refusing/.test(e.message));
+    assert.ok(existsSync(join(dir, '.braindance-stage')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

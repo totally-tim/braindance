@@ -19,7 +19,7 @@ commitment. Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 - **A Kinect v2.** Without one you can still replay a capture and work on the browser side.
 - **Node 26 or newer.**
 - **macOS on Apple Silicon, or Debian / Raspberry Pi OS** for a capture node.
-- **ffmpeg** for video out, expected at `/opt/homebrew/bin/ffmpeg`. Set `FFMPEG=` to override.
+- **ffmpeg** for video out, on your `PATH`. Set `FFMPEG=` to the program to use another.
 
 
 ## Linux Specific step you might need before install
@@ -309,7 +309,9 @@ npm run build:native
 `build:native` picks the `macos` preset (OpenCL) or the `linux` preset (OpenGL, for the Pi)
 from the platform and ends by running the grabber it just built. The GL packages on the Debian
 line are required: without them libfreenect2 builds a CPU-only library, and the build refuses
-that. `node tools/build-native.mjs --help` lists the overrides.
+that. `node tools/build-native.mjs --help` lists the overrides. `npm run build:native -- --stage DIR`
+also writes a copy of the grabber and its libraries that runs from wherever `DIR` is moved to; Linux
+needs `patchelf` for it.
 
 ## Going deeper
 

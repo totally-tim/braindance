@@ -60,6 +60,7 @@ Per tool, read from the source:
 | `module-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a stale anchor |
 | `syntax-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor |
 | `cpp-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor, no compiler or headers |
+| `grabber-stdin-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a stale anchor, no compiler or TurboJPEG, a grabber that will not build |
 | `decoder-check` | pass, or a missed mutation | a failed assertion, a catch, or a probe that will not build or run | `DID NOT RUN`: no compiler, no built library or grabber, a stale anchor, a failed rebuild, or a mutated rebuild that changed nothing |
 | `grabber-args-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no `vendor/prefix`, build-native failed, a mutation the binary did not change, a stale anchor |
 | `vendor-check` | pass, or a **catch** | a failed assertion, a miss, or a stale anchor | `PASS on the source, with the artifact untested` |
@@ -156,8 +157,8 @@ which take hours and a GPU browser; all but `library` need a server at `SWEEP_UR
 `fixture-1g`).
 
 `--jobs` above 1 runs mutations side by side, and the sweep refuses it unless every named tool is
-one of `syntax`, `module`, `cpp`, `hd-encoder` and `release-gate`: those apply a mutation in memory
-or in a private temp copy and bind no port. Every other tool stages its mutation where a second
+one of `syntax`, `module`, `cpp`, `hd-encoder`, `grabber-stdin` and `release-gate`: those apply a
+mutation in memory or in a private temp copy and bind no port. Every other tool stages its mutation where a second
 run would read it.
 
 ## `suite`
@@ -207,9 +208,9 @@ they are.
 Stage 2 lasts as long as `library-check`, and `editor-check` and `preview-check` are most of stage
 3.
 
-It leaves out `hd-encoder-check`, `decoder-check` and `registration-check`, which need a native
-build, a built library or a corpus, `desktop-check`, which opens Electron windows on the display, and
-`sweep-all`, which runs mutations. A `*-check.mjs` it
+It leaves out `hd-encoder-check` and `grabber-stdin-check`, which compile native code, `decoder-check`
+and `registration-check`, which need a built library or a corpus, `desktop-check`, which opens Electron
+windows on the display, and `sweep-all`, which runs mutations. A `*-check.mjs` it
 neither runs nor leaves out by name comes back DID NOT RUN, so a new tool is placed in a stage or
 named as left out.
 
@@ -911,7 +912,112 @@ is NOT CAUGHT even though it exits 1.
 The early-return row is the part of the grabber's failed corpus write that runs without a sensor:
 an encoder left running when its scope ends is joined. The write itself happens after the device
 starts, so the grabber's exit 1 on a short write needs a sensor and a filesystem that fills during
-the dump, and no tool here reaches it.
+the dump, and no tool here reaches it. `grabber-stdin-check` reaches the exit 1 for a corpus file
+that will not open.
+
+## `grabber-stdin-check`
+
+What `stop` and end-of-file on stdin do to the grabber. No sensor, no libfreenect2 build and no
+port. It runs in three parts.
+
+The reader part extracts `applyLowLight` and `pollCommands` out of `native/grabber.cpp`, compiles
+them with the stubs in `test/fixtures/grabber-stdin.cpp`, and feeds them a real non-blocking pipe on
+descriptor 0.
+
+The writer part extracts the output writer, `write_message` and what it calls, and compiles it with
+`test/fixtures/grabber-write.cpp`. The fixture runs the frame loop's thread and the encoder's on a
+pipe the parent leaves unread. The frame writer stalls in a 512 KiB message, the stop reaches it
+through the stdin its stalled wait reads, and the encoder's message arrives while the frame writer
+waits or after it gave up. The parent reads again once the frame writer has returned, and the tool
+reads the stream through `MessageParser` from `server/protocol.js`. The sensor's timing decides
+which thread reaches the lock first. A stop through the built grabber lets a queued encoder give up
+on its own failed lock attempt, so the writer part scripts the order.
+
+The stream part builds the whole of `native/grabber.cpp` against `test/fixtures/fake-freenect2.cpp`,
+which defines the libfreenect2 symbols the grabber calls behind the real headers, and runs the
+result as a child. The fake device delivers synthetic frames from a thread, paced by
+`FAKE_DEPTH_MS`, `FAKE_COLOUR_EVERY`, `FAKE_MAX_FRAMES` and `FAKE_REGISTER_MS`. The tool does not
+read the child's stdout until a row says to, so the first frame fills the pipe and the capture loop
+waits in a write when the stop arrives. A stop has 4000 ms. The tool kills a child still running at
+the bound, and its row fails.
+
+It proves the stop path through the real capture loop, the output waits, the encoder thread and the
+teardown, and that a message cut short ends the output. The fake sensor counts the frames the
+grabber takes and the frames it gives back and prints both when its device closes, so every
+teardown row asserts they match. That counts the grabber's own releases. The USB link,
+libfreenect2's own stop and close, and the server as the parent need a sensor and are not in it.
+
+```
+node tools/grabber-stdin-check.mjs
+```
+
+| needs | |
+| --- | --- |
+| toolchain | a C++ compiler for the reader and writer parts; the stream part adds TurboJPEG's headers and library. Without them it exits 2 |
+| fixture | none: each row writes into the pipe and closes it itself |
+
+The rows that hold the pipe open are the control for the rows that close it. A reader that took -1
+with `EAGAIN` for end-of-file would stop on a pipe with nothing in it, and the open-pipe rows would
+fail. Each stream row that stops a stalled grabber has a row ahead of it showing the grabber stalled:
+no new frame for 450 ms, where depth arrives every 10 ms. The writer rows are:
+
+- two writers and no stop: both messages arrive whole, each carrying only its own bytes. This is
+  the control for a writer that refuses too much;
+- a second message queued behind a frame the stop cuts short, and one that reaches the lock after
+  the frame gave up: the frame writer reports its message abandoned, the second write is refused,
+  the parent's stream is the cut frame and ends there, and the shipped parser holds it as one
+  unfinished message.
+
+The stream rows are:
+
+- a stop line, and end-of-file, with the first frame stuck in an unread pipe;
+- a stop line with the encoder thread holding the write lock on a full pipe while the frame loop
+  waits for it;
+- a command written while a write is stalled is applied at once and does not stop the run, the
+  stalled frame completes, and the stream stays whole. This is the control for a fix that stops on
+  any stdin activity;
+- a stop line to a parent that is still reading, which paces its reads so a write is nearly always
+  waiting: the stream ends on a message boundary. This is the control for a fix that gives a frame
+  up the moment a stop is set;
+- a stop line, and end-of-file, already waiting when the first frame arrives: nothing follows the
+  hello, and the one depth frame the loop took is given back;
+- two exits that no stop requested, each with the encoder stalled in a write: the sensor goes quiet
+  and the loop leaves on its ten-second frame timeout, and a corpus file will not open.
+
+Exit 2 means it did not finish; a mutation with zero failed assertions is NOT CAUGHT even though it
+exits 1. Each mutation runs the part it names: reader, writer or stream.
+
+- **`eof-never-stops`** — end-of-file is compared with a value `read` never returns, and the
+  closed-pipe rows fail.
+- **`would-block-stops`** — -1 is read as end-of-file, and the open-pipe rows fail.
+- **`eof-drops-the-commands-it-arrives-with`** — the reader returns on end-of-file before it parses
+  what it read, and the same-pass row fails.
+- **`stop-line-ignored`** — the `stop` line stops matching, and the stop rows fail while the
+  end-of-file rows stay green.
+- **`stop-matches-a-prefix`** — any line that begins `stop` stops the run, and the near-miss row
+  fails.
+- **`cut-message-leaves-the-output-open`** — a write that gave up part-way no longer closes the
+  output to the next writer, and the queued and late rows find its bytes after the cut.
+- **`cut-message-does-not-close-the-output`** — the write that gave up leaves nothing for a later
+  write to refuse, and the same rows fail.
+- **`stalled-write-never-gives-up`** — a write on a full pipe keeps waiting after the stop is read,
+  and every stalled-stop row hangs.
+- **`stalled-write-ignores-stdin`** — nothing reads stdin while a write waits, and the stalled-stop
+  rows hang and the command row sees its command unread.
+- **`frame-lock-ignores-stdin`** — the loop waiting for the write lock never reads stdin, and the
+  row where the encoder holds the lock hangs.
+- **`stdout-left-blocking`** — stdout stays blocking, so a write sits in the kernel, and the
+  stalled-stop rows hang.
+- **`frame-written-after-stop`** — the loop writes the frame in hand after it reads a stop, and the
+  rows with a stop already waiting find bytes after the hello.
+- **`early-stop-keeps-the-depth-frame`** — the loop leaves on a stop without giving back the depth
+  frame it took, and the rows with a stop already waiting find a frame taken and not returned.
+- **`stalled-write-gives-up-at-once`** — a write gives up as soon as a stop is set, and the
+  reading-parent row and the whole-stream row after the command row end on a cut frame.
+- **`teardown-leaves-the-encoder-writing`** — the flag that ends an encoder's stalled write is not
+  set before the join, and the frame-timeout row hangs.
+- **`corpus-failure-leaves-the-encoder-writing`** — the same flag is not set before the early
+  return that destroys the encoder, and the corpus row hangs.
 
 ## `vcam-check`
 
@@ -1144,8 +1250,9 @@ A run that stops before its verdict prints `DID NOT RUN` with the count so far a
 
 ## `jobs-check`
 
-The queue only hands a job to a machine that can reproduce it, and a job carries enough to be
-reproduced at all.
+The queue only hands a job to a machine that can reproduce it, a job carries enough to be
+reproduced at all, a cancel reaches a queued job and a render under way, a worker whose queue stops
+answering gives its claim up, and a render records what it ran on.
 
 ```
 node tools/jobs-check.mjs
@@ -1164,6 +1271,14 @@ copy of `server/`, not the repo's, and it reads its renderer class out of the br
 render in. Some mutations are queue semantics and take `--no-render`; others need the render
 block, so reading every mutation run as `--no-render` is wrong.
 
+The budget section runs the worker twice behind the forwarding proxy, once with every heartbeat
+answered 500 and once with every heartbeat left unanswered, so only the worker's own timeout ends
+it. Each starts failing when the export's scratch directory appears, and `--beat 200` turns the
+seven failures into about a second and a half, which the render has to outlast.
+`test/render-worker.test.mjs` drives the same `runQueue` with a scripted queue and a scripted
+browser and needs no port: the budget in both timings, a cancel, a lost lease, a report the queue
+records as failed, and heartbeat replies that arrive after their job has ended.
+
 - **`claim-ignores-renderer`** — `rendererMatches` returns true for every pairing, so a job pinned
   to one renderer class is handed to any worker.
 - **`claim-hides-blocked`** — a claim with nothing to hand out returns an empty blocked list and a
@@ -1172,7 +1287,8 @@ block, so reading every mutation run as `--no-render` is wrong.
   rule, so a take id reaches the queue.
 - **`envelope-takes-the-callers-captures`** — the footage a job renders comes from the caller's
   list instead of being derived from the clips.
-- **`worker-reads-any-job-version`** — the worker's gate on the job envelope's version goes.
+- **`store-reads-any-job-version`** — the store hands out a job file of another version instead of
+  listing it as refused.
 - **`worker-preflights-only-the-first-capture`** — the worker asks its library about the first
   hash a job names instead of every one.
 - **`attestation-passes-on-a-mismatch`** — the worker stops comparing what the page opened against
@@ -1190,6 +1306,15 @@ block, so reading every mutation run as `--no-render` is wrong.
   reclaims one whose worker is gone.
 - **`heartbeat-ignores-lease`** — the heartbeat's lease comparison goes, so another claim's beat
   renews the job.
+- **`cancel-queued-does-nothing`** — a cancel of a queued job answers 200 and leaves it queued.
+- **`claim-skips-environment`** — a claim records no app build, effect versions or renderer class.
+- **`finish-skips-sidecar`** — a done render's sidecar is never amended with the version record.
+- **`finish-records-done-over-a-failed-sidecar`** — a done report whose artifact cannot take the
+  record is kept as done instead of stored as failed.
+- **`worker-ignores-cancel`** — the heartbeat decision stops reading a cancel request, so a cancelled
+  render runs to its end.
+- **`worker-ignores-budget`** — the worker acts on every verdict but the seventh failed heartbeat, so
+  a render whose queue went away runs to its end and reports done.
 - **`heartbeat-stops-on-first-error`** — the worker stops beating on the first failed beat instead
   of reporting a missed one.
 - **`static-serves-nothing`** — the static route throws after its `stat`, so the worker's page

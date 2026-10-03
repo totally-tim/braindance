@@ -4,11 +4,46 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { accessSync, constants, statSync } from 'node:fs';
 import { mkdir, readdir, writeFile, stat, rm, rename } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 
-// Absolute rather than resolved off PATH: this is the encoder the export was measured against.
-const FFMPEG = process.env.FFMPEG ?? '/opt/homebrew/bin/ffmpeg';
+// The encoder `FFMPEG` names, read once at import. Unset, `ffmpeg` is looked up on PATH at each
+// export, so one installed after the server started is found without a restart.
+const FFMPEG_NAMED = process.env.FFMPEG || null;
+const FFMPEG_FILE = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+
+function findOnPath(directories) {
+  for (const directory of directories) {
+    // `resolve` reads an empty entry as the current directory, and makes the result absolute so the
+    // spawn does not look it up on PATH again.
+    const candidate = resolve(directory, FFMPEG_FILE);
+    try {
+      if (!statSync(candidate).isFile()) continue;
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch { /* nothing runnable here, so the next directory */ }
+  }
+  return null;
+}
+
+/**
+ * The encoder to spawn: the one `FFMPEG` names, else the first `ffmpeg` on PATH. Throws a sentence
+ * naming both places when there is neither, because a host's PATH is usually shorter than a shell's.
+ */
+export function ffmpegBinary({ named = FFMPEG_NAMED, searchPath = process.env.PATH } = {}) {
+  if (named) return named;
+  // A PATH with entries keeps its empty ones, which a shell reads as the current directory; a PATH
+  // with none is refused.
+  const directories = searchPath ? searchPath.split(delimiter) : [];
+  const found = findOnPath(directories);
+  if (found) return found;
+  const searched = directories.map((directory) => directory || '.');
+  throw new Error(
+    `no ffmpeg to export with: the FFMPEG environment variable is not set, and ${FFMPEG_FILE} is not in `
+    + `${searched.length ? `any PATH directory (${searched.join(', ')})` : 'PATH, which is empty'}`,
+  );
+}
 
 // How many frames may be in flight. A courtesy the client extends rather than something this
 // server enforces - nothing below counts unacked frames.
@@ -195,12 +230,15 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
       renderer: msg.renderer ?? null,
     };
 
+    // Before anything is created, so a machine with no encoder refuses with nothing to clean up.
+    const ffmpeg = ffmpegBinary();
+
     // The directory the target is in rather than the scratch directory - one level deeper for a
     // sequence, because the image2 muxer opens each frame by name and creates nothing.
     await mkdir(dirname(target), { recursive: true });
     const args = ffmpegArgs({ width, height, fps, codec, into: target });
-    log(`[export] ${FFMPEG} ${args.join(' ')}`);
-    child = spawn(FFMPEG, args, { stdio: ['pipe', 'ignore', 'pipe'] });
+    log(`[export] ${ffmpeg} ${args.join(' ')}`);
+    child = spawn(ffmpeg, args, { stdio: ['pipe', 'ignore', 'pipe'] });
     child.stderr.on('data', (chunk) => stderr.push(chunk.toString('utf8')));
     child.on('error', (err) => fail(`ffmpeg could not start: ${err.message}`));
     child.stdin.on('error', () => { /* reported through the exit code instead */ });

@@ -57,7 +57,46 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libturbojpeg0-dev
       - run: node tools/cpp-check.mjs
       - run: node tools/hd-encoder-check.mjs
-      - run: node tools/sweep-all.mjs --tools cpp,hd-encoder --jobs "$(nproc)"
+      - run: node tools/grabber-stdin-check.mjs
+      - run: node tools/sweep-all.mjs --tools cpp,hd-encoder,grabber-stdin --jobs "$(nproc)"
+
+  # Builds the fork and the grabber, stages them, then makes the build unreachable and runs the
+  # staged grabber from where it stands. No sensor, so --check is as far as it goes. The stage step
+  # reads the stage back with otool, or readelf and ldd, because a copy of libusb on the runner's own
+  # library path would let a stage that still leaned on the build pass the run.
+  native:
+    name: the staged grabber runs without its build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 26
+      - if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_UPGRADE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: brew install cmake libusb jpeg-turbo
+      - if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y cmake pkg-config patchelf
+          libusb-1.0-0-dev libturbojpeg0-dev libglfw3-dev libgl1-mesa-dev
+      - run: node tools/build-native.mjs --stage "$RUNNER_TEMP/braindance"
+      - run: mv vendor/prefix vendor/prefix.moved && mv native/build native/build.moved
+      # The control for the two steps after it: the grabber the build left behind has to fail with
+      # the prefix gone, or the rename proved nothing about the stage.
+      - run: |
+          if native/build.moved/grabber --help >/dev/null 2>&1; then
+            echo "the unstaged grabber still runs with vendor/prefix moved"
+            exit 1
+          fi
+      - run: '"$RUNNER_TEMP/braindance/bin/grabber" --help'
+      - run: '"$RUNNER_TEMP/braindance/bin/grabber" --check'
 
   supply-chain-gate:
     name: the minimum release age is armed
