@@ -33,6 +33,10 @@ const MUTATIONS = {
     file: 'web/main.js', edits: [['  if (e.repeat) return;\n  ui.play.click();', '  if (e.repeat || controlKeeps(e.target, e.key)) return;\n  ui.play.click();']],
     fails: 'Space cannot start the transport while a slider, selector, or numeric field holds focus',
   },
+  'text-field-loses-space': {
+    file: 'web/main.js', edits: [["  if (takesText(e.target) && e.target.type !== 'number') return;\n", '']],
+    fails: 'a space typed into a text field starts the transport instead of reaching the field',
+  },
   'undo-leaves-spectrum-empty': {
     file: 'web/audio-session.js', edits: [['if (!inspection && inspectionFailure !== clip.hash)', 'if (false && !inspection && inspectionFailure !== clip.hash)']],
     fails: 'undoing a replacement cannot restore the earlier audio spectrum while paused',
@@ -174,6 +178,19 @@ async function main() {
   await page.waitForFunction(() => __kinect.timeline.transport().programSec > 1.3);
   await page.locator('#tPlay').click();
   check(await page.evaluate(() => !__kinect.timeline.transport().playing), 'real transport starts and pauses with audio loaded');
+  await page.locator('#panelTabLook').click();
+  await page.locator('#effectRackOpen').click();
+  await page.locator('#effectRackSearch').fill('');
+  await page.locator('#effectRackSearch').pressSequentially('film stock');
+  const typed = await page.evaluate(() => ({
+    value: document.getElementById('effectRackSearch').value,
+    playing: __kinect.timeline.transport().playing || __kinect.timeline.transport().pendingPlay,
+  }));
+  check(typed.value === 'film stock' && !typed.playing, 'a text field keeps Space', JSON.stringify(typed));
+  if (typed.playing) await page.locator('#tPlay').click();
+  await page.locator('#effectRackSearch').fill('');
+  await page.locator('#effectRackClose').click();
+  await page.locator('#panelTabAudio').click();
   for (const selector of ['#audio-low', '#audioEffect', '#audioDepth', '#audioImport']) {
     await page.locator(selector).focus();
     await page.keyboard.press('Space');

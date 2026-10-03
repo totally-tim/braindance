@@ -644,6 +644,8 @@ not finish prints `DID NOT FINISH` with its stack and exits 2.
 - **`mux-ignores-start`** — the export trims the song from program 0. Fails the exact-sample row.
 - **`added-effect-hidden`** — an effect added at its defaults is left out of the destinations.
 - **`space-keeps-control-focus`** — Space stays with a focused slider, selector or number field.
+- **`text-field-loses-space`** — the text-field exception goes, so a space typed into the effect
+  search starts the transport.
 - **`undo-leaves-spectrum-empty`** — the paused spectrum is never rebuilt after an undo restores
   the earlier song.
 

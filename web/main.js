@@ -6968,9 +6968,10 @@ const SHORTCUTS = 'space play/pause · arrows step a frame, with shift a second 
   + 'g moves and turns the selected clip · '
   + 'cmd-z undoes · h hides the panel';
 
-// Space belongs to the transport even when a control still holds focus.
+// Space belongs to the transport even when a control still holds focus, except where it types.
 addEventListener('keydown', (e) => {
   if (e.code !== 'Space' || e.metaKey || e.ctrlKey || e.altKey || !EDITING || !timeline) return;
+  if (takesText(e.target) && e.target.type !== 'number') return;
   e.preventDefault();
   e.stopImmediatePropagation();
   if (e.repeat) return;

@@ -194,10 +194,10 @@ follows the view direction, and `q` and `e` follow the current navigation vertic
 levelled room in the normal view, the sensor's own vertical in sensor view. Flying carries the
 orbit pivot with the camera.
 
-**A focused text field keeps every key but space**, and gaining text focus releases any flight
+**A focused text field keeps the whole keyboard**, and gaining text focus releases any flight
 keys being held. Sliders, dropdowns and other non-text inputs keep only the arrows, enter, home,
 end and the page keys, so a focused slider still nudges with the arrows while shift-`w` flies
-and `cmd-z` undoes. Space plays and pauses whatever has focus.
+and `cmd-z` undoes. Space plays and pauses whatever else has focus, a number field included.
 
 **A shift-drag turns the view the way you drag it**, which is the opposite of an orbit: drag
 right and the view turns right, so the scene sweeps left. A drag the height of the stage turns
