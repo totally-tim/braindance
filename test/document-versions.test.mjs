@@ -55,11 +55,28 @@ function storeCalls(text) {
 }
 
 const constantNames = Object.keys(DOCUMENT_VERSIONS).map((kind) => `${kind.toUpperCase()}_VERSION`);
+// Whole-file patterns, because `\s` spans a line break and a literal split across lines is the same literal.
 const LITERALS = [
-  { what: 'a version key holding a number', re: /\bversion\s*:\s*-?\d/ },
-  { what: 'a version compared with a number', re: /\.version\s*[!=]==?\s*-?\d|-?\d+\s*[!=]==?\s*[\w.?]*\.version\b/ },
-  { what: 'a per-kind version constant', re: new RegExp(`\\b(?:${constantNames.join('|')})\\s*=\\s*-?\\d`) },
+  { what: 'a version key holding a number', re: /\bversion\s*:\s*-?\d/g },
+  { what: 'a version compared with a number', re: /\.version\s*[!=]==?\s*-?\d|-?\d+\s*[!=]==?\s*[\w.?]*\.version\b/g },
+  { what: 'a per-kind version constant', re: new RegExp(`\\b(?:${constantNames.join('|')})\\s*=\\s*-?\\d`, 'g') },
 ];
+
+/** Every document version literal in one source text, by line. */
+function literalsIn(name, text) {
+  const found = [];
+  for (const { what, re } of LITERALS) {
+    for (const m of text.matchAll(re)) {
+      found.push(`${name}:${text.slice(0, m.index).split('\n').length} ${what}: ${m[0].replace(/\s+/g, ' ')}`);
+    }
+  }
+  for (const { line, args } of storeCalls(text)) {
+    if (args.some((arg) => /^-?\d+$/.test(arg))) found.push(`${name}:${line} a DocumentStore given a numeric version: ${args.join(', ')}`);
+    const kind = /^'([a-z]+)'$/.exec(args[1] ?? '')?.[1];
+    if (!Object.hasOwn(DOCUMENT_VERSIONS, kind ?? '')) found.push(`${name}:${line} a DocumentStore whose kind is not a table entry: ${args[1]}`);
+  }
+  return found;
+}
 
 test('the table names each document kind once, at a positive integer', () => {
   assert.deepEqual(Object.keys(DOCUMENT_VERSIONS).sort(), ['deliverable', 'preset', 'project']);
@@ -84,19 +101,18 @@ test('each kind\'s store and refusal read that kind\'s entry, and an undeclared 
 
 test('no shipped source writes or compares a document version as a literal', async () => {
   const found = [];
-  for (const file of await sourceFiles()) {
-    const text = await readFile(file, 'utf8');
-    const name = relative(REPO, file);
-    text.split('\n').forEach((line, i) => {
-      for (const { what, re } of LITERALS) if (re.test(line)) found.push(`${name}:${i + 1} ${what}: ${line.trim()}`);
-    });
-    for (const { line, args } of storeCalls(text)) {
-      if (args.some((arg) => /^-?\d+$/.test(arg))) found.push(`${name}:${line} a DocumentStore given a numeric version: ${args.join(', ')}`);
-      const kind = /^'([a-z]+)'$/.exec(args[1] ?? '')?.[1];
-      if (!Object.hasOwn(DOCUMENT_VERSIONS, kind ?? '')) found.push(`${name}:${line} a DocumentStore whose kind is not a table entry: ${args[1]}`);
-    }
-  }
+  for (const file of await sourceFiles()) found.push(...literalsIn(relative(REPO, file), await readFile(file, 'utf8')));
   assert.deepEqual(found, []);
+});
+
+test('the scan sees a literal split across lines, in the real serialiser and in a comparison', async () => {
+  const main = await readFile(join(REPO, 'web/main.js'), 'utf8');
+  const stamp = '    version: DOCUMENT_VERSIONS.project,\n';
+  assert.equal(main.split(stamp).length, 2, 'the project serialiser stamps the table entry once');
+  assert.equal(literalsIn('web/main.js', main.replace(stamp, '    version:\n      9,\n')).length, 1);
+  assert.equal(literalsIn('snippet', 'if (deliverable.version\n  !== 2) refuse();').length, 1);
+  assert.equal(literalsIn('snippet', 'const DELIVERABLE_VERSION =\n  2;').length, 1);
+  assert.equal(literalsIn('snippet', "new DocumentStore(dir,\n  'deliverable',\n  2)").length, 1);
 });
 
 test('the shipped presets carry the preset entry', async () => {
