@@ -35,6 +35,11 @@ always with its zeroes. The colour count explains a stale-looking image, and the
 are frames libfreenect2 marked failed itself, which separates a failing GPU readback from a
 degraded USB link.
 
+The grabber reads one command per line from stdin: `low-light`, `hd-color`, `key` and `stop`.
+End-of-file on stdin stops it as `stop` does, so a grabber whose parent is gone ends through the
+same teardown. Only a read of zero bytes is end-of-file. Stdin is non-blocking, and a pipe with
+nothing in it yet is not a closed one.
+
 `--min-depth` and `--max-depth` clip on the GPU before a frame is built, so they decide what exists
 at all. The viewer's `nearClip` and `farClip` only hide points that already arrived, and the
 recorder's preview range drives that pair, never the grabber's.

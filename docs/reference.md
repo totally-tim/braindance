@@ -91,6 +91,26 @@ have it, which are Apple's, and that is upstream's order kept.
 built, so a point outside them is never recorded. The viewer's own `near` and `far` only hide
 points that already arrived, so putting a preview range on the grabber flags destroys footage.
 
+**The grabber reads commands on stdin and ends when stdin does.** One command per line:
+`low-light on|off`, `hd-color on|off`, `key on|off` and `stop`. `stop` and end-of-file both end the
+run through the ordinary teardown, so a grabber started by hand needs a stdin that stays open. A
+terminal has one, and a script holds one with `tail -f /dev/null | native/build/grabber ...`.
+
+### Staged grabber
+
+`node tools/build-native.mjs --stage DIR` builds as usual, then writes `DIR/bin/grabber` and
+`DIR/lib/`. `lib/` holds libfreenect2, libusb and libturbojpeg, and GLFW on Linux. The system
+supplies the rest, graphics drivers included. The grabber finds `lib/` by `@loader_path/../lib` on
+macOS and `$ORIGIN/../lib` on Linux, and each library finds its neighbours by `@loader_path` or
+`$ORIGIN`, so the directory runs from wherever it is moved to. Linux needs `patchelf`, and macOS
+signs each file ad hoc again after its load paths change, which a release replaces with its own
+identity.
+
+The stage is read back with `otool` on macOS, and with `readelf -d` and `ldd` on Linux. It fails on
+an rpath or dependency outside the stage and the system, on a bundled library that resolves from
+anywhere else, and on a staged `--help` that loads one from outside. A `DIR` holding anything
+beyond an earlier stage is refused.
+
 ## Reaching it from another machine
 
 There is no authentication anywhere in this program. Whoever reaches the port can arm the

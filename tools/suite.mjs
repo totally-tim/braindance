@@ -66,6 +66,7 @@ const ON_ONE_SERVER = [
 // is asked about by existing.
 const LEFT_OUT = {
   'hd-encoder-check': 'compiles and runs native code against TurboJPEG',
+  'grabber-stdin-check': 'compiles and runs the grabber\'s command reader',
   'decoder-check': 'needs vendor/prefix and the built grabber',
   'registration-check': 'needs a corpus from grabber --dump-corpus',
 };

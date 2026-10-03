@@ -39,8 +39,11 @@ node tools/suite.mjs          # every proof tool that needs no sensor or native 
 ```
 
 CI runs `syntax-check`, `module-check`, `vendor-check`, `npm run test:unit`, `guard-check`,
-`cpp-check`, `hd-encoder-check` and `release-gate-check`, and `sweep-all` runs every mutation of
-`syntax-check`, `module-check`, `cpp-check`, `hd-encoder-check` and `release-gate-check`.
+`cpp-check`, `hd-encoder-check`, `grabber-stdin-check` and `release-gate-check`, and `sweep-all`
+runs every mutation of `syntax-check`, `module-check`, `cpp-check`, `hd-encoder-check`,
+`grabber-stdin-check` and `release-gate-check`. A `native` job builds libfreenect2 and the grabber
+on macOS and Ubuntu, stages them, moves `vendor/prefix` away and runs the staged grabber's `--help`
+and `--check`.
 `vendor-check` exits 2 there, because a runner has no built prefix to check the library against.
 `.github/workflows/checks.yml` names every other check tool on a `not-run:` line, and
 `syntax-check` fails when a tool is in neither place. `release-gate-check` needs an npm that

@@ -381,11 +381,19 @@ static void applyLowLight(libfreenect2::Freenect2Device *dev, bool on) {
 // Commands arrive newline terminated on stdin so the server can retune a running grabber.
 // Restarting instead would cost a multi-second blackout: closing the device on macOS sleeps
 // 4s inside libfreenect2.
+//
+// `stop` and end-of-file both set g_stop, so a parent can end the run without a signal and a
+// parent that dies takes the grabber with it. Only 0 is end-of-file: the descriptor is
+// non-blocking, so -1 with EAGAIN is a pipe with nothing in it yet.
 static void pollCommands(libfreenect2::Freenect2Device *dev, std::string &pending, bool wantColor,
                          HdEncoder *hd) {
   char buf[256];
   ssize_t n;
   while ((n = ::read(STDIN_FILENO, buf, sizeof(buf))) > 0) pending.append(buf, (size_t)n);
+  if (n == 0) {
+    std::fprintf(stderr, "[grabber] stdin closed, stopping\n");
+    g_stop = 1;
+  }
 
   size_t nl;
   while ((nl = pending.find('\n')) != std::string::npos) {
@@ -393,7 +401,10 @@ static void pollCommands(libfreenect2::Freenect2Device *dev, std::string &pendin
     pending.erase(0, nl + 1);
     if (!line.empty() && line.back() == '\r') line.pop_back();
 
-    if (line == "low-light on" || line == "low-light off") {
+    if (line == "stop") {
+      std::fprintf(stderr, "[grabber] stop requested\n");
+      g_stop = 1;
+    } else if (line == "low-light on" || line == "low-light off") {
       if (wantColor) applyLowLight(dev, line == "low-light on");
     } else if (line == "hd-color on" || line == "hd-color off") {
       // Asked for rather than always on: a 1080p JPEG is roughly 215KB and another ~50Mbit/s
@@ -623,7 +634,11 @@ int main(int argc, char **argv) {
         "stdin commands, newline terminated, applied live:\n"
         "  low-light on|off\n"
         "  hd-color on|off\n"
-        "  key on|off\n",
+        "  key on|off\n"
+        "  stop\n"
+        "\n"
+        "stop and end-of-file on stdin both end the run through the ordinary teardown,\n"
+        "so a grabber started by hand needs a stdin that stays open.\n",
         pipelineName.c_str(), offered_decoders().c_str(), colorDecoderName.c_str());
       return 0;
     }

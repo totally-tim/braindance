@@ -59,6 +59,7 @@ Per tool, read from the source:
 | `module-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a stale anchor |
 | `syntax-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor |
 | `cpp-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor, no compiler or headers |
+| `grabber-stdin-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: a stale anchor, no compiler |
 | `decoder-check` | pass, or a missed mutation | a failed assertion, a catch, or a probe that will not build or run | `DID NOT RUN`: no compiler, no built library or grabber, a stale anchor, a failed rebuild, or a mutated rebuild that changed nothing |
 | `grabber-args-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no `vendor/prefix`, build-native failed, a mutation the binary did not change, a stale anchor |
 | `vendor-check` | pass, or a **catch** | a failed assertion, a miss, or a stale anchor | `PASS on the source, with the artifact untested` |
@@ -155,8 +156,8 @@ which take hours and a GPU browser; all but `library` need a server at `SWEEP_UR
 `fixture-1g`).
 
 `--jobs` above 1 runs mutations side by side, and the sweep refuses it unless every named tool is
-one of `syntax`, `module`, `cpp`, `hd-encoder` and `release-gate`: those apply a mutation in memory
-or in a private temp copy and bind no port. Every other tool stages its mutation where a second
+one of `syntax`, `module`, `cpp`, `hd-encoder`, `grabber-stdin` and `release-gate`: those apply a
+mutation in memory or in a private temp copy and bind no port. Every other tool stages its mutation where a second
 run would read it.
 
 ## `suite`
@@ -206,8 +207,8 @@ they are.
 Stage 2 lasts as long as `library-check`, and `editor-check` and `preview-check` are most of stage
 3.
 
-It leaves out `hd-encoder-check`, `decoder-check` and `registration-check`, which need a native
-build, a built library or a corpus, and `sweep-all`, which runs mutations. A `*-check.mjs` it
+It leaves out `hd-encoder-check` and `grabber-stdin-check`, which compile native code, `decoder-check`
+and `registration-check`, which need a built library or a corpus, and `sweep-all`, which runs mutations. A `*-check.mjs` it
 neither runs nor leaves out by name comes back DID NOT RUN, so a new tool is placed in a stage or
 named as left out.
 
@@ -910,6 +911,38 @@ The early-return row is the part of the grabber's failed corpus write that runs 
 an encoder left running when its scope ends is joined. The write itself happens after the device
 starts, so the grabber's exit 1 on a short write needs a sensor and a filesystem that fills during
 the dump, and no tool here reaches it.
+
+## `grabber-stdin-check`
+
+The grabber's command reader: what `stop` and end-of-file on stdin do. No sensor, no libfreenect2
+build: the tool extracts `applyLowLight` and `pollCommands` out of `native/grabber.cpp`, compiles
+them with the stubs in `test/fixtures/grabber-stdin.cpp`, and feeds them a real non-blocking pipe on
+descriptor 0. It proves the reader. The capture loop that calls it each frame, and the teardown
+after it, need a sensor.
+
+```
+node tools/grabber-stdin-check.mjs
+```
+
+| needs | |
+| --- | --- |
+| toolchain | a C++ compiler; without one it exits 2 |
+| fixture | none: each row writes into the pipe and closes it itself |
+
+The rows that hold the pipe open are the control for the rows that close it. A reader that took -1
+with `EAGAIN` for end-of-file would stop on a pipe with nothing in it, and the open-pipe rows would
+fail. Exit 2 means it did not finish; a mutation with zero failed assertions is NOT CAUGHT even
+though it exits 1.
+
+- **`eof-never-stops`** — end-of-file is compared with a value `read` never returns, and the
+  closed-pipe rows fail.
+- **`would-block-stops`** — -1 is read as end-of-file, and the open-pipe rows fail.
+- **`eof-drops-the-commands-it-arrives-with`** — the reader returns on end-of-file before it parses
+  what it read, and the same-pass row fails.
+- **`stop-line-ignored`** — the `stop` line stops matching, and the stop rows fail while the
+  end-of-file rows stay green.
+- **`stop-matches-a-prefix`** — any line that begins `stop` stops the run, and the near-miss row
+  fails.
 
 ## `vcam-check`
 

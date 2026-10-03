@@ -4,22 +4,33 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';
 import { cpus } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { audit, stage } from './native-stage.mjs';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
 const flag = (name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : null);
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(`usage: node tools/build-native.mjs [--preset macos|linux] [--jobs N] [--clean]
+  console.log(`usage: node tools/build-native.mjs [--preset macos|linux] [--jobs N] [--clean] [--stage DIR]
 
   --preset overrides the platform detection. macos builds depth on OpenCL and leaves
            OpenGL off; linux is the other way round and covers the Raspberry Pi.
   --jobs   parallel compile jobs. Defaults to this machine's core count, capped at 8.
   --clean  removes vendor/build, vendor/prefix and native/build first. The vendored
-           library is a one-time build, so the ordinary run reuses it.`);
+           library is a one-time build, so the ordinary run reuses it.
+  --stage  after the build, writes DIR/bin/grabber and DIR/lib/ holding every library the
+           grabber loads that the system does not supply, each reached by a path relative to
+           itself. It reads the result back and fails on any path left over from this
+           machine. DIR may be an earlier stage and nothing else.`);
   process.exit(0);
+}
+
+const stageDir = flag('--stage');
+if (argv.includes('--stage') && (!stageDir || stageDir.startsWith('--'))) {
+  console.error('--stage wants a directory to write the stage into');
+  process.exit(2);
 }
 
 // Two presets, and the Pi rides with linux because its V3D has no OpenCL. ENABLE_OPENGL=ON
@@ -92,11 +103,15 @@ if (preset === 'macos') {
     console.error(`missing Homebrew packages: ${missing.join(', ')} - brew install ${missing.join(' ')}`);
     process.exit(2);
   }
-  // Pointed at explicitly because libfreenect2's finder does not look in Homebrew's opt paths.
+  // Pointed at explicitly because libfreenect2's finder does not look in Homebrew's opt paths,
+  // and its libusb finder asks pkg-config, which a Mac need not have.
   const jpeg = brewPrefix('jpeg-turbo');
+  const usb = brewPrefix('libusb');
   vendorFlags.push(
     `-DTurboJPEG_INCLUDE_DIRS=${join(jpeg, 'include')}`,
     `-DTurboJPEG_LIBRARIES=${join(jpeg, 'lib/libturbojpeg.dylib')}`,
+    `-DLibUSB_INCLUDE_DIRS=${join(usb, 'include/libusb-1.0')}`,
+    `-DLibUSB_LIBRARIES=${join(usb, 'lib/libusb-1.0.dylib')}`,
   );
 }
 
@@ -170,4 +185,22 @@ if (!decoders || !defaultDecoder || !decoders.split(/\s+/).includes(defaultDecod
 }
 
 console.log(`[build-native] OK - ${GRABBER}`);
+
+if (stageDir) {
+  try {
+    const libs = stage({ grabber: GRABBER, dir: stageDir });
+    console.log(`[build-native] staged ${libs.join(', ')} beside the grabber in ${resolve(stageDir)}`);
+    const { problems, report } = audit(stageDir);
+    console.log(report);
+    if (problems.length) {
+      console.error('[build-native] STAGE FAILED - reading the stage back found:');
+      for (const p of problems) console.error(`  ${p}`);
+      process.exit(1);
+    }
+    console.log(`[build-native] STAGE OK - ${join(resolve(stageDir), 'bin/grabber')} reaches only its own lib/ and the system`);
+  } catch (e) {
+    console.error(`[build-native] STAGE FAILED - ${e.message}`);
+    process.exit(1);
+  }
+}
 console.log('[build-native] node tools/vendor-check.mjs proves the tree is upstream v0.2.1 plus the declared edits');
