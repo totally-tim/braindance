@@ -57,6 +57,19 @@ npm run replay            # replay captures/sample.knct, no sensor needed
 No capture ships with the repo. Record one, or build a synthetic one with
 `npm run fixtures`.
 
+### The desktop app
+
+```bash
+npm ci
+npm ci --prefix desktop
+npm start --prefix desktop
+```
+
+The first start downloads Electron. One window opens on the menu, served from
+`http://127.0.0.1:8480`. Port 8480 has to be free, and the app refuses to start without it. Closing the window quits the app and finishes the take
+being recorded. The library, projects, presets, effects and exports live in the app's data folder,
+`~/Library/Application Support/Braindance` on macOS. It needs Node 26 or newer on the machine.
+
 ## Using it
 
 ### 1. Record a take

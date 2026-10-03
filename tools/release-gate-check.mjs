@@ -2,7 +2,9 @@
 // Proves this repo's supply-chain gate is armed: that `.npmrc` names a minimum release age,
 // and that the npm doing the installing actually refuses on it. It needs the registry, because
 // reading the key back answers `null` whether it took or not, and a value npm can parse but
-// nobody meant - 0, -1, 2000 - is an open gate wearing a configured file.
+// nobody meant - 0, -1, 2000 - is an open gate wearing a configured file. npm reads the
+// `.npmrc` of the directory holding the nearest package.json and no other, so `desktop/`, which
+// installs on its own, is proved separately from the root.
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -17,6 +19,10 @@ const MUTATIONS = {
   'wrong-unit': 'min-release-age=2d\n',
   'no-gate': '# nothing here\n',
   absent: null,
+  // These two land on desktop/ alone and leave the root's gate as it is, so only the desktop rows
+  // can redden.
+  'desktop-ungated': '# nothing here\n',
+  'desktop-absent': null,
 };
 if (MUTATE && !(MUTATE in MUTATIONS)) {
   console.error(`unknown mutation ${MUTATE} - have ${Object.keys(MUTATIONS).join(', ')}`);
@@ -33,11 +39,17 @@ writeFileSync(MASK[3], '');
 // as command-line flags, so the machine's own config would reach every probe past MASK.
 const ENV = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^npm_config_/i.test(key)));
 
-let cwd = REPO;
+let trees = [{ label: '', dir: REPO }, { label: 'desktop/ ', dir: join(REPO, 'desktop') }];
 if (MUTATE) {
-  cwd = join(scratch, 'tree');
-  mkdirSync(cwd, { recursive: true });
-  if (MUTATIONS[MUTATE] !== null) writeFileSync(join(cwd, '.npmrc'), MUTATIONS[MUTATE]);
+  const root = join(scratch, 'tree');
+  trees = trees.map((tree, i) => {
+    const dir = i === 0 ? root : join(root, 'desktop');
+    mkdirSync(dir, { recursive: true });
+    // A mutation lands on the trees it names and copies the real file into the others.
+    const body = !MUTATE.startsWith('desktop-') || i === 1 ? MUTATIONS[MUTATE] : readFileSync(join(tree.dir, '.npmrc'), 'utf8');
+    if (body !== null) writeFileSync(join(dir, '.npmrc'), body);
+    return { ...tree, dir };
+  });
 }
 
 let checked = 0;
@@ -53,15 +65,6 @@ const bail = (why, extra = '') => {
   rmSync(scratch, { recursive: true, force: true });
   process.exit(2);
 };
-
-const gateFile = join(cwd, '.npmrc');
-const source = existsSync(gateFile) ? readFileSync(gateFile, 'utf8') : null;
-ok('the tree carries an .npmrc, so a contributor cloning it inherits the gate rather than this machine\'s user config',
-  source !== null, gateFile);
-ok('and it names min-release-age, which is the only key npm turns into a cutoff',
-  /^\s*min-release-age\s*=/m.test(source ?? ''),
-  // Matched on the setting rather than on the substring, or the detail column quotes a comment.
-  (source ?? '').split('\n').find((l) => /^\s*min-release-age\s*=/.test(l)) ?? 'no such line');
 
 // Asked of npm rather than compared against a version number: `config ls -l` lists
 // every key it knows.
@@ -96,30 +99,43 @@ function resolveUnderGate(from) {
   }
 }
 
-// A registry this cannot reach answers nothing about the gate, but npm rejecting the
-// value is a finding.
-const said = resolveUnderGate(cwd);
-const valueRejected = /invalid config|Invalid time value/i.test(said);
-if (!valueRejected && !/notarget|No matching version/i.test(said)) {
-  bail('npm could not resolve against the registry, so its refusal could not be read',
-    said.trim() || 'no output at all');
+// Each tree is asked on its own: npm reads the `.npmrc` beside the nearest package.json and no
+// other, so one tree's gate says nothing about another's.
+for (const { label, dir } of trees) {
+  const gateFile = join(dir, '.npmrc');
+  const source = existsSync(gateFile) ? readFileSync(gateFile, 'utf8') : null;
+  ok(`${label}the tree carries an .npmrc, so a contributor cloning it inherits the gate rather than this machine's user config`,
+    source !== null, gateFile);
+  ok(`${label}and it names min-release-age, which is the only key npm turns into a cutoff`,
+    /^\s*min-release-age\s*=/m.test(source ?? ''),
+    // Matched on the setting rather than on the substring, or the detail column quotes a comment.
+    (source ?? '').split('\n').find((l) => /^\s*min-release-age\s*=/.test(l)) ?? 'no such line');
+
+  // A registry this cannot reach answers nothing about the gate, but npm rejecting the
+  // value is a finding.
+  const said = resolveUnderGate(dir);
+  const valueRejected = /invalid config|Invalid time value/i.test(said);
+  if (!valueRejected && !/notarget|No matching version/i.test(said)) {
+    bail('npm could not resolve against the registry, so its refusal could not be read',
+      said.trim() || 'no output at all');
+  }
+
+  // The cutoff npm names in the refusal: its absence is the wrong-unit and the no-gate cases.
+  const stamp = valueRejected ? null : said.match(/with a date before ([^\n]+?)\.?\s*$/m)?.[1]?.trim() ?? null;
+  const when = stamp ? new Date(stamp) : null;
+  const valid = when !== null && !Number.isNaN(when.getTime());
+  ok(`${label}npm refuses on it, naming the cutoff it derived - so the value is one npm turned into a real date rather than one it could not use`,
+    valid, stamp ?? (valueRejected
+      ? `npm rejected the value outright: ${said.match(/npm (?:warn|error) [^\n]*/i)?.[0]?.trim() ?? 'invalid config'}`
+      : 'no cutoff named in the refusal'));
+
+  const hours = valid ? (Date.now() - when.getTime()) / 3_600_000 : 0;
+  ok(`${label}and the cutoff is at least 48 hours back, which is the window a compromised release is most likely to be caught in`,
+    valid && hours >= 47.5, valid ? `${hours.toFixed(1)}h` : 'no cutoff');
+  // An upper bound too, because a gate nobody can install through gets turned off rather than fixed.
+  ok(`${label}and not so far back that ordinary dependency work is impossible, which is how a gate gets deleted instead of corrected`,
+    valid && hours <= 24 * 400, valid ? `${(hours / 24).toFixed(1)} days` : 'no cutoff');
 }
-
-// The cutoff npm names in the refusal: its absence is the wrong-unit and the no-gate cases.
-const stamp = valueRejected ? null : said.match(/with a date before ([^\n]+?)\.?\s*$/m)?.[1]?.trim() ?? null;
-const when = stamp ? new Date(stamp) : null;
-const valid = when !== null && !Number.isNaN(when.getTime());
-ok('npm refuses on it, naming the cutoff it derived - so the value is one npm turned into a real date rather than one it could not use',
-  valid, stamp ?? (valueRejected
-    ? `npm rejected the value outright: ${said.match(/npm (?:warn|error) [^\n]*/i)?.[0]?.trim() ?? 'invalid config'}`
-    : 'no cutoff named in the refusal'));
-
-const hours = valid ? (Date.now() - when.getTime()) / 3_600_000 : 0;
-ok('and the cutoff is at least 48 hours back, which is the window a compromised release is most likely to be caught in',
-  valid && hours >= 47.5, valid ? `${hours.toFixed(1)}h` : 'no cutoff');
-// An upper bound too, because a gate nobody can install through gets turned off rather than fixed.
-ok('and not so far back that ordinary dependency work is impossible, which is how a gate gets deleted instead of corrected',
-  valid && hours <= 24 * 400, valid ? `${(hours / 24).toFixed(1)} days` : 'no cutoff');
 
 // The positive twin: without it a cutoff proves only that some gate exists somewhere
 // on this machine.
@@ -127,10 +143,10 @@ const bare = join(scratch, 'bare');
 mkdirSync(bare, { recursive: true });
 const elsewhere = resolveUnderGate(bare);
 if (!/notarget|No matching version/i.test(elsewhere)) {
-  bail('the ungated control could not reach the registry either, so the row above is unattributable',
+  bail('the ungated control could not reach the registry either, so the rows above are unattributable',
     elsewhere.trim() || 'no output at all');
 }
-ok('and a directory with no .npmrc draws no cutoff at all, so the one above came from the file under test',
+ok('and a directory with no .npmrc draws no cutoff at all, so the ones above came from the files under test',
   !/with a date before/i.test(elsewhere),
   elsewhere.match(/with a date before ([^\n]+?)\.?\s*$/m)?.[1]?.trim() ?? 'none named');
 
