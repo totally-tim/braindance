@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { externalUrl, sameOrigin, senderTrusted } from './origin.js';
+import { revealable } from './reveal.js';
 import { NODE_MAJOR, PORT, STOP_GRACE_MS, findNode, nodeDirs, portFree, rootsUnder, startService } from './service.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -16,7 +17,10 @@ const log = (line) => console.log(`[desktop] ${line}`);
 
 let service = null;
 let origin = null;
+let roots = null;
 let win = null;
+// What the user chose in this session's native dialogs; `revealPath` answers for these.
+const picked = new Set();
 let stopped = null;
 let exitCode = 0;
 
@@ -77,7 +81,11 @@ function registerBridge() {
     }
     return fn(...args);
   });
-  const chosen = (result) => (result.canceled ? null : result.filePaths[0]);
+  const remember = (path) => {
+    if (path) picked.add(path);
+    return path;
+  };
+  const chosen = (result) => remember(result.canceled ? null : result.filePaths[0]);
 
   handle('chooseDirectory', async () => chosen(await dialog.showOpenDialog(win, {
     properties: ['openDirectory', 'createDirectory'],
@@ -89,11 +97,13 @@ function registerBridge() {
   handle('chooseExportDestination', async (defaultName) => {
     if (typeof defaultName !== 'string') throw new Error('chooseExportDestination takes a file name');
     const result = await dialog.showSaveDialog(win, { defaultPath: defaultName });
-    return result.canceled ? null : result.filePath;
+    return remember(result.canceled ? null : result.filePath);
   });
-  handle('revealPath', (path) => {
+  handle('revealPath', async (path) => {
     if (typeof path !== 'string' || !isAbsolute(path)) throw new Error('revealPath takes an absolute path');
-    shell.showItemInFolder(path);
+    const target = await revealable(path, { picked, roots: Object.values(roots) });
+    if (!target) throw new Error('revealPath shows only an existing path chosen in this app or inside its data folders');
+    shell.showItemInFolder(target);
   });
 }
 
@@ -109,7 +119,7 @@ async function boot() {
       `Braindance serves its editor on port ${PORT} and no other. Close the program that holds it and start Braindance again.`);
   }
 
-  const roots = rootsUnder(app.getPath('userData'));
+  roots = rootsUnder(app.getPath('userData'));
   for (const dir of Object.values(roots)) mkdirSync(dir, { recursive: true });
   service = startService({
     node: node.path,

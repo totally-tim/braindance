@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // Proves the desktop shell: that its window shows the service's own origin and refuses every other,
-// that closing the last window stops the service with exit 0 inside the bound, that a second launch
-// hands over to the first and starts no service, that a held port is refused by name, and that the
-// bridge answers only the window the app opened. Every refusal row has a positive twin, so a shell
-// that refused everything would fail. The two dialogs a person sees are not read: the refusal is
-// proved by the line the app logs beside its dialog, and the missing-Node dialog is not driven here.
+// that the bridge answers only the window the app opened and reveals only a path the user chose or
+// one inside the app's data folders, that a second launch hands over to the first and starts no
+// service, that a held port is refused by name, and that closing the last window of a plain launch
+// stops the service with exit 0 and then ends the Electron process itself with exit 0. Every
+// refusal row has a positive twin, so a shell that refused everything would fail. The two dialogs a
+// person sees are not read: the refusal is proved by the line the app logs beside its dialog, and
+// the missing-Node dialog is not driven here.
 //
 //   node tools/desktop-check.mjs [--mutate <name>]
 //
@@ -14,6 +16,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, realpathSync, rmSync, symlinkSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:http';
+import { loadavg } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PORT, STOP_GRACE_MS, portFree } from '../desktop/service.js';
@@ -22,6 +25,11 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
 const MUTATE = argv.includes('--mutate') ? argv[argv.indexOf('--mutate') + 1] : null;
 const STAGE = join(REPO, '.desktop-check');
+// How long Electron has to end once its service has. The service has STOP_GRACE_MS; this is the
+// app's own bound, and a process that needs a kill to end has not met it. Chromium's teardown
+// after `app.exit` runs from seconds to minutes on a loaded machine, so the bound is long and the
+// row reports the load average beside it.
+const APP_EXIT_MS = 180_000;
 
 // Each names source text in the staged copy and must match exactly once. One row per claim, so a
 // red row names what broke.
@@ -53,6 +61,40 @@ const MUTATIONS = {
     edits: [['    if (!senderTrusted(event, win?.webContents, origin)) {', '    if (false) {']],
     fails: 'the foreign-window row, which asks the bridge from a page that is not the service and '
       + 'must be refused; the rows asking from the service page stay green',
+  },
+  // The bridge reveals whatever absolute path it is handed.
+  'reveal-any-absolute-path': {
+    file: 'desktop/main.js',
+    edits: [['    const target = await revealable(path, { picked, roots: Object.values(roots) });', '    const target = path;']],
+    fails: 'the rows that ask to reveal a file nobody chose, a system file, a path that climbs out of '
+      + 'a root, a link out of a root and a path that does not exist; the rows for a path the user '
+      + 'chose and a path in a root stay green',
+  },
+  // The path is judged as written, so a link inside a root is taken for a file inside it.
+  'reveal-skips-realpath': {
+    file: 'desktop/reveal.js',
+    edits: [
+      ["import { sep } from 'node:path';", "import { resolve, sep } from 'node:path';"],
+      ['  try { real = await realpath(path); } catch { return null; }', '  real = resolve(path);'],
+    ],
+    fails: 'the rows for the directory link and the file link that lead out of a root, and for the '
+      + 'path that does not exist; the row for the climb stays green, because resolving the path '
+      + 'already removes a `..`',
+  },
+  // A path the user chose in a dialog is forgotten at once.
+  'picks-are-not-recorded': {
+    file: 'desktop/main.js',
+    edits: [['    if (path) picked.add(path);', '    if (path) void path;']],
+    fails: 'the row that reveals the three paths the dialogs returned, and the row that reveals the '
+      + 'file it first refused once the dialog has returned it; the root rows stay green',
+  },
+  // The app never ends: the last window closes and the service stops, and Electron stays alive.
+  'app-exit-is-skipped': {
+    file: 'desktop/main.js',
+    edits: [['    app.exit(exitCode);', '    void exitCode;']],
+    fails: 'the two rows that read the Electron process itself, which neither ends by itself nor '
+      + 'ends with 0; the rows for the service and the port stay green, because the service is '
+      + 'stopped before the app fails to exit',
   },
   // A stop becomes a kill: the service never runs its own shutdown.
   'close-kills-the-service': {
@@ -159,9 +201,9 @@ const alive = (pid) => {
 };
 
 const children = new Set();
-// Electron started by hand, for the launches Playwright cannot attach to.
-function launchPlain(userData) {
-  const child = spawn(ELECTRON, [APP, `--user-data-dir=${userData}`], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+// Electron started by hand, with no debugger of Playwright's attached, so its exit is its own.
+function launchPlain(userData, extraArgs = []) {
+  const child = spawn(ELECTRON, [APP, `--user-data-dir=${userData}`, ...extraArgs], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   children.add(child);
   const run = { child, output: '', exit: null };
   const take = (chunk) => { run.output += chunk; };
@@ -273,29 +315,80 @@ try {
   await main(({ BrowserWindow }, id) => BrowserWindow.getAllWindows().filter((w) => w.id !== id).forEach((w) => w.destroy()), windowId);
 
   console.log('the bridge');
-  await main(({ dialog }) => {
+  // Real files, because the bridge reveals only what exists. PICKS stands for what the dialogs
+  // return; SECRET sits where no data folder and no dialog points.
+  const FILES = join(realpathSync(STAGE), 'files');
+  const PICKS = { dir: join(FILES, 'picked-dir'), file: join(FILES, 'picked.json'), out: join(FILES, 'picked-out.mp4') };
+  const SECRET = join(FILES, 'outside', 'secret.txt');
+  mkdirSync(join(FILES, 'outside'), { recursive: true });
+  mkdirSync(PICKS.dir, { recursive: true });
+  for (const file of [PICKS.file, PICKS.out, SECRET]) writeFileSync(file, 'x');
+  const REAL_USERDATA = realpathSync(USERDATA);
+  const inRoot = (name, ...rest) => join(REAL_USERDATA, name, ...rest);
+  writeFileSync(inRoot('captures', 'take.knct'), 'x');
+  symlinkSync(join(FILES, 'outside'), inRoot('captures', 'escape'));
+  symlinkSync(SECRET, inRoot('exports', 'leak'));
+  await main(({ dialog }, picks) => {
     const record = (name, answer) => async (...args) => {
-      globalThis.desktopCheck.dialogs.push({ name, options: args.at(-1) });
-      return answer;
+      const options = args.at(-1);
+      globalThis.desktopCheck.dialogs.push({ name, options });
+      return answer(options);
     };
-    dialog.showOpenDialog = record('open', { canceled: false, filePaths: ['/stub/chosen'] });
-    dialog.showSaveDialog = record('save', { canceled: false, filePath: '/stub/out.mp4' });
-  });
-  ok('chooseDirectory answers the service page with the path the dialog gave',
-    (await page.evaluate(() => window.desktop.chooseDirectory())) === '/stub/chosen');
-  ok('and asked for a directory', (await main(() => globalThis.desktopCheck.dialogs))[0]?.options.properties.includes('openDirectory') === true);
-  ok('openProjectFile answers likewise, over JSON files', (await page.evaluate(() => window.desktop.openProjectFile())) === '/stub/chosen'
-    && (await main(() => globalThis.desktopCheck.dialogs))[1]?.options.filters[0].extensions.join() === 'json');
-  ok('chooseExportDestination answers with the path the save dialog gave',
-    (await page.evaluate(() => window.desktop.chooseExportDestination('shot.mp4'))) === '/stub/out.mp4');
-  ok('and refuses a name that is not a string', await page.evaluate(() => window.desktop.chooseExportDestination(42).then(() => false, (e) => /file name/.test(String(e)))));
-  await page.evaluate(() => window.desktop.revealPath('/stub/chosen'));
-  ok('revealPath reveals an absolute path', JSON.stringify(await main(() => globalThis.desktopCheck.revealed)) === '["/stub/chosen"]');
-  ok('and refuses a relative one, revealing nothing',
-    (await page.evaluate(() => window.desktop.revealPath('../etc').then(() => false, (e) => /absolute/.test(String(e)))))
-    && (await main(() => globalThis.desktopCheck.revealed)).length === 1);
+    dialog.showOpenDialog = record('open', (options) => ({
+      canceled: false, filePaths: [options.properties.includes('openDirectory') ? picks.dir : picks.file],
+    }));
+    dialog.showSaveDialog = record('save', () => ({ canceled: false, filePath: picks.out }));
+  }, PICKS);
+  const reveal = (path) => page.evaluate((target) => window.desktop.revealPath(target).then(() => 'revealed', (e) => String(e)), path);
+  const revealed = () => main(() => globalThis.desktopCheck.revealed);
+  const dialogs = () => main(() => globalThis.desktopCheck.dialogs);
+  const SHOWS_ONLY = /shows only an existing path chosen in this app or inside its data folders/;
+  // A refusal reveals nothing; its row says the bridge refused by that rule and the list did not grow.
+  const refusal = async (path) => {
+    const had = (await revealed()).length;
+    const answer = await reveal(path);
+    return { pass: SHOWS_ONLY.test(answer) && (await revealed()).length === had, detail: answer.split('\n')[0].slice(0, 120) };
+  };
 
-  const dialogsBefore = (await main(() => globalThis.desktopCheck.dialogs)).length;
+  const beforePick = await refusal(PICKS.file);
+  ok('revealPath refuses a file that exists but nobody chose', beforePick.pass, beforePick.detail);
+  ok('chooseDirectory answers the service page with the path the dialog gave',
+    (await page.evaluate(() => window.desktop.chooseDirectory())) === PICKS.dir);
+  ok('and asked for a directory', (await dialogs())[0]?.options.properties.includes('openDirectory') === true);
+  ok('openProjectFile answers likewise, over JSON files', (await page.evaluate(() => window.desktop.openProjectFile())) === PICKS.file
+    && (await dialogs())[1]?.options.filters[0].extensions.join() === 'json');
+  ok('chooseExportDestination answers with the path the save dialog gave',
+    (await page.evaluate(() => window.desktop.chooseExportDestination('shot.mp4'))) === PICKS.out);
+  ok('and refuses a name that is not a string', await page.evaluate(() => window.desktop.chooseExportDestination(42).then(() => false, (e) => /file name/.test(String(e)))));
+
+  const beforePicks = (await revealed()).length;
+  const answers = [await reveal(PICKS.dir), await reveal(PICKS.file), await reveal(PICKS.out)];
+  const shownPicks = (await revealed()).slice(beforePicks);
+  ok('revealPath shows the three paths the dialogs returned, as given',
+    answers.every((answer) => answer === 'revealed') && JSON.stringify(shownPicks) === JSON.stringify(Object.values(PICKS)),
+    JSON.stringify(shownPicks));
+  ok('the file it refused before is shown once the dialog has returned it', answers[1] === 'revealed');
+  const take = inRoot('captures', 'take.knct');
+  ok('revealPath shows a file inside a data folder, by its real path',
+    (await reveal(take)) === 'revealed' && (await revealed()).at(-1) === take, (await revealed()).at(-1));
+
+  for (const [what, path] of [
+    ['a file outside every data folder that nobody chose', SECRET],
+    ['a system file', '/etc/hosts'],
+    ['a path that climbs out of a data folder', `${inRoot('captures')}/../../files/outside/secret.txt`],
+    ['a directory link inside a data folder that leads out of it', join(inRoot('captures', 'escape'), 'secret.txt')],
+    ['a file link inside a data folder that leads out of it', inRoot('exports', 'leak')],
+    ['a path in a data folder that does not exist', inRoot('captures', 'missing.knct')],
+  ]) {
+    const refused = await refusal(path);
+    ok(`revealPath refuses ${what}, revealing nothing`, refused.pass, refused.detail);
+  }
+  const beforeRelative = (await revealed()).length;
+  ok('and refuses a relative path, revealing nothing',
+    (await page.evaluate(() => window.desktop.revealPath('../etc').then(() => false, (e) => /absolute/.test(String(e)))))
+    && (await revealed()).length === beforeRelative);
+
+  const dialogsBefore = (await dialogs()).length;
   const foreign = await main(async ({ BrowserWindow }, preload) => {
     const window = new BrowserWindow({ show: false, webPreferences: { preload, sandbox: true, contextIsolation: true } });
     try {
@@ -308,7 +401,7 @@ try {
     }
   }, join(APP, 'preload.cjs'));
   ok('the same call from a page that is not the service is refused, by the bridge', /answers only the Braindance window/.test(foreign.refused ?? ''), JSON.stringify(foreign));
-  ok('and no dialog was shown for it', (await main(() => globalThis.desktopCheck.dialogs)).length === dialogsBefore);
+  ok('and no dialog was shown for it', (await dialogs()).length === dialogsBefore);
 
   console.log('a second launch');
   await main(({ BrowserWindow }, id) => BrowserWindow.fromId(id).minimize(), windowId);
@@ -323,24 +416,46 @@ try {
   ok('and no second window', (await windows()) === 1);
   if (!exit) { second.child.kill('SIGKILL'); await second.done; }
 
-  console.log('closing the last window');
-  const pid = started[0]?.pid ?? 0;
-  const closedAt = Date.now();
+  // The attached run ends here and claims nothing about exit, because Playwright holds an exiting
+  // Electron open while its debugger is attached. Its service must be gone and its port free before
+  // the next launch can bind it.
+  const attachedService = started[0]?.pid;
   main(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach((w) => w.close())).catch(() => {});
-  // The app's own exit line, and not the process's end: Playwright holds an exiting Electron open
-  // while its debugger is attached, and under load it can hold it for a minute.
-  const quit = await until(() => /\[desktop\] exiting with code (\d+)/.exec(output), STOP_GRACE_MS + 10_000);
-  const serviceGone = await until(() => !alive(pid), STOP_GRACE_MS + 10_000, 50);
-  const took = Date.now() - closedAt;
-  const end = await Promise.race([gone, sleep(5000).then(() => null)]);
-  if (!end) electron.kill('SIGKILL');
-  ok('the app quits', Boolean(quit), quit ? quit[0] : 'it never reached its exit');
-  ok('the service exited with code 0', /\[desktop\] service exited code=0 signal=none/.test(output), (/\[desktop\] service exited[^\n]*/.exec(output) ?? ['no exit line'])[0]);
-  ok('within the bound, so it was never killed', serviceGone && took < STOP_GRACE_MS && !/was killed/.test(output));
-  ok('and the app exits with 0 too', quit?.[1] === '0', quit ? `exit code ${quit[1]}` : 'no exit line');
-  ok('no service is left', services().length === 0 && !alive(pid), `${services().length} left`);
-  ok('and the port is free again', await portFree(PORT));
+  if (attachedService) await until(() => !alive(attachedService), STOP_GRACE_MS + 10_000, 50);
+  if (!(await Promise.race([gone, sleep(APP_EXIT_MS).then(() => null)]))) electron.kill('SIGKILL');
   driven = null;
+  ok('the attached run left no service and a free port', services().length === 0 && (await portFree(PORT)), `${services().length} left`);
+
+  console.log('closing the last window of a plain launch');
+  // No debugger of Playwright's: the window is closed over Chromium's own debugging port, as a
+  // click on its close box would, and the Electron process is then waited on as it is.
+  const quitting = launchPlain(join(STAGE, 'profile-quit'), ['--remote-debugging-port=0']);
+  const debugPort = await until(() => /DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//.exec(quitting.output)?.[1], 30_000);
+  const serviceLine = await until(() => /\[desktop\] service ready pid=(\d+)/.exec(quitting.output), 60_000);
+  const targets = () => fetch(`http://127.0.0.1:${debugPort}/json/list`).then((r) => r.json(), () => []);
+  const target = debugPort && await until(async () => (await targets()).find((t) => t.type === 'page' && t.url.startsWith(origin)), 30_000);
+  if (!target) throw new Error(`the plain launch showed no window on ${origin}\n${quitting.output.split('\n').filter((l) => /\[desktop\]|\[server\]/.test(l)).slice(-6).join('\n')}`);
+  const closedAt = Date.now();
+  await fetch(`http://127.0.0.1:${debugPort}/json/close/${target.id}`);
+  const servicePid = Number(serviceLine?.[1]);
+  const serviceGone = await until(() => !alive(servicePid), STOP_GRACE_MS + 10_000, 50);
+  const took = Date.now() - closedAt;
+  // The app's own bound starts when its service has ended. Only after the verdict on the exit is
+  // taken may the process be killed, and a kill is the failure the row below reports.
+  const serviceEndedAt = Date.now();
+  const ended = await Promise.race([quitting.done, sleep(APP_EXIT_MS).then(() => null)]);
+  const killed = ended === null;
+  const tail = Date.now() - serviceEndedAt;
+  if (killed) { quitting.child.kill('SIGKILL'); await quitting.done; }
+  const exitLine = /\[desktop\] exiting with code (\d+)/.exec(quitting.output);
+  ok('the service exited with code 0', /\[desktop\] service exited code=0 signal=none/.test(quitting.output), (/\[desktop\] service exited[^\n]*/.exec(quitting.output) ?? ['no exit line'])[0]);
+  ok('within the bound, so it was never killed', serviceGone && took < STOP_GRACE_MS && !/was killed/.test(quitting.output), `${took} ms`);
+  ok(`the app's own process ended by itself within ${APP_EXIT_MS / 1000} seconds of its service`, !killed && ended?.signal === null,
+    killed ? `still running after ${APP_EXIT_MS / 1000} seconds, so the check killed it; ${exitLine ? `the app had logged "${exitLine[0]}"` : 'the app never logged its exit line'}; load average ${loadavg()[0].toFixed(0)}`
+      : `${JSON.stringify(quitting.exit)} ${tail} ms after the service ended; load average ${loadavg()[0].toFixed(0)}`);
+  ok('and its exit code is 0', quitting.exit?.code === 0 && quitting.exit.signal === null && !killed, JSON.stringify(quitting.exit));
+  ok('no service is left', services().length === 0 && !alive(servicePid), `${services().length} left`);
+  ok('and the port is free again', await portFree(PORT));
 
   console.log('a port that is held');
   const stranger = createServer((req, res) => res.end('the stranger'));

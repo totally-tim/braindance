@@ -115,7 +115,7 @@ Read the assertion count, never the exit code.
 | `level-check.mjs` | levelling: the room turns and every surface keeps its meaning | port 8377 free |
 | `vcam-check.mjs` | the output to OBS: the colour camera, the keyed webcam and its page; a take records the colour camera and never the key and its replay serves the colour; the take neither may touch and which webcam subscribers a revocation ends | port 8361 free |
 | `guard-check.mjs` | the socket's origin rule, the bind, the rebinding rule | port 8321 free, `captures/sample.knct` |
-| `desktop-check.mjs` | the desktop shell: its window shows the service's origin and refuses every other, closing the last window stops the service with exit 0, a second launch starts nothing, a held port is refused by name, the bridge answers one window | port 8480 free, `npm ci --prefix desktop`, a display |
+| `desktop-check.mjs` | the desktop shell: its window shows the service's origin and refuses every other, the bridge answers one window and reveals only a path the user chose or one under the app's folders, a second launch starts nothing, a held port is refused by name, closing the last window of a plain launch stops the service and ends the Electron process by itself with exit 0 | port 8480 free, `npm ci --prefix desktop`, a display |
 | `jobs-check.mjs` | the queue, the pin, a real render, a job this build cannot read | ports 8231 and 8232, a GPU browser, ffprobe |
 | `effect-check.mjs` | installing an effect: revisions, the door, the hotload, park and restore | port 8281 free, a GPU browser |
 | `effect-conformance-check.mjs` | every installed effect draws nothing at all when it is off | `--url`, a GPU browser |

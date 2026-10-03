@@ -22,7 +22,8 @@ export function serviceArgs({ entry, port, roots }) {
     ...ROOT_NAMES.flatMap((name) => [`--${name}`, roots[name]])];
 }
 
-const READY = /^\[server\] ready (.*)$/;
+// `.` does not match a carriage return, so the pattern takes the CR of a CRLF line end itself.
+const READY = /^\[server\] ready (.*?)\r?$/;
 
 /**
  * What a ready line says, or null for any other line. A ready line that cannot be read is an error,
@@ -47,6 +48,17 @@ export function parseReadyLine(line, port = PORT) {
     throw new Error(`the service says it listens on ${url.origin}, and this app opens only port ${port}`);
   }
   return { ...info, url: url.href, origin: url.origin };
+}
+
+/** Takes text in pieces of any size and calls `onLine` once for each line that is complete. */
+export function lineSplitter(onLine) {
+  let pending = '';
+  return (chunk) => {
+    pending += chunk;
+    const parts = pending.split('\n');
+    pending = parts.pop();
+    for (const line of parts) onLine(line);
+  };
 }
 
 const NODE_BINARY = process.platform === 'win32' ? 'node.exe' : 'node';
@@ -129,26 +141,20 @@ export function startService({
   )));
 
   const lines = (stream, name) => {
-    let pending = '';
     stream.setEncoding('utf8');
-    stream.on('data', (chunk) => {
-      pending += chunk;
-      const parts = pending.split('\n');
-      pending = parts.pop();
-      for (const line of parts) {
-        tail.push(line);
-        if (tail.length > 20) tail.shift();
-        onLine(name, line);
-        if (name === 'stdout') {
-          try {
-            const info = parseReadyLine(line, port);
-            if (info) resolveReady(info);
-          } catch (err) {
-            rejectReady(err);
-          }
+    stream.on('data', lineSplitter((line) => {
+      tail.push(line);
+      if (tail.length > 20) tail.shift();
+      onLine(name, line);
+      if (name === 'stdout') {
+        try {
+          const info = parseReadyLine(line, port);
+          if (info) resolveReady(info);
+        } catch (err) {
+          rejectReady(err);
         }
       }
-    });
+    }));
   };
   lines(child.stdout, 'stdout');
   lines(child.stderr, 'stderr');

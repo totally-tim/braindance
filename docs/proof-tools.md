@@ -1063,8 +1063,10 @@ exits 2, because a crash counted as a failed assertion reads under `--mutate` as
 
 ## `desktop-check`
 
-The desktop shell shows the service's own origin and no other, stops the service when its last
-window closes, starts nothing for a second launch, and refuses a held port by name.
+The desktop shell shows the service's own origin and no other, answers the bridge only for its own
+window, reveals only a path the user chose or one inside its data folders, starts nothing for a
+second launch, refuses a held port by name, and ends its service and then its own process when its
+last window closes.
 
 ```
 node tools/desktop-check.mjs
@@ -1072,24 +1074,40 @@ node tools/desktop-check.mjs
 
 | needs | |
 | --- | --- |
-| port | 8480 free: the shell has no other, and the tool exits 2 naming what answers |
+| port | 8480 free: the shell has no other, and the tool exits 2 naming what answers. The close launch takes a debugging port from Chromium |
 | install | `npm ci` at the root for Playwright, and `npm ci --prefix desktop` for Electron |
 | display | the windows open on the desktop; no GPU browser |
 | binaries | Node 26 on `PATH`, `lsof`, `ps` |
 
-It stages `desktop/` under `.desktop-check/` and runs the staged copy through Playwright's Electron
-support against the real `server/index.js` on a scratch profile, so a mutation never touches the
-checkout and no real library is written. The rows read the window's origin and web preferences,
-send the page to another host name, another site and a file, call `window.open`, and call the four
-bridge functions with `dialog` and `shell` stubbed in the main process, so no native dialog opens
-and nothing reaches the OS browser. Each refusal has a positive twin: a path of the service is
-allowed, and the bridge answers the service page. A page that is not the service asks the bridge
-too. The second launch is a plain Electron process on the same profile, run while the first window
-is minimized. The close row closes the last window and reads the app's own `exiting with code`
-line and the service's `service exited` line, because Playwright holds an exiting Electron open
-while its debugger is attached, and under load it can hold it longer than the stop bound. The last
-section holds
-port 8480 with a stranger and reads the refusal from the line the app logs beside its dialog.
+It stages `desktop/` under `.desktop-check/` and runs the staged copy against the real
+`server/index.js` on a scratch profile, so a mutation never touches the checkout and no real library
+is written. Two kinds of launch carry the rows.
+
+The attached run goes through Playwright's Electron support and holds the window, navigation and
+bridge rows. They read the window's origin and web preferences, send the page to another host name,
+another site and a file, call `window.open`, and call the four bridge functions with `dialog` and
+`shell` stubbed in the main process, so no native dialog opens and nothing reaches the OS browser or
+the file manager. Each refusal has a positive twin: a path of the service is allowed, and the bridge
+answers the service page. A page that is not the service asks the bridge too. The reveal rows write
+real files, because the bridge reveals only what exists. They ask for the three paths the dialogs
+return and for a file in a data folder, and expect the bridge to show each. They ask for a file
+outside every data folder, a system file, a `..` climb out of a data folder, a directory link and a
+file link that lead out of one, and a path that does not exist, and expect the bridge to refuse
+each. The stub for `showItemInFolder` records what the bridge handed it, and each refusal row reads
+both the refusal and that the record did not grow. The same file is refused before the dialog
+returns it and shown after. The second launch is a plain Electron process on the same profile, run
+while the first window is minimized.
+
+The attached run ends by closing its windows and claims nothing about exit, because Playwright holds
+an exiting Electron open while its debugger is attached. The close rows run on a separate plain
+Electron launch on its own profile, started with `--remote-debugging-port=0`. The tool closes the
+window over Chromium's debugging endpoint, as a click on its close box would, and waits on two
+deadlines. The service has `STOP_GRACE_MS` to exit, and its rows read the `service exited` line of
+the app, the process table and the port. The Electron process has `APP_EXIT_MS`, 180 seconds, to end
+once its service has, and its rows read that process's own exit event: it must end without a kill by
+the tool, and with code 0. A kill after the wait is the failure the row reports, beside the load
+average at that moment. Chromium's teardown after `app.exit` runs from seconds to minutes on a
+loaded machine, so a failure of these rows under load is a rerun on a quiet machine.
 
 The two dialogs a person reads are not driven: the Node 26 refusal is held by the unit tests of
 `findNode`, and both refusals share `refuse` in `desktop/main.js`. A launch from Finder, whose
@@ -1105,8 +1123,19 @@ A run that stops before its verdict prints `DID NOT RUN` with the count so far a
 - **`sandbox-off`** — the renderer is not sandboxed. The sandbox row reddens.
 - **`bridge-skips-the-sender-check`** — the bridge answers any sender. The row that asks from a page
   that is not the service reddens, with the row for the dialog it must not open.
+- **`reveal-any-absolute-path`** — the bridge reveals any absolute path. The rows for a file nobody
+  chose, a system file, a `..` climb, the two links and a path that does not exist redden. The rows
+  for a path a dialog returned and a path in a data folder stay green.
+- **`reveal-skips-realpath`** — the path is judged as written. The rows for the directory link, the
+  file link and the missing path redden. The climb row stays green, because resolving the path
+  already removes a `..`.
+- **`picks-are-not-recorded`** — a path a dialog returned is forgotten at once. The row for the three
+  paths and the row for the file refused before its dialog redden. The data folder row stays green.
 - **`close-kills-the-service`** — Quit kills the service in place of writing `stop`. The service's
   exit code and the app's exit code redden.
+- **`app-exit-is-skipped`** — Quit stops the service and never calls `app.exit`. The two rows that
+  read the Electron process itself redden, for the missing exit and for the missing code 0. The rows
+  for the service and the port stay green, because the service ends before the app fails to.
 - **`second-launch-takes-no-lock`** — a second launch is not handed over. The rows where it exits and
   where the first window returns redden. The one-service row stays green, because the held port
   refuses the second start as well.

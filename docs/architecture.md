@@ -167,6 +167,7 @@ in one window. The editor in the window is the page a browser gets, and nothing 
 | `desktop/main.js` | the window, the quit sequence, the bridge handlers, and every refusal |
 | `desktop/service.js` | the service child: which Node runs it, its flags, its ready line, its stop |
 | `desktop/origin.js` | which URLs and which IPC senders belong to the window |
+| `desktop/reveal.js` | which paths the bridge may show in the OS file manager |
 | `desktop/preload.cjs` | the four calls the page may make, in CommonJS because a sandboxed preload cannot be a module |
 
 **The origin is fixed.** The service listens on port 8480 and no other. Browser storage belongs to
@@ -203,8 +204,16 @@ so does every `window.open`, which makes the app one window.
 
 **The bridge.** `window.desktop` holds `chooseDirectory`, `openProjectFile`,
 `chooseExportDestination` and `revealPath`. Each is an `ipcMain.handle` that `senderTrusted` lets
-through only from the top frame of the window while it shows the service's origin. `revealPath`
-takes an absolute path and `chooseExportDestination` a file name.
+through only from the top frame of the window while it shows the service's origin.
+`chooseExportDestination` takes a file name. `revealPath` takes an absolute path and passes it to the
+OS file manager only when `revealable` allows it. `revealable` allows a path that one of the three
+dialogs returned in this session, and a path that exists and has a real path inside one of the seven
+data folders. A path from a dialog is shown as given, and a chosen folder does not allow its
+contents. For any other path, including a `..` climb, a link that leads out of a data folder and a
+path that does not exist, the bridge refuses with one message. It shows the real path that it
+checked. The check and the reveal are two steps, so a process that writes inside a data folder could
+swap a folder for a link between them and send the reveal elsewhere. The reveal opens a file manager
+window and reads nothing.
 
 ## The effect store
 
