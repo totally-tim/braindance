@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { CLIP_CEILING, PROJECT_VERSION } from '../web/format.js';
+import { CLIP_CEILING, DOCUMENT_VERSIONS } from '../web/format.js';
 // The server's own validator, imported rather than re-stated: `validateExport` is what both the
 // socket's `begin` and `POST /jobs` call, so a list of codec names retyped here would be a third
 // copy that can drift from both.
@@ -7177,7 +7177,7 @@ try {
       'export writes a named file the browser actually downloaded', download.suggestedFilename());
     const expected = { ...known, bloom: onlyOnScreen };
     const wrong = Object.entries(expected).filter(([n, v]) => exported.values?.[n] !== v);
-    check(exported.version === PROJECT_VERSION && wrong.length === 0,
+    check(exported.version === DOCUMENT_VERSIONS.preset && wrong.length === 0,
       'and what it wrote is the look on screen rather than the document the picker names',
       wrong.length ? wrong.map(([n, v]) => `${n} ${exported.values?.[n]} not ${v}`).join(' ') : `version ${exported.version}, bloom ${exported.values.bloom}`);
 
@@ -7424,7 +7424,7 @@ try {
     }
 
     const bad = join(TMP, `${NAME_BAD}.braindance-preset.json`);
-    writeFileSync(bad, `${JSON.stringify({ version: PROJECT_VERSION, values: { bloom: 'loud' } }, null, 2)}\n`);
+    writeFileSync(bad, `${JSON.stringify({ version: DOCUMENT_VERSIONS.preset, values: { bloom: 'loud' } }, null, 2)}\n`);
     await importFile(bad);
     await page.waitForFunction("document.getElementById('tNote').textContent.includes('bloom')", null, { timeout: 15000 })
       .catch(() => {});
@@ -7446,7 +7446,7 @@ try {
     // creates `__proto__` as an own enumerable property where `p.x.__proto__ = v` invokes the
     // setter and creates nothing, so this shape has to be sent as source rather than built in JS.
     const proto = join(TMP, `${NAME_PROTO}.braindance-preset.json`);
-    writeFileSync(proto, `{ "version": ${PROJECT_VERSION}, "values": { "__proto__": { "polluted": true }, "bloom": 1 } }\n`);
+    writeFileSync(proto, `{ "version": ${DOCUMENT_VERSIONS.preset}, "values": { "__proto__": { "polluted": true }, "bloom": 1 } }\n`);
     const parsedHasOwn = Object.keys(JSON.parse(readFileSync(proto, 'utf8')).values).includes('__proto__');
     check(parsedHasOwn, 'the probe really contains __proto__ as an own key, or the row below tests nothing');
     await importFile(proto);
@@ -7468,9 +7468,9 @@ try {
       return (await text('#tNote')) ?? '';
     };
 
-    const noValues = await refuse(NAME_NO_VALUES, `{ "version": ${PROJECT_VERSION} }`);
-    const emptyValues = await refuse(NAME_EMPTY_VALUES, `{ "version": ${PROJECT_VERSION}, "values": {} }`);
-    const listValues = await refuse(NAME_LIST_VALUES, `{ "version": ${PROJECT_VERSION}, "values": [1, 2, 3] }`);
+    const noValues = await refuse(NAME_NO_VALUES, `{ "version": ${DOCUMENT_VERSIONS.preset} }`);
+    const emptyValues = await refuse(NAME_EMPTY_VALUES, `{ "version": ${DOCUMENT_VERSIONS.preset}, "values": {} }`);
+    const listValues = await refuse(NAME_LIST_VALUES, `{ "version": ${DOCUMENT_VERSIONS.preset}, "values": [1, 2, 3] }`);
     const distinct = new Set([noValues, emptyValues, listValues]).size === 3;
     check(distinct
       && /no values object/.test(noValues)
@@ -7484,7 +7484,7 @@ try {
     const missingThree = readings.slice(2);
     const partReadings = await refuse(NAME_PART_READINGS,
       JSON.stringify({
-        version: PROJECT_VERSION,
+        version: DOCUMENT_VERSIONS.preset,
         values: { bloom: 0.8, ...Object.fromEntries(namedTwo.map((n) => [n, 1])) },
       }));
     check(missingThree.every((n) => partReadings.includes(n))
@@ -7495,7 +7495,7 @@ try {
       `"${partReadings}" against ${namedTwo.join(', ')} named and ${missingThree.join(', ')} missing`);
 
     const strayKey = await refuse(NAME_STRAY_KEY,
-      JSON.stringify({ version: PROJECT_VERSION, mode: 4, values: { bloom: 0.6 } }));
+      JSON.stringify({ version: DOCUMENT_VERSIONS.preset, mode: 4, values: { bloom: 0.6 } }));
     check(/mode/.test(strayKey) && /preset/.test(strayKey),
       'a document carrying a key beside version and values is refused by name, so a field an older version had is answered rather than ignored',
       `"${strayKey}"`);
@@ -7517,7 +7517,7 @@ try {
       body: JSON.stringify({
         name: NAME_EDITED,
         rev: `sha256:${'ab'.repeat(32)}`,
-        body: { version: PROJECT_VERSION, values: { pointSize: 'as big as it goes' } },
+        body: { version: DOCUMENT_VERSIONS.preset, values: { pointSize: 'as big as it goes' } },
       }),
     }));
     await page.click('#tPreset');
@@ -12525,7 +12525,7 @@ try {
     const preset = await page.evaluate(`(() => {
       const k = globalThis.__kinect;
       const body = {
-        version: k.library.PROJECT_VERSION,
+        version: k.library.DOCUMENT_VERSIONS.preset,
         values: { pointSize: 33.3, opacity: 0.44, bloom: 0.75, crush: 0.05 },
       };
       const before = k.library.serialiseProjectBody();
@@ -12646,7 +12646,7 @@ try {
         k.library.applyStoredPreset({
           name: 'framing-is-not-a-look',
           rev: null,
-          body: { version: k.library.PROJECT_VERSION, values: { left: -3.75 } },
+          body: { version: k.library.DOCUMENT_VERSIONS.preset, values: { left: -3.75 } },
         });
       } catch (error) {
         message = error.message;
@@ -12710,7 +12710,7 @@ try {
       await route.continue();
     };
     writeFileSync(importTargetPath, `${JSON.stringify({
-      version: PROJECT_VERSION,
+      version: DOCUMENT_VERSIONS.preset,
       values: { pointSize: 46.7 },
     }, null, 2)}\n`);
     await page.route(`**/presets/${importTargetName}*`, holdImport);

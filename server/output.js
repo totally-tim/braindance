@@ -1,5 +1,6 @@
 import { EXPORT_SIZES } from '../web/export-sizes.js';
 import { FRAMING_NAMES } from '../web/crop-box.js';
+import { DOCUMENT_VERSIONS } from '../web/format.js';
 
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const refuse = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
@@ -17,10 +18,9 @@ const maxHeight = Math.max(...dimensions.map(([, h]) => h));
 
 // Serializes preset reads with patches, so an earlier slow read cannot erase a later write.
 export class Output {
-  constructor({ presets, effects, version }) {
+  constructor({ presets, effects }) {
     this.presets = presets;
     this.effects = effects;
-    this.version = version;
     this.state = { mode: 'camera', size: { w: 1920, h: 1080 }, preset: null, params: {} };
     this.tags = {};
     this.presetBody = null;
@@ -77,8 +77,8 @@ export class Output {
         if (err?.code === 'ENOENT') refuse(`no preset named ${patch.preset}`, 404);
         refuse(err.message, 400);
       }
-      if (doc.body?.version !== this.version) {
-        refuse(`preset ${patch.preset} is version ${doc.body?.version}; this build reads version ${this.version}`, 409);
+      if (doc.body?.version !== DOCUMENT_VERSIONS.preset) {
+        refuse(`preset ${patch.preset} is version ${doc.body?.version}; this build reads version ${DOCUMENT_VERSIONS.preset}`, 409);
       }
       if (!Array.isArray(doc.body.requires)) refuse('preset requires must be a list', 409);
       const installed = new Set(this.effects.list().map((effect) => effect.id));

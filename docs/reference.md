@@ -718,8 +718,9 @@ scalar carrying a string fails at the key that is wrong and `__proto__` is refus
 unknown parameter.
 
 **This build reads project version 9 alone**, which places footage with each clip's `speed` and
-`sourceStart`, records the effects added to each look, and carries the audio clip. A file from any
-older version is refused naming its own version, and there is no conversion.
+`sourceStart`, records the effects added to each look, and carries the audio clip. Presets are
+version 8 and deliverables version 2. A file from any other version is refused naming its own
+version, and there is no conversion.
 
 ## Batch rendering
 

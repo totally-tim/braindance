@@ -1,4 +1,4 @@
-import { PROJECT_VERSION, documentNameRefusal, versionRefusal } from './format.js';
+import { DOCUMENT_VERSIONS, documentNameRefusal, versionRefusal } from './format.js';
 import { clipAffordedSec, clipSourceSecAt, usableClipRate } from './clip-plan.js';
 import { createSkim } from './take-draw.js';
 import { pickTakes } from './take-picker.js';
@@ -63,7 +63,7 @@ const missingIn = (body) => body.clips
 /** Why this page cannot draw a project, or null. */
 function bodyRefusal(body) {
   if (!body || typeof body !== 'object') return 'this file does not hold an object';
-  if (body.version !== PROJECT_VERSION) return versionRefusal('this project', body.version);
+  if (body.version !== DOCUMENT_VERSIONS.project) return versionRefusal('project', body.version);
   if (!Array.isArray(body.clips)) return 'this file carries no clips array, so it is not an edit';
   if (body.clips.some((c) => !c || typeof c !== 'object' || !usableClipRate(c.speed)
     || !Number.isFinite(c.sourceStart) || c.sourceStart < 0)) {

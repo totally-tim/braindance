@@ -13,7 +13,7 @@ import { openCapture, withCapture, forgetCapture, openCaptureCount, decimatePayl
 import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
 import { AudioStore } from './audio.js';
 import {
-  VALID_HASH, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, checkedMarkLog, copyOnNode, downloadTake,
+  VALID_HASH, DocumentStore, NodeLink, appendMarks, checkedMarkLog, copyOnNode, downloadTake,
   downloadsInFlight, hashFile, markLogPath, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
   adoptNamedMarkLogs, removeName, removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeFileFor,
 } from './library.js';
@@ -132,7 +132,6 @@ const PROJECTS = new DocumentStore(resolve(flag('--projects', join(ROOT, 'projec
 const PRESETS = new DocumentStore(
   resolve(flag('--presets', join(ROOT, 'presets'))),
   'preset',
-  PROJECT_VERSION,
   resolve(flag('--builtin-presets', join(ROOT, 'presets-builtin'))),
 );
 // The spines every program is assembled from, named once because the install door and the
@@ -145,9 +144,7 @@ const EFFECTS = new EffectStore(
   resolve(flag('--builtin-effects', join(ROOT, 'effects-builtin'))),
   SPINES,
 );
-// Version 2 dropped `outputFps` - the rate is a property of the edit - and a version 1 document is
-// refused rather than read, because it names a rate this build would ignore.
-const DELIVERABLES = new DocumentStore(resolve(flag('--deliverables', join(CAPTURES_DIR, '..', 'deliverables'))), 'deliverable', 2);
+const DELIVERABLES = new DocumentStore(resolve(flag('--deliverables', join(CAPTURES_DIR, '..', 'deliverables'))), 'deliverable');
 const JOBS = new JobStore(resolve(flag('--jobs', join(ROOT, 'jobs'))));
 const AUDIO = new AudioStore(resolve(flag('--audio', join(ROOT, 'audio'))));
 const node = NODE_URL ? new NodeLink(NODE_URL, NODE_NAME) : null;
@@ -1240,7 +1237,7 @@ async function serveLocalTakes(req, res) {
   sendJson(res, { here: HERE_NAME, ...here, storage: await remaining(CAPTURES_DIR, recordingRate()) });
 }
 
-const output = new Output({ presets: PRESETS, effects: EFFECTS, version: PROJECT_VERSION });
+const output = new Output({ presets: PRESETS, effects: EFFECTS });
 const sendOutput = (ws) => {
   for (const patch of output.messages()) ws.send(JSON.stringify({ programOut: patch }));
 };

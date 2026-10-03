@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import {
-  CLIP_CEILING, DEPTH_H, DEPTH_W, POINTS, PROJECT_VERSION, VALID_ID, copyName, documentNameRefusal,
+  CLIP_CEILING, DEPTH_H, DEPTH_W, DOCUMENT_VERSIONS, POINTS, VALID_ID, copyName, documentNameRefusal,
   effectIdsIn, effectOf, nextUntitledName, presetCarriesLookName, snapScalar,
   versionRefusal, captureFormatRefusal, requiresEntryRefusal, requiresListRefusal,
 } from './format.js';
@@ -1967,14 +1967,12 @@ function applyPreset(preset) {
 }
 
 // The export settings. Separate from the project, so one edit can spawn several.
-const DELIVERABLE_VERSION = 2;
-
 let activeDeliverable = null;
 
 function ensureActiveDeliverable() {
   if (activeDeliverable) return;
   activeDeliverable = {
-    version: DELIVERABLE_VERSION,
+    version: DOCUMENT_VERSIONS.deliverable,
     in: 0,
     out: null,
     outputSize: openingSizeForAspect(projectAspect) ?? DEFAULT_EXPORT_SIZE,
@@ -1991,13 +1989,13 @@ function setActiveDeliverable(deliverable) {
 
 function applyDeliverable(deliverable) {
   // Asked before anything is touched, so an unreadable document is refused whole.
-  if (deliverable.version !== DELIVERABLE_VERSION) {
+  if (deliverable.version !== DOCUMENT_VERSIONS.deliverable) {
     const named = Number.isFinite(deliverable.outputFps)
       ? ` it was written at ${deliverable.outputFps}fps, which is the only record of that rate,`
       : '';
     throw new Error(
       `this deliverable is version ${JSON.stringify(deliverable.version)} and this build writes `
-      + `${DELIVERABLE_VERSION}: the output rate lives on the project now, so a version 1 document `
+      + `${DOCUMENT_VERSIONS.deliverable}: the output rate lives on the project now, so a version 1 document `
       + `would render at a rate nothing on screen agrees with -${named} so set the rate in Project `
       + 'settings and save the deliverable again',
     );
@@ -2753,7 +2751,7 @@ function serialiseProjectBody({ suppressed = null } = {}) {
     ...writableRequires(),
   ];
   return {
-    version: PROJECT_VERSION,
+    version: DOCUMENT_VERSIONS.project,
     audio: audioClip ? structuredClone(audioClip) : null,
     ...(requires.length ? { requires } : {}),
     ...(suppressed ? { suppressed } : {}),
@@ -2940,8 +2938,8 @@ function checkProject(project) {
     throw new Error(`a project is an object, got ${JSON.stringify(project)}`);
   }
   // The version gate first, because everything below it is interpreted in the version.
-  if (project.version !== PROJECT_VERSION) {
-    throw new Error(versionRefusal('this project', project.version));
+  if (project.version !== DOCUMENT_VERSIONS.project) {
+    throw new Error(versionRefusal('project', project.version));
   }
   if (!project.look || typeof project.look !== 'object' || Array.isArray(project.look)) {
     throw new Error('a project carries a look object');
@@ -3061,7 +3059,7 @@ function checkProject(project) {
     const shortReadings = missingReadings(clip.params);
     if (shortReadings.length) {
       throw new Error(
-        `${what} names no ${shortReadings.join(', ')}: a version ${PROJECT_VERSION} clip carries `
+        `${what} names no ${shortReadings.join(', ')}: a version ${DOCUMENT_VERSIONS.project} clip carries `
         + 'all five reading weights, and the ones it leaves out would come back as defaults rather '
         + 'than as the look it was saved with',
       );
@@ -8155,7 +8153,7 @@ function presetFromCurrentLook(names) {
     }
   }
   const requires = requiresFor(Object.keys(values));
-  return { version: PROJECT_VERSION, ...(requires.length ? { requires } : {}), values };
+  return { version: DOCUMENT_VERSIONS.preset, ...(requires.length ? { requires } : {}), values };
 }
 
 /** Every look parameter of one effect, in declaration order. */
@@ -8354,15 +8352,15 @@ function pickPresetSubset({ title, verb, name }) {
 
 /** Everything about a preset that can be refused without writing anything. */
 function refusePresetBody(name, body) {
-  if (body?.version !== PROJECT_VERSION) {
-    throw new Error(versionRefusal(`preset ${name}`, body?.version));
+  if (body?.version !== DOCUMENT_VERSIONS.preset) {
+    throw new Error(`preset ${name}: ${versionRefusal('preset', body?.version)}`);
   }
   // The envelope, checked with the same suspicion as what is inside it.
   const PRESET_KEYS = ['version', 'requires', 'values'];
   const stray = Object.keys(body).filter((k) => !PRESET_KEYS.includes(k));
   if (stray.length) {
     throw new Error(
-      `preset ${name} carries ${stray.join(', ')}, which a version ${PROJECT_VERSION} preset has no `
+      `preset ${name} carries ${stray.join(', ')}, which a version ${DOCUMENT_VERSIONS.preset} preset has no `
       + `place for: a preset is ${PRESET_KEYS.join(', ')} and nothing else, so a key beside them is `
       + 'either a field an older version had or a typo, and both would be read as neither',
     );
@@ -12236,7 +12234,7 @@ globalThis.__kinect = {
   },
 
   library: {
-    PROJECT_VERSION,
+    DOCUMENT_VERSIONS,
     CLIP_CEILING,
     restoreProject,
     serialiseProjectBody,

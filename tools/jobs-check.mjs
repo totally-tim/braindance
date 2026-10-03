@@ -11,7 +11,7 @@ import { createServer, request } from 'node:http';
 import { connect } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PROJECT_VERSION } from '../web/format.js';
+import { DOCUMENT_VERSIONS } from '../web/format.js';
 import { JOB_VERSION } from '../server/jobs.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -426,7 +426,7 @@ const READING_REQUIRES = [
   { id: 'blackwall', version: '1.0.0' },
 ];
 const PROJECT = {
-  version: PROJECT_VERSION,
+  version: DOCUMENT_VERSIONS.project,
   // The three package readings are values even at their inert defaults. The queue derives this
   // envelope from every package namespace the document names, so the baseline must claim them.
   requires: READING_REQUIRES,

@@ -1,15 +1,17 @@
 /**
- * The document format's version, stamped by the page as it saves and by the server as it
- * writes, so there is one number rather than two that agree.
+ * Each document kind's format version, stamped by the page as it saves and by the server as it
+ * writes, so there is one number per kind rather than two that agree.
  *
  * A document from any other version is refused, naming the version it found, rather than
  * opened on a best guess: this build ships no conversion and no reader of a second shape.
- * Version 9 carries a `clips` array - each clip its own take, placement, speed, in-point,
- * the look values that write the cloud and the effects added to it - beside the `look` block
- * holding the ones that write the post chain, and an `audio` clip with its one mapping.
- * Version 8 carried no audio and no added effects.
+ * A project carries a `clips` array - each clip its own take, placement, speed, in-point, the
+ * look values that write the cloud and the effects added to it - beside the `look` block holding
+ * the ones that write the post chain, and an `audio` clip with its one mapping. A deliverable
+ * names no output rate, because the rate belongs to the edit, so a version 1 deliverable, which
+ * named one, would render at a rate nothing on screen agrees with.
  */
-export const PROJECT_VERSION = 9;
+// A project embeds look blocks, so a look-schema change bumps project and preset together; any other change bumps only its own kind.
+export const DOCUMENT_VERSIONS = Object.freeze({ project: 9, preset: 8, deliverable: 2 });
 
 /**
  * How many clips this build composites.
@@ -27,16 +29,17 @@ export const CLIP_CEILING = 8;
  * different things about one file is how one of them ends up false. A version that is not a
  * finite number is its own band, because it says nothing about older or newer.
  */
-export function versionRefusal(what, version) {
+export function versionRefusal(kind, version) {
+  const reads = DOCUMENT_VERSIONS[kind];
   const across = !Number.isFinite(version)
     ? 'its version field is absent or is not a number, so it is not a document this build can '
       + 'place at all - which says nothing about whether it is older or newer'
-    : version > PROJECT_VERSION
+    : version > reads
       ? 'it is from a later build than this one, so nothing here knows what it means - this build is '
         + 'the thing to move, not the document'
       : `nothing in this build reads a document that old and there is no path from here to `
-        + `${PROJECT_VERSION}, because this repo ships no conversion`;
-  return `${what} is version ${JSON.stringify(version)} and this build reads version ${PROJECT_VERSION}: ${across}`;
+        + `${reads}, because this repo ships no conversion`;
+  return `this ${kind} is version ${JSON.stringify(version)} and this build reads version ${reads}: ${across}`;
 }
 
 /**

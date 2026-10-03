@@ -297,10 +297,13 @@ deliverable carries the resolution, because every screen-space term is expressed
 bloom's chain is frozen at 600 whatever the buffer is, so two sizes of one shape reopen
 identically. Point sizes also use the camera's 50-degree boot lens as their reference.
 
-`PROJECT_VERSION` is 9 and presets share it. `aspect` and `outputFps` are additive and bump
+`DOCUMENT_VERSIONS` in `web/format.js` holds one version per document kind: a project is 9, a
+preset 8 and a deliverable 2. Every store, serialiser and refusal reads its kind's entry, and
+`test/document-versions.test.mjs` fails on a version literal anywhere in `server/`, `web/` or
+`bin/`. A project embeds look blocks, so a change to the look's shape bumps project and preset
+together; any other change bumps only its own kind. `aspect` and `outputFps` are additive and bump
 nothing, so an absent `aspect` means the shape of the `outputSize` beside it and an absent
-`outputFps` means 30. `web/format.js` owns the number and the refusal a document from another
-version gets. Deliverables carry their own version, 2, because a version 1 document names a rate
+`outputFps` means 30. A version 1 deliverable is refused rather than read, because it names a rate
 this build ignores: it would parse perfectly and render the wrong file.
 
 ## Clips, and what a cut costs

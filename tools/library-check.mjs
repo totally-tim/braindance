@@ -27,7 +27,7 @@ import { DEPTH_H, DEPTH_W } from '../web/format.js';
 import { REVEAL } from '../server/library.js';
 // The format version, imported rather than written down: a literal here is a second copy of
 // the one this build writes.
-import { PROJECT_VERSION, CAPTURE_FORMAT } from '../web/format.js';
+import { DOCUMENT_VERSIONS, CAPTURE_FORMAT } from '../web/format.js';
 
 const argv = process.argv.slice(2);
 const flag = (name, fallback = null) => {
@@ -211,7 +211,7 @@ const MUTATIONS = {
   // The document version stops being checked, so a file whose point size is in the old unit
   // loads silently and draws 1.8x wrong at every output size.
   'accept-any-version': { file: 'web/main.js', edits: [[
-    '  if (project.version !== PROJECT_VERSION) {',
+    '  if (project.version !== DOCUMENT_VERSIONS.project) {',
     '  if (false) {',
   ]] },
   // The parked pool never reaches the file again, so a save drops what the clip could not load.
@@ -350,7 +350,7 @@ const MUTATIONS = {
     "  { path: '/library/writes', pattern: /^\\/library\\/writes$/, read: serveWriteCounts },",
     "  { path: '/library/writes', pattern: /^\\/library\\/writes$/, read: serveWriteCounts },\n"
     + "  { path: '/library/sweep-probe', pattern: /^\\/library\\/sweep-probe$/, read: async (req, res) => {\n"
-    + "    await PROJECTS.write('planted-then-removed', { version: PROJECT_VERSION, clips: [], look: { params: {}, tracks: {} }, composition: { camera: [] }, outputSize: '1920x1080' });\n"
+    + "    await PROJECTS.write('planted-then-removed', { version: PROJECTS.version, clips: [], look: { params: {}, tracks: {} }, composition: { camera: [] }, outputSize: '1920x1080' });\n"
     + "    await PROJECTS.remove('planted-then-removed');\n"
     + '    sendJson(res, { restored: true });\n'
     + '  } },',
@@ -920,7 +920,7 @@ const MUTATIONS = {
   // Every version older than this build gets one sentence again, so a document with no
   // conversion path is told the thing that is true of a document from the future.
   'one-refusal-for-older-versions': { file: 'web/format.js', edits: [[
-    '    : version > PROJECT_VERSION', '    : false',
+    '    : version > reads', '    : false',
   ]],
     fails: 'one sentence for every version, which collapses the three bands `versionRefusal` '
       + 'still keeps now the migration is gone: older, later, and a version field that is not '
@@ -4432,7 +4432,7 @@ async function runChecks() {
 
     // The saved file is a file on disk with a version on it.
     const saved = JSON.parse(readFileSync(join(WORK, 'projects/round-trip.json'), 'utf8'));
-    check(saved.version === PROJECT_VERSION, 'the file carries the format version', `version ${saved.version}`);
+    check(saved.version === DOCUMENT_VERSIONS.project, 'the file carries the format version', `version ${saved.version}`);
     check(JSON.parse(readFileSync(join(WORK, 'projects/own-footage.json'), 'utf8')).clips?.[0]?.take?.hash?.startsWith('sha256:'),
       'and a project saved from the editor names its footage by content hash rather than by path');
 
@@ -4576,7 +4576,7 @@ async function runChecks() {
       ['a project with no version', 'delete p.version;'],
       ['a version 8 project', 'p.version = 8;'],
       // Derived from the version this build writes rather than written down.
-      ['a project from a newer version', `p.version = ${PROJECT_VERSION + 1};`],
+      ['a project from a newer version', `p.version = ${DOCUMENT_VERSIONS.project + 1};`],
       ['a version that is not a number', 'p.version = "1";'],
       ['a negative in-point', 'p.clips[0].sourceStart = -0.25;'],
       ['a non-finite in-point', 'p.clips[0].sourceStart = NaN;'],
@@ -4788,7 +4788,7 @@ async function runChecks() {
 
     const onDisk = readFileSync(join(WORK, 'presets/hand-tuned.json'), 'utf8');
     const doc = JSON.parse(onDisk);
-    check(doc.version === PROJECT_VERSION, 'a preset carries the format version too',
+    check(doc.version === DOCUMENT_VERSIONS.preset, 'a preset carries its own format version',
       `version ${doc.version}`);
     check(doc.values['blackwall.amount'] === 1 && doc.values.readRgb === 0,
       'the reading travels inside the values, like every other look parameter',
@@ -4836,7 +4836,7 @@ async function runChecks() {
     await page.evaluate(`(async () => {
       await fetch('/presets/hand-tuned?rev=' + await globalThis.__rev('presets', 'hand-tuned'), {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ version: ${PROJECT_VERSION}, values: { bloom: 0, pointSize: 9 } }),
+        body: JSON.stringify({ version: ${DOCUMENT_VERSIONS.preset}, values: { bloom: 0, pointSize: 9 } }),
       });
     })()`);
     const stillTuned = await page.evaluate("globalThis.__kinect.params.get('bloom')");
@@ -4917,7 +4917,7 @@ async function runChecks() {
 
     const builtinPath = join(WORK, 'builtin-presets/blackwall.json');
     const bytesBefore = readFileSync(builtinPath, 'utf8');
-    const forkBody = { version: PROJECT_VERSION, requires: shipped.requires, values: { ...shipped.values, bloom: 0.95 } };
+    const forkBody = { version: DOCUMENT_VERSIONS.preset, requires: shipped.requires, values: { ...shipped.values, bloom: 0.95 } };
     await writeDoc(macUrl, 'presets', 'blackwall', forkBody);
     check(readFileSync(builtinPath, 'utf8') === bytesBefore,
       'saving over a shipped look leaves the shipped file byte-identical',
@@ -4990,7 +4990,7 @@ async function runChecks() {
       } catch (e) { return e.message; }
     })()`);
     const refusedOld = await refusalFor(2);
-    const refusedFuture = await refusalFor(PROJECT_VERSION + 1);
+    const refusedFuture = await refusalFor(DOCUMENT_VERSIONS.preset + 1);
     check(refusedOld !== 'ACCEPTED' && refusedFuture !== 'ACCEPTED',
       'a preset from another format version is refused', `${refusedOld.slice(0, 40)} / ${refusedFuture.slice(0, 40)}`);
     check(/no path from here/.test(refusedOld) && !/later build/.test(refusedOld),
@@ -5606,14 +5606,14 @@ async function runChecks() {
     // All six stores, and a closed take beside the open one.
     const closedTake = writeTake(shootDir, 'a-closed-take', { frames: 6 });
     const SEEDED_PROJECT = {
-      version: PROJECT_VERSION,
+      version: DOCUMENT_VERSIONS.project,
       look: { params: {}, tracks: {} },
       composition: { camera: [] },
       outputSize: '1920x1080',
       appliedPreset: null,
     };
     writeFileSync(join(shootProjects, 'seeded-project.json'), `${JSON.stringify(SEEDED_PROJECT, null, 2)}\n`);
-    writeFileSync(join(shootPresets, 'seeded-preset.json'), `${JSON.stringify({ version: PROJECT_VERSION, values: {} }, null, 2)}\n`);
+    writeFileSync(join(shootPresets, 'seeded-preset.json'), `${JSON.stringify({ version: DOCUMENT_VERSIONS.preset, values: {} }, null, 2)}\n`);
     const shootUrl = await startServer(root, [
       '--captures', shootDir, '--name', 'shooting', '--record', '--no-color',
       '--projects', shootProjects, '--presets', shootPresets,
@@ -5732,7 +5732,7 @@ async function runChecks() {
       'and nothing was written to the captures directory',
       readdirSync(guardDir).join(' '));
 
-    const FUTURE = PROJECT_VERSION + 1;
+    const FUTURE = DOCUMENT_VERSIONS.project + 1;
     const future = await writeDoc(guardUrl, 'projects', 'from-the-future', { version: FUTURE, tracks: {}, futureField: 'kept' });
     check(new RegExp(`version ${FUTURE}`).test(future.error ?? ''),
       'a document from a future format version is refused rather than restamped as this one',
