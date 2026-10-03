@@ -283,9 +283,30 @@ export class Recorder {
     if (!colour) take.inFlight.push(take.accepted);
   }
 
+  // The close is kept on the take, because `closeAll` has to wait for one a grabber restart began
+  // and nothing else holds it.
+  close(reason) {
+    const take = this.take;
+    const closed = this.closeOpenTake(reason);
+    if (take) take.closed = closed;
+    return closed;
+  }
+
+  /**
+   * Closes the open take and waits for every take whose close is still running, so none is cut off
+   * between its last frame and its index. Rejects with the first take that did not close cleanly,
+   * after every one has finished.
+   */
+  async closeAll(reason) {
+    // `close` runs first and moves the open take into `closing`, so a Set holds its close once.
+    const closes = new Set([this.close(reason), ...[...this.closing].map((take) => take.closed)]);
+    const failed = (await Promise.allSettled(closes)).find((result) => result.status === 'rejected');
+    if (failed) throw failed.reason;
+  }
+
   // The scan writes the sidecar index and the content hash, which is what makes the take a library
   // entry, so a take is not finished until it has one.
-  async close(reason) {
+  async closeOpenTake(reason) {
     const take = this.take;
     if (!take) return null;
     this.take = null;
