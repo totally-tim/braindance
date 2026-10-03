@@ -296,7 +296,9 @@ npm run build:native
 `build:native` picks the `macos` preset (OpenCL) or the `linux` preset (OpenGL, for the Pi)
 from the platform and ends by running the grabber it just built. The GL packages on the Debian
 line are required: without them libfreenect2 builds a CPU-only library, and the build refuses
-that. `node tools/build-native.mjs --help` lists the overrides.
+that. `node tools/build-native.mjs --help` lists the overrides. `npm run build:native -- --stage DIR`
+also writes a copy of the grabber and its libraries that runs from wherever `DIR` is moved to; Linux
+needs `patchelf` for it.
 
 ## Going deeper
 

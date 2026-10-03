@@ -35,6 +35,21 @@ always with its zeroes. The colour count explains a stale-looking image, and the
 are frames libfreenect2 marked failed itself, which separates a failing GPU readback from a
 degraded USB link.
 
+The grabber reads one command per line from stdin: `low-light`, `hd-color`, `key` and `stop`.
+End-of-file on stdin stops it as `stop` does, so a grabber whose parent is gone ends through the
+same teardown. Only a read of zero bytes is end-of-file. Stdin is non-blocking, and a pipe with
+nothing in it yet is not a closed one.
+
+Stdout is non-blocking too, so a write to a full pipe waits in a 100 ms poll rather than in the
+kernel. The wait reads stdin, so the grabber sees a `stop` behind a stalled frame at once and
+applies any other command while the write waits. A write gives up when a stop is set and a whole
+interval passes with nothing moving, so a parent that stopped reading cannot hold the run. A parent
+that reads again within that interval gets the frame whole, and one that pauses longer can lose it.
+A write that gave up part-way closes the output. Both writers refuse every later message, so the
+stream the parent reads ends on a whole message or at one cut. The encoder thread's writes give up
+the same way. The grabber sets the flag that ends them before the join, on every way out of the
+loop.
+
 `--min-depth` and `--max-depth` clip on the GPU before a frame is built, so they decide what exists
 at all. The viewer's `nearClip` and `farClip` only hide points that already arrived, and the
 recorder's preview range drives that pair, never the grabber's.
