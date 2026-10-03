@@ -103,16 +103,22 @@ if (preset === 'macos') {
     console.error(`missing Homebrew packages: ${missing.join(', ')} - brew install ${missing.join(' ')}`);
     process.exit(2);
   }
-  // Pointed at explicitly because libfreenect2's finder does not look in Homebrew's opt paths,
-  // and its libusb finder asks pkg-config, which a Mac need not have.
+  // Pointed at explicitly because libfreenect2's finder does not look in Homebrew's opt paths.
   const jpeg = brewPrefix('jpeg-turbo');
-  const usb = brewPrefix('libusb');
   vendorFlags.push(
     `-DTurboJPEG_INCLUDE_DIRS=${join(jpeg, 'include')}`,
     `-DTurboJPEG_LIBRARIES=${join(jpeg, 'lib/libturbojpeg.dylib')}`,
-    `-DLibUSB_INCLUDE_DIRS=${join(usb, 'include/libusb-1.0')}`,
-    `-DLibUSB_LIBRARIES=${join(usb, 'lib/libusb-1.0.dylib')}`,
   );
+  // Its libusb finder asks pkg-config and has no search of its own for Homebrew, so a Mac without
+  // pkg-config is pointed at the library. With pkg-config these two flags made the configure end on
+  // LibUSB_LIBRARY-NOTFOUND (macos-latest), so they are left off there.
+  if (!have('pkg-config')) {
+    const usb = brewPrefix('libusb');
+    vendorFlags.push(
+      `-DLibUSB_INCLUDE_DIRS=${join(usb, 'include/libusb-1.0')}`,
+      `-DLibUSB_LIBRARIES=${join(usb, 'lib/libusb-1.0.dylib')}`,
+    );
+  }
 }
 
 const run = (bin, args) => {
