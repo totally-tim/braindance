@@ -1153,6 +1153,7 @@ const serveJobFinish = async (req, res, args) => {
       lease: body.lease ?? null,
     });
     logWarnings(job, 'finish');
+    if (body.state === 'done' && job.state !== 'done') console.log(`[jobs] ${job.id} reported done and is recorded ${job.state}: ${job.error}`);
     sendJson(res, job);
   } catch (err) {
     sendJson(res, { error: err.message }, 409);

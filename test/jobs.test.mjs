@@ -1,8 +1,9 @@
 // The render queue's store, driven in process: cancellation, the heartbeat decision, the version
 // record and the refusal of a job file this build did not write. No server and no browser.
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import fsp, { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -25,7 +26,7 @@ const environment = (over = {}) => ({
 });
 
 // A store over a scratch directory, with a clock and an environment the test moves by hand.
-async function harness() {
+async function harness(options = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'braindance-jobs-'));
   const exportsDir = join(dir, 'exports');
   await mkdir(exportsDir);
@@ -36,6 +37,7 @@ async function harness() {
     environment: async (renderer) => ({ record: { ...current.record, renderer }, problems: current.problems }),
     now: () => clock.t,
     staleMs: STALE_MS,
+    ...options,
   });
   let n = 0;
   const enqueue = (over = {}) => store.enqueue({
@@ -277,32 +279,245 @@ test('a render that ran on a different environment than it started on warns at f
   }
 });
 
-test('a sidecar outside the exports directory is not written, and the job says so', async () => {
+// A job claimed and finished `done` over `output`, which is the report a worker sends.
+const reportDone = async (h, output) => {
+  await h.enqueue();
+  const job = await claimOne(h);
+  return h.store.finish(job.id, { state: 'done', output, frames: 3, lease: job.lease });
+};
+
+// What a done report that could not be recorded looks like, on the answer and on disk.
+const assertNotDone = async (h, job, cause, output) => {
+  assert.equal(job.state, 'failed', 'the answer says failed');
+  assert.equal((await h.store.read(job.id)).state, 'failed', 'and so does the record on disk');
+  assert.equal(job.lease, null, 'the lease is spent either way');
+  assert.equal(job.artifactPath, output, 'the artifact stays named on the record');
+  assert.ok(job.error.includes(JSON.stringify(output)), `the reason names the artifact path: ${job.error}`);
+  assert.match(job.error, cause);
+};
+
+// A directory elsewhere with a movie and its sidecar in it, which nothing in `exports/` may touch.
+const outsideMovie = async (h) => {
+  const elsewhere = join(h.dir, 'elsewhere');
+  await mkdir(elsewhere);
+  await writeFile(join(elsewhere, 'movie.mp4'), 'video');
+  await writeFile(join(elsewhere, 'movie.mp4.job.json'), '{"output":"stray"}\n');
+  return elsewhere;
+};
+
+test('a sidecar outside the exports directory is not written, and the job is failed for it', async () => {
   const h = await harness();
   try {
-    await h.enqueue();
-    const job = await claimOne(h);
     const stray = join(h.dir, 'elsewhere.mp4');
+    await writeFile(stray, 'video');
     await writeFile(`${stray}.job.json`, '{"output":"stray"}\n');
-    const done = await h.store.finish(job.id, { state: 'done', output: stray, frames: 3, lease: job.lease });
-    assert.equal(done.state, 'done', 'the render itself is not failed for it');
-    assert.match(done.warnings.find((w) => w.field === 'sidecar').text, /outside the exports directory/);
+    const job = await reportDone(h, stray);
+    await assertNotDone(h, job, /outside the exports directory/, stray);
     assert.equal(await readFile(`${stray}.job.json`, 'utf8'), '{"output":"stray"}\n', 'the file is untouched');
+    assert.equal(await readFile(stray, 'utf8'), 'video', 'and so is the artifact');
   } finally {
     await h.cleanup();
   }
 });
 
-test('a sidecar that is missing is a warning on a job that is still done', async () => {
+test('a done report with no artifact path is failed rather than recorded as done', async () => {
   const h = await harness();
   try {
-    await h.enqueue();
-    const job = await claimOne(h);
-    const done = await h.store.finish(job.id, {
-      state: 'done', output: join(h.exportsDir, 'nowhere', 'gone.mp4'), frames: 3, lease: job.lease,
+    for (const output of [null, '']) {
+      const job = await reportDone(h, output);
+      assert.equal(job.state, 'failed');
+      assert.match(job.error, /names no artifact path/);
+      assert.equal(job.artifactPath, null);
+    }
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a sidecar that is missing fails the job, and the artifact is left where it is', async () => {
+  const h = await harness();
+  try {
+    const output = await h.artifact('lost');
+    await rm(`${output}.job.json`);
+    const job = await reportDone(h, output);
+    await assertNotDone(h, job, /sidecar cannot be read: ENOENT/, output);
+    assert.equal(await readFile(output, 'utf8'), 'video', 'the encoded file is not removed');
+    assert.deepEqual(await readdir(join(h.exportsDir, 'lost.1-1')), ['lost.mp4'], 'and nothing is made in its place');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('an artifact that is not there fails the job', async () => {
+  const h = await harness();
+  try {
+    const output = join(h.exportsDir, 'nowhere', 'gone.mp4');
+    await assertNotDone(h, await reportDone(h, output), /no such file or directory/, output);
+    const bare = join(h.exportsDir, 'bare.mp4');
+    await writeFile(`${bare}.job.json`, '{}\n');
+    await assertNotDone(h, await reportDone(h, bare), /artifact cannot be read: ENOENT/, bare);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a sidecar that is not a JSON object, or not a file, fails the job and is left as it was', async () => {
+  const h = await harness();
+  try {
+    for (const [name, body, cause] of [
+      ['torn', '{ not json', /is not JSON/],
+      ['list', '[1]\n', /is not a JSON object/],
+    ]) {
+      const output = await h.artifact(name);
+      await writeFile(`${output}.job.json`, body);
+      await assertNotDone(h, await reportDone(h, output), cause, output);
+      assert.equal(await readFile(`${output}.job.json`, 'utf8'), body);
+      assert.deepEqual((await readdir(join(h.exportsDir, `${name}.1-1`))).sort(), [`${name}.mp4`, `${name}.mp4.job.json`]);
+    }
+    const output = await h.artifact('folder');
+    await rm(`${output}.job.json`);
+    await mkdir(`${output}.job.json`);
+    await assertNotDone(h, await reportDone(h, output), /not a regular file/, output);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a directory that is a symlink out of the exports directory is not read or written through', async () => {
+  const h = await harness();
+  try {
+    const elsewhere = await outsideMovie(h);
+    await symlink(elsewhere, join(h.exportsDir, 'linked'));
+    const output = join(h.exportsDir, 'linked', 'movie.mp4');
+    const job = await reportDone(h, output);
+    await assertNotDone(h, job, /resolves to .*outside the exports directory/, output);
+    assert.equal(await readFile(join(elsewhere, 'movie.mp4.job.json'), 'utf8'), '{"output":"stray"}\n', 'the outside sidecar is byte for byte what it was');
+    assert.deepEqual((await readdir(elsewhere)).sort(), ['movie.mp4', 'movie.mp4.job.json'], 'and nothing was made beside it');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a symlinked directory that stays inside the exports directory is refused too', async () => {
+  const h = await harness();
+  try {
+    const output = await h.artifact('real');
+    await symlink(join(h.exportsDir, 'real.1-1'), join(h.exportsDir, 'alias'));
+    const job = await reportDone(h, join(h.exportsDir, 'alias', 'real.mp4'));
+    await assertNotDone(h, job, /reached through a symlink/, join(h.exportsDir, 'alias', 'real.mp4'));
+    assert.deepEqual(JSON.parse(await readFile(`${output}.job.json`, 'utf8')), { output: 'real', frames: 3 }, 'the sidecar under the real name is unamended');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('an exports directory that is itself a symlink works, because the root is resolved too', async () => {
+  const h = await harness();
+  try {
+    const linked = join(h.dir, 'exports-link');
+    await symlink(h.exportsDir, linked);
+    const store = new JobStore(join(h.dir, 'jobs-linked'), {
+      exportsDir: linked,
+      environment: async (renderer) => ({ record: { ...h.current.record, renderer }, problems: [] }),
+      now: () => h.clock.t,
+      staleMs: STALE_MS,
+    });
+    const output = await h.artifact('rooted');
+    await store.enqueue({ project: PROJECT, captures: [HASH], output: 'rooted', width: 64, height: 36, fps: 30 });
+    const job = (await store.claim({ worker: 'w', renderer: METAL })).job;
+    const done = await store.finish(job.id, {
+      state: 'done', output: join(linked, 'rooted.1-1', 'rooted.mp4'), frames: 3, lease: job.lease,
     });
     assert.equal(done.state, 'done');
-    assert.match(done.warnings.find((w) => w.field === 'sidecar').text, /could not take the version record/);
+    assert.deepEqual(JSON.parse(await readFile(`${output}.job.json`, 'utf8')).versions, done.versions);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a sidecar that is a symlink is refused and the file it points at is not touched', async () => {
+  const h = await harness();
+  try {
+    const elsewhere = await outsideMovie(h);
+    const output = await h.artifact('swapped');
+    await rm(`${output}.job.json`);
+    await symlink(join(elsewhere, 'movie.mp4.job.json'), `${output}.job.json`);
+    const job = await reportDone(h, output);
+    await assertNotDone(h, job, /sidecar .* is a symlink/, output);
+    assert.equal(await readFile(join(elsewhere, 'movie.mp4.job.json'), 'utf8'), '{"output":"stray"}\n');
+    assert.equal((await lstat(`${output}.job.json`)).isSymbolicLink(), true, 'the link is left for whoever put it there');
+
+    const linkedArtifact = join(h.exportsDir, 'ghost.mp4');
+    await symlink(join(elsewhere, 'movie.mp4'), linkedArtifact);
+    await writeFile(`${linkedArtifact}.job.json`, '{}\n');
+    await assertNotDone(h, await reportDone(h, linkedArtifact), /artifact .* is a symlink/, linkedArtifact);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('the scratch file is created exclusively, so a link planted at its name is not written through', async () => {
+  const h = await harness({ tempSuffix: () => 'fixed' });
+  try {
+    const elsewhere = await outsideMovie(h);
+    const victim = join(elsewhere, 'victim.txt');
+    await writeFile(victim, 'precious');
+    const output = await h.artifact('planted');
+    const planted = `${output}.job.json.fixed.tmp`;
+    await symlink(victim, planted);
+    const job = await reportDone(h, output);
+    await assertNotDone(h, job, /EEXIST/, output);
+    assert.equal(await readFile(victim, 'utf8'), 'precious', 'what the link points at is untouched');
+    assert.equal((await lstat(planted)).isSymbolicLink(), true, 'and the link is not the queue\'s to remove');
+    assert.deepEqual(JSON.parse(await readFile(`${output}.job.json`, 'utf8')), { output: 'planted', frames: 3 }, 'the sidecar is as the export left it');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+// Fails one of the store's own file calls for as long as `body` runs. `exercise` is an fs function
+// and `when` picks the call, because the job record is written through the same ones.
+async function failing(exercise, when, how, body) {
+  const real = fsp[exercise];
+  mock.method(fsp, exercise, async (...args) => (when(args) ? how(real, args) : real(...args)));
+  syncBuiltinESMExports();
+  try {
+    return await body();
+  } finally {
+    mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+}
+
+test('a write that fails after the scratch file exists removes it and fails the job', async () => {
+  const h = await harness({ tempSuffix: () => 'half' });
+  try {
+    const output = await h.artifact('full');
+    const job = await failing('open', ([, flags]) => flags === 'wx', async (real, args) => {
+      const handle = await real(...args);
+      handle.writeFile = async () => { throw new Error('ENOSPC: no space left on device'); };
+      return handle;
+    }, () => reportDone(h, output));
+    await assertNotDone(h, job, /ENOSPC/, output);
+    assert.deepEqual((await readdir(join(h.exportsDir, 'full.1-1'))).sort(), ['full.mp4', 'full.mp4.job.json'], 'no scratch file is left');
+    assert.deepEqual(JSON.parse(await readFile(`${output}.job.json`, 'utf8')), { output: 'full', frames: 3 });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a rename that fails removes the scratch file and fails the job', async () => {
+  const h = await harness({ tempSuffix: () => 'late' });
+  try {
+    const output = await h.artifact('stuck');
+    const job = await failing('rename', ([, to]) => String(to).endsWith('.job.json'), async () => {
+      throw new Error('EXDEV: cross-device link not permitted');
+    }, () => reportDone(h, output));
+    await assertNotDone(h, job, /EXDEV/, output);
+    assert.deepEqual((await readdir(join(h.exportsDir, 'stuck.1-1'))).sort(), ['stuck.mp4', 'stuck.mp4.job.json'], 'no scratch file is left');
+    assert.deepEqual(JSON.parse(await readFile(`${output}.job.json`, 'utf8')), { output: 'stuck', frames: 3 });
+    const again = await h.store.requeue(job.id);
+    assert.equal(again.state, 'queued', 'a failed job is what a retry is for');
   } finally {
     await h.cleanup();
   }

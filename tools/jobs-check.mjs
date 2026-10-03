@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { PROJECT_VERSION } from '../web/format.js';
-import { JOB_VERSION } from '../server/jobs.js';
+import { BEAT_BUDGET, JOB_VERSION } from '../server/jobs.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -263,10 +263,10 @@ const MUTATIONS = {
   },
   'preflight-reads-a-failure-as-an-empty-store': { file: 'tools/render-worker.mjs', edits: [
     [
-      '        const res = await fetch(`${URL_}${path}`, { signal: AbortSignal.timeout(5000) });\n'
+      '        const res = await request(`${URL_}${path}`, { signal: AbortSignal.timeout(5000) });\n'
       + '        if (!res.ok) throw new Error(`it answered ${res.status}`);\n'
       + '        return held(await res.json());',
-      '        return held(await (await fetch(`${URL_}${path}`)).json());',
+      '        return held(await (await request(`${URL_}${path}`)).json());',
     ],
     [
       '      if (!body || !Array.isArray(body.effects)) {\n'
@@ -316,11 +316,21 @@ const MUTATIONS = {
       + 'row that reads the app build, the effect versions and the renderer off the claimed job',
   },
   'finish-skips-sidecar': { file: 'server/jobs.js', edits: [[
-    "      if (state === 'done' && job.artifactPath) await this.#amendSidecar(job);\n",
+    '          await this.#amendSidecar(job);\n',
     '',
   ]],
-    fails: 'a done render whose sidecar is never amended. It needs the render block. Reddens the '
-      + 'sidecar row and nothing else: the job still says done and still carries the record',
+    fails: 'a done render whose sidecar is never amended. Reddens the row that reads the version '
+      + 'record out of the sidecar of a staged artifact, and under the render block the same row '
+      + 'for a real one: the job still says done and still carries the record. Expected, not measured',
+  },
+  'finish-records-done-over-a-failed-sidecar': { file: 'server/jobs.js', edits: [[
+    "        } catch (err) {\n          job.state = 'failed';\n",
+    '        } catch (err) {\n          job.state = state;\n',
+  ]],
+    fails: 'a done report whose artifact cannot take the record, kept as done with the reason beside '
+      + 'it. Queue semantics, so `--no-render`. Expected, not measured: the rows about the report '
+      + 'naming an artifact outside the exports directory redden, and the ones about a finished '
+      + 'render stay green',
   },
   'worker-ignores-cancel': { file: 'server/jobs.js', edits: [[
     "    if (typeof answer.body?.cancelRequested === 'number') {",
@@ -330,6 +340,15 @@ const MUTATIONS = {
       + 'the render block: the render runs to its end and the job comes back done. Expected, not '
       + 'measured: the state row and the row that finds nothing left under exports/ redden, '
       + 'because a finished render leaves its directory there',
+  },
+  'worker-ignores-budget': { file: 'tools/render-worker.mjs', edits: [[
+    "      if (heard.verdict !== 'continue') {",
+    "      if (heard.verdict !== 'continue' && heard.verdict !== 'abandon') {",
+  ]],
+    fails: 'the worker acting on every verdict but the seventh failed heartbeat. It needs the render '
+      + 'block: cancellation and lease loss still work, and the render runs to its end and reports '
+      + 'done while its queue is unreachable. Expected, not measured: both arms of the budget '
+      + 'section redden on the state, the exit code and the artifact left behind',
   },
   'heartbeat-stops-on-first-error': { file: 'tools/render-worker.mjs', edits: [[
     '        .then(heardBack, (err) => heardBack({ error: err.message }));',
@@ -655,6 +674,36 @@ const failsWorkerEffectReads = ({ times = 1, answer = null } = {}) => (req, res,
   return true;
 };
 
+/**
+ * Every heartbeat failed from the moment `armed()` says so, and the rest carried as they come.
+ * `silent` leaves the request unanswered, so only the worker's own timeout ends it; otherwise it
+ * is answered 500 at once. A refusal and a silence time differently, and the worker's budget has to
+ * hold for both.
+ */
+const failsHeartbeats = ({ armed, silent }) => (req, res, state) => {
+  if (req.method !== 'POST' || !/^\/jobs\/[^/]+\/heartbeat$/.test(req.url ?? '') || !armed()) return false;
+  state.failed++;
+  if (silent) return true;
+  res.writeHead(500, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'the queue is not answering' }));
+  return true;
+};
+
+// What an export has under `exports/` for `name` while it is running: its scratch directory, which
+// exists from the moment the encoder starts and goes when the export socket closes early.
+const scratchOf = (name) => (existsSync(exportsDir) ? readdirSync(exportsDir) : [])
+  .filter((entry) => entry.startsWith(`${name}.`));
+
+// The files an export leaves, so a done report has an artifact and a sidecar to name.
+const stageArtifact = (name) => {
+  const folder = join(exportsDir, `${name}.1-1`);
+  mkdirSync(folder, { recursive: true });
+  const artifact = join(folder, `${name}.mp4`);
+  writeFileSync(artifact, 'video');
+  writeFileSync(`${artifact}.job.json`, `${JSON.stringify({ output: name })}\n`);
+  return artifact;
+};
+
 try {
   const serverLog = await startServer();
 
@@ -910,7 +959,7 @@ try {
 
   const victim = claims.find((c) => c.body.job).body.job;
   const reports = await Promise.all([
-    post(`/jobs/${victim.id}/finish`, { state: 'done', output: 'winner', lease: victim.lease }),
+    post(`/jobs/${victim.id}/finish`, { state: 'done', output: stageArtifact('winner'), lease: victim.lease }),
     post(`/jobs/${victim.id}/finish`, { state: 'failed', error: 'loser', lease: victim.lease }),
   ]);
   const accepted = reports.filter((r) => r.status === 200);
@@ -952,12 +1001,18 @@ try {
   check(ghost.status === 409,
     'a running record carrying no lease cannot be finished by anybody - that is a record no claim could have written, so it is unusable rather than open',
     `${ghost.status} ${(ghost.body.error ?? '').slice(0, 60)}`);
-  const rightLease = await post(`/jobs/${held.id}/finish`, { state: 'done', lease: held.lease });
-  check(rightLease.status === 200, 'while the claim that holds the lease is taken, which is the positive half of that');
+  const rightLease = await post(`/jobs/${held.id}/finish`, { state: 'done', output: stageArtifact('held'), lease: held.lease });
+  check(rightLease.status === 200 && rightLease.body.state === 'done',
+    'while the claim that holds the lease is taken, which is the positive half of that');
 
   section('a finished job is finished');
-  const fin = await post(`/jobs/${good.body.id}/finish`, { state: 'done', output: 'check', lease: c1.body.job.lease });
+  const checkArtifact = stageArtifact('check');
+  const fin = await post(`/jobs/${good.body.id}/finish`, { state: 'done', output: checkArtifact, lease: c1.body.job.lease });
   check(fin.status === 200 && fin.body.state === 'done', 'a worker reports an outcome and the record takes it');
+  const staged = JSON.parse(readFileSync(`${checkArtifact}.job.json`, 'utf8'));
+  check(staged.output === 'check' && staged.versions?.finished?.app === fin.body.versions?.finished?.app && Array.isArray(staged.warnings),
+    'and the sidecar beside the artifact it named gained the job\'s version record and warnings, which the export had written without',
+    JSON.stringify(Object.keys(staged)));
   const again = await post(`/jobs/${good.body.id}/finish`, { state: 'failed', error: 'the loser of a race', lease: c1.body.job.lease });
   check(again.status === 409, 'a second report on the same job is refused, so two workers racing cannot leave the last one to speak as the record',
     `${again.status}`);
@@ -1053,6 +1108,23 @@ try {
   await post(`/jobs/${unasked.id}/finish`, { state: 'failed', error: 'tidying', lease: unasked.lease });
   const tooLate = await post(`/jobs/${unasked.id}/cancel`, {});
   check(tooLate.status === 409, '  and a job that has already finished cannot be cancelled', `${tooLate.status}`);
+
+  // A job is done when its artifact can take the record. The artifact here exists and so does its
+  // sidecar, which is why the only thing wrong with the report is where it points.
+  await enqueue({ output: 'jobs-check-unfiled', renderer: METAL });
+  const unfiled = (await post('/jobs/claim', { worker: 'cancel-check', renderer: METAL })).body.job;
+  const stray = join(WORK, 'stray.mp4');
+  writeFileSync(stray, 'video');
+  writeFileSync(`${stray}.job.json`, '{"output":"stray"}\n');
+  const misfiled = await post(`/jobs/${unfiled.id}/finish`, { state: 'done', output: stray, lease: unfiled.lease });
+  check(misfiled.status === 200 && misfiled.body.state === 'failed'
+      && String(misfiled.body.error).includes(stray) && /outside the exports directory/.test(String(misfiled.body.error)),
+  'a done report naming an artifact outside the exports directory is recorded as failed, naming the path and the cause',
+  `${misfiled.status} ${misfiled.body.state ?? misfiled.body.error} ${String(misfiled.body.error ?? '').slice(0, 60)}`);
+  check((await get(`/jobs/${unfiled.id}`)).state === 'failed',
+    '  and a read of the job says failed as well, so it was never stored as done');
+  check(readFileSync(`${stray}.job.json`, 'utf8') === '{"output":"stray"}\n' && existsSync(stray),
+    '  and the file and the sidecar it named are where they were, untouched');
 
   section('the queue is behind the same guard every mutating route is');
   const noType = await fetch(`${URL_}/jobs`, { method: 'POST', body: '{}' });
@@ -1353,8 +1425,7 @@ try {
     doomedWorker.stdout.on('data', (c) => doomedLog.push(c.toString()));
     doomedWorker.stderr.on('data', (c) => doomedLog.push(c.toString()));
     const doomedExit = new Promise((done) => { doomedWorker.on('close', done); });
-    const scratch = () => (existsSync(exportsDir) ? readdirSync(exportsDir) : [])
-      .filter((entry) => entry.startsWith('jobs-check-cancel.'));
+    const scratch = () => scratchOf('jobs-check-cancel');
     // The export's scratch directory exists from the moment the encoder is started, so waiting for
     // it is waiting for a render that is under way rather than one still loading its page.
     for (const started = Date.now(); scratch().length === 0 && Date.now() - started < 90_000;) await sleep(100);
@@ -1398,6 +1469,43 @@ try {
       `heartbeat ${beatRecord.heartbeat ?? 'null'} against claimed ${beatRecord.claimed ?? 'null'}`
       + `, ${((beatRecord.heartbeat ?? 0) - (beatRecord.claimed ?? 0)) / 1000}s apart`);
     await proxy.close();
+
+    section('a worker whose queue stops answering mid-render gives the claim up');
+    // Armed once the export's scratch directory exists, so every failed heartbeat lands on a render
+    // that is under way: failing them from the start spends the budget on the page loading, and
+    // there is then no half-written file for the stop to be shown to clean up. `--beat 200` makes
+    // seven failures about a second and a half, which the render has to outlast.
+    for (const arm of [
+      { output: 'jobs-check-budget-refused', silent: false, how: 'answered 500' },
+      { output: 'jobs-check-budget-silent', silent: true, how: 'never answered' },
+    ]) {
+      const budgetProxy = await startInterferingProxy(PROXY_PORT, PORT,
+        failsHeartbeats({ armed: () => scratchOf(arm.output).length > 0, silent: arm.silent }));
+      proxies.push(budgetProxy);
+      const budgeted = await enqueue({ captures: [take.hash], output: arm.output, width: 320, height: 180 });
+      const budgetWorker = spawn(process.execPath, [join(root, 'tools/render-worker.mjs'),
+        '--url', budgetProxy.url, '--name', arm.output, '--drain', '--max', '1', '--beat', '200'],
+      { stdio: ['ignore', 'pipe', 'pipe'] });
+      const budgetLog = [];
+      budgetWorker.stdout.on('data', (c) => budgetLog.push(c.toString()));
+      budgetWorker.stderr.on('data', (c) => budgetLog.push(c.toString()));
+      const budgetCode = await new Promise((done) => { budgetWorker.on('close', done); });
+      // The server removes the scratch when the export socket closes, a moment after the page does.
+      for (const settled = Date.now(); scratchOf(arm.output).length > 0 && Date.now() - settled < 10_000;) await sleep(100);
+      const budgetRecord = await get(`/jobs/${budgeted.body.id}`);
+      await budgetProxy.close();
+      check(budgetProxy.state.failed >= BEAT_BUDGET,
+        `heartbeats were ${arm.how} once the export was under way, at least ${BEAT_BUDGET} of them, so what follows is about a worker whose queue went away mid-render`,
+        `${budgetProxy.state.failed} failed`);
+      check(budgetRecord.state === 'failed' && new RegExp(`${BEAT_BUDGET} heartbeats failed in a row`).test(String(budgetRecord.error)),
+        '  and the worker stopped rendering and reported failed naming the budget, rather than rendering on to a done the queue cannot confirm',
+        `exit ${budgetCode}, state ${budgetRecord.state}, ${String(budgetRecord.error ?? budgetLog.join('').trim().split('\n').slice(-1)).slice(0, 110)}`);
+      check(budgetCode === 1,
+        '  and exited failing, because a job it took did not finish', `exit ${budgetCode}`);
+      check(budgetRecord.artifactPath === null && scratchOf(arm.output).length === 0,
+        '  and nothing of the export is left under exports/, because closing the page closes the export socket and the server answers by discarding the scratch',
+        `${scratchOf(arm.output).length} entries left, artifact ${JSON.stringify(budgetRecord.artifactPath)}`);
+    }
 
     section('the store a worker answers from is read per job, not per worker');
     // A worker takes up to sixteen jobs and used to answer for all of them out of one reading of

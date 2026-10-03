@@ -5,8 +5,9 @@
 // same frames. The job records what it ran on, and a render that finds a different build, effect,
 // GPU or encoder still renders and says so: the promise is a picture that looks the same.
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { constants } from 'node:fs';
+import { lstat, mkdir, open, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { validateExport } from './export.js';
 import { listJsonNames } from './library.js';
 import { effectIdsIn, requiresEntryRefusal, requiresListRefusal } from '../web/format.js';
@@ -135,9 +136,13 @@ export class JobStore {
    * `exportsDir` is the root a finished job's sidecar must sit inside. `environment(renderer)`
    * answers `{ record, problems }`: the version record of what a render would run on right now,
    * and a `{ field, text }` for each part of it that could not be read. It is asked only when a
-   * job is claimed or finished, so an idle queue probes nothing.
+   * job is claimed or finished, so an idle queue probes nothing. `tempSuffix()` names the scratch
+   * file a sidecar is written through; a test fixes it to plant something at that name.
    */
-  constructor(dir, { exportsDir, environment, now = Date.now, staleMs = STALE_MS }) {
+  constructor(dir, {
+    exportsDir, environment, now = Date.now, staleMs = STALE_MS,
+    tempSuffix = () => randomBytes(8).toString('hex'),
+  }) {
     if (typeof exportsDir !== 'string' || exportsDir === '') throw new Error('a job store is built with the exports directory its sidecars live in');
     if (typeof environment !== 'function') throw new Error('a job store is built with the function that reads the environment a render runs on');
     this.dir = dir;
@@ -145,6 +150,7 @@ export class JobStore {
     this.environment = environment;
     this.now = now;
     this.staleMs = staleMs;
+    this.tempSuffix = tempSuffix;
     // Every state transition goes through here, one at a time: `claim` and `finish` both have
     // an `await` between the decision and the write, so without this two workers claim one job.
     this.gate = Promise.resolve();
@@ -439,33 +445,76 @@ export class JobStore {
         ...warn('finish', problems),
         ...warn('finish', versionDifferences(job.versions.claimed, record, requiredIds(job))),
       );
-      // Before the record says `done`, so nobody reads a finished job beside an unamended sidecar.
-      if (state === 'done' && job.artifactPath) await this.#amendSidecar(job);
+      // A render is done when the queue holds its record and the sidecar beside the artifact does
+      // too. Anything less is a failed job that says why, and the artifact stays where it is.
+      if (state === 'done') {
+        try {
+          await this.#amendSidecar(job);
+        } catch (err) {
+          job.state = 'failed';
+          job.error = `the render reported done but its artifact ${JSON.stringify(job.artifactPath)} `
+            + `could not take the version record, so it is not recorded as done: ${err.message}`;
+        }
+      }
       return this.#put(job);
     });
   }
 
   // The export wrote `<artifact>.job.json` beside the render. It gains the version record and the
-  // warnings, aside and renamed like every other write here. A sidecar that cannot be amended is
-  // a warning on the job rather than a failed render: the file exists and the job holds the record.
+  // warnings, written aside and renamed like every other write here. The artifact path is a lease
+  // holder's word, so every path touched is held to the exports root by where the filesystem puts
+  // it rather than how it is spelled, and none of them may be a symlink: a link under the
+  // artifact would carry this read and write somewhere else. Throws, saying why, when it cannot.
   async #amendSidecar(job) {
-    const sidecar = `${job.artifactPath}.job.json`;
+    if (typeof job.artifactPath !== 'string' || job.artifactPath === '') {
+      throw new Error('the report names no artifact path');
+    }
+    const artifact = resolve(job.artifactPath);
+    const folder = dirname(artifact);
+    const realRoot = await realpath(this.exportsDir);
+    const realFolder = await realpath(folder);
+    const inside = relative(realRoot, realFolder);
+    if (inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+      throw new Error(`its directory resolves to ${realFolder}, outside the exports directory ${realRoot}`);
+    }
+    if (inside !== relative(resolve(this.exportsDir), folder)) {
+      throw new Error(`its directory ${folder} is reached through a symlink`);
+    }
+    const real = join(realFolder, basename(artifact));
+    const sidecar = `${real}.job.json`;
+    for (const [what, path] of [['artifact', real], ['sidecar', sidecar]]) {
+      const info = await lstat(path).catch((err) => { throw new Error(`the ${what} cannot be read: ${err.message}`); });
+      if (info.isSymbolicLink()) throw new Error(`the ${what} ${path} is a symlink`);
+      if (what === 'sidecar' && !info.isFile()) throw new Error(`the sidecar ${path} is not a regular file`);
+    }
+    // `O_NOFOLLOW` where there is one, so a link swapped in after the check above still fails.
+    const reading = await open(sidecar, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    let text;
     try {
-      const inside = relative(resolve(this.exportsDir), resolve(sidecar));
-      if (inside === '' || inside.startsWith('..') || isAbsolute(inside)) {
-        throw new Error(`it is outside the exports directory ${this.exportsDir}`);
-      }
-      const record = JSON.parse(await readFile(sidecar, 'utf8'));
-      if (!isMap(record)) throw new Error('it is not a JSON object');
-      const amended = { ...record, versions: job.versions, warnings: job.warnings };
-      await writeFile(`${sidecar}.tmp`, `${JSON.stringify(amended, null, 2)}\n`);
-      await rename(`${sidecar}.tmp`, sidecar);
+      text = await reading.readFile('utf8');
+    } finally {
+      await reading.close();
+    }
+    let record;
+    try {
+      record = JSON.parse(text);
     } catch (err) {
-      job.warnings.push({
-        at: 'finish',
-        field: 'sidecar',
-        text: `the sidecar ${sidecar} could not take the version record: ${err.message}`,
-      });
+      throw new Error(`the sidecar ${sidecar} is not JSON: ${err.message}`);
+    }
+    if (!isMap(record)) throw new Error(`the sidecar ${sidecar} is not a JSON object`);
+    const amended = { ...record, versions: job.versions, warnings: job.warnings };
+    // `wx` fails on anything already at the name, a link included, so the write cannot be
+    // steered onto another file by planting one. Only what this call created is removed.
+    const scratch = `${sidecar}.${this.tempSuffix()}.tmp`;
+    const out = await open(scratch, 'wx');
+    try {
+      await out.writeFile(`${JSON.stringify(amended, null, 2)}\n`);
+      await out.close();
+      await rename(scratch, sidecar);
+    } catch (err) {
+      await out.close().catch(() => {});
+      await unlink(scratch).catch(() => {});
+      throw err;
     }
   }
 

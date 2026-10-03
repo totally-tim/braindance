@@ -115,7 +115,7 @@ Read the assertion count, never the exit code.
 | `level-check.mjs` | levelling: the room turns and every surface keeps its meaning | port 8377 free |
 | `vcam-check.mjs` | the output to OBS: the colour camera, the keyed webcam and its page; a take records the colour camera and never the key and its replay serves the colour; the take neither may touch and which webcam subscribers a revocation ends | port 8361 free |
 | `guard-check.mjs` | the socket's origin rule, the bind, the rebinding rule | port 8321 free, `captures/sample.knct` |
-| `jobs-check.mjs` | the queue, the pin, a cancel, a real render and its version record, a job this build cannot read | ports 8231 and 8232, a GPU browser, ffprobe |
+| `jobs-check.mjs` | the queue, the pin, a cancel, a worker whose queue stops answering, a real render and its version record, a job this build cannot read | ports 8231 and 8232, a GPU browser, ffprobe |
 | `effect-check.mjs` | installing an effect: revisions, the door, the hotload, park and restore | port 8281 free, a GPU browser |
 | `effect-conformance-check.mjs` | every installed effect draws nothing at all when it is off | `--url`, a GPU browser |
 | `module-check.mjs` | the boundaries in `web/`: the import graph, what crosses it | nothing |

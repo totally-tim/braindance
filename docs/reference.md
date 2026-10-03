@@ -785,10 +785,13 @@ the encode finishes in the moment the worker closes its page, a finished file si
 cancelled job and no record names it.
 
 **A worker gives a claim up after seven heartbeats fail in a row**, which is 105 seconds at the
-default `--beat`. It stops the same way: it closes its page, reports `failed` if the queue will
-listen, and carries on with its next claim. The queue allows a requeue after 120 seconds of
-silence, so a `--beat` above 17000 ms lets a second worker take the job before the first has
-stopped.
+default `--beat`. A heartbeat fails when the queue answers it with an error or does not answer
+within one `--beat`, and an answered one clears the count. The worker stops the same way a cancel
+stops it: it closes its page, reports `failed` if the queue will listen, and carries on with its
+next claim once that page has closed. The queue allows a requeue after 120 seconds of silence, so
+a `--beat` above 17000 ms lets a second worker take the job before the first has stopped. The
+heartbeats of a claim end with it, and a reply that arrives after the job has finished or stopped
+is ignored.
 
 **A job records what it ran on.** At claim and again at finish it stores the app build
 (`renderVersion`), the version of each installed effect by id, the GPU renderer string and the
@@ -801,11 +804,18 @@ same, and the record says where it may differ.
 
 Each warning is `{ at, field, was, now, text }`, where `at` is `claim` or `finish`. Effects are
 compared for the ids the job requires. ffmpeg is compared when both records read a version. An
-ffmpeg that cannot be resolved or run, or a sidecar that cannot take the record, is a warning of
-its own. The server prints each warning to its log, and the worker prints them at claim.
+ffmpeg that cannot be resolved or run is a warning of its own. The server prints each warning to
+its log, and the worker prints them at claim.
 
-Before a `done` report lands, the queue writes `versions` and `warnings` into the render's
-`.job.json` sidecar, which must sit inside the exports directory.
+**A job is `done` only once its artifact's sidecar holds the version record.** A `done` report
+names the artifact in `output`. The queue resolves the exports directory and the artifact's
+directory to where the filesystem puts them, writes `versions` and `warnings` into a scratch file
+it creates exclusively beside the render's `.job.json` sidecar, and renames that over the sidecar.
+It refuses an artifact outside the exports directory, a directory reached through a symlink, a
+symlinked artifact or sidecar, and a sidecar that is missing or is not a JSON object. A report that
+names no artifact, or whose artifact the queue refuses or fails to read, write or rename, is stored
+as `failed`. The job's `error` names the artifact path and the cause, the answer to the report is
+the failed job, and the file stays where it is. A failed job can be requeued.
 
 **A job file carries the queue's version, `JOB_VERSION`.** The store does not read a file of another
 version, and no worker is handed it. `GET /jobs` lists it under `refused` with its reason, and
@@ -891,7 +901,7 @@ hash, `sha256:` and 64 hex digits, percent-encoded; `:id` is its name.
 | `/jobs` | GET, POST | Lists the queue and the job files it refused, and enqueues a render. |
 | `/jobs/claim` | POST | Hands the oldest claimable job to a worker of a named renderer class. |
 | `/jobs/:id` | GET | One job, without its lease. |
-| `/jobs/:id/finish` | POST | Reports `done`, `failed` or `cancelled` against the lease the claim handed out. |
+| `/jobs/:id/finish` | POST | Reports `done`, `failed` or `cancelled` against the lease the claim handed out. A `done` whose artifact cannot take the version record is answered with the job stored as `failed`. |
 | `/jobs/:id/heartbeat` | POST | Says the claim is still rendering, and answers with the job, so a cancel request reaches the worker. |
 | `/jobs/:id/cancel` | POST | Cancels a queued job, or asks a running one to stop. |
 | `/jobs/:id/requeue` | POST | Puts a job back on the queue, still pinned. |

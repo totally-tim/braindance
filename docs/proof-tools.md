@@ -1062,8 +1062,8 @@ exits 2, because a crash counted as a failed assertion reads under `--mutate` as
 ## `jobs-check`
 
 The queue only hands a job to a machine that can reproduce it, a job carries enough to be
-reproduced at all, a cancel reaches a queued job and a render under way, and a render records what
-it ran on.
+reproduced at all, a cancel reaches a queued job and a render under way, a worker whose queue stops
+answering gives its claim up, and a render records what it ran on.
 
 ```
 node tools/jobs-check.mjs
@@ -1081,6 +1081,14 @@ roots the flags default to never resolve into the checkout. The worker under tes
 copy of `server/`, not the repo's, and it reads its renderer class out of the browser it will
 render in. Some mutations are queue semantics and take `--no-render`; others need the render
 block, so reading every mutation run as `--no-render` is wrong.
+
+The budget section runs the worker twice behind the forwarding proxy, once with every heartbeat
+answered 500 and once with every heartbeat left unanswered, so only the worker's own timeout ends
+it. Each starts failing when the export's scratch directory appears, and `--beat 200` turns the
+seven failures into about a second and a half, which the render has to outlast.
+`test/render-worker.test.mjs` drives the same `runQueue` with a scripted queue and a scripted
+browser and needs no port: the budget in both timings, a cancel, a lost lease, a report the queue
+records as failed, and heartbeat replies that arrive after their job has ended.
 
 - **`claim-ignores-renderer`** — `rendererMatches` returns true for every pairing, so a job pinned
   to one renderer class is handed to any worker.
@@ -1112,8 +1120,12 @@ block, so reading every mutation run as `--no-render` is wrong.
 - **`cancel-queued-does-nothing`** — a cancel of a queued job answers 200 and leaves it queued.
 - **`claim-skips-environment`** — a claim records no app build, effect versions or renderer class.
 - **`finish-skips-sidecar`** — a done render's sidecar is never amended with the version record.
+- **`finish-records-done-over-a-failed-sidecar`** — a done report whose artifact cannot take the
+  record is kept as done instead of stored as failed.
 - **`worker-ignores-cancel`** — the heartbeat decision stops reading a cancel request, so a cancelled
   render runs to its end.
+- **`worker-ignores-budget`** — the worker acts on every verdict but the seventh failed heartbeat, so
+  a render whose queue went away runs to its end and reports done.
 - **`heartbeat-stops-on-first-error`** — the worker stops beating on the first failed beat instead
   of reporting a missed one.
 - **`static-serves-nothing`** — the static route throws after its `stat`, so the worker's page
