@@ -26,6 +26,12 @@
 
 namespace libfreenect2 {
 
+// Frames the grabber took from a listener and frames it gave back, by stream, so the device's
+// close can say whether every frame the grabber held was returned. Frames still queued in the
+// listener were never taken and are not counted.
+static std::atomic<unsigned long long> g_taken[2], g_returned[2];
+static int stream(Frame::Type type) { return type == Frame::Depth ? 1 : 0; }
+
 static int envMs(const char *name, int fallback) {
   const char *text = std::getenv(name);
   return text ? std::atoi(text) : fallback;
@@ -71,12 +77,14 @@ bool SyncMultiFrameListener::waitForNewFrame(FrameMap &frame, int milliseconds) 
                           [this] { return !impl_->queue.empty(); })) return false;
   frame[impl_->type] = impl_->queue.front();
   impl_->queue.pop_front();
+  g_taken[stream(impl_->type)]++;
   // A test counts these to see whether the grabber's loop is still taking frames.
   if (impl_->type == Frame::Depth) std::fprintf(stderr, "[fake] depth frame %llu handed out\n", ++impl_->handedOut);
   return true;
 }
 void SyncMultiFrameListener::waitForNewFrame(FrameMap &frame) { waitForNewFrame(frame, 1 << 30); }
 void SyncMultiFrameListener::release(FrameMap &frame) {
+  g_returned[stream(impl_->type)] += frame.size();
   for (auto &entry : frame) delete entry.second;
   frame.clear();
 }
@@ -140,7 +148,8 @@ class FakeDevice : public Freenect2Device {
     return true;
   }
   bool close() override {
-    std::fprintf(stderr, "[fake] device closed\n");
+    std::fprintf(stderr, "[fake] device closed: depth %llu taken, %llu returned; colour %llu taken, %llu returned\n",
+                 g_taken[1].load(), g_returned[1].load(), g_taken[0].load(), g_returned[0].load());
     return true;
   }
 

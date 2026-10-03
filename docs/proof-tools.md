@@ -916,11 +916,20 @@ that will not open.
 ## `grabber-stdin-check`
 
 What `stop` and end-of-file on stdin do to the grabber. No sensor, no libfreenect2 build and no
-port. It runs in two parts.
+port. It runs in three parts.
 
 The reader part extracts `applyLowLight` and `pollCommands` out of `native/grabber.cpp`, compiles
 them with the stubs in `test/fixtures/grabber-stdin.cpp`, and feeds them a real non-blocking pipe on
 descriptor 0.
+
+The writer part extracts the output writer, `write_message` and what it calls, and compiles it with
+`test/fixtures/grabber-write.cpp`. The fixture runs the frame loop's thread and the encoder's on a
+pipe the parent leaves unread. The frame writer stalls in a 512 KiB message, the stop reaches it
+through the stdin its stalled wait reads, and the encoder's message arrives while the frame writer
+waits or after it gave up. The parent reads again once the frame writer has returned, and the tool
+reads the stream through `MessageParser` from `server/protocol.js`. The sensor's timing decides
+which thread reaches the lock first. A stop through the built grabber lets a queued encoder give up
+on its own failed lock attempt, so the writer part scripts the order.
 
 The stream part builds the whole of `native/grabber.cpp` against `test/fixtures/fake-freenect2.cpp`,
 which defines the libfreenect2 symbols the grabber calls behind the real headers, and runs the
@@ -931,8 +940,10 @@ waits in a write when the stop arrives. A stop has 4000 ms. The tool kills a chi
 the bound, and its row fails.
 
 It proves the stop path through the real capture loop, the output waits, the encoder thread and the
-teardown. The USB link, libfreenect2's own stop and close, and the server as the parent need a
-sensor and are not in it.
+teardown, and that a message cut short ends the output. The fake sensor counts the frames the
+grabber takes and the frames it gives back and prints both when its device closes, so every
+teardown row asserts they match. That counts the grabber's own releases. The USB link,
+libfreenect2's own stop and close, and the server as the parent need a sensor and are not in it.
 
 ```
 node tools/grabber-stdin-check.mjs
@@ -940,13 +951,22 @@ node tools/grabber-stdin-check.mjs
 
 | needs | |
 | --- | --- |
-| toolchain | a C++ compiler for the reader part; the stream part adds TurboJPEG's headers and library. Without them it exits 2 |
+| toolchain | a C++ compiler for the reader and writer parts; the stream part adds TurboJPEG's headers and library. Without them it exits 2 |
 | fixture | none: each row writes into the pipe and closes it itself |
 
 The rows that hold the pipe open are the control for the rows that close it. A reader that took -1
 with `EAGAIN` for end-of-file would stop on a pipe with nothing in it, and the open-pipe rows would
 fail. Each stream row that stops a stalled grabber has a row ahead of it showing the grabber stalled:
-no new frame for 450 ms, where depth arrives every 10 ms. The stream rows are:
+no new frame for 450 ms, where depth arrives every 10 ms. The writer rows are:
+
+- two writers and no stop: both messages arrive whole, each carrying only its own bytes. This is
+  the control for a writer that refuses too much;
+- a second message queued behind a frame the stop cuts short, and one that reaches the lock after
+  the frame gave up: the frame writer reports its message abandoned, the second write is refused,
+  the parent's stream is the cut frame and ends there, and the shipped parser holds it as one
+  unfinished message.
+
+The stream rows are:
 
 - a stop line, and end-of-file, with the first frame stuck in an unread pipe;
 - a stop line with the encoder thread holding the write lock on a full pipe while the frame loop
@@ -958,12 +978,12 @@ no new frame for 450 ms, where depth arrives every 10 ms. The stream rows are:
   waiting: the stream ends on a message boundary. This is the control for a fix that gives a frame
   up the moment a stop is set;
 - a stop line, and end-of-file, already waiting when the first frame arrives: nothing follows the
-  hello;
+  hello, and the one depth frame the loop took is given back;
 - two exits that no stop requested, each with the encoder stalled in a write: the sensor goes quiet
   and the loop leaves on its ten-second frame timeout, and a corpus file will not open.
 
 Exit 2 means it did not finish; a mutation with zero failed assertions is NOT CAUGHT even though it
-exits 1. The reader mutations run the reader part and the stream mutations run the stream part.
+exits 1. Each mutation runs the part it names: reader, writer or stream.
 
 - **`eof-never-stops`** — end-of-file is compared with a value `read` never returns, and the
   closed-pipe rows fail.
@@ -974,6 +994,10 @@ exits 1. The reader mutations run the reader part and the stream mutations run t
   end-of-file rows stay green.
 - **`stop-matches-a-prefix`** — any line that begins `stop` stops the run, and the near-miss row
   fails.
+- **`cut-message-leaves-the-output-open`** — a write that gave up part-way no longer closes the
+  output to the next writer, and the queued and late rows find its bytes after the cut.
+- **`cut-message-does-not-close-the-output`** — the write that gave up leaves nothing for a later
+  write to refuse, and the same rows fail.
 - **`stalled-write-never-gives-up`** — a write on a full pipe keeps waiting after the stop is read,
   and every stalled-stop row hangs.
 - **`stalled-write-ignores-stdin`** — nothing reads stdin while a write waits, and the stalled-stop
@@ -984,6 +1008,8 @@ exits 1. The reader mutations run the reader part and the stream mutations run t
   stalled-stop rows hang.
 - **`frame-written-after-stop`** — the loop writes the frame in hand after it reads a stop, and the
   rows with a stop already waiting find bytes after the hello.
+- **`early-stop-keeps-the-depth-frame`** — the loop leaves on a stop without giving back the depth
+  frame it took, and the rows with a stop already waiting find a frame taken and not returned.
 - **`stalled-write-gives-up-at-once`** — a write gives up as soon as a stop is set, and the
   reading-parent row and the whole-stream row after the command row end on a cut frame.
 - **`teardown-leaves-the-encoder-writing`** — the flag that ends an encoder's stalled write is not

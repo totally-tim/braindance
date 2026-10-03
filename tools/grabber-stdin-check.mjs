@@ -1,7 +1,9 @@
 #!/usr/bin/env node
-// What `stop` and end-of-file on stdin do to the grabber, in two parts, with no sensor, no
+// What `stop` and end-of-file on stdin do to the grabber, in three parts, with no sensor, no
 // libfreenect2 build and no port.
 //   reader: the shipped `pollCommands`, compiled and fed a real non-blocking pipe.
+//   writer: the shipped `write_message`, compiled with the frame loop's thread and the encoder's on a
+//           pipe the parent leaves unread, and its output read back through the shipped parser.
 //   stream: the shipped grabber, `main` and all, linked against test/fixtures/fake-freenect2.cpp in
 //           place of a sensor and run as a child with its stdout left unread, because a parent that
 //           stopped reading is the case a stop has to survive.
@@ -13,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { HEADER_BYTES, MAGIC, MessageParser, TYPE_COLOR, TYPE_FRAME, TYPE_HELLO } from '../server/protocol.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -21,6 +24,9 @@ const MUTATE = argv.includes('--mutate') ? argv[argv.indexOf('--mutate') + 1] : 
 const EOF_BRANCH = '  if (n == 0) {\n    std::fprintf(stderr, "[grabber] stdin closed, stopping\\n");\n    g_stop = 1;\n  }\n';
 const STOP_BRANCH = '    if (line == "stop") {\n';
 const RETURN_ON_TIMEOUT = '      if (g_stop) return false;\n    } else if (fds[0].revents) {\n';
+const CUT_CHECK = '  if (g_outputCut) return false;\n';
+const CUT_SET = '    g_outputCut = true;\n';
+const STOP_RELEASE = '    if (g_stop) {\n      depthListener.release(depthFrames);\n      break;\n    }\n';
 const MUTATIONS = {
   'eof-never-stops': {
     section: 'reader',
@@ -52,6 +58,18 @@ const MUTATIONS = {
     edits: [[STOP_BRANCH, '    if (line.compare(0, 4, "stop") == 0) {\n']],
     fails: 'the near-miss row: "stopped", "stop now" and the rest stop the run',
   },
+  'cut-message-leaves-the-output-open': {
+    section: 'writer',
+    file: 'native/grabber.cpp',
+    edits: [[CUT_CHECK, '']],
+    fails: 'the queued and late rows: a write after the cut message is accepted, and its bytes follow the cut',
+  },
+  'cut-message-does-not-close-the-output': {
+    section: 'writer',
+    file: 'native/grabber.cpp',
+    edits: [[CUT_SET, '']],
+    fails: 'the queued and late rows: the write that gave up leaves nothing for a later write to refuse',
+  },
   'stalled-write-never-gives-up': {
     section: 'stream',
     file: 'native/grabber.cpp',
@@ -79,8 +97,14 @@ const MUTATIONS = {
   'frame-written-after-stop': {
     section: 'stream',
     file: 'native/grabber.cpp',
-    edits: [['    if (g_stop) {\n      depthListener.release(depthFrames);\n      break;\n    }\n', '']],
+    edits: [[STOP_RELEASE, '']],
     fails: 'the stop-before-the-first-frame rows: a frame is written after the stop was read',
+  },
+  'early-stop-keeps-the-depth-frame': {
+    section: 'stream',
+    file: 'native/grabber.cpp',
+    edits: [[STOP_RELEASE, '    if (g_stop) break;\n']],
+    fails: 'the stop-before-the-first-frame rows: the depth frame taken before the stop was read is never returned',
   },
   'stalled-write-gives-up-at-once': {
     section: 'stream',
@@ -105,7 +129,7 @@ const MUTATIONS = {
 class DidNotRun extends Error {}
 const fail = (reason) => { throw new DidNotRun(reason); };
 
-const sections = MUTATE ? [MUTATIONS[MUTATE]?.section] : ['reader', 'stream'];
+const sections = MUTATE ? [MUTATIONS[MUTATE]?.section] : ['reader', 'writer', 'stream'];
 let checked = 0;
 let failed = 0;
 const row = (pass, name, detail) => {
@@ -159,11 +183,80 @@ const buildGrabber = (source, scratch) => {
   return binary;
 };
 
+const PAYLOAD = 512 * 1024;
+const filled = (bytes, value) => bytes.every((b) => b === value);
+
+// A stream through the shipped parser, fed up to the first message's declared end and then the rest,
+// as a parent reading in chunks sees it. A second header inside the first message's payload is not
+// visible to it, so a torn message followed by more bytes shows up as a message carrying both
+// writers' bytes, or as the desync after it.
+const shipped = (stream) => {
+  const parser = new MessageParser();
+  const first = stream.length >= HEADER_BYTES ? Math.min(stream.length, HEADER_BYTES + stream.readUInt32LE(8)) : stream.length;
+  const messages = [];
+  let error = null;
+  try {
+    for (const chunk of [stream.subarray(0, first), stream.subarray(first)]) if (chunk.length) messages.push(...parser.push(chunk));
+  } catch (e) { error = e.message; }
+  return { messages, error, buffered: parser.buf.length };
+};
+
+// Three interleavings of the frame loop's writer and the encoder's on a pipe nobody reads: no stop; a
+// stop with the encoder queued behind the frame; a stop with the encoder arriving after the frame gave
+// up. The last takes the lock without failing a try, so the stop check in the lock wait never sees it.
+const writer = (source, scratch) => {
+  const start = source.indexOf('// How long a write waits on a full pipe');
+  const end = source.indexOf('static uint64_t now_ms()', start);
+  if (start < 0 || end < 0) fail('write_message extraction anchors moved');
+  writeFileSync(join(scratch, 'write-under-test.h'), source.slice(start, end));
+  const binary = join(scratch, 'writer');
+  const build = spawnSync(cxx, ['-std=c++11', '-O1', '-pthread', `-I${scratch}`,
+    join(REPO, 'test/fixtures/grabber-write.cpp'), '-o', binary], { encoding: 'utf8' });
+  if (build.status !== 0) fail(`a C++ compiler is required: ${build.error?.message ?? build.stderr}`);
+  const play = (scenario) => {
+    const file = join(scratch, `writer-${scenario}.bin`);
+    const run = spawnSync(binary, [scenario, file], { encoding: 'utf8', timeout: 30000 });
+    const said = /^frame=(-?\d+) colour=(-?\d+) bytes=\d+$/m.exec(run.stdout ?? '');
+    if (!said || run.error || run.signal || run.status !== 0) fail(run.error?.message ?? `the ${scenario} run did not finish (${run.status}, ${run.signal}) ${run.stderr}`);
+    return { frame: said[1] === '1', colour: said[2] === '1', stream: readFileSync(file) };
+  };
+
+  console.log('\ntwo writers and no stop');
+  {
+    const { frame, colour, stream } = play('free');
+    const seen = shipped(stream);
+    const [a, b] = seen.messages;
+    row(frame && colour, 'free: both messages are written', `frame=${frame} colour=${colour}`);
+    row(!seen.error && seen.buffered === 0 && seen.messages.length === 2
+      && a.type === FRAME && a.payload.length === PAYLOAD && filled(a.payload, 0x11)
+      && b.type === COLOUR && b.payload.length === PAYLOAD && filled(b.payload, 0x22),
+    'free: the shipped parser reads two whole messages, each carrying only its own writer\'s bytes',
+    JSON.stringify({ error: seen.error, buffered: seen.buffered, messages: seen.messages.map((m) => m.type) }));
+  }
+
+  for (const [scenario, what] of [
+    ['queued', 'a second message queued behind a frame the stop cuts short'],
+    ['late', 'a second message that reaches the lock after the frame gave up'],
+  ]) {
+    console.log(`\n${what}`);
+    const { frame, colour, stream } = play(scenario);
+    const seen = shipped(stream);
+    row(!frame, `${scenario}: the frame the stop cuts short is abandoned`, `frame=${frame}`);
+    row(!colour, `${scenario}: the second message is refused`, `colour=${colour}`);
+    row(stream.length > HEADER_BYTES && stream.length < HEADER_BYTES + PAYLOAD
+      && stream.readUInt32LE(0) === MAGIC && stream.readUInt32LE(4) === FRAME && stream.readUInt32LE(8) === PAYLOAD
+      && filled(stream.subarray(HEADER_BYTES), 0x11),
+    `${scenario}: what the parent reads is the cut frame and ends there`, `${stream.length} bytes, ${stream.includes(0x22) ? 'with' : 'without'} the second writer's bytes`);
+    row(!seen.error && seen.messages.length === 0 && seen.buffered === stream.length,
+      `${scenario}: the shipped parser holds it as one unfinished message and meets no second header`,
+      JSON.stringify({ error: seen.error, buffered: seen.buffered, messages: seen.messages.map((m) => m.type) }));
+  }
+};
+
 // How long a stop may take from the request to the end of the run. A healthy one takes about
 // one write-wait interval, so this is the margin for a loaded machine, not an expectation.
 const BOUND_MS = 4000;
-const MAGIC = 0x4B4E4354;
-const [HELLO, FRAME, COLOUR] = [1, 2, 3];
+const [HELLO, FRAME, COLOUR] = [TYPE_HELLO, TYPE_FRAME, TYPE_COLOR];
 
 // The messages in a stream, and whether it stops on a message boundary. `rest` is the bytes after
 // the last whole message, which a cut-off frame leaves.
@@ -206,6 +299,7 @@ const stream = async (binary, scratch) => {
     child.stdout.pause();
     run.exited = new Promise((resolve) => child.on('exit', (code, signal) => { run.exit = { code, signal }; resolve(); }));
     run.closed = new Promise((resolve) => child.on('close', resolve));
+    run.errEnded = new Promise((resolve) => child.stderr.on('end', resolve));
     return run;
   };
   const drain = (run, pace = 0) => { run.draining = true; run.pace = pace; run.child.stdout.resume(); };
@@ -243,7 +337,10 @@ const stream = async (binary, scratch) => {
   // grabber that hangs costs the bound and not the check.
   const request = async (run, how) => {
     if (how === 'stop') run.child.stdin.write('stop\n'); else run.child.stdin.end();
-    return { hung: await whenDone(run, BOUND_MS) };
+    const hung = await whenDone(run, BOUND_MS);
+    // The exit event can come before the last of the child's stderr has been read.
+    await Promise.race([run.errEnded, sleep(1000)]);
+    return { hung };
   };
   const collect = async (run) => {
     run.draining = true; run.pace = 0; run.child.stdout.resume();
@@ -252,9 +349,17 @@ const stream = async (binary, scratch) => {
   };
   const tail = (run) => `exit ${JSON.stringify(run.exit)}\n${run.err.trimEnd().split('\n').slice(-6).join('\n')}`;
   const ends = (name, run, hung) => row(!hung, `${name}: the run ends within ${BOUND_MS} ms of the request`, hung && tail(run));
-  const clean = (name, run, hung) => row(!hung && run.exit.code === 0
-    && /\[grabber\] stopped after/.test(run.err) && /\[fake\] device closed/.test(run.err),
-  `${name}: it ends through its ordinary teardown with exit 0`, tail(run));
+  // What the fake sensor says at its close: the frames the grabber took and the frames it gave back.
+  const frames = (run) => {
+    const m = /\[fake\] device closed: depth (\d+) taken, (\d+) returned; colour (\d+) taken, (\d+) returned/.exec(run.err);
+    return m && { depthTaken: +m[1], depthReturned: +m[2], colourTaken: +m[3], colourReturned: +m[4] };
+  };
+  const clean = (name, run, hung) => {
+    const f = frames(run);
+    row(!hung && run.exit.code === 0 && /\[grabber\] stopped after/.test(run.err)
+      && f && f.depthTaken === f.depthReturned && f.colourTaken === f.colourReturned,
+    `${name}: it ends through its ordinary teardown with exit 0, every frame it took returned`, tail(run));
+  };
 
   console.log('\na stop or an end-of-file behind a write the parent is not reading');
   for (const how of ['stop', 'eof']) {
@@ -324,6 +429,9 @@ const stream = async (binary, scratch) => {
     const { hung } = await request(run, how);
     ends(name, run, hung);
     clean(name, run, hung);
+    const f = frames(run);
+    row(f && f.depthTaken === 1 && f.depthReturned === 1,
+      `${name}: the depth frame taken before the stop was read is returned`, tail(run));
     const out = await collect(run);
     row(out.whole && out.types.length === 1 && out.types[0] === HELLO,
       `${name}: nothing is written after the hello`, JSON.stringify({ ...out, types: out.types }));
@@ -373,6 +481,7 @@ const main = async () => {
   const scratch = mkdtempSync(join(tmpdir(), 'grabber-stdin-'));
   try {
     if (sections.includes('reader')) { console.log('the reader, against a real pipe'); reader(source, scratch); }
+    if (sections.includes('writer')) writer(source, scratch);
     if (sections.includes('stream')) await stream(buildGrabber(source, scratch), scratch);
   } finally {
     for (const run of runs) run.child.kill('SIGKILL');

@@ -160,7 +160,13 @@ static bool write_file(const std::string &path, const void *const *parts,
 // waiting on it while the other is stalled on a full pipe has to keep asking whether to stop.
 static std::timed_mutex g_writeMutex;
 
-// False means the pipe is gone or the run is stopping with the message unsent or cut short.
+// Set under g_writeMutex when a write gave up with its message unfinished. The stream is then
+// mid-payload, so a later header would be read as payload bytes and the one after it as a desync:
+// neither writer may put another byte on the output.
+static bool g_outputCut = false;
+
+// False means the pipe is gone or the run is stopping with the message unsent or cut short. A
+// write that fails once the lock is held closes the output for good.
 static bool write_message(int fd, uint32_t type, const void *payload, uint32_t payloadLen,
                           const std::function<void()> &whileStalled = nullptr) {
   std::unique_lock<std::timed_mutex> lock(g_writeMutex, std::defer_lock);
@@ -168,9 +174,14 @@ static bool write_message(int fd, uint32_t type, const void *payload, uint32_t p
     if (whileStalled) whileStalled();
     if (g_stop) return false;
   }
+  if (g_outputCut) return false;
   uint32_t header[3] = {MAGIC, type, payloadLen};
-  if (!write_all(fd, header, sizeof(header), whileStalled)) return false;
-  if (payloadLen && !write_all(fd, payload, payloadLen, whileStalled)) return false;
+  if (!write_all(fd, header, sizeof(header), whileStalled)
+      || (payloadLen && !write_all(fd, payload, payloadLen, whileStalled))) {
+    g_outputCut = true;
+    std::fprintf(stderr, "[grabber] a message was cut short, the output takes no more\n");
+    return false;
+  }
   return true;
 }
 
