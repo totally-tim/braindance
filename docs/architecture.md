@@ -95,8 +95,12 @@ and nothing is running to turn it on, and `applyCamera` re-derives that refusal 
 changes, so a request made servable by switching colour on is not refused on the reason it was
 refused before. A key page attached while there is no colour to key is a socket waiting for a reason
 rather than demand. MJPEG holds transient outages for up to 45 seconds and refuses permanent
-unavailability with 503. SIGINT and SIGTERM wait for grabber teardown and recorder close whichever of
-the two fails, and say which of the two failed.
+unavailability with 503. SIGINT, SIGTERM and, under `--stop-on-stdin`, a `stop` line or the end of
+stdin run one shutdown. It waits for grabber teardown and for every take the recorder owns, the open
+one and any a restart left closing (`closeAll`), whichever of the two fails, and says which of the
+two failed. A replay server has its own shutdown behind the same triggers: it closes the retained
+capture and the listener, then exits. After the bind the server prints `[server] ready` with its
+origin and roots, which is how a host learns a port it did not choose.
 
 `server/output.js` owns output state for the server process. Preset reads and patches are
 serialized in arrival order. The record page writes mode and size through HTTP and parameter

@@ -27,6 +27,8 @@ the checkout.
 | `--builtin-effects DIR` | `effects-builtin/` | The effect root the build ships. |
 | `--deliverables DIR` | `deliverables/` beside the captures directory | Where saved export settings live. |
 | `--jobs DIR` | `jobs/` | The render queue's records. |
+| `--exports DIR` | `exports/` | Where a render lands, and what `/exports/` serves. |
+| `--stop-on-stdin` | off | Reads stdin as the host's channel: the line `stop` shuts the server down as SIGTERM does, and so does the end of stdin. |
 | `--node URL` | none | A capture node this instance links to, so its takes appear in the library here. |
 | `--node-name NAME` | `node` | The label that node is listed under. |
 | `--name NAME` | `mac` when `--node` is given, else `node` | The name this instance reports as. |
@@ -40,6 +42,21 @@ builtin root is missing refuses to boot, so a broken install cannot read as noth
 back its button. `--replay` loops a recorded capture with no sensor attached, replaying the
 arrival spacing the capture was recorded at, which on a degraded link is uneven. A capture recorded
 with colour on also feeds `/camera.mjpg`; `/key` has nothing to key on a replay.
+
+**`FFMPEG` names the encoder.** A render runs the program in the `FFMPEG` environment variable,
+and without it the first `ffmpeg` on `PATH`. An empty entry in a `PATH` that has others is the
+current directory, as a shell reads it. A render with neither is refused before it starts, with a
+message naming both.
+
+**A host reads one line to know the server is up.** Once the server is bound it prints
+`[server] ready ` and a JSON object on the same line: `url`, the origin with the port the system
+chose when `--port` is `0`; `pid`; and `roots`, the absolute `captures`, `projects`, `presets`,
+`deliverables`, `effects`, `jobs` and `exports` directories. The stop signals and, under
+`--stop-on-stdin`, the `stop` line and the end of stdin run one shutdown. A live server finishes
+the open take and every take a grabber restart left closing, filing their indexes and marks, stops
+the grabber and exits 0. It exits 1 when a take does not close, a take's marks cannot be written, or
+the grabber does not stop, and says which on stderr. A replay server stops accepting connections,
+closes its capture and exits 0, or exits 1 when the capture does not close.
 
 ### Grabber flags
 
