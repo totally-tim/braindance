@@ -3,6 +3,7 @@
 
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { createReadStream, mkdirSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { pipeline } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -52,6 +53,9 @@ const HOST = flag('--host', LOOPBACK);
 const REPLAY = flag('--replay');
 // Recording is a runtime action; this only says whether the first take arms itself at hello.
 const RECORD = has('--record');
+// The host that started this process owns its stdin: a `stop` line asks for the shutdown a signal
+// does, and end-of-file means the host is gone. Windows delivers no SIGTERM, so the pipe is its channel.
+const STOP_ON_STDIN = has('--stop-on-stdin');
 const STANDBY_AFTER_MS = Number(flag('--standby-after', '600')) * 1000;
 if (!Number.isFinite(STANDBY_AFTER_MS) || STANDBY_AFTER_MS < 0) {
   throw new Error('--standby-after must be a non-negative number of seconds');
@@ -101,7 +105,7 @@ const [GRABBER_BIN, ...GRABBER_ARGS] = commandOf(flag('--grabber'));
 // A flag, because a capture node and an editing machine are the same program and the only way to
 // run both on one host is separate directories.
 const CAPTURES_DIR = resolve(flag('--captures', join(ROOT, 'captures')));
-const EXPORTS_DIR = join(ROOT, 'exports');
+const EXPORTS_DIR = resolve(flag('--exports', join(ROOT, 'exports')));
 
 // The program `POST /library/reveal/:id` starts, and any arguments it leads with, substituting
 // those and nothing else, so a proof tool measures the arguments the platform's file manager
@@ -2089,6 +2093,21 @@ setInterval(() => {
   console.log(`[server] ${fps} fps  ${mbs} MB/s  dropped=${closed.dropped}  clients=${wss.clients.size}`);
 }, 5000);
 
+// Every way a shutdown is asked for, shared by both modes: both signals, and the host's stdin
+// under `--stop-on-stdin`.
+function armStop(shutdown) {
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  if (!STOP_ON_STDIN) return;
+  const lines = createInterface({ input: process.stdin });
+  lines.on('line', (line) => {
+    const command = line.trim();
+    if (command === 'stop') shutdown();
+    else if (command) console.error(`[server] stdin: ignoring ${JSON.stringify(command)}, the one command is stop`);
+  });
+  lines.on('close', shutdown);
+}
+
 function startLive() {
   const bin = GRABBER_BIN ? resolve(GRABBER_BIN) : join(ROOT, 'native/build/grabber');
   const buildArgs = () => {
@@ -2374,7 +2393,7 @@ function startLive() {
     // the sensor claimed by a process nobody owns.
     const [grabber, take] = await Promise.allSettled([
       stopGrabber({ holdProcessOpen: true, grace: STANDBY_GRACE_MS }),
-      recorder.close('server stopped'),
+      recorder.closeAll('server stopped'),
     ]);
     // Named rather than dumped: an operator reading this over ssh needs to know which half of the
     // way out failed, and the two halves fail with messages that look alike in a log.
@@ -2384,13 +2403,29 @@ function startLive() {
     }
     process.exit(failed.length ? 1 : 0);
   };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
-
+  armStop(shutdown);
 }
 
 async function startReplay() {
-  let capture;
+  let capture = null;
+  let timer = null;
+  let stopped = false;
+  // Armed before the capture is read, so a stop that lands while it is being indexed, or after it
+  // failed to open, still ends the process.
+  armStop(async () => {
+    if (stopped) return;
+    stopped = true;
+    clearTimeout(timer);
+    httpServer.close();
+    let failed = false;
+    try {
+      await capture?.close();
+    } catch (err) {
+      failed = true;
+      console.error(`[server] shutdown: the capture did not close: ${err.message}`);
+    }
+    process.exit(failed ? 1 : 0);
+  });
   try {
     capture = await openCapture(REPLAY);
   } catch (err) {
@@ -2453,9 +2488,10 @@ async function startReplay() {
   let i = 0;
   let failing = false;
   const schedule = () => {
+    if (stopped) return;
     const gap = gaps[i % gaps.length];
     i++;
-    setTimeout(tick, gap);
+    timer = setTimeout(tick, gap);
   };
   // Each frame is read when it is due, so a five-minute take costs what a nine-second one does.
   // The read is awaited before the timer is set, measured at 0.07-0.6ms against a 64ms median.
@@ -2479,6 +2515,8 @@ async function startReplay() {
         schedule();
       })
       .catch((err) => {
+        // The capture is closed under a read in flight when the server stops; that is not a failure.
+        if (stopped) return;
         // A read that fails must not freeze the loop in silence: a viewer holding its last frame
         // looks exactly like a paused take. Logged on the transition only.
         if (!failing) {
@@ -2518,4 +2556,18 @@ httpServer.listen(PORT, HOST, () => {
   }, (err) => console.error(`[library] marks logs filed by take name were not moved: ${err.message}`));
   if (REPLAY) startReplay().catch((err) => console.error(`[server] replay failed: ${err.message}`));
   else startLive();
+  // Last, so a host reading this line finds every stop it may send already armed. The port comes
+  // off the socket because `--port 0` has no other answer.
+  const { address, port } = httpServer.address();
+  const host = address === '0.0.0.0' || address === '::' ? 'localhost' : address.includes(':') ? `[${address}]` : address;
+  const roots = {
+    captures: CAPTURES_DIR,
+    projects: PROJECTS.dir,
+    presets: PRESETS.dir,
+    deliverables: DELIVERABLES.dir,
+    effects: EFFECTS.dir,
+    jobs: JOBS.dir,
+    exports: EXPORTS_DIR,
+  };
+  console.log(`[server] ready ${JSON.stringify({ url: `http://${host}:${port}`, pid: process.pid, roots })}`);
 });
