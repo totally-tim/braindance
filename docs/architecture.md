@@ -434,9 +434,9 @@ measures stereo energy per channel, so opposite phases do not cancel. `web/audio
 decodes and plays the soundtrack, aligns it to the transport, and stops it when the transport
 pauses or waits for footage.
 
-The mapping adds `depth × signal` to one scalar effect parameter after its value or track is
-evaluated, and writes the sum to the runtime parameter. The document keeps the base value, the
-keys, the conditioning and the mapping, and the signal is never written into any of them.
+The mapping adds `depth × signal` to one scalar effect parameter after the page evaluates its
+value or track, and writes the sum to the runtime parameter. The document keeps the base value,
+the keys, the conditioning and the mapping, and nothing writes the signal into any of them.
 
 `server/audio.js` decodes an upload through FFmpeg with only the pipe protocol allowed, stores
 48 kHz stereo WAV by content hash, and checks the hash on every read. The export server copies

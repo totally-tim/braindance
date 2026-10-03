@@ -349,9 +349,9 @@ through a longer lens. Existing shots at other lenses change appearance.
 ## Audio
 
 **Audio** in the timeline imports one file, up to 64 MiB and ten minutes long. FFmpeg converts it
-to 48 kHz stereo PCM, and the project names the result by its SHA-256 hash. `--audio DIR`
-chooses where the assets live. A project moved to another machine needs its audio asset as well
-as its takes, and a project whose asset is missing or changed is refused before it opens.
+to 48 kHz stereo PCM, and the project names the result by its SHA-256 hash. `--audio DIR` chooses
+where the assets live. A project moved to another machine needs its audio asset as well as its
+takes, and the page refuses a project whose asset is missing or changed before opening it.
 
 Choose **Clip**, **Effect**, then **Parameter**. The effects offered are those added to that
 clip, those with changed values or keys, and the one the mapping already drives; post effects
@@ -359,16 +359,15 @@ are under **Project**. **Depth** is signed and in the parameter's units. The res
 value or its keys plus depth times the signal, held to the parameter's range and step. The base
 and its keys stay editable and the signal never replaces them.
 
-**Low**, **Mid** and **High** split at 200 Hz and 2 kHz, and **Gain** follows them.
-**Threshold** and **Ceiling** map the RMS level onto 0 to 1; **Attack** and **Release** smooth
-the rise and the fall. The spectrum shows the input and the EQ output at the playhead, paused
-or playing. These controls shape the signal only: playback and export carry the song as
-imported.
+**Low**, **Mid** and **High** split at 200 Hz and 2 kHz, and **Gain** follows them. **Threshold**
+and **Ceiling** map the RMS level onto 0 to 1; **Attack** and **Release** smooth the rise and the
+fall. The spectrum shows the input and the EQ output at the playhead, paused or playing. These
+controls shape the signal only. Playback and export carry the song as imported.
 
 **Start**, or dragging the audio lane, places the song in program seconds. A clip's speed and
 in-point do not move it. The project saves the audio settings and the mapping, and undo restores
 them. MP4, MOV and lossless exports carry the song trimmed to the export range, with silence
-outside the audio clip. A PNG sequence is refused while the project has audio.
+outside the audio clip. Export refuses a PNG sequence while the project has audio.
 
 A project holds one audio clip and one mapping onto one scalar effect parameter. Audio comes
 from a file.
