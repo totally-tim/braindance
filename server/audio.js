@@ -5,7 +5,7 @@ import { link, mkdir, mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { validAudioHash, AUDIO_RATE, AUDIO_SECONDS, AUDIO_UPLOAD_BYTES, readAudioWav } from '../web/audio-source.js';
-import { FFMPEG } from './export.js';
+import { ffmpegBinary } from './export.js';
 
 const digest = (bytes) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 
@@ -44,7 +44,7 @@ export class AudioStore {
       if (!size) throw new Error('audio file is empty');
       const output = join(scratch, 'audio.wav');
       await new Promise((resolve, reject) => {
-        const child = spawn(FFMPEG, [
+        const child = spawn(ffmpegBinary(), [
           '-hide_banner', '-nostdin', '-loglevel', 'error', '-protocol_whitelist', 'pipe', '-i', 'pipe:0',
           '-map', '0:a:0', '-vn', '-t', String(AUDIO_SECONDS + 0.01), '-ac', '2', '-ar', String(AUDIO_RATE),
           '-c:a', 'pcm_s16le', '-map_metadata', '-1', '-fflags', '+bitexact', '-flags:a', '+bitexact', output,

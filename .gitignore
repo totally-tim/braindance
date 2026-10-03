@@ -60,3 +60,7 @@ output
 
 # Imported audio assets.
 audio/
+
+# The staged copy desktop-check runs, with the shell's own profile inside it. It survives only
+# a run that was killed, and holds a database and a cache nobody should commit.
+.desktop-check

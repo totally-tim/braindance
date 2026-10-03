@@ -35,6 +35,21 @@ always with its zeroes. The colour count explains a stale-looking image, and the
 are frames libfreenect2 marked failed itself, which separates a failing GPU readback from a
 degraded USB link.
 
+The grabber reads one command per line from stdin: `low-light`, `hd-color`, `key` and `stop`.
+End-of-file on stdin stops it as `stop` does, so a grabber whose parent is gone ends through the
+same teardown. Only a read of zero bytes is end-of-file. Stdin is non-blocking, and a pipe with
+nothing in it yet is not a closed one.
+
+Stdout is non-blocking too, so a write to a full pipe waits in a 100 ms poll rather than in the
+kernel. The wait reads stdin, so the grabber sees a `stop` behind a stalled frame at once and
+applies any other command while the write waits. A write gives up when a stop is set and a whole
+interval passes with nothing moving, so a parent that stopped reading cannot hold the run. A parent
+that reads again within that interval gets the frame whole, and one that pauses longer can lose it.
+A write that gave up part-way closes the output. Both writers refuse every later message, so the
+stream the parent reads ends on a whole message or at one cut. The encoder thread's writes give up
+the same way. The grabber sets the flag that ends them before the join, on every way out of the
+loop.
+
 `--min-depth` and `--max-depth` clip on the GPU before a frame is built, so they decide what exists
 at all. The viewer's `nearClip` and `farClip` only hide points that already arrived, and the
 recorder's preview range drives that pair, never the grabber's.
@@ -80,8 +95,12 @@ and nothing is running to turn it on, and `applyCamera` re-derives that refusal 
 changes, so a request made servable by switching colour on is not refused on the reason it was
 refused before. A key page attached while there is no colour to key is a socket waiting for a reason
 rather than demand. MJPEG holds transient outages for up to 45 seconds and refuses permanent
-unavailability with 503. SIGINT and SIGTERM wait for grabber teardown and recorder close whichever of
-the two fails, and say which of the two failed.
+unavailability with 503. SIGINT, SIGTERM and, under `--stop-on-stdin`, a `stop` line or the end of
+stdin run one shutdown. It waits for grabber teardown and for every take the recorder owns, the open
+one and any a restart left closing (`closeAll`), whichever of the two fails, and says which of the
+two failed. A replay server has its own shutdown behind the same triggers: it closes the retained
+capture and the listener, then exits. After the bind the server prints `[server] ready` with its
+origin and roots, which is how a host learns a port it did not choose.
 
 `server/output.js` owns output state for the server process. Preset reads and patches are
 serialized in arrival order. The record page writes mode and size through HTTP and parameter
@@ -153,8 +172,72 @@ for as long as the clip moves under its fetch, and either lands where it was ask
 
 **The render queue** produces video from finished edits. A job is a self-contained project body
 plus the captures it names and an output spec, claimed by a worker pinned to the renderer class it
-draws with, because bit-exactness does not survive a change of GPU. `tools/render-worker.mjs`
-brings a page up on `/edit?take=`, which opens no document, so that page writes nothing.
+draws with, because a different GPU draws a different picture. A re-render is promised to look the
+same. The job records the app build, the installed effects' versions, the GPU renderer and the
+ffmpeg version at claim and at finish, and a render whose record differs from the one before it
+runs anyway, with the difference written into the job and its sidecar. A worker's heartbeat is
+also how a cancel reaches it, and a worker whose heartbeats keep failing stops rendering.
+`tools/render-worker.mjs` brings a page up on `/edit?take=`, which opens no
+document, so that page writes nothing.
+
+## The desktop shell
+
+`desktop/` is an Electron app. It runs the service as a child process and shows the service's pages
+in one window. The editor in the window is the page a browser gets, and nothing in `server/` or
+`web/` reads whether a shell is there.
+
+| file | what it owns |
+| --- | --- |
+| `desktop/main.js` | the window, the quit sequence, the bridge handlers, and every refusal |
+| `desktop/service.js` | the service child: which Node runs it, its flags, its ready line, its stop |
+| `desktop/origin.js` | which URLs and which IPC senders belong to the window |
+| `desktop/reveal.js` | which paths the bridge may show in the OS file manager |
+| `desktop/preload.cjs` | the four calls the page may make, in CommonJS because a sandboxed preload cannot be a module |
+
+**The origin is fixed.** The service listens on port 8480 and no other. Browser storage belongs to
+an origin and an origin includes the port, so a port chosen per launch would give the editor an
+empty preview cache and default panels every time. The shell refuses a held port with a dialog that
+names it. `portFree` asks first, and a service that exits before its ready line gets the same
+refusal.
+
+**Start.** `findNode` takes the first Node of version 26 or newer on `PATH`, then in
+`/opt/homebrew/bin` and `/usr/local/bin`, because an app started from Finder has a minimal `PATH`.
+With none, a dialog names the versions it did find. The shell creates seven directories under
+`app.getPath('userData')` and starts `node server/index.js --port 8480 --stop-on-stdin` with
+`--captures`, `--projects`, `--presets`, `--deliverables`, `--effects`, `--jobs` and `--exports`
+each pointing at its own. The window opens on the `url` of the `[server] ready` line. `startService`
+rejects a line naming another port, an exit before the line, and 30 seconds without one, and the
+refusal carries the service's last lines.
+
+**Stop.** Closing the last window quits on every platform. Quit writes `stop` and a newline to the
+service's stdin, which is the stop message on Windows as well, where a signal never reaches the
+service as SIGTERM. The shell waits `STOP_GRACE_MS`, 20 seconds, which is longer than the server's
+15-second standby grace, and kills the service only after that. The app exits with 0 when the
+service exited 0 and with 1 otherwise, and `[desktop] service exited` in its output carries the
+code. A service that exits while the window is open is a refusal, and the app quits.
+
+**One instance.** The app takes `requestSingleInstanceLock`. A second launch exits with 0 and the
+first window comes back from minimized and takes focus. The fixed port is the second guard: a second
+service would find 8480 held.
+
+**The window.** It is sandboxed, context-isolated and without Node integration. `guard` compares
+origins and not URLs, so every path on the service is allowed and another host name for the same
+service is not. It runs on `will-frame-navigate` and `will-redirect`, so a subframe and a redirect
+are held to the same rule. A refused main-frame navigation to a web link goes to the OS browser, and
+so does every `window.open`, which makes the app one window.
+
+**The bridge.** `window.desktop` holds `chooseDirectory`, `openProjectFile`,
+`chooseExportDestination` and `revealPath`. Each is an `ipcMain.handle` that `senderTrusted` lets
+through only from the top frame of the window while it shows the service's origin.
+`chooseExportDestination` takes a file name. `revealPath` takes an absolute path and passes it to the
+OS file manager only when `revealable` allows it. `revealable` allows a path that one of the three
+dialogs returned in this session, and a path that exists and has a real path inside one of the seven
+data folders. A path from a dialog is shown as given, and a chosen folder does not allow its
+contents. For any other path, including a `..` climb, a link that leads out of a data folder and a
+path that does not exist, the bridge refuses with one message. It shows the real path that it
+checked. The check and the reveal are two steps, so a process that writes inside a data folder could
+swap a folder for a link between them and send the reveal elsewhere. The reveal opens a file manager
+window and reads nothing.
 
 ## The effect store
 

@@ -3,6 +3,7 @@
 
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { createReadStream, mkdirSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { pipeline } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +11,7 @@ import { basename, dirname, join, normalize, extname, sep, resolve } from 'node:
 import { WebSocketServer } from 'ws';
 import { MessageParser, encodeMessage, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, TYPE_KEY, MAX_PAYLOAD_BYTES } from './protocol.js';
 import { openCapture, withCapture, forgetCapture, openCaptureCount, decimatePayload, cloudExtent, colourAfterFrames } from './capture.js';
-import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
+import { ffmpegBinary, handleExportSocket, MAX_FRAME_BYTES } from './export.js';
 import { AudioStore } from './audio.js';
 import {
   VALID_HASH, DocumentStore, NodeLink, appendMarks, checkedMarkLog, copyOnNode, downloadTake,
@@ -25,7 +26,7 @@ import { gradeSpine } from '../web/grade-shader.js';
 import { moshSpine } from '../web/mosh-shader.js';
 import { Recorder } from './recorder.js';
 import { JobStore } from './jobs.js';
-import { renderVersion } from './render-version.js';
+import { ffmpegVersion, renderVersion } from './render-version.js';
 import { Webcam } from './webcam.js';
 import { IDLE_TICK_MS, IdleDeadline } from './idle.js';
 import { ABSENT_DELAY, RESTART_DELAYS, retryAfter } from './backoff.js';
@@ -53,6 +54,9 @@ const HOST = flag('--host', LOOPBACK);
 const REPLAY = flag('--replay');
 // Recording is a runtime action; this only says whether the first take arms itself at hello.
 const RECORD = has('--record');
+// The host that started this process owns its stdin: a `stop` line asks for the shutdown a signal
+// does, and end-of-file means the host is gone. Windows delivers no SIGTERM, so the pipe is its channel.
+const STOP_ON_STDIN = has('--stop-on-stdin');
 const STANDBY_AFTER_MS = Number(flag('--standby-after', '600')) * 1000;
 if (!Number.isFinite(STANDBY_AFTER_MS) || STANDBY_AFTER_MS < 0) {
   throw new Error('--standby-after must be a non-negative number of seconds');
@@ -102,7 +106,7 @@ const [GRABBER_BIN, ...GRABBER_ARGS] = commandOf(flag('--grabber'));
 // A flag, because a capture node and an editing machine are the same program and the only way to
 // run both on one host is separate directories.
 const CAPTURES_DIR = resolve(flag('--captures', join(ROOT, 'captures')));
-const EXPORTS_DIR = join(ROOT, 'exports');
+const EXPORTS_DIR = resolve(flag('--exports', join(ROOT, 'exports')));
 
 // The program `POST /library/reveal/:id` starts, and any arguments it leads with, substituting
 // those and nothing else, so a proof tool measures the arguments the platform's file manager
@@ -145,7 +149,20 @@ const EFFECTS = new EffectStore(
   SPINES,
 );
 const DELIVERABLES = new DocumentStore(resolve(flag('--deliverables', join(CAPTURES_DIR, '..', 'deliverables'))), 'deliverable');
-const JOBS = new JobStore(resolve(flag('--jobs', join(ROOT, 'jobs'))));
+// What a render would run on right now, asked when a job is claimed and when it finishes.
+const jobEnvironment = async (renderer) => {
+  const ffmpeg = await ffmpegVersion(ffmpegBinary);
+  return {
+    record: {
+      app: await renderVersion(WEB_DIR, THREE_DIR),
+      effects: Object.fromEntries(EFFECTS.list().map((e) => [e.id, e.version])),
+      renderer,
+      ffmpeg: ffmpeg.version,
+    },
+    problems: ffmpeg.problem ? [{ field: 'ffmpeg', text: ffmpeg.problem }] : [],
+  };
+};
+const JOBS = new JobStore(resolve(flag('--jobs', join(ROOT, 'jobs'))), { exportsDir: EXPORTS_DIR, environment: jobEnvironment });
 const AUDIO = new AudioStore(resolve(flag('--audio', join(ROOT, 'audio'))));
 const node = NODE_URL ? new NodeLink(NODE_URL, NODE_NAME) : null;
 
@@ -1072,12 +1089,24 @@ const serveWriteCounts = (req, res) => sendJson(res, {
 // A job as anybody may read it, which is a job without its lease. The lease is a capability: left
 // in the record these routes return, `GET /jobs/<id>` handed anyone what `finish` needs to forge.
 const withoutLease = ({ lease, ...job }) => job;
-const serveJobs = async (req, res) => sendJson(res, { jobs: (await JOBS.list()).map(withoutLease) });
+// Only the warnings of the step that just ran, or a finish would print the claim's again.
+const logWarnings = (job, at) => {
+  for (const w of job.warnings.filter((x) => x.at === at)) console.log(`[jobs] ${job.id} warning at ${at}: ${w.text}`);
+};
+const serveJobs = async (req, res) => {
+  const { jobs, refused } = await JOBS.scan();
+  sendJson(res, { jobs: jobs.map(withoutLease), refused });
+};
+// A file that is not there is a 404. One this build refuses by version is a conflict that says why.
+const unreadable = (err, id) => (err.code === 'ENOENT' || /^unusable job id/.test(err.message)
+  ? { status: 404, error: `no job ${id}` }
+  : { status: 409, error: err.message });
 const serveJob = async (req, res, args) => {
   try {
     sendJson(res, withoutLease(await JOBS.read(args[0])));
-  } catch {
-    sendJson(res, { error: `no job ${args[0]}` }, 404);
+  } catch (err) {
+    const { status, error } = unreadable(err, args[0]);
+    sendJson(res, { error }, status);
   }
 };
 
@@ -1096,6 +1125,7 @@ const serveJobClaim = async (req, res) => {
     const body = await readBody(req);
     const { job, blocked, queued } = await JOBS.claim({ worker: body.worker ?? null, renderer: body.renderer });
     if (job) {
+      logWarnings(job, 'claim');
       sendJson(res, { job, queued });
       return;
     }
@@ -1106,7 +1136,7 @@ const serveJobClaim = async (req, res) => {
         queued,
         blocked,
         error: `${blocked.length} job(s) are queued and every one of them is pinned to a different renderer class than ${JSON.stringify(body.renderer)}: `
-          + 'this is a scheduling failure rather than an empty queue, because a re-render on a different rasteriser would not reproduce the original',
+          + 'this is a scheduling failure rather than an empty queue, because a render on a different rasteriser can look different from the original',
       }, 409);
       return;
     }
@@ -1119,13 +1149,16 @@ const serveJobClaim = async (req, res) => {
 const serveJobFinish = async (req, res, args) => {
   try {
     const body = await readBody(req);
-    sendJson(res, await JOBS.finish(args[0], {
+    const job = await JOBS.finish(args[0], {
       state: body.state, error: body.error ?? null, output: body.output ?? null,
       frames: body.frames ?? null,
       // Without it, `POST /jobs/<id>/finish` with `{"state":"done"}` marked a job done that
       // nothing had ever rendered.
       lease: body.lease ?? null,
-    }));
+    });
+    logWarnings(job, 'finish');
+    if (body.state === 'done' && job.state !== 'done') console.log(`[jobs] ${job.id} reported done and is recorded ${job.state}: ${job.error}`);
+    sendJson(res, job);
   } catch (err) {
     sendJson(res, { error: err.message }, 409);
   }
@@ -1142,11 +1175,22 @@ const serveJobHeartbeat = async (req, res, args) => {
   }
 };
 
+// Without the lease, because a cancel of a running job answers with a record that is still held.
+const serveJobCancel = async (req, res, args) => {
+  try {
+    sendJson(res, withoutLease(await JOBS.cancel(args[0])));
+  } catch (err) {
+    const { status, error } = unreadable(err, args[0]);
+    sendJson(res, { error }, status);
+  }
+};
+
 const serveJobRequeue = async (req, res, args) => {
   try {
     sendJson(res, await JOBS.requeue(args[0]));
   } catch (err) {
-    sendJson(res, { error: err.message }, 404);
+    const { status, error } = unreadable(err, args[0]);
+    sendJson(res, { error }, status);
   }
 };
 const serveRemaining = async (req, res) => sendJson(res, await remaining(CAPTURES_DIR, recordingRate()));
@@ -1444,6 +1488,7 @@ const ROUTES = [
   { path: '/jobs/:id', pattern: /^\/jobs\/(?!claim$)([^/]+)$/, read: serveJob },
   { path: '/jobs/:id/finish', pattern: /^\/jobs\/([^/]+)\/finish$/, write: { methods: ['POST'], run: serveJobFinish } },
   { path: '/jobs/:id/heartbeat', pattern: /^\/jobs\/([^/]+)\/heartbeat$/, write: { methods: ['POST'], run: serveJobHeartbeat } },
+  { path: '/jobs/:id/cancel', pattern: /^\/jobs\/([^/]+)\/cancel$/, write: { methods: ['POST'], run: serveJobCancel } },
   { path: '/jobs/:id/requeue', pattern: /^\/jobs\/([^/]+)\/requeue$/, write: { methods: ['POST'], run: serveJobRequeue } },
 ];
 
@@ -2062,6 +2107,21 @@ setInterval(() => {
   console.log(`[server] ${fps} fps  ${mbs} MB/s  dropped=${closed.dropped}  clients=${wss.clients.size}`);
 }, 5000);
 
+// Every way a shutdown is asked for, shared by both modes: both signals, and the host's stdin
+// under `--stop-on-stdin`.
+function armStop(shutdown) {
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  if (!STOP_ON_STDIN) return;
+  const lines = createInterface({ input: process.stdin });
+  lines.on('line', (line) => {
+    const command = line.trim();
+    if (command === 'stop') shutdown();
+    else if (command) console.error(`[server] stdin: ignoring ${JSON.stringify(command)}, the one command is stop`);
+  });
+  lines.on('close', shutdown);
+}
+
 function startLive() {
   const bin = GRABBER_BIN ? resolve(GRABBER_BIN) : join(ROOT, 'native/build/grabber');
   const buildArgs = () => {
@@ -2347,7 +2407,7 @@ function startLive() {
     // the sensor claimed by a process nobody owns.
     const [grabber, take] = await Promise.allSettled([
       stopGrabber({ holdProcessOpen: true, grace: STANDBY_GRACE_MS }),
-      recorder.close('server stopped'),
+      recorder.closeAll('server stopped'),
     ]);
     // Named rather than dumped: an operator reading this over ssh needs to know which half of the
     // way out failed, and the two halves fail with messages that look alike in a log.
@@ -2357,13 +2417,29 @@ function startLive() {
     }
     process.exit(failed.length ? 1 : 0);
   };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
-
+  armStop(shutdown);
 }
 
 async function startReplay() {
-  let capture;
+  let capture = null;
+  let timer = null;
+  let stopped = false;
+  // Armed before the capture is read, so a stop that lands while it is being indexed, or after it
+  // failed to open, still ends the process.
+  armStop(async () => {
+    if (stopped) return;
+    stopped = true;
+    clearTimeout(timer);
+    httpServer.close();
+    let failed = false;
+    try {
+      await capture?.close();
+    } catch (err) {
+      failed = true;
+      console.error(`[server] shutdown: the capture did not close: ${err.message}`);
+    }
+    process.exit(failed ? 1 : 0);
+  });
   try {
     capture = await openCapture(REPLAY);
   } catch (err) {
@@ -2426,9 +2502,10 @@ async function startReplay() {
   let i = 0;
   let failing = false;
   const schedule = () => {
+    if (stopped) return;
     const gap = gaps[i % gaps.length];
     i++;
-    setTimeout(tick, gap);
+    timer = setTimeout(tick, gap);
   };
   // Each frame is read when it is due, so a five-minute take costs what a nine-second one does.
   // The read is awaited before the timer is set, measured at 0.07-0.6ms against a 64ms median.
@@ -2452,6 +2529,8 @@ async function startReplay() {
         schedule();
       })
       .catch((err) => {
+        // The capture is closed under a read in flight when the server stops; that is not a failure.
+        if (stopped) return;
         // A read that fails must not freeze the loop in silence: a viewer holding its last frame
         // looks exactly like a paused take. Logged on the transition only.
         if (!failing) {
@@ -2491,4 +2570,18 @@ httpServer.listen(PORT, HOST, () => {
   }, (err) => console.error(`[library] marks logs filed by take name were not moved: ${err.message}`));
   if (REPLAY) startReplay().catch((err) => console.error(`[server] replay failed: ${err.message}`));
   else startLive();
+  // Last, so a host reading this line finds every stop it may send already armed. The port comes
+  // off the socket because `--port 0` has no other answer.
+  const { address, port } = httpServer.address();
+  const host = address === '0.0.0.0' || address === '::' ? 'localhost' : address.includes(':') ? `[${address}]` : address;
+  const roots = {
+    captures: CAPTURES_DIR,
+    projects: PROJECTS.dir,
+    presets: PRESETS.dir,
+    deliverables: DELIVERABLES.dir,
+    effects: EFFECTS.dir,
+    jobs: JOBS.dir,
+    exports: EXPORTS_DIR,
+  };
+  console.log(`[server] ready ${JSON.stringify({ url: `http://${host}:${port}`, pid: process.pid, roots })}`);
 });

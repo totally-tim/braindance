@@ -1,6 +1,10 @@
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
+
+const run = promisify(execFile);
 
 const SHIPPED = /\.(js|html|json)$/;
 
@@ -39,4 +43,34 @@ export async function renderVersion(web, three) {
   const digest = hash.digest('hex');
   known.set(slot, { fingerprint, digest });
   return digest;
+}
+
+/** The version token off the first line `ffmpeg -version` prints, or null. */
+export function parseFfmpegVersion(text) {
+  return /^ffmpeg version (\S+)/.exec(text ?? '')?.[1] ?? null;
+}
+
+/**
+ * The version of the ffmpeg the export will run, as `{ version, problem }`. `resolveBinary` throws
+ * when no ffmpeg resolves. Whatever stops a version coming back is a `problem` sentence beside a
+ * null `version`, so the job that asked warns rather than fails.
+ */
+export async function ffmpegVersion(resolveBinary) {
+  let binary;
+  try {
+    binary = resolveBinary();
+  } catch (err) {
+    return { version: null, problem: `ffmpeg could not be resolved: ${err.message}` };
+  }
+  let stdout;
+  try {
+    ({ stdout } = await run(binary, ['-version'], { timeout: 5000 }));
+  } catch (err) {
+    return { version: null, problem: `ffmpeg at ${binary} did not report a version: ${err.message}` };
+  }
+  const version = parseFfmpegVersion(stdout);
+  if (version === null) {
+    return { version: null, problem: `ffmpeg at ${binary} printed ${JSON.stringify(stdout.split('\n')[0])} for -version, which is not a version line` };
+  }
+  return { version, problem: null };
 }

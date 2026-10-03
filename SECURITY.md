@@ -29,6 +29,12 @@ A browser sending an `Origin` from any other hostname, such as a reverse proxy, 
 `/etc/hosts` entry or a Tailscale MagicDNS name, is refused on every guarded route. Reach the
 server by address instead.
 
+**A finished render's sidecar stays under the exports directory.** Sidecar amendment refuses a
+symlink and a sidecar swapped for another file between its checks and its open. A process that
+can rewrite directories under the exports root while a render finishes can redirect the
+amendment, because Node has no open or rename relative to a descriptor. Such a process can
+already drive the server, which is what this page assumes of every local process.
+
 ## What `--host 0.0.0.0` exposes
 
 Everything, to everyone who can route to the port:

@@ -28,8 +28,10 @@
 #include <chrono>
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <thread>
+#include <poll.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -78,8 +80,9 @@ static const int DW = 512;
 static const int DH = 424;
 static const size_t DEPTH_PIXELS = (size_t)DW * DH;
 
-static volatile std::sig_atomic_t g_stop = 0;
-static void on_signal(int) { g_stop = 1; }
+// Atomic because the encoder thread reads it as well: its writes give up on a stop.
+static std::atomic<bool> g_stop{false};
+static void on_signal(int) { g_stop = true; }
 
 // libfreenect2 logs to stdout by default, which would corrupt the binary stream.
 class StderrLogger : public libfreenect2::Logger {
@@ -91,13 +94,42 @@ public:
   }
 };
 
-// Pipe writes are capped at 64KB on macOS, so a ~500KB frame always partial-writes.
-static bool write_all(int fd, const void *buf, size_t len) {
+// How long a write waits on a full pipe before it asks whether the run is stopping.
+static const int STALL_POLL_MS = 100;
+
+// Waits for a stalled fd to take bytes again. False means give up: a stop was requested and a
+// whole interval passed with nothing moving, so a parent still draining gets its frame and one that
+// stopped reading does not hold the run. `whileStalled` is the capture loop's command reader. It
+// runs when stdin has something, because a `stop` behind a stalled write is otherwise never read.
+static bool wait_writable(int fd, const std::function<void()> &whileStalled) {
+  bool watchStdin = (bool)whileStalled;
+  for (;;) {
+    pollfd fds[2] = {{fd, POLLOUT, 0}, {STDIN_FILENO, POLLIN, 0}};
+    const int ready = ::poll(fds, watchStdin && !g_stop ? 2 : 1, STALL_POLL_MS);
+    if (ready < 0) {
+      if (errno != EINTR) return false;
+    } else if (ready == 0) {
+      if (g_stop) return false;
+    } else if (fds[0].revents) {
+      return true; // room, or a closed reader that the next write reports
+    } else {
+      if (fds[1].revents & (POLLERR | POLLNVAL)) watchStdin = false; // not a pipe poll can wait on
+      whileStalled();
+    }
+  }
+}
+
+// Pipe writes are capped at 64KB on macOS, so a ~500KB frame always partial-writes. stdout is
+// non-blocking, so a full pipe is EAGAIN and the wait above can end a write that would otherwise
+// sit in the kernel for as long as the parent leaves the pipe unread.
+static bool write_all(int fd, const void *buf, size_t len,
+                      const std::function<void()> &whileStalled = nullptr) {
   const uint8_t *p = static_cast<const uint8_t *>(buf);
   while (len > 0) {
     ssize_t n = ::write(fd, p, len);
     if (n < 0) {
       if (errno == EINTR) continue;
+      if ((errno == EAGAIN || errno == EWOULDBLOCK) && wait_writable(fd, whileStalled)) continue;
       return false;
     }
     p += n;
@@ -124,14 +156,32 @@ static bool write_file(const std::string &path, const void *const *parts,
 
 // stdout has two writers - the frame loop and the encoder thread - and a message is a
 // header plus a payload as two `write_all` calls over a pipe that partial-writes at 64KB.
-// Without this lock the two interleave and the parser reads a desync.
-static std::mutex g_writeMutex;
+// Without this lock the two interleave and the parser reads a desync. Timed, because a writer
+// waiting on it while the other is stalled on a full pipe has to keep asking whether to stop.
+static std::timed_mutex g_writeMutex;
 
-static bool write_message(int fd, uint32_t type, const void *payload, uint32_t payloadLen) {
-  std::lock_guard<std::mutex> lock(g_writeMutex);
+// Set under g_writeMutex when a write gave up with its message unfinished. The stream is then
+// mid-payload, so a later header would be read as payload bytes and the one after it as a desync:
+// neither writer may put another byte on the output.
+static bool g_outputCut = false;
+
+// False means the pipe is gone or the run is stopping with the message unsent or cut short. A
+// write that fails once the lock is held closes the output for good.
+static bool write_message(int fd, uint32_t type, const void *payload, uint32_t payloadLen,
+                          const std::function<void()> &whileStalled = nullptr) {
+  std::unique_lock<std::timed_mutex> lock(g_writeMutex, std::defer_lock);
+  while (!lock.try_lock_for(std::chrono::milliseconds(STALL_POLL_MS))) {
+    if (whileStalled) whileStalled();
+    if (g_stop) return false;
+  }
+  if (g_outputCut) return false;
   uint32_t header[3] = {MAGIC, type, payloadLen};
-  if (!write_all(fd, header, sizeof(header))) return false;
-  if (payloadLen && !write_all(fd, payload, payloadLen)) return false;
+  if (!write_all(fd, header, sizeof(header), whileStalled)
+      || (payloadLen && !write_all(fd, payload, payloadLen, whileStalled))) {
+    g_outputCut = true;
+    std::fprintf(stderr, "[grabber] a message was cut short, the output takes no more\n");
+    return false;
+  }
   return true;
 }
 
@@ -381,11 +431,19 @@ static void applyLowLight(libfreenect2::Freenect2Device *dev, bool on) {
 // Commands arrive newline terminated on stdin so the server can retune a running grabber.
 // Restarting instead would cost a multi-second blackout: closing the device on macOS sleeps
 // 4s inside libfreenect2.
+//
+// `stop` and end-of-file both set g_stop, so a parent can end the run without a signal and a
+// parent that dies takes the grabber with it. Only 0 is end-of-file: the descriptor is
+// non-blocking, so -1 with EAGAIN is a pipe with nothing in it yet.
 static void pollCommands(libfreenect2::Freenect2Device *dev, std::string &pending, bool wantColor,
                          HdEncoder *hd) {
   char buf[256];
   ssize_t n;
   while ((n = ::read(STDIN_FILENO, buf, sizeof(buf))) > 0) pending.append(buf, (size_t)n);
+  if (n == 0) {
+    std::fprintf(stderr, "[grabber] stdin closed, stopping\n");
+    g_stop = 1;
+  }
 
   size_t nl;
   while ((nl = pending.find('\n')) != std::string::npos) {
@@ -393,7 +451,10 @@ static void pollCommands(libfreenect2::Freenect2Device *dev, std::string &pendin
     pending.erase(0, nl + 1);
     if (!line.empty() && line.back() == '\r') line.pop_back();
 
-    if (line == "low-light on" || line == "low-light off") {
+    if (line == "stop") {
+      std::fprintf(stderr, "[grabber] stop requested\n");
+      g_stop = 1;
+    } else if (line == "low-light on" || line == "low-light off") {
       if (wantColor) applyLowLight(dev, line == "low-light on");
     } else if (line == "hd-color on" || line == "hd-color off") {
       // Asked for rather than always on: a 1080p JPEG is roughly 215KB and another ~50Mbit/s
@@ -623,7 +684,11 @@ int main(int argc, char **argv) {
         "stdin commands, newline terminated, applied live:\n"
         "  low-light on|off\n"
         "  hd-color on|off\n"
-        "  key on|off\n",
+        "  key on|off\n"
+        "  stop\n"
+        "\n"
+        "stop and end-of-file on stdin both end the run through the ordinary teardown,\n"
+        "so a grabber started by hand needs a stdin that stays open.\n",
         pipelineName.c_str(), offered_decoders().c_str(), colorDecoderName.c_str());
       return 0;
     }
@@ -821,6 +886,9 @@ int main(int argc, char **argv) {
 
   // Non-blocking so the capture loop never stalls waiting on a command that may never come.
   ::fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
+  // stdout too, so a pipe the parent stopped reading is a wait the stop can end rather than a
+  // write that never returns. Its flags are read first, because a redirect may have set others.
+  ::fcntl(STDOUT_FILENO, F_SETFL, ::fcntl(STDOUT_FILENO, F_GETFL) | O_NONBLOCK);
   std::string pendingCommands;
 
   libfreenect2::Freenect2Device::IrCameraParams ir = dev->getIrCameraParams();
@@ -896,6 +964,11 @@ int main(int argc, char **argv) {
   std::vector<uint8_t> depthOut(DEPTH_PIXELS * sizeof(uint16_t));
   std::vector<uint8_t> payload;
 
+  // What a write waiting on a full pipe runs, so a `stop` the parent sent behind it is still read.
+  const std::function<void()> readCommands = [&] {
+    pollCommands(dev, pendingCommands, wantColor, &hdEncoder);
+  };
+
   libfreenect2::FrameMap depthFrames, colorFrames;
   bool haveColor = false;
   // Said once rather than per frame: a decoder producing something the webcam cannot encode
@@ -928,6 +1001,10 @@ int main(int argc, char **argv) {
     uint64_t tArrived = now_us();
 
     pollCommands(dev, pendingCommands, wantColor, &hdEncoder);
+    if (g_stop) {
+      depthListener.release(depthFrames);
+      break;
+    }
 
     // Take a new colour frame only if one is already waiting; never block on it. The previous
     // one is released first, so at most one is held outside the pool.
@@ -1009,7 +1086,10 @@ int main(int argc, char **argv) {
       const size_t lens[3] = {sizeof(head),
                               (size_t)depth->width * depth->height * depth->bytes_per_pixel,
                               (size_t)rgb->width * rgb->height * rgb->bytes_per_pixel};
-      if (!write_file(path, parts, lens, 3)) return 1;
+      if (!write_file(path, parts, lens, 3)) {
+        g_stop = 1; // the encoder's destructor joins a writer that may be stalled on stdout
+        return 1;
+      }
       if (++dumped >= dumpCount) {
         std::fprintf(stderr, "[grabber] corpus complete: %d frames\n", dumped);
         g_stop = 1;
@@ -1075,7 +1155,8 @@ int main(int argc, char **argv) {
     if (colorBytes) std::memcpy(p, jpegBuf, colorBytes);
     uint64_t tAssembled = now_us();
 
-    bool ok = write_message(STDOUT_FILENO, TYPE_FRAME, payload.data(), (uint32_t)payload.size());
+    bool ok = write_message(STDOUT_FILENO, TYPE_FRAME, payload.data(), (uint32_t)payload.size(),
+                            readCommands);
     uint64_t tWritten = now_us();
     depthListener.release(depthFrames);
 
@@ -1100,7 +1181,7 @@ int main(int argc, char **argv) {
       prof.push_back(r);
     }
 
-    if (!ok) break; // consumer closed the pipe
+    if (!ok) break; // consumer closed the pipe, or a stop ended a write the parent left unread
 
     if (++frameCount % 150 == 0)
       std::fprintf(stderr, "[grabber] %llu frames (%llu colour, %llu bad depth, %llu bad colour)\n",
@@ -1109,7 +1190,10 @@ int main(int argc, char **argv) {
   }
 
   // Stopped before the listener releases its frame and before the counters below are read, so
-  // the thread is quiescent rather than mid-encode when either happens.
+  // the thread is quiescent rather than mid-encode when either happens. g_stop is set first
+  // because a loop that ended on a timeout or a closed pipe has not, and the encoder's write
+  // gives up only on it.
+  g_stop = 1;
   hdEncoder.stop();
   if (haveColor) colorListener.release(colorFrames);
 
