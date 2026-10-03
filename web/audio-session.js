@@ -18,7 +18,7 @@ export function createAudioSession({ changed = () => {}, failed = () => {} } = {
       if (Math.abs(decoded.pcm.duration - clip.duration) > 0.5 / AUDIO_RATE) throw new Error('audio duration does not match its saved asset');
       return decoded.pcm;
     }
-    const response = await fetch(`/audio/${clip.hash.slice(7)}`);
+    const response = await fetch(`/audio/${encodeURIComponent(clip.hash)}`);
     if (!response.ok) throw new Error(`audio ${clip.name} is unavailable (${response.status})`);
     const bytes = new Uint8Array(await response.arrayBuffer());
     const hash = 'sha256:' + [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]

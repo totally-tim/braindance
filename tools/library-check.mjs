@@ -5553,7 +5553,6 @@ async function runChecks() {
         .replace(':hash', encodeURIComponent(hash))
         .replace(':id', id)
         .replace(':name', name)
-        .replace(':hash', '0'.repeat(64))
         .replace(':a-:b', '0-1')
         .replace(':n', '0');
       return built.includes(':') ? null : built;

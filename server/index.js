@@ -1296,8 +1296,13 @@ const ROUTES = [
     try { sendJson(res, await AUDIO.import(req)); }
     catch (err) { sendJson(res, { error: err.message }, 400); }
   } } },
-  { path: '/audio/:hash', pattern: /^\/audio\/([0-9a-f]{64})$/, read: async (req, res, [hash]) => {
-    const bytes = await AUDIO.read(`sha256:${hash}`);
+  { path: '/audio/:hash', pattern: /^\/audio\/(sha256:[0-9a-f]{64})$/, read: async (req, res, [hash]) => {
+    let bytes;
+    try { bytes = await AUDIO.read(hash); } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+      sendJson(res, { error: `no audio asset ${hash}` }, 404);
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': bytes.length, 'Cache-Control': 'private, max-age=31536000, immutable' });
     res.end(req.method === 'HEAD' ? undefined : bytes);
   } },
