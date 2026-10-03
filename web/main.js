@@ -9120,7 +9120,8 @@ function deleteSelectedClip() {
   timeline.pause();
   const at = clips.indexOf(clip);
   clips.splice(at, 1);
-  if (audioClip?.target?.clip === clip.id) { audioClip.target = null; audioPanel?.paint(); }
+  // A new object rather than an edit in place, so an audio change already waiting on its analysis sees it.
+  if (audioClip?.target?.clip === clip.id) { replaceAudio({ ...audioClip, target: null }); audioPanel?.paint(); }
   clipLanesShut.delete(clip.id);
   // Onto whatever took its place rather than onto nothing: the panel's clip half greys when the
   // strip holds no clip, and an edit that still has clips has one under the panel.

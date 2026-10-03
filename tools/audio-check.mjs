@@ -37,6 +37,15 @@ const MUTATIONS = {
     file: 'web/main.js', edits: [["  if (takesText(e.target) && e.target.type !== 'number') return;\n", '']],
     fails: 'a space typed into a text field starts the transport instead of reaching the field',
   },
+  'delete-edits-target-in-place': {
+    file: 'web/main.js', edits: [['replaceAudio({ ...audioClip, target: null }); audioPanel?.paint(); }', 'audioClip.target = null; audioPanel?.paint(); }']],
+    fails: 'an audio edit waiting on its analysis restores a mapping onto the clip deleted meanwhile',
+  },
+  'audio-hashed-in-the-page': {
+    file: 'web/audio-session.js', edits: [['    const pcm = readAudioWav(new Uint8Array(await response.arrayBuffer()));',
+      "    const bytes = new Uint8Array(await response.arrayBuffer());\n    await crypto.subtle.digest('SHA-256', bytes);\n    const pcm = readAudioWav(bytes);"]],
+    fails: 'a project with audio cannot open on a plain-HTTP origin, which has no crypto.subtle',
+  },
   'undo-leaves-spectrum-empty': {
     file: 'web/audio-session.js', edits: [['if (!inspection && inspectionFailure !== clip.hash)', 'if (false && !inspection && inspectionFailure !== clip.hash)']],
     fails: 'undoing a replacement cannot restore the earlier audio spectrum while paused',
@@ -91,7 +100,9 @@ async function main() {
     ['x', { 'Content-Type': 'text/plain' }, 415, 'simple content type refused'],
     ['x', { 'Content-Type': 'application/octet-stream', Origin: 'http://evil.invalid' }, 403, 'foreign origin refused'],
   ]) { const r = await fetch(`${origin}/audio`, { method: 'POST', headers, body }); check(r.status === status, label, String(r.status)); }
-  browser = await chromium.launch({ headless: !process.argv.includes('--headed'), args: ['--autoplay-policy=no-user-gesture-required'] });
+  // A `.local` name is a LAN editor's origin: the server accepts it and the browser gives it no secure context.
+  browser = await chromium.launch({ headless: !process.argv.includes('--headed'),
+    args: ['--autoplay-policy=no-user-gesture-required', '--host-resolver-rules=MAP braindance.local 127.0.0.1'] });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1050 } });
   page.setDefaultTimeout(45000);
   const errors = []; page.on('pageerror', (e) => errors.push(e.message));
@@ -231,6 +242,15 @@ async function main() {
     return { error, same: JSON.stringify(before) === JSON.stringify(__kinect.library.serialiseProjectBody()) };
   });
   check(missing.error.includes('unavailable') && missing.same, 'missing audio refuses the whole project before changing the open edit');
+  const lan = await browser.newPage();
+  const lanErrors = []; lan.on('pageerror', (e) => lanErrors.push(e.message));
+  await lan.goto(`http://braindance.local:${PORT}/edit?project=${new URL(page.url()).searchParams.get('project')}`);
+  const plain = await lan.waitForFunction(() => globalThis.__kinect?.audio.clip(), null, { timeout: 20000 })
+    .then(() => lan.evaluate(() => ({ secure: isSecureContext, subtle: typeof crypto.subtle, hash: __kinect.audio.clip().hash, signal: __kinect.audio.signal(1) })),
+      () => lan.evaluate(() => ({ note: document.getElementById('tNote')?.textContent ?? '' })));
+  check(plain.secure === false && plain.subtle === 'undefined' && plain.hash === expected.hash && plain.signal > 0 && !lanErrors.length,
+    'a project with audio opens on a plain-HTTP LAN origin', JSON.stringify({ ...plain, errors: lanErrors }));
+  await lan.close();
   await page.locator('#panelTabAudio').click();
   const exportOptions = { width: 320, height: 180, fps: 30, from: 15, to: 29, name: 'audio-proof', codec: 'lossless' };
   const done = await page.evaluate((options) => __kinect.export.run(options), exportOptions);
@@ -264,6 +284,24 @@ async function main() {
     const video = await page.evaluate((options) => __kinect.export.run({ ...options, name: 'audio-preview', codec: 'h264' }), { ...exportOptions, from: 0, to: 89 });
     cpSync(video.output, join(SHOTS, 'audio-preview.mp4'));
   }
+  const raced = await page.evaluate(async () => {
+    const k = __kinect; const before = k.library.serialiseProjectBody(); const two = structuredClone(before);
+    const other = structuredClone(two.clips[0]); other.id = 'c2'; two.clips.push(other);
+    k.library.restoreProject(two); k.keyframes.undo.commit();
+    k.editor.selectClipRow(before.audio.target.clip);
+    const gain = document.getElementById('audio-gain'); gain.value = '6'; gain.dispatchEvent(new Event('change'));
+    document.getElementById('tDeleteClip').click();
+    return { before, target: before.audio.target.clip };
+  });
+  await page.waitForFunction(() => !document.getElementById('audioImport').disabled);
+  const afterRace = await page.evaluate((target) => {
+    const k = __kinect; const body = k.library.serialiseProjectBody(); let reopen = '';
+    try { k.library.restoreProject(body); } catch (e) { reopen = e.message; }
+    return { target: k.audio.clip().target, clips: body.clips.map((c) => c.id), reopen, deleted: target };
+  }, raced.target);
+  check(afterRace.target === null && !afterRace.clips.includes(afterRace.deleted) && !afterRace.reopen,
+    'an audio edit pending while its target clip is deleted leaves no mapping onto that clip', JSON.stringify(afterRace));
+  await page.evaluate((before) => { __kinect.library.restoreProject(before); __kinect.keyframes.undo.commit(); }, raced.before);
   await page.locator('#audioRemove').click();
   check(await page.evaluate(() => __kinect.audio.clip() === null && !document.querySelector('.taudio')), 'Remove clears the audio source and lane');
   await page.keyboard.press('Meta+z');

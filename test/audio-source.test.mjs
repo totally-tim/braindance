@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { audioFilter, handleExportSocket } from '../server/export.js';
+import { DOCUMENT_VERSIONS } from '../web/format.js';
 
 const tone = (hz, amplitude = 0.2) => {
   const samples = Float32Array.from({ length: AUDIO_RATE }, (_, i) => amplitude * Math.sin(2 * Math.PI * hz * i / AUDIO_RATE));
@@ -181,10 +182,28 @@ test('closing an export during setup stops it before the audio asset is read', a
   const message = ws.listeners('message')[0];
   const pending = message(Buffer.from(JSON.stringify({ begin: {
     name: 'canceled', width: 320, height: 180, fps: 30, frames: 1, codec: 'lossless',
-    programStart: 0, project: { audio: clip() },
+    programStart: 0, project: { version: DOCUMENT_VERSIONS.project, audio: clip() },
   } })), false);
   ws.readyState = 3;
   ws.emit('close');
   try { await Promise.all([pending, close]); assert.equal(reads, 0); }
   finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('an export refuses a project of another version before reading its audio', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'audio-export-version-'));
+  let reads = 0;
+  const sent = [];
+  const ws = new EventEmitter();
+  Object.assign(ws, { OPEN: 1, readyState: 1, send(text) { sent.push(JSON.parse(text)); }, close() {} });
+  handleExportSocket(ws, { outDir: root, log() {}, audioStore: { async read() { reads++; throw new Error('read'); } } });
+  try {
+    await ws.listeners('message')[0](Buffer.from(JSON.stringify({ begin: {
+      name: 'old-project', width: 320, height: 180, fps: 30, frames: 1, codec: 'lossless',
+      programStart: 0, project: { version: DOCUMENT_VERSIONS.project - 1, audio: clip() },
+    } })), false);
+    assert.equal(reads, 0);
+    assert.match(sent.at(-1)?.error ?? '', new RegExp(`this project is version ${DOCUMENT_VERSIONS.project - 1}`));
+    assert.deepEqual(await readdir(root), []);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

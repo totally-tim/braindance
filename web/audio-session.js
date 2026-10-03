@@ -19,14 +19,12 @@ export function createAudioSession({ changed = () => {}, failed = () => {} } = {
       return decoded.pcm;
     }
     const response = await fetch(`/audio/${encodeURIComponent(clip.hash)}`);
+    // The server checks the content hash before it answers, and a LAN editor's plain-HTTP origin
+    // has no `crypto.subtle` to check it again with.
     if (!response.ok) throw new Error(`audio ${clip.name} is unavailable (${response.status})`);
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    const hash = 'sha256:' + [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
-      .map((b) => b.toString(16).padStart(2, '0')).join('');
-    if (hash !== clip.hash) throw new Error(`audio ${clip.name} does not match its saved content hash`);
-    const pcm = readAudioWav(bytes);
+    const pcm = readAudioWav(new Uint8Array(await response.arrayBuffer()));
     if (Math.abs(pcm.duration - clip.duration) > 0.5 / AUDIO_RATE) throw new Error('audio duration does not match its saved asset');
-    decoded = { hash, pcm };
+    decoded = { hash: clip.hash, pcm };
     return pcm;
   };
   const prepare = async (clip) => {

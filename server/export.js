@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readdir, writeFile, stat, rm, rename } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { AUDIO_RATE, checkAudioClip, readAudioWav } from '../web/audio-source.js';
+import { DOCUMENT_VERSIONS, versionRefusal } from '../web/format.js';
 
 // Absolute rather than resolved off PATH: this is the encoder the export was measured against.
 export const FFMPEG = process.env.FFMPEG ?? '/opt/homebrew/bin/ffmpeg';
@@ -195,6 +196,9 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
       name: msg.name, width: msg.width, height: msg.height, fps: msg.fps,
       frames: msg.frames, codec: msg.codec ?? 'h264',
     });
+    if (msg.project != null && msg.project.version !== DOCUMENT_VERSIONS.project) {
+      throw new Error(versionRefusal('project', msg.project.version));
+    }
 
     const spec = CODECS[codec];
     const ext = spec.ext;
