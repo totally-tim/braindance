@@ -3241,6 +3241,17 @@ try {
     `value=${undoRemoval.value}, keyed=${undoRemoval.keyed}, hidden=${undoRemoval.hidden}`);
 
   await page.evaluate('__kinect.keyframes.setTracks({})');
+  // The undo put the rack entry back with the value. A preset leaves the value with no entry, and
+  // then the reset alone has to keep the effect.
+  await page.evaluate(`(() => {
+    const k = globalThis.__kinect;
+    const body = k.library.serialiseProjectBody();
+    const drop = (block) => { if (block.effects) block.effects = block.effects.filter((id) => id !== 'halation'); };
+    drop(body.look);
+    body.clips.forEach(drop);
+    k.library.restoreProject(body);
+  })()`);
+  await settle();
   if (undoRemoval.hidden === true) {
     await page.evaluate(`document.querySelector('button[aria-label="halation.amount reset to default"]').click()`);
   } else {
