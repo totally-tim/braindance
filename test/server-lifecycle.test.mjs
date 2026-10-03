@@ -23,8 +23,7 @@ const noShell = process.platform === 'win32' ? 'the stand-in encoders are shell 
 
 let work;
 let sample;
-// Frames half a second apart, so the replay timer a stop has to cancel is pending for all but a
-// millisecond of each gap.
+// Frames half a second apart, so the replay sits between two reads for most of the run.
 let slowSample;
 const children = new Set();
 
@@ -351,7 +350,7 @@ test('a line that is not stop is ignored and said so', { timeout: 60_000 }, asyn
 // the process ends, through a probe on the capture that leaves the server's code alone.
 
 const REPLAY_TRIGGERS = { ...TRIGGERS, SIGTERM: (server) => server.child.kill('SIGTERM') };
-// Longer than the gap between two frames, so a timer left running fires inside it.
+// How long the close stays held after the timer is released, for a read a left-behind timer starts.
 const HOLD_MS = 800;
 
 const WHAT_FAILED = {
@@ -376,6 +375,7 @@ const refused = (port) => new Promise((done) => {
 async function observeReplayStop(name, trigger, { mode = 'hold', root = REPO } = {}) {
   const events = join(work, `${name}.events`);
   const release = join(work, `${name}.release`);
+  const timerRelease = join(work, `${name}.timer-release`);
   writeFileSync(events, '');
   const server = await start(name, {
     flags: ['--stop-on-stdin', '--replay', slowSample],
@@ -386,24 +386,25 @@ async function observeReplayStop(name, trigger, { mode = 'hold', root = REPO } =
       BRAINDANCE_PROBE_EVENTS: events,
       BRAINDANCE_PROBE_MODE: mode,
       BRAINDANCE_PROBE_RELEASE: release,
+      BRAINDANCE_PROBE_TIMER_RELEASE: timerRelease,
     },
   });
   const happened = () => readFileSync(events, 'utf8').split('\n').filter(Boolean);
   const failed = [];
   const expect = (ok, id) => { if (!ok) failed.push(id); };
 
-  await eventually(() => happened().includes('frame-read'), 'the replay to read a frame');
-  // Long enough for that read to arm the next one, so a timer is pending when the stop arrives.
-  await sleep(60);
+  // The probe holds the timer the read arms, so it is pending when the stop arrives however long the read took.
+  await eventually(() => happened().includes('timer-armed'), 'the replay to arm its next frame timer');
   trigger(server);
   await eventually(() => happened().includes('close-begun') || server.child.exitCode !== null, 'the stop to reach the capture or end the process');
   const begun = happened().includes('close-begun');
   expect(begun, 'closed');
   if (begun && mode === 'hold') {
-    const seen = happened().length;
+    // A timer the stop left pending fires now, and reads a frame inside the held close.
+    writeFileSync(timerRelease, '');
     await sleep(HOLD_MS);
     expect(server.child.exitCode === null, 'waited');
-    expect(!happened().slice(seen).includes('frame-read'), 'timer');
+    expect(!happened().slice(happened().indexOf('close-begun')).includes('frame-read'), 'timer');
     expect(await refused(Number(new URL(server.url).port)), 'listener');
   }
   writeFileSync(release, '');
