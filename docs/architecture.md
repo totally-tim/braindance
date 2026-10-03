@@ -180,6 +180,65 @@ also how a cancel reaches it, and a worker whose heartbeats keep failing stops r
 `tools/render-worker.mjs` brings a page up on `/edit?take=`, which opens no
 document, so that page writes nothing.
 
+## The desktop shell
+
+`desktop/` is an Electron app. It runs the service as a child process and shows the service's pages
+in one window. The editor in the window is the page a browser gets, and nothing in `server/` or
+`web/` reads whether a shell is there.
+
+| file | what it owns |
+| --- | --- |
+| `desktop/main.js` | the window, the quit sequence, the bridge handlers, and every refusal |
+| `desktop/service.js` | the service child: which Node runs it, its flags, its ready line, its stop |
+| `desktop/origin.js` | which URLs and which IPC senders belong to the window |
+| `desktop/reveal.js` | which paths the bridge may show in the OS file manager |
+| `desktop/preload.cjs` | the four calls the page may make, in CommonJS because a sandboxed preload cannot be a module |
+
+**The origin is fixed.** The service listens on port 8480 and no other. Browser storage belongs to
+an origin and an origin includes the port, so a port chosen per launch would give the editor an
+empty preview cache and default panels every time. The shell refuses a held port with a dialog that
+names it. `portFree` asks first, and a service that exits before its ready line gets the same
+refusal.
+
+**Start.** `findNode` takes the first Node of version 26 or newer on `PATH`, then in
+`/opt/homebrew/bin` and `/usr/local/bin`, because an app started from Finder has a minimal `PATH`.
+With none, a dialog names the versions it did find. The shell creates seven directories under
+`app.getPath('userData')` and starts `node server/index.js --port 8480 --stop-on-stdin` with
+`--captures`, `--projects`, `--presets`, `--deliverables`, `--effects`, `--jobs` and `--exports`
+each pointing at its own. The window opens on the `url` of the `[server] ready` line. `startService`
+rejects a line naming another port, an exit before the line, and 30 seconds without one, and the
+refusal carries the service's last lines.
+
+**Stop.** Closing the last window quits on every platform. Quit writes `stop` and a newline to the
+service's stdin, which is the stop message on Windows as well, where a signal never reaches the
+service as SIGTERM. The shell waits `STOP_GRACE_MS`, 20 seconds, which is longer than the server's
+15-second standby grace, and kills the service only after that. The app exits with 0 when the
+service exited 0 and with 1 otherwise, and `[desktop] service exited` in its output carries the
+code. A service that exits while the window is open is a refusal, and the app quits.
+
+**One instance.** The app takes `requestSingleInstanceLock`. A second launch exits with 0 and the
+first window comes back from minimized and takes focus. The fixed port is the second guard: a second
+service would find 8480 held.
+
+**The window.** It is sandboxed, context-isolated and without Node integration. `guard` compares
+origins and not URLs, so every path on the service is allowed and another host name for the same
+service is not. It runs on `will-frame-navigate` and `will-redirect`, so a subframe and a redirect
+are held to the same rule. A refused main-frame navigation to a web link goes to the OS browser, and
+so does every `window.open`, which makes the app one window.
+
+**The bridge.** `window.desktop` holds `chooseDirectory`, `openProjectFile`,
+`chooseExportDestination` and `revealPath`. Each is an `ipcMain.handle` that `senderTrusted` lets
+through only from the top frame of the window while it shows the service's origin.
+`chooseExportDestination` takes a file name. `revealPath` takes an absolute path and passes it to the
+OS file manager only when `revealable` allows it. `revealable` allows a path that one of the three
+dialogs returned in this session, and a path that exists and has a real path inside one of the seven
+data folders. A path from a dialog is shown as given, and a chosen folder does not allow its
+contents. For any other path, including a `..` climb, a link that leads out of a data folder and a
+path that does not exist, the bridge refuses with one message. It shows the real path that it
+checked. The check and the reveal are two steps, so a process that writes inside a data folder could
+swap a folder for a link between them and send the reveal elsewhere. The reveal opens a file manager
+window and reads nothing.
+
 ## The effect store
 
 Every effect is a package — a manifest and the GLSL chunks it splices into the shaders — and the

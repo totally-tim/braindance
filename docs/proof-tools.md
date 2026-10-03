@@ -29,7 +29,7 @@ total is the tool's `PASS` and `FAIL` rows. A row never decides a verdict.
 
 The tools disagree about what a caught mutation exits. Four exit **0** on a catch and 1 on a miss
 — `registry-check`, `vendor-check`, `registration-check` and `release-gate-check` — so anything
-gating on "non-zero means caught" reads a genuine miss by these four as a catch. Thirteen exit 1 on
+gating on "non-zero means caught" reads a genuine miss by these four as a catch. Fourteen exit 1 on
 a catch *and* 1 on a miss, so the code carries no information and only the printed sentence
 separates them. Seven carry no miss branch at all and exit on the failure count, so a mutation they
 fail to catch exits 0 and reads as a clean pass.
@@ -53,6 +53,7 @@ Per tool, read from the source:
 | `level-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8377 held, no GPU browser |
 | `vcam-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`, or section 6 unproven without an IPv4 |
 | `guard-check` | pass | a failed assertion, a catch, or a miss | `PASS, with claims untested here`: no non-internal IPv4; `DID NOT RUN`: a crash |
+| `desktop-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8480 held, no Electron binary, no Playwright, a crash |
 | `jobs-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a port held, a crash |
 | `effect-check` | pass | a failed assertion, a catch, or a miss | `UNTESTED`, or `DID NOT RUN` |
 | `effect-conformance-check` | pass | a failed assertion, a catch, or a miss | `UNTESTED`, or `DID NOT RUN` |
@@ -208,7 +209,8 @@ Stage 2 lasts as long as `library-check`, and `editor-check` and `preview-check`
 3.
 
 It leaves out `hd-encoder-check` and `grabber-stdin-check`, which compile native code, `decoder-check`
-and `registration-check`, which need a built library or a corpus, and `sweep-all`, which runs mutations. A `*-check.mjs` it
+and `registration-check`, which need a built library or a corpus, `desktop-check`, which opens Electron
+windows on the display, and `sweep-all`, which runs mutations. A `*-check.mjs` it
 neither runs nor leaves out by name comes back DID NOT RUN, so a new tool is placed in a stage or
 named as left out.
 
@@ -1165,6 +1167,87 @@ exits 2, because a crash counted as a failed assertion reads under `--mutate` as
 - **`origin-allows-null`** — the literal string `null`, which a `file://` page and a sandboxed
   iframe both send, is treated as same-origin.
 
+## `desktop-check`
+
+The desktop shell shows the service's own origin and no other, answers the bridge only for its own
+window, reveals only a path the user chose or one inside its data folders, starts nothing for a
+second launch, refuses a held port by name, and ends its service and then its own process when its
+last window closes.
+
+```
+node tools/desktop-check.mjs
+```
+
+| needs | |
+| --- | --- |
+| port | 8480 free: the shell has no other, and the tool exits 2 naming what answers. The close launch takes a debugging port from Chromium |
+| install | `npm ci` at the root for Playwright, and `npm ci --prefix desktop` for Electron |
+| display | the windows open on the desktop; no GPU browser |
+| binaries | Node 26 on `PATH`, `lsof`, `ps` |
+
+It stages `desktop/` under `.desktop-check/` and runs the staged copy against the real
+`server/index.js` on a scratch profile, so a mutation never touches the checkout and no real library
+is written. Two kinds of launch carry the rows.
+
+The attached run goes through Playwright's Electron support and holds the window, navigation and
+bridge rows. They read the window's origin and web preferences, send the page to another host name,
+another site and a file, call `window.open`, and call the four bridge functions with `dialog` and
+`shell` stubbed in the main process, so no native dialog opens and nothing reaches the OS browser or
+the file manager. Each refusal has a positive twin: a path of the service is allowed, and the bridge
+answers the service page. A page that is not the service asks the bridge too. The reveal rows write
+real files, because the bridge reveals only what exists. They ask for the three paths the dialogs
+return and for a file in a data folder, and expect the bridge to show each. They ask for a file
+outside every data folder, a system file, a `..` climb out of a data folder, a directory link and a
+file link that lead out of one, and a path that does not exist, and expect the bridge to refuse
+each. The stub for `showItemInFolder` records what the bridge handed it, and each refusal row reads
+both the refusal and that the record did not grow. The same file is refused before the dialog
+returns it and shown after. The second launch is a plain Electron process on the same profile, run
+while the first window is minimized.
+
+The attached run ends by closing its windows and claims nothing about exit, because Playwright holds
+an exiting Electron open while its debugger is attached. The close rows run on a separate plain
+Electron launch on its own profile, started with `--remote-debugging-port=0`. The tool closes the
+window over Chromium's debugging endpoint, as a click on its close box would, and waits on two
+deadlines. The service has `STOP_GRACE_MS` to exit, and its rows read the `service exited` line of
+the app, the process table and the port. The Electron process has `APP_EXIT_MS`, 180 seconds, to end
+once its service has, and its rows read that process's own exit event: it must end without a kill by
+the tool, and with code 0. A kill after the wait is the failure the row reports, beside the load
+average at that moment. Chromium's teardown after `app.exit` runs from seconds to minutes on a
+loaded machine, so a failure of these rows under load is a rerun on a quiet machine.
+
+The two dialogs a person reads are not driven: the Node 26 refusal is held by the unit tests of
+`findNode`, and both refusals share `refuse` in `desktop/main.js`. A launch from Finder, whose
+`PATH` is minimal, is unproven here, because the tool runs from a shell that has Node on `PATH`.
+
+A run that stops before its verdict prints `DID NOT RUN` with the count so far and exits 2.
+
+- **`navigation-allows-any-origin`** — every page is the window's own. The rows for another host
+  name and another site redden. The same-origin twin stays green, and so does the file row, because
+  Chromium refuses a `file:` URL from an http page whatever the shell says.
+- **`popups-open-in-the-app`** — `window.open` opens a window of its own. The row counting windows
+  reddens. The row for the OS browser stays green, because the handler still hands the link over.
+- **`sandbox-off`** — the renderer is not sandboxed. The sandbox row reddens.
+- **`bridge-skips-the-sender-check`** — the bridge answers any sender. The row that asks from a page
+  that is not the service reddens, with the row for the dialog it must not open.
+- **`reveal-any-absolute-path`** — the bridge reveals any absolute path. The two rows for a file
+  nobody chose redden, and so do the rows for a system file, a `..` climb, the two links and a path
+  that does not exist. The rows for a path a dialog returned and a path in a data folder stay green.
+- **`reveal-skips-realpath`** — the path is judged as written. The rows for the directory link, the
+  file link and the missing path redden. The climb row stays green, because resolving the path
+  already removes a `..`.
+- **`picks-are-not-recorded`** — a path a dialog returned is forgotten at once. The row for the three
+  paths and the row for the file refused before its dialog redden. The data folder row stays green.
+- **`close-kills-the-service`** — Quit kills the service in place of writing `stop`. The service's
+  exit code and the app's exit code redden.
+- **`app-exit-is-skipped`** — Quit stops the service and never calls `app.exit`. The two rows that
+  read the Electron process itself redden, for the missing exit and for the missing code 0. The rows
+  for the service and the port stay green, because the service ends before the app fails to.
+- **`second-launch-takes-no-lock`** — a second launch is not handed over. The rows where it exits and
+  where the first window returns redden. The one-service row stays green, because the held port
+  refuses the second start as well.
+- **`busy-port-is-not-checked`** — the held-port probe is gone. The service starts and dies on the
+  port, so the rows for the named refusal and for no service output redden.
+
 ## `jobs-check`
 
 The queue only hands a job to a machine that can reproduce it, a job carries enough to be
@@ -1698,7 +1781,9 @@ gets one line on stderr and is not refused.
 ## The supply-chain gate
 
 `release-gate-check` proves this repo's gate is armed: that `.npmrc` names a minimum release age,
-and that the npm doing the installing actually refuses on it.
+and that the npm doing the installing actually refuses on it. It asks twice, once for the root and
+once for `desktop/`, because npm reads the `.npmrc` beside the nearest `package.json` and no other,
+so the root's gate does not protect `desktop/`'s installs.
 
 ```
 node tools/release-gate-check.mjs
@@ -1724,6 +1809,9 @@ directory with no `.npmrc` to prove the cutoff came from the file under test.
 - **`wrong-unit`** — `min-release-age=2d`, a value npm cannot parse.
 - **`no-gate`** — an `.npmrc` naming no gate.
 - **`absent`** — no `.npmrc` at all, so a contributor cloning the tree inherits nothing.
+- **`desktop-ungated`** — an `.npmrc` naming no gate under `desktop/` alone, with the root's gate
+  untouched. Only the `desktop/` rows redden.
+- **`desktop-absent`** — no `.npmrc` under `desktop/` alone.
 
 ## Command line and standby
 

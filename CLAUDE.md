@@ -115,6 +115,7 @@ Read the assertion count, never the exit code.
 | `level-check.mjs` | levelling: the room turns and every surface keeps its meaning | port 8377 free |
 | `vcam-check.mjs` | the output to OBS: the colour camera, the keyed webcam and its page; a take records the colour camera and never the key and its replay serves the colour; the take neither may touch and which webcam subscribers a revocation ends | port 8361 free |
 | `guard-check.mjs` | the socket's origin rule, the bind, the rebinding rule | port 8321 free, `captures/sample.knct` |
+| `desktop-check.mjs` | the desktop shell: its window shows the service's origin and refuses every other, the bridge answers one window and reveals only a path the user chose or one under the app's folders, a second launch starts nothing, a held port is refused by name, closing the last window of a plain launch stops the service and ends the Electron process by itself with exit 0 | port 8480 free, `npm ci --prefix desktop`, a display |
 | `jobs-check.mjs` | the queue, the pin, a cancel, a worker whose queue stops answering, a real render and its version record, a job this build cannot read | ports 8231 and 8232, a GPU browser, ffprobe |
 | `effect-check.mjs` | installing an effect: revisions, the door, the hotload, park and restore | port 8281 free, a GPU browser |
 | `effect-conformance-check.mjs` | every installed effect draws nothing at all when it is off | `--url`, a GPU browser |
@@ -129,15 +130,15 @@ Read the assertion count, never the exit code.
 | `grabber-args-check.mjs` | the built grabber refuses a depth-clip range it cannot read or that is empty, before it looks for a device | what build-native needs, and libfreenect2 in `vendor/prefix` |
 | `vendor-check.mjs` | `third_party` is upstream v0.2.1 plus declared edits | nothing |
 | `registration-check.mjs` | our registration equals upstream's, bit for bit | a corpus from `grabber --dump-corpus` |
-| `release-gate-check.mjs` | the `.npmrc` supply-chain gate is actually armed | the npm registry |
+| `release-gate-check.mjs` | the `.npmrc` supply-chain gate is actually armed, in the root and in `desktop/` | the npm registry |
 
 **Ports.** `cli-check` probes port 8401 before staging under `.cli-check/`. These tools spawn their own server and need the port free:
-`guard-check` 8321, `jobs-check` 8231 and 8232, `effect-check` 8281, `level-check` 8377,
+`desktop-check` 8480, `guard-check` 8321, `jobs-check` 8231 and 8232, `effect-check` 8281, `level-check` 8377,
 `monitor-check` 8341, `vcam-check` 8361, `boot-check` 8391, `library-check` 8210 (`--node-port`)
 and 8211..8229 (`--mac-port`..`+18`), `index-check` 8251 under `--stage` or `--mutate` only, and
 `sensor-view-check` 8131 for the section needing its own capture. A stranger on the port answers
-the tool, and its green run proves nothing. `library-check`, `boot-check`, `effect-check` and
-`index-check` probe the port first and exit 2 naming what answers. Everywhere else, run
+the tool, and its green run proves nothing. `library-check`, `boot-check`, `effect-check`,
+`index-check` and `desktop-check` probe the port first and exit 2 naming what answers. Everywhere else, run
 `pgrep -f "tools/.*-check.mjs"` first. `suite` probes every tool's ports before starting it, and
 8431 (`--port`) for the server it starts.
 
