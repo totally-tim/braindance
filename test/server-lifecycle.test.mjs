@@ -6,7 +6,8 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -15,18 +16,24 @@ import { WebSocket } from 'ws';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const FAKE_GRABBER = join(REPO, 'tools/fake-grabber.mjs');
+const PROBE = join(REPO, 'test/capture-close-probe.mjs');
 const ROOT_NAMES = ['captures', 'projects', 'presets', 'deliverables', 'effects', 'jobs', 'exports'];
 const WAIT_MS = 30_000;
 const noShell = process.platform === 'win32' ? 'the stand-in encoders are shell scripts' : false;
 
 let work;
 let sample;
+// Frames half a second apart, so the replay timer a stop has to cancel is pending for all but a
+// millisecond of each gap.
+let slowSample;
 const children = new Set();
 
 before(() => {
   work = mkdtempSync(join(tmpdir(), 'braindance-lifecycle-'));
   sample = join(work, 'sample.knct');
   execFileSync(process.execPath, [join(REPO, 'tools/make-sample.mjs'), sample, '--frames', '30'], { stdio: 'pipe' });
+  slowSample = join(work, 'slow.knct');
+  execFileSync(process.execPath, [join(REPO, 'tools/make-sample.mjs'), slowSample, '--frames', '30', '--fps', '2'], { stdio: 'pipe' });
   // Two stand-ins that write their own name where ffmpeg would put the video, so the file says
   // which one ran. `$last` is the output path, which is ffmpeg's last argument.
   for (const [dir, says] of [['named', 'named'], ['on-path', 'path']]) {
@@ -56,10 +63,10 @@ async function eventually(probe, what, ms = WAIT_MS) {
 }
 
 /** A server child with its own roots under `work`, resolved once it has printed its ready line. */
-async function start(name, { flags = [], env = {}, rootsGiven = ROOT_NAMES, stdin = true } = {}) {
+async function start(name, { flags = [], env = {}, rootsGiven = ROOT_NAMES, stdin = true, entry = join(REPO, 'server/index.js'), nodeArgs = [] } = {}) {
   const base = join(work, name);
   const roots = Object.fromEntries(ROOT_NAMES.map((root) => [root, join(base, root)]));
-  const args = [join(REPO, 'server/index.js'), '--port', '0', '--standby-after', '0',
+  const args = [...nodeArgs, entry, '--port', '0', '--standby-after', '0',
     ...rootsGiven.flatMap((root) => [`--${root}`, roots[root]]), ...flags];
   const environment = { ...process.env, ...env };
   for (const [key, value] of Object.entries(env)) if (value === undefined) delete environment[key];
@@ -301,6 +308,24 @@ for (const [what, trigger] of Object.entries(TRIGGERS)) {
   });
 }
 
+test('a stop that cannot write the take\'s marks exits 1, names the take, and still indexes it', { timeout: 90_000 }, async () => {
+  const server = await start('live-marks-fail', { flags: ['--stop-on-stdin', '--record', '--grabber', fakeGrabber()] });
+  const id = await shoot(server);
+  // A regular file where the marks directory goes: the take closes, and only its marks fail.
+  const marks = join(server.roots.captures, 'marks');
+  rmSync(marks, { recursive: true, force: true });
+  writeFileSync(marks, 'not a directory');
+  server.child.stdin.write('stop\n');
+  const { code, signal } = await server.stops();
+  assert.deepEqual([code, signal], [1, null]);
+  await server.until(
+    (all) => all.some((line) => line.startsWith(`[server] shutdown: the take did not finish: take ${id}: could not write its marks`)),
+    'the sentence naming the take',
+  );
+  assert.equal(server.lines.some((line) => line.includes('the grabber did not finish')), false, 'the grabber stopped');
+  assert.ok(existsSync(join(server.roots.captures, `${id}.idx`)), `take ${id} has its index sidecar`);
+});
+
 test('without --stop-on-stdin a stop line and end of file do nothing', { timeout: 60_000 }, async () => {
   const server = await start('no-flag', { flags: ['--replay', sample] });
   server.child.stdin.write('stop\n');
@@ -321,23 +346,125 @@ test('a line that is not stop is ignored and said so', { timeout: 60_000 }, asyn
 });
 
 // ---------------------------------------------------------------------------------------------
-// A replay server stops too.
+// A replay server stops too. Process exit releases the capture, the timer and the listener whether
+// or not the shutdown did, so each is read while the capture's close is held open or at the moment
+// the process ends, through a probe on the capture that leaves the server's code alone.
 
-for (const [what, trigger] of Object.entries(TRIGGERS)) {
-  test(`${what} stops a replay server with exit 0`, { timeout: 60_000 }, async () => {
-    const server = await start(`replay-${what.replace(/\W+/g, '-')}`, { flags: ['--stop-on-stdin', '--replay', sample] });
-    await server.until((all) => all.some((line) => line.includes('frames indexed')), 'the replay to be running');
-    trigger(server);
-    assert.deepEqual(await server.stops(), { code: 0, signal: null });
+const REPLAY_TRIGGERS = { ...TRIGGERS, SIGTERM: (server) => server.child.kill('SIGTERM') };
+// Longer than the gap between two frames, so a timer left running fires inside it.
+const HOLD_MS = 800;
+
+const WHAT_FAILED = {
+  closed: 'the shutdown never called the capture\'s close',
+  waited: 'the server exited while the capture was still closing',
+  finished: 'the capture\'s close had not finished when the server exited',
+  timer: 'a frame was read after the stop began, so the replay timer was left running',
+  listener: 'the listener still accepted a connection after the stop began',
+  code: 'the exit code was not the one the capture\'s close earned',
+  diagnostic: 'the failed close was not reported',
+};
+
+// A fresh connection rather than a request: a fetch may ride a connection that is already open,
+// and a closed listener leaves those answering.
+const refused = (port) => new Promise((done) => {
+  const socket = connect(port, '127.0.0.1');
+  socket.once('connect', () => { socket.destroy(); done(false); });
+  socket.once('error', () => done(true));
+});
+
+// Stops a replay server under the probe and answers which observations failed.
+async function observeReplayStop(name, trigger, { mode = 'hold', root = REPO } = {}) {
+  const events = join(work, `${name}.events`);
+  const release = join(work, `${name}.release`);
+  writeFileSync(events, '');
+  const server = await start(name, {
+    flags: ['--stop-on-stdin', '--replay', slowSample],
+    entry: join(root, 'server/index.js'),
+    nodeArgs: ['--import', PROBE],
+    env: {
+      BRAINDANCE_PROBE_CAPTURE: join(root, 'server/capture.js'),
+      BRAINDANCE_PROBE_EVENTS: events,
+      BRAINDANCE_PROBE_MODE: mode,
+      BRAINDANCE_PROBE_RELEASE: release,
+    },
+  });
+  const happened = () => readFileSync(events, 'utf8').split('\n').filter(Boolean);
+  const failed = [];
+  const expect = (ok, id) => { if (!ok) failed.push(id); };
+
+  await eventually(() => happened().includes('frame-read'), 'the replay to read a frame');
+  // Long enough for that read to arm the next one, so a timer is pending when the stop arrives.
+  await sleep(60);
+  trigger(server);
+  await eventually(() => happened().includes('close-begun') || server.child.exitCode !== null, 'the stop to reach the capture or end the process');
+  const begun = happened().includes('close-begun');
+  expect(begun, 'closed');
+  if (begun && mode === 'hold') {
+    const seen = happened().length;
+    await sleep(HOLD_MS);
+    expect(server.child.exitCode === null, 'waited');
+    expect(!happened().slice(seen).includes('frame-read'), 'timer');
+    expect(await refused(Number(new URL(server.url).port)), 'listener');
+  }
+  writeFileSync(release, '');
+  const { code } = await server.stops();
+  expect(happened().includes(mode === 'reject' ? 'close-rejected' : 'close-ended'), 'finished');
+  expect(code === (mode === 'reject' ? 1 : 0), 'code');
+  if (mode === 'reject') {
+    const said = await server.until(
+      (all) => all.some((line) => line === '[server] shutdown: the capture did not close: injected: the capture would not close'),
+      'the diagnostic', 3000,
+    ).catch(() => false);
+    expect(said, 'diagnostic');
+  }
+  return failed;
+}
+
+const explain = (ids) => ids.map((id) => WHAT_FAILED[id]);
+
+for (const [what, trigger] of Object.entries(REPLAY_TRIGGERS)) {
+  test(`${what} stops a replay server: it waits for the capture to close, then exits 0`, { timeout: 60_000 }, async () => {
+    assert.deepEqual(explain(await observeReplayStop(`replay-${what.replace(/\W+/g, '-')}`, trigger)), []);
   });
 }
 
-test('SIGTERM stops a replay server with exit 0', { timeout: 60_000 }, async () => {
-  const server = await start('replay-sigterm', { flags: ['--replay', sample] });
-  await server.until((all) => all.some((line) => line.includes('frames indexed')), 'the replay to be running');
-  server.child.kill('SIGTERM');
-  assert.deepEqual(await server.stops(), { code: 0, signal: null });
+test('a capture that fails to close is reported and the replay server exits 1', { timeout: 60_000 }, async () => {
+  assert.deepEqual(explain(await observeReplayStop('replay-reject', TRIGGERS['a stop line'], { mode: 'reject' })), []);
 });
+
+// A copy of the server with one line changed, so a control can ask whether the observation above
+// notices. The line must be there exactly once, or the control would be testing nothing.
+function stagedWith(name, from, to) {
+  const root = join(work, 'staged', name);
+  mkdirSync(root, { recursive: true });
+  for (const entry of readdirSync(REPO)) {
+    if (entry !== 'server' && !entry.startsWith('.')) symlinkSync(join(REPO, entry), join(root, entry));
+  }
+  cpSync(join(REPO, 'server'), join(root, 'server'), { recursive: true });
+  const file = join(root, 'server/index.js');
+  const source = readFileSync(file, 'utf8');
+  assert.equal(source.split(from).length - 1, 1, `${from} is in server/index.js exactly once`);
+  writeFileSync(file, source.replace(from, to));
+  return root;
+}
+
+// Each removes one thing the replay shutdown does, and names the observations that must catch it
+// and no others.
+const REPLAY_CONTROLS = [
+  { name: 'the capture is never closed', from: 'await capture?.close();', to: '', fails: ['closed', 'finished'] },
+  { name: 'the capture is closed but not awaited', from: 'await capture?.close();', to: 'capture?.close();', fails: ['waited', 'finished'] },
+  { name: 'the replay timer is not cleared', from: 'clearTimeout(timer);', to: '', fails: ['timer'] },
+  { name: 'the listener is not closed', from: 'httpServer.close();', to: '', fails: ['listener'] },
+  { name: 'a capture that fails to close is counted as a success', mode: 'reject', from: 'failed = true;', to: '', fails: ['code'] },
+];
+
+for (const { name, from, to, fails, mode = 'hold' } of REPLAY_CONTROLS) {
+  test(`control: when ${name}, the replay stop observation goes red`, { timeout: 60_000 }, async () => {
+    const root = stagedWith(name.replace(/\W+/g, '-'), from, to);
+    const failed = await observeReplayStop(`control-${name.replace(/\W+/g, '-')}`, TRIGGERS['a stop line'], { mode, root });
+    assert.deepEqual(explain(failed.sort()), explain([...fails].sort()));
+  });
+}
 
 test('a replay of a capture that is not there still stops on the stop line', { timeout: 60_000 }, async () => {
   const server = await start('replay-missing', { flags: ['--stop-on-stdin', '--replay', join(work, 'not-there.knct')] });

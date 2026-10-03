@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { accessSync, constants, statSync } from 'node:fs';
 import { mkdir, readdir, writeFile, stat, rm, rename } from 'node:fs/promises';
-import { delimiter, dirname, join } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 
 // The encoder `FFMPEG` names, read once at import. Unset, `ffmpeg` is looked up on PATH at each
 // export, so one installed after the server started is found without a restart.
@@ -15,7 +15,9 @@ const FFMPEG_FILE = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
 
 function findOnPath(directories) {
   for (const directory of directories) {
-    const candidate = join(directory, FFMPEG_FILE);
+    // `resolve` reads an empty entry as the current directory, and makes the result absolute so the
+    // spawn does not look it up on PATH again.
+    const candidate = resolve(directory, FFMPEG_FILE);
     try {
       if (!statSync(candidate).isFile()) continue;
       accessSync(candidate, constants.X_OK);
@@ -31,12 +33,15 @@ function findOnPath(directories) {
  */
 export function ffmpegBinary({ named = FFMPEG_NAMED, searchPath = process.env.PATH } = {}) {
   if (named) return named;
-  const directories = (searchPath ?? '').split(delimiter).filter(Boolean);
+  // A PATH with entries keeps its empty ones, which a shell reads as the current directory; a PATH
+  // with none is refused.
+  const directories = searchPath ? searchPath.split(delimiter) : [];
   const found = findOnPath(directories);
   if (found) return found;
+  const searched = directories.map((directory) => directory || '.');
   throw new Error(
     `no ffmpeg to export with: the FFMPEG environment variable is not set, and ${FFMPEG_FILE} is not in `
-    + `${directories.length ? `any PATH directory (${directories.join(', ')})` : 'PATH, which is empty'}`,
+    + `${searched.length ? `any PATH directory (${searched.join(', ')})` : 'PATH, which is empty'}`,
   );
 }
 

@@ -3,9 +3,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, isAbsolute, join } from 'node:path';
 import { ffmpegBinary } from '../server/export.js';
 
 const noShell = process.platform !== 'win32' ? false : 'the stand-in encoders are shell scripts';
@@ -65,4 +65,92 @@ test('with neither, the refusal names the variable and every directory it search
 
 test('with neither and an empty PATH, the refusal says PATH is empty', () => {
   assert.throws(() => ffmpegBinary({ named: null, searchPath: '' }), /PATH, which is empty/);
+});
+
+// An empty entry in a PATH that has others is the current directory, as a shell reads it. The file
+// runs in a process of its own, so a test may change directory as long as it changes back.
+function inDirectory(directory, run) {
+  const before = process.cwd();
+  process.chdir(directory);
+  try {
+    run();
+  } finally {
+    process.chdir(before);
+  }
+}
+
+test('an empty entry in PATH is the current directory, whether first, between two or last', { skip: noShell }, () => {
+  const { runnable, cleanup } = stage();
+  try {
+    const here = runnable('here');
+    const expected = join(realpathSync(here.directory), 'ffmpeg');
+    inDirectory(here.directory, () => {
+      for (const searchPath of [
+        ['', '/no-such-ffmpeg-directory'],
+        ['/no-such-ffmpeg-directory', '', '/also-no-such-directory'],
+        ['/no-such-ffmpeg-directory', ''],
+        ['', ''],
+      ]) {
+        assert.equal(ffmpegBinary({ named: null, searchPath: searchPath.join(delimiter) }), expected, JSON.stringify(searchPath));
+      }
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test('the empty entry has its place in the search order, ahead of or behind a later ffmpeg', { skip: noShell }, () => {
+  const { runnable, cleanup } = stage();
+  try {
+    const here = runnable('here');
+    const later = runnable('later');
+    const mine = join(realpathSync(here.directory), 'ffmpeg');
+    inDirectory(here.directory, () => {
+      assert.equal(ffmpegBinary({ named: null, searchPath: ['', later.directory].join(delimiter) }), mine, 'a leading empty entry wins');
+      assert.equal(ffmpegBinary({ named: null, searchPath: ['/no-such-ffmpeg-directory', '', later.directory].join(delimiter) }), mine, 'so does one in the middle');
+      assert.equal(ffmpegBinary({ named: null, searchPath: [later.directory, ''].join(delimiter) }), later.file, 'a trailing one comes last');
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test('the result is absolute, so the spawn does not look it up on PATH again', { skip: noShell }, () => {
+  const { runnable, cleanup } = stage();
+  try {
+    const here = runnable('here');
+    inDirectory(here.directory, () => {
+      assert.ok(isAbsolute(ffmpegBinary({ named: null, searchPath: delimiter })));
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test('a PATH that is unset or empty is refused even with an ffmpeg in the current directory', { skip: noShell }, () => {
+  const { runnable, cleanup } = stage();
+  try {
+    const here = runnable('here');
+    inDirectory(here.directory, () => {
+      for (const searchPath of ['', null]) {
+        assert.throws(() => ffmpegBinary({ named: null, searchPath }), /PATH, which is empty/, `${searchPath}`);
+      }
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test('the refusal names an empty entry as the current directory', () => {
+  const stray = mkdtempSync(join(tmpdir(), 'braindance-ffmpeg-bare-'));
+  try {
+    inDirectory(stray, () => {
+      assert.throws(
+        () => ffmpegBinary({ named: null, searchPath: ['', '/no-such-ffmpeg-directory'].join(delimiter) }),
+        /any PATH directory \(\., \/no-such-ffmpeg-directory\)/,
+      );
+    });
+  } finally {
+    rmSync(stray, { recursive: true, force: true });
+  }
 });

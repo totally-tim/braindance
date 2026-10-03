@@ -63,7 +63,8 @@ function settle(take) {
 // Marks hang off the take rather than the recorder, or a take that failed mid-write leaves them
 // for whichever take closes next. Until the scan gives the take its hash they are the take object's
 // own, and the hash is what files them - once the hello has landed, because its `startedAt` is what
-// makes one take's bytes differ from another's: two takes that died before it hash alike.
+// makes one take's bytes differ from another's: two takes that died before it hash alike. A write
+// that fails rejects naming the take, so the way out of the process can say whose marks were lost.
 async function flushMarks(dir, take, index) {
   // The drop count goes into the marks log because it is the one sidecar neither derived from the
   // take's bytes nor thrown away with them, and a count held in memory is gone at the next restart.
@@ -80,7 +81,7 @@ async function flushMarks(dir, take, index) {
   try {
     await appendMarks(dir, index.hash, [...take.pendingMarks.splice(0), ...drop]);
   } catch (err) {
-    console.error(`[recorder] take ${take.id}: could not write its marks: ${err.message}`);
+    throw new Error(`take ${take.id}: could not write its marks: ${err.message}`);
   }
 }
 
@@ -211,7 +212,7 @@ export class Recorder {
         cachedIndex(failed.path).then(
           (index) => flushMarks(this.dir, failed, index),
           (err) => console.error(`[recorder] take ${failed.id}: its marks have no hash to be filed under: ${err.message}`),
-        );
+        ).catch((err) => console.error(`[recorder] ${err.message}`));
         this.onChange(this.state);
       }
     });
@@ -324,6 +325,7 @@ export class Recorder {
     // Past the catch rather than inside a branch of it: a close that failed still scans what
     // landed, and the scan is what gives the marks a hash to be filed under.
     let index;
+    let marksError = null;
     try {
       settle(take);
       forgetCapture(take.path);
@@ -333,7 +335,9 @@ export class Recorder {
         }
         throw err;
       });
-      await flushMarks(this.dir, take, index);
+      // Held until the take is reported closed: its index is on disk and the library lists it,
+      // whatever became of its marks.
+      await flushMarks(this.dir, take, index).catch((err) => { marksError = err; });
     } finally {
       // In a `finally`, or an index build that threw leaves this process claiming a file it had
       // stopped working on, with the library refusing to open or remove it until a restart. This
@@ -347,7 +351,12 @@ export class Recorder {
       + (take.droppedColour ? `, ${take.droppedColour} colour frames dropped to a slow disk` : ''),
     );
     this.onChange(this.state);
-    if (closeError) throw closeError;
+    if (closeError) {
+      // One error leaves, so the other is said here rather than dropped.
+      if (marksError) console.error(`[recorder] ${marksError.message}`);
+      throw closeError;
+    }
+    if (marksError) throw marksError;
     return {
       id: take.id,
       path: take.path,
