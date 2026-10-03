@@ -2,7 +2,8 @@
 // record and the refusal of a job file this build did not write. No server and no browser.
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import fsp, { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import fsp, { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -451,6 +452,77 @@ test('a sidecar that is a symlink is refused and the file it points at is not to
     await symlink(join(elsewhere, 'movie.mp4'), linkedArtifact);
     await writeFile(`${linkedArtifact}.job.json`, '{}\n');
     await assertNotDone(h, await reportDone(h, linkedArtifact), /artifact .* is a symlink/, linkedArtifact);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+// Swaps the sidecar as the queue opens it, after every check it made has passed. `noFollow: false`
+// strips `O_NOFOLLOW` from the open, which is the call a platform without the flag makes.
+const swapAtOpen = (h, output, swap, { noFollow = true } = {}) => failing(
+  'open',
+  ([path, flags]) => String(path).endsWith('.job.json') && typeof flags === 'number',
+  async (real, [path, flags]) => {
+    await swap(path);
+    return real(path, noFollow ? flags : flags & ~constants.O_NOFOLLOW);
+  },
+  () => reportDone(h, output),
+);
+
+// What a swap the queue refused leaves: the file it pointed at, and the folder, as they were.
+const assertSwapRefused = async (h, elsewhere, name) => {
+  assert.equal(await readFile(join(elsewhere, 'movie.mp4.job.json'), 'utf8'), '{"output":"stray"}\n', 'the outside sidecar is byte for byte what it was');
+  assert.deepEqual((await readdir(elsewhere)).sort(), ['movie.mp4', 'movie.mp4.job.json'], 'and nothing was made beside it');
+  assert.deepEqual((await readdir(join(h.exportsDir, `${name}.1-1`))).sort(), [`${name}.mp4`, `${name}.mp4.job.json`], 'no scratch file is left');
+};
+
+const toElsewhere = (elsewhere) => async (path) => {
+  await rm(path);
+  await symlink(join(elsewhere, 'movie.mp4.job.json'), path);
+};
+
+test('a sidecar swapped for a link after the checks is refused by the open', {
+  skip: constants.O_NOFOLLOW === undefined && 'this platform has no O_NOFOLLOW',
+}, async () => {
+  const h = await harness();
+  try {
+    const elsewhere = await outsideMovie(h);
+    const output = await h.artifact('raced');
+    const job = await swapAtOpen(h, output, toElsewhere(elsewhere));
+    await assertNotDone(h, job, /ELOOP/, output);
+    assert.equal((await lstat(`${output}.job.json`)).isSymbolicLink(), true, 'the link is left for whoever put it there');
+    await assertSwapRefused(h, elsewhere, 'raced');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('where the open cannot refuse a link, the file it returns is held to the one the checks saw', async () => {
+  const h = await harness();
+  try {
+    const elsewhere = await outsideMovie(h);
+    const output = await h.artifact('windows');
+    const job = await swapAtOpen(h, output, toElsewhere(elsewhere), { noFollow: false });
+    await assertNotDone(h, job, /replaced between the check and the open/, output);
+    assert.equal((await lstat(`${output}.job.json`)).isSymbolicLink(), true, 'the link is left for whoever put it there');
+    await assertSwapRefused(h, elsewhere, 'windows');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a sidecar replaced by another regular file after the checks is refused, whatever the open does', async () => {
+  const h = await harness();
+  try {
+    const elsewhere = await outsideMovie(h);
+    const output = await h.artifact('replaced');
+    const job = await swapAtOpen(h, output, async (path) => {
+      await writeFile(`${path}.other`, '{"output":"other"}\n');
+      await rename(`${path}.other`, path);
+    });
+    await assertNotDone(h, job, /replaced between the check and the open/, output);
+    assert.equal(await readFile(`${output}.job.json`, 'utf8'), '{"output":"other"}\n', 'the file that arrived is not amended');
+    await assertSwapRefused(h, elsewhere, 'replaced');
   } finally {
     await h.cleanup();
   }

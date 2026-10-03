@@ -812,10 +812,12 @@ names the artifact in `output`. The queue resolves the exports directory and the
 directory to where the filesystem puts them, writes `versions` and `warnings` into a scratch file
 it creates exclusively beside the render's `.job.json` sidecar, and renames that over the sidecar.
 It refuses an artifact outside the exports directory, a directory reached through a symlink, a
-symlinked artifact or sidecar, and a sidecar that is missing or is not a JSON object. A report that
-names no artifact, or whose artifact the queue refuses or fails to read, write or rename, is stored
-as `failed`. The job's `error` names the artifact path and the cause, the answer to the report is
-the failed job, and the file stays where it is. A failed job can be requeued.
+symlinked artifact or sidecar, and a sidecar that is missing or is not a JSON object. The sidecar
+it opens must have the device and inode of the one it checked, so a link or a file swapped in
+between is refused on every platform, one without `O_NOFOLLOW` included. A report that names no
+artifact, or whose artifact the queue refuses or fails to read, write or rename, is stored as
+`failed`. The job's `error` names the artifact path and the cause, the answer to the report is the
+failed job, and the file stays where it is. A failed job can be requeued.
 
 **A job file carries the queue's version, `JOB_VERSION`.** The store does not read a file of another
 version, and no worker is handed it. `GET /jobs` lists it under `refused` with its reason, and

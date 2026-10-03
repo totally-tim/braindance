@@ -482,15 +482,26 @@ export class JobStore {
     }
     const real = join(realFolder, basename(artifact));
     const sidecar = `${real}.job.json`;
+    let checked;
     for (const [what, path] of [['artifact', real], ['sidecar', sidecar]]) {
-      const info = await lstat(path).catch((err) => { throw new Error(`the ${what} cannot be read: ${err.message}`); });
+      const info = await lstat(path, { bigint: true }).catch((err) => { throw new Error(`the ${what} cannot be read: ${err.message}`); });
       if (info.isSymbolicLink()) throw new Error(`the ${what} ${path} is a symlink`);
-      if (what === 'sidecar' && !info.isFile()) throw new Error(`the sidecar ${path} is not a regular file`);
+      if (what === 'sidecar') {
+        if (!info.isFile()) throw new Error(`the sidecar ${path} is not a regular file`);
+        checked = info;
+      }
     }
-    // `O_NOFOLLOW` where there is one, so a link swapped in after the check above still fails.
+    // `O_NOFOLLOW` refuses a link swapped in after the checks where the platform has the flag. The
+    // open file's device and inode must also be the checked ones, which covers Windows and a
+    // regular file swapped in. A directory swapped above `folder` is not caught: Node cannot open
+    // relative to a descriptor.
     const reading = await open(sidecar, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     let text;
     try {
+      const opened = await reading.stat({ bigint: true });
+      if (opened.dev !== checked.dev || opened.ino !== checked.ino) {
+        throw new Error(`the sidecar ${sidecar} was replaced between the check and the open`);
+      }
       text = await reading.readFile('utf8');
     } finally {
       await reading.close();
