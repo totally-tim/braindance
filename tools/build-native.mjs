@@ -23,7 +23,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
   --stage  after the build, writes DIR/bin/grabber and DIR/lib/ holding every library the
            grabber loads that the system does not supply, each reached by a path relative to
            itself. It reads the result back and fails on any path left over from this
-           machine. DIR may be an earlier stage and nothing else.`);
+           machine. DIR must be empty or a stage an earlier --stage wrote.`);
   process.exit(0);
 }
 

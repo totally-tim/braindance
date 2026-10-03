@@ -94,7 +94,8 @@ points that already arrived, so putting a preview range on the grabber flags des
 **The grabber reads commands on stdin and ends when stdin does.** One command per line:
 `low-light on|off`, `hd-color on|off`, `key on|off` and `stop`. `stop` and end-of-file both end the
 run through the ordinary teardown, so a grabber started by hand needs a stdin that stays open. A
-terminal has one, and a script holds one with `tail -f /dev/null | native/build/grabber ...`.
+terminal has one. A background job in a script reads `/dev/null` instead, and a script holds a
+stdin open with `tail -f /dev/null | native/build/grabber ...`.
 
 ### Staged grabber
 
@@ -108,8 +109,8 @@ identity.
 
 The stage is read back with `otool` on macOS, and with `readelf -d` and `ldd` on Linux. It fails on
 an rpath or dependency outside the stage and the system, on a bundled library that resolves from
-anywhere else, and on a staged `--help` that loads one from outside. A `DIR` holding anything
-beyond an earlier stage is refused.
+anywhere else, and on a staged `--help` that loads one from outside. A `DIR` that is not empty
+and that an earlier `--stage` did not write is refused.
 
 ## Reaching it from another machine
 

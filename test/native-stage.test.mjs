@@ -113,6 +113,16 @@ test('ldd gives the name asked for and where it came to, or null when it did not
     { name: 'libusb-1.0.so.0', path: '/tmp/stage/lib/libusb-1.0.so.0' },
     { name: 'libstdc++.so.6', path: '/lib/x86_64-linux-gnu/libstdc++.so.6' },
     { name: 'libudev.so.1', path: null },
+    { name: '/lib64/ld-linux-x86-64.so.2', path: '/lib64/ld-linux-x86-64.so.2' },
+  ]);
+});
+
+test('ldd paths are bounded by the address, so a path with spaces comes back whole', () => {
+  const text = '\tlibfreenect2.so.0.2 => /tmp/stage space/lib/libfreenect2.so.0.2 (0x00007f1b4a000000)\n'
+    + '\t/tmp/build host/libusb-1.0.so.0 (0x00007f1b49f00000)\n';
+  assert.deepEqual(parseLdd(text), [
+    { name: 'libfreenect2.so.0.2', path: '/tmp/stage space/lib/libfreenect2.so.0.2' },
+    { name: '/tmp/build host/libusb-1.0.so.0', path: '/tmp/build host/libusb-1.0.so.0' },
   ]);
 });
 
@@ -141,9 +151,9 @@ test('the four libraries that travel on Linux are named, and a distribution\'s o
 const STAGE_LIB = '/tmp/stage/lib';
 const cleanLinux = () => ({
   files: [
-    { path: 'bin/grabber', kind: 'bin', rpath: ['$ORIGIN/../lib'] },
-    { path: 'lib/libfreenect2.so.0.2', kind: 'lib', rpath: ['$ORIGIN'] },
-    { path: 'lib/libusb-1.0.so.0', kind: 'lib', rpath: ['$ORIGIN'] },
+    { path: 'bin/grabber', kind: 'bin', needed: ['libfreenect2.so.0.2', 'libc.so.6'], rpath: ['$ORIGIN/../lib'] },
+    { path: 'lib/libfreenect2.so.0.2', kind: 'lib', needed: ['libusb-1.0.so.0'], rpath: ['$ORIGIN'] },
+    { path: 'lib/libusb-1.0.so.0', kind: 'lib', needed: ['libudev.so.1'], rpath: ['$ORIGIN'] },
   ],
   loaded: [
     { name: 'libfreenect2.so.0.2', path: `${STAGE_LIB}/libfreenect2.so.0.2` },
@@ -167,6 +177,10 @@ test('a Linux stage is refused when a library that has to travel resolves somewh
     ['an absolute rpath on the grabber', (s) => { s.files[0].rpath = ['/home/runner/vendor/prefix/lib']; }, /carries the rpath \/home\/runner/],
     ['no rpath on a library', (s) => { s.files[1].rpath = []; }, /carries no rpath/],
     ['the grabber\'s rpath on a library', (s) => { s.files[2].rpath = ['$ORIGIN/../lib']; }, /not \$ORIGIN/],
+    ['a library that needs another by an absolute path', (s) => { s.files[1].needed = ['/tmp/build-host/libusb-1.0.so.0']; }, /needs \/tmp\/build-host\/libusb-1\.0\.so\.0 by an absolute path/],
+    ['an absolute dependency on a library of the build host\'s', (s) => { s.loaded.push({ name: '/tmp/build-host/libfoo.so.1', path: '/tmp/build-host/libfoo.so.1' }); }, /neither the system's nor in the stage/],
+    ['an absolute dependency on the build host\'s copy of a library that has to travel', (s) => { s.loaded.push({ name: '/tmp/build-host/libusb-1.0.so.0', path: '/tmp/build-host/libusb-1.0.so.0' }); }, /outside the stage/],
+    ['an absolute dependency on the host\'s own copy of a library that has to travel', (s) => { s.loaded.push({ name: '/usr/lib/x86_64-linux-gnu/libusb-1.0.so.0', path: '/usr/lib/x86_64-linux-gnu/libusb-1.0.so.0' }); }, /outside the stage/],
   ];
   for (const [what, edit, expected] of cases) {
     const problems = broken(edit);
@@ -174,16 +188,48 @@ test('a Linux stage is refused when a library that has to travel resolves somewh
   }
 });
 
-test('stage refuses a directory that holds anything beyond a stage, before it touches it', () => {
+const stageInto = (dir) => stage({ grabber: join(dir, 'no-such-grabber'), dir });
+
+test('stage refuses a directory it did not write, before it touches it', () => {
   const dir = mkdtempSync(join(tmpdir(), 'braindance-stage-'));
   try {
     mkdirSync(join(dir, 'bin'));
+    mkdirSync(join(dir, 'lib'));
     writeFileSync(join(dir, 'bin', 'keep'), 'x');
+    writeFileSync(join(dir, 'lib', 'keep'), 'x');
+    assert.throws(() => stageInto(dir), /not empty and is not a stage this wrote/);
+    assert.ok(existsSync(join(dir, 'bin', 'keep')) && existsSync(join(dir, 'lib', 'keep')),
+      'a directory holding only bin/ and lib/ is somebody\'s install and is left as it was');
     writeFileSync(join(dir, 'notes.txt'), 'x');
-    assert.throws(() => stage({ grabber: join(dir, 'no-such-grabber'), dir }), /notes\.txt.*not part of a stage/);
-    assert.ok(existsSync(join(dir, 'bin', 'keep')) && existsSync(join(dir, 'notes.txt')), 'a refused directory is left as it was');
+    assert.throws(() => stageInto(dir), /not empty and is not a stage this wrote/);
     const file = join(dir, 'notes.txt');
     assert.throws(() => stage({ grabber: file, dir: file }), /is not a directory/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stage replaces a directory that carries its marker, and refuses one with strays beside it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'braindance-stage-'));
+  try {
+    mkdirSync(join(dir, 'bin'));
+    writeFileSync(join(dir, 'bin', 'old'), 'x');
+    writeFileSync(join(dir, '.braindance-stage'), '');
+    assert.throws(() => stageInto(dir), (e) => !/refusing/.test(e.message), 'it got past the directory check');
+    assert.ok(!existsSync(join(dir, 'bin', 'old')), 'the earlier stage is gone');
+    assert.ok(existsSync(join(dir, '.braindance-stage')), 'and the new one is marked');
+    writeFileSync(join(dir, 'notes.txt'), 'x');
+    assert.throws(() => stageInto(dir), /notes\.txt beside a stage/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stage takes an empty directory', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'braindance-stage-'));
+  try {
+    assert.throws(() => stageInto(dir), (e) => !/refusing/.test(e.message));
+    assert.ok(existsSync(join(dir, '.braindance-stage')));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

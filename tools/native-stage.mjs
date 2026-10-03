@@ -3,7 +3,7 @@
 // --stage DIR` is the entry point.
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
-  chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync,
+  chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
@@ -47,12 +47,18 @@ export function parseOtoolRpaths(text) {
   return out;
 }
 
-/** `ldd`'s resolved libraries: the name asked for and the path it came to, null when not found. */
+/**
+ * `ldd`'s resolved libraries: the name asked for and the path it came to, null when not found. A
+ * dependency recorded by an absolute path prints with no arrow and comes back as its own path. The
+ * address closing each line is what bounds a path, because a path can hold spaces.
+ */
 export function parseLdd(text) {
   const out = [];
   for (const line of text.split('\n')) {
-    const m = /^\s*(\S+) => (not found|\S+)/.exec(line);
-    if (m) out.push({ name: m[1], path: m[2] === 'not found' ? null : m[2] });
+    const arrow = /^\s*(\S+) => (?:(not found)|(.+?) \(0x[0-9a-fA-F]+\))\s*$/.exec(line);
+    if (arrow) { out.push({ name: arrow[1], path: arrow[2] ? null : arrow[3] }); continue; }
+    const bare = /^\s*(\/.+?) \(0x[0-9a-fA-F]+\)\s*$/.exec(line);
+    if (bare) out.push({ name: bare[1], path: bare[1] });
   }
   return out;
 }
@@ -102,7 +108,7 @@ export function macViolations(files, staged) {
 
 /**
  * What is wrong with a staged Linux tree. `files` is one record per ELF: its path under the stage,
- * `bin` or `lib`, and its RPATH and RUNPATH entries. `loaded` is what `ldd` resolved for the
+ * `bin` or `lib`, its NEEDED names and its RPATH and RUNPATH entries. `loaded` is what `ldd` resolved for the
  * grabber, and `stageLib` the real path of lib/. Every library that has to travel has to resolve
  * inside the stage, because a copy on this machine's own library path would run just as well and
  * prove nothing.
@@ -112,6 +118,9 @@ export function linuxViolations(files, loaded, stageLib) {
   for (const f of files) {
     const want = f.kind === 'bin' ? LINUX_BIN_RPATH : LINUX_LIB_RPATH;
     if (f.rpath.length === 0) problems.push(`${f.path} carries no rpath, so it would be found by the host's search path alone`);
+    for (const n of f.needed) {
+      if (n.includes('/')) problems.push(`${f.path} needs ${n} by an absolute path, which no rpath redirects`);
+    }
     for (const r of f.rpath) {
       if (r !== want) problems.push(`${f.path} carries the rpath ${r}, which is not ${want}`);
     }
@@ -119,7 +128,7 @@ export function linuxViolations(files, loaded, stageLib) {
   const inStage = (p) => p === stageLib || p.startsWith(`${stageLib}/`);
   for (const { name, path } of loaded) {
     if (path === null) problems.push(`${name} is not found`);
-    else if (LINUX_BUNDLED.test(name)) {
+    else if (LINUX_BUNDLED.test(basename(name))) {
       if (!inStage(path)) problems.push(`${name} resolves to ${path}, outside the stage`);
     } else if (!isLinuxSystem(path) && !inStage(path)) {
       problems.push(`${name} resolves to ${path}, which is neither the system's nor in the stage`);
@@ -136,18 +145,25 @@ const need = (bin, args, hint) => {
   if (spawnSync(bin, args, { stdio: 'ignore' }).error) throw new Error(`${bin} is not on PATH - ${hint}`);
 };
 
-// An existing directory is replaced only when it is a stage this wrote, so a typo does not empty a
-// directory that holds something else.
+// A stage carries this file, and only a directory that carries it is replaced. Another directory
+// holding bin/ and lib/ is somebody's install, and a typo must not empty it.
+const MARKER = '.braindance-stage';
+
 function prepare(dir) {
   if (existsSync(dir)) {
     if (!statSync(dir).isDirectory()) throw new Error(`${dir} exists and is not a directory`);
-    const stray = readdirSync(dir).filter((e) => e !== 'bin' && e !== 'lib');
-    if (stray.length) throw new Error(`${dir} holds ${stray.join(', ')}, which is not part of a stage - refusing to replace it`);
+    const entries = readdirSync(dir);
+    if (entries.length && !entries.includes(MARKER)) {
+      throw new Error(`${dir} is not empty and is not a stage this wrote - refusing to replace it`);
+    }
+    const stray = entries.filter((e) => e !== MARKER && e !== 'bin' && e !== 'lib');
+    if (stray.length) throw new Error(`${dir} holds ${stray.join(', ')} beside a stage - refusing to replace it`);
     rmSync(join(dir, 'bin'), { recursive: true, force: true });
     rmSync(join(dir, 'lib'), { recursive: true, force: true });
   }
   mkdirSync(join(dir, 'bin'), { recursive: true });
   mkdirSync(join(dir, 'lib'), { recursive: true });
+  writeFileSync(join(dir, MARKER), '');
 }
 
 // Copied as a file, never as a link, and made writable: Homebrew's libraries are read-only.
@@ -280,7 +296,8 @@ export function audit(dir) {
     const records = files.map((f) => {
       const dyn = run('readelf', ['-d', f.abs]);
       report.push(`$ readelf -d ${f.path}\n${dyn.split('\n').filter((l) => /NEEDED|RPATH|RUNPATH/.test(l)).join('\n')}`);
-      return { path: f.path, kind: f.kind, rpath: parseReadelfDynamic(dyn).rpath };
+      const { needed, rpath } = parseReadelfDynamic(dyn);
+      return { path: f.path, kind: f.kind, needed, rpath };
     });
     const env = { ...process.env };
     delete env.LD_LIBRARY_PATH;
