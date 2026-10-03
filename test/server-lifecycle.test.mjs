@@ -34,11 +34,19 @@ before(() => {
   slowSample = join(work, 'slow.knct');
   execFileSync(process.execPath, [join(REPO, 'tools/make-sample.mjs'), slowSample, '--frames', '30', '--fps', '2'], { stdio: 'pipe' });
   // Two stand-ins that write their own name where ffmpeg would put the video, so the file says
-  // which one ran. `$last` is the output path, which is ffmpeg's last argument.
+  // which one ran. The server child's PATH is one directory, so node does the work and the shell
+  // only execs it by absolute path.
+  const standIn = join(work, 'stand-in-encoder.mjs');
+  writeFileSync(standIn, [
+    "import { writeFileSync } from 'node:fs';",
+    "process.stdin.on('data', () => {});",
+    "process.stdin.on('end', () => writeFileSync(process.argv.at(-1), process.argv[2]));",
+    '',
+  ].join('\n'));
   for (const [dir, says] of [['named', 'named'], ['on-path', 'path']]) {
     mkdirSync(join(work, dir));
     const file = join(work, dir, dir === 'named' ? 'my-encoder' : 'ffmpeg');
-    writeFileSync(file, `#!/bin/sh\ncat >/dev/null\nfor last; do :; done\nprintf ${says} > "$last"\n`);
+    writeFileSync(file, `#!/bin/sh\nexec "${process.execPath}" "${standIn}" ${says} "$@"\n`);
     chmodSync(file, 0o755);
   }
   mkdirSync(join(work, 'empty'));
@@ -221,6 +229,26 @@ async function exportOneFrame(server) {
     if (message.done || message.error || message.closed || message.socketError) return heard;
   }
 }
+
+// A stand-in that exits before its input ends makes the server report "ffmpeg exited 0" ahead of
+// the export's end, a race a slow process start hides. So the stand-in is held to its job directly:
+// running while its input is open, named when the input closes, with nothing on PATH.
+test('control: a stand-in encoder waits for the end of its input with nothing on PATH, then writes its name', { skip: noShell, timeout: 30_000 }, async () => {
+  const output = join(work, 'control-encoder.out');
+  const encoder = spawn(join(work, 'on-path/ffmpeg'), ['-i', 'pipe:0', output], {
+    env: { PATH: join(work, 'empty') }, stdio: ['pipe', 'ignore', 'pipe'],
+  });
+  children.add(encoder);
+  const stderr = [];
+  encoder.stderr.on('data', (chunk) => stderr.push(chunk.toString('utf8')));
+  const exited = new Promise((done) => encoder.once('exit', (code, signal) => done({ code, signal })));
+  encoder.stdin.write(Buffer.alloc(16));
+  await sleep(300);
+  assert.equal(encoder.exitCode, null, `the stand-in exited with its input still open: ${stderr.join('').trim()}`);
+  encoder.stdin.end();
+  assert.deepEqual(await exited, { code: 0, signal: null }, stderr.join('').trim());
+  assert.equal(readFileSync(output, 'utf8'), 'path');
+});
 
 test('an export lands under --exports and is served from it, by the encoder FFMPEG names', { skip: noShell, timeout: 60_000 }, async () => {
   const server = await start('export-named', {
