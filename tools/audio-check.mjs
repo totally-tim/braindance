@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { FFMPEG } from '../server/export.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const flag = (name, fallback = null) => { const i = process.argv.indexOf(name); return i < 0 ? fallback : process.argv[i + 1]; };
@@ -15,7 +16,6 @@ const AUDIO = flag('--audio');
 const SOURCE = flag('--source');
 const SHOTS = flag('--shots');
 const MUTATE = flag('--mutate');
-const FFMPEG = process.env.FFMPEG ?? '/opt/homebrew/bin/ffmpeg';
 const MUTATIONS = {
   'signal-disconnected': {
     file: 'web/main.js', edits: [['    applyAudio(t);', '    /* audio deliberately disconnected */']],

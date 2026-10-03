@@ -4,7 +4,7 @@ import {
   AUDIO_RATE, AUDIO_SECONDS, AUDIO_UPLOAD_BYTES, analyseAudio, checkAudioClip, defaultConditioning,
   audioSpectrum, modulatedValue, readAudioWav, signalAt,
 } from '../web/audio-source.js';
-import { audioFilter, AudioStore } from '../server/audio.js';
+import { AudioStore } from '../server/audio.js';
 import { requireMutation } from '../server/http-guard.js';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readdir, writeFile, rm, symlink } from 'node:fs/promises';
@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { EventEmitter } from 'node:events';
-import { handleExportSocket } from '../server/export.js';
+import { audioFilter, handleExportSocket } from '../server/export.js';
 
 const tone = (hz, amplitude = 0.2) => {
   const samples = Float32Array.from({ length: AUDIO_RATE }, (_, i) => amplitude * Math.sin(2 * Math.PI * hz * i / AUDIO_RATE));

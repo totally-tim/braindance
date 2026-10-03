@@ -6,11 +6,10 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, writeFile, stat, rm, rename } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { audioFilter } from './audio.js';
 import { AUDIO_RATE, checkAudioClip, readAudioWav } from '../web/audio-source.js';
 
 // Absolute rather than resolved off PATH: this is the encoder the export was measured against.
-const FFMPEG = process.env.FFMPEG ?? '/opt/homebrew/bin/ffmpeg';
+export const FFMPEG = process.env.FFMPEG ?? '/opt/homebrew/bin/ffmpeg';
 
 // How many frames may be in flight. A courtesy the client extends rather than something this
 // server enforces - nothing below counts unacked frames.
@@ -120,6 +119,26 @@ async function artifactBytes(spec, artifact, frames) {
   let total = 0;
   for (const name of names) total += (await stat(join(artifact, name))).size;
   return total;
+}
+
+// Silence is generated as a stream, so a clip placed hours into the edit needs no delay buffer.
+export function audioFilter(clip, from, frames, fps) {
+  const count = Math.round(frames * AUDIO_RATE / fps);
+  const outputStart = Math.round(from * AUDIO_RATE);
+  const sourceStart = Math.round(clip.start * AUDIO_RATE);
+  const sourceEnd = sourceStart + Math.round(clip.duration * AUDIO_RATE);
+  const begin = Math.max(outputStart, sourceStart);
+  const end = Math.min(outputStart + count, sourceEnd);
+  const silence = (n, name) => `anullsrc=r=${AUDIO_RATE}:cl=stereo,atrim=end_sample=${n}[${name}]`;
+  if (end <= begin) return `${silence(count, 'audio')}`;
+  const filters = [];
+  const parts = [];
+  if (begin > outputStart) { filters.push(silence(begin - outputStart, 'lead')); parts.push('[lead]'); }
+  filters.push(`[1:a]atrim=start_sample=${begin - sourceStart}:end_sample=${end - sourceStart},asetpts=PTS-STARTPTS[body]`);
+  parts.push('[body]');
+  if (end < outputStart + count) { filters.push(silence(outputStart + count - end, 'tail')); parts.push('[tail]'); }
+  filters.push(`${parts.join('')}concat=n=${parts.length}:v=0:a=1[audio]`);
+  return filters.join(';');
 }
 
 function ffmpegArgs({ width, height, fps, codec, into, audio = null }) {

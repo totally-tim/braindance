@@ -5,8 +5,8 @@ import { link, mkdir, mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { validAudioHash, AUDIO_RATE, AUDIO_SECONDS, AUDIO_UPLOAD_BYTES, readAudioWav } from '../web/audio-source.js';
+import { FFMPEG } from './export.js';
 
-const FFMPEG = process.env.FFMPEG ?? '/opt/homebrew/bin/ffmpeg';
 const digest = (bytes) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 
 export class AudioStore {
@@ -77,24 +77,4 @@ export class AudioStore {
       this.importing = false;
     }
   }
-}
-
-// Silence is generated as a stream, so a clip placed hours into the edit needs no delay buffer.
-export function audioFilter(clip, from, frames, fps) {
-  const count = Math.round(frames * AUDIO_RATE / fps);
-  const outputStart = Math.round(from * AUDIO_RATE);
-  const sourceStart = Math.round(clip.start * AUDIO_RATE);
-  const sourceEnd = sourceStart + Math.round(clip.duration * AUDIO_RATE);
-  const begin = Math.max(outputStart, sourceStart);
-  const end = Math.min(outputStart + count, sourceEnd);
-  const silence = (n, name) => `anullsrc=r=${AUDIO_RATE}:cl=stereo,atrim=end_sample=${n}[${name}]`;
-  if (end <= begin) return `${silence(count, 'audio')}`;
-  const filters = [];
-  const parts = [];
-  if (begin > outputStart) { filters.push(silence(begin - outputStart, 'lead')); parts.push('[lead]'); }
-  filters.push(`[1:a]atrim=start_sample=${begin - sourceStart}:end_sample=${end - sourceStart},asetpts=PTS-STARTPTS[body]`);
-  parts.push('[body]');
-  if (end < outputStart + count) { filters.push(silence(outputStart + count - end, 'tail')); parts.push('[tail]'); }
-  filters.push(`${parts.join('')}concat=n=${parts.length}:v=0:a=1[audio]`);
-  return filters.join(';');
 }
