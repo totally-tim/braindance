@@ -5,12 +5,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
-  LINUX_BUNDLED, isLinuxSystem, isMacSystem, linuxViolations, macViolations,
-  parseLdd, parseOtoolDeps, parseOtoolId, parseOtoolRpaths, parseReadelfDynamic, stage,
+  LINUX_BUNDLED, isLinuxSystem, isMacSystem, linuxLibrariesToStage, linuxViolations, macViolations,
+  parseLdd, parseOtoolDeps, parseOtoolId, parseOtoolRpaths, parseReadelfDynamic, stage, stageLinux,
 } from '../tools/native-stage.mjs';
 
 const BUILT_GRABBER = `native/build/grabber:
@@ -145,6 +145,97 @@ test('the four libraries that travel on Linux are named, and a distribution\'s o
   }
   for (const name of ['libc.so.6', 'libstdc++.so.6', 'libGL.so.1', 'libudev.so.1', 'libusbmuxd.so.6', 'libglfwx.so.3']) {
     assert.ok(!LINUX_BUNDLED.test(name), name);
+  }
+});
+
+// What ldd prints for a grabber built against libfreenect2 with VA-API found on the build host:
+// the four libraries that travel by name, one that travels because nothing on the target
+// supplies it, and the system's own.
+const LDD_WITH_VAAPI = `\tlinux-vdso.so.1 (0x00007ffd4b5f6000)
+\tlibfreenect2.so.0.2 => /home/runner/vendor/prefix/lib/libfreenect2.so.0.2 (0x00007f1b4a000000)
+\tlibusb-1.0.so.0 => /usr/lib/x86_64-linux-gnu/libusb-1.0.so.0 (0x00007f1b49f00000)
+\tlibturbojpeg.so.0 => /usr/lib/x86_64-linux-gnu/libturbojpeg.so.0 (0x00007f1b49e00000)
+\tlibglfw.so.3 => /usr/lib/x86_64-linux-gnu/libglfw.so.3 (0x00007f1b49d00000)
+\tlibva.so.2 => /opt/media/lib/libva.so.2 (0x00007f1b49c00000)
+\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007f1b49b00000)
+\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f1b49a00000)
+\t/lib64/ld-linux-x86-64.so.2 (0x00007f1b4b2a0000)
+`;
+
+test('Linux staging carries the four named libraries and every other one that resolves outside the system', () => {
+  const carried = linuxLibrariesToStage(parseLdd(LDD_WITH_VAAPI));
+  assert.deepEqual(carried.map((l) => l.name),
+    ['libfreenect2.so.0.2', 'libusb-1.0.so.0', 'libturbojpeg.so.0', 'libglfw.so.3', 'libva.so.2']);
+  assert.equal(carried.find((l) => l.name === 'libva.so.2').path, '/opt/media/lib/libva.so.2');
+  const local = linuxLibrariesToStage([{ name: 'libfoo.so.2', path: '/usr/local/lib/libfoo.so.2.1' }]);
+  assert.deepEqual(local, [{ name: 'libfoo.so.2', path: '/usr/local/lib/libfoo.so.2.1' }],
+    '/usr/local/lib is not a system directory, and the real file travels under the name asked for');
+  assert.deepEqual(linuxLibrariesToStage([{ name: 'libc.so.6', path: '/usr/lib/x86_64-linux-gnu/libc.so.6' }]), []);
+});
+
+test('Linux staging refuses what it cannot carry: an unresolved library, a shared name, an absolute dependency', () => {
+  const message = (loaded) => { try { linuxLibrariesToStage(loaded); } catch (e) { return e.message; } return ''; };
+  assert.match(message([{ name: 'libva.so.2', path: null }]), /libva\.so\.2 does not resolve/);
+  assert.match(message([{ name: 'libudev.so.1', path: null }]), /libudev\.so\.1 does not resolve/,
+    'a system library the build host cannot find is as unrunnable as a bundled one');
+  assert.match(message([{ name: 'libfoo.so.1', path: '/opt/a/lib/libfoo.so.1' }, { name: 'libfoo.so.1', path: '/opt/b/lib/libfoo.so.1' }]),
+    /two libraries are both called libfoo\.so\.1: \/opt\/a\/lib\/libfoo\.so\.1 and \/opt\/b\/lib\/libfoo\.so\.1/);
+  assert.match(message([{ name: '/opt/media/lib/libva.so.2', path: '/opt/media/lib/libva.so.2' }]),
+    /by an absolute path, which no rpath redirects/);
+  assert.match(message([{ name: '/usr/lib/x86_64-linux-gnu/libusb-1.0.so.0', path: '/usr/lib/x86_64-linux-gnu/libusb-1.0.so.0' }]),
+    /by an absolute path/, 'a bundled library named by an absolute path is not the stage\'s copy even in a system directory');
+  const same = [{ name: 'libfoo.so.1', path: '/opt/a/lib/libfoo.so.1' }, { name: 'libfoo.so.1', path: '/opt/a/lib/libfoo.so.1' }];
+  assert.equal(linuxLibrariesToStage(same).length, 1, 'one file listed twice is one library');
+  assert.deepEqual(linuxLibrariesToStage([{ name: '/lib64/ld-linux-x86-64.so.2', path: '/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2' }]), [],
+    'the loader, named by its absolute system path, is the system\'s');
+});
+
+// stageLinux against a grabber whose ldd output names a library outside the system. `ldd` and
+// `patchelf` are stand-ins on PATH: ldd prints the text, patchelf writes down the call.
+test('the Linux stage copies a dependency from outside the system and gives it its own $ORIGIN search path', () => {
+  const root = mkdtempSync(join(tmpdir(), 'braindance-linux-stage-'));
+  const saved = { ...process.env };
+  try {
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    const tool = (name, body) => { writeFileSync(join(bin, name), `#!/bin/sh\n[ "$1" = --version ] && exit 0\n${body}\n`); chmodSync(join(bin, name), 0o755); };
+    tool('ldd', 'cat "$FAKE_LDD_OUTPUT"');
+    tool('patchelf', 'echo "$@" >> "$FAKE_PATCHELF_LOG"');
+    const host = (rel, text) => {
+      const path = join(root, 'host', rel);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, text);
+      return path;
+    };
+    const grabber = host('build/grabber', 'grabber');
+    const libs = {
+      'libfreenect2.so.0.2': host('prefix/libfreenect2.so.0.2', 'freenect2'),
+      'libusb-1.0.so.0': host('prefix/libusb-1.0.so.0', 'usb'),
+      'libva.so.2': host('opt/libva.so.2.1900.0', 'va'),
+    };
+    const lines = Object.entries(libs).map(([name, path]) => `\t${name} => ${path} (0x00007f1b4a000000)`);
+    writeFileSync(join(root, 'ldd.txt'), `\tlinux-vdso.so.1 (0x00007ffd4b5f6000)\n${lines.join('\n')}\n`);
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+    process.env.FAKE_LDD_OUTPUT = join(root, 'ldd.txt');
+    process.env.FAKE_PATCHELF_LOG = join(root, 'patchelf.log');
+    const dir = join(root, 'stage');
+    mkdirSync(join(dir, 'bin'), { recursive: true });
+    mkdirSync(join(dir, 'lib'));
+    const names = stageLinux(grabber, dir);
+    assert.deepEqual(names, Object.keys(libs));
+    assert.deepEqual(readdirSync(join(dir, 'lib')).sort(), Object.keys(libs).sort(), 'the dependency outside the system is in lib/');
+    assert.equal(readFileSync(join(dir, 'lib', 'libva.so.2'), 'utf8'), 'va', 'under the name the loader asks for, holding the real file');
+    const calls = readFileSync(join(root, 'patchelf.log'), 'utf8').trim().split('\n').map((l) => l.replace(`${dir}/`, ''));
+    assert.deepEqual(calls.sort(), [
+      '--set-rpath $ORIGIN lib/libfreenect2.so.0.2',
+      '--set-rpath $ORIGIN lib/libusb-1.0.so.0',
+      '--set-rpath $ORIGIN lib/libva.so.2',
+      '--set-rpath $ORIGIN/../lib bin/grabber',
+    ]);
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

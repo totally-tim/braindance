@@ -1,4 +1,4 @@
-#include <csignal>
+#include <atomic>
 #include <cstdio>
 #include <string>
 #include <fcntl.h>
@@ -21,7 +21,7 @@ struct HdEncoder {
   void setKeyEnabled(bool on) { keyCalls++; keyOn = on; }
 };
 
-static volatile std::sig_atomic_t g_stop = 0;
+static std::atomic<bool> g_stop{false};
 
 #include "poll-under-test.h"
 
@@ -45,7 +45,7 @@ struct Stdin {
     if (::dup2(fds[0], STDIN_FILENO) < 0) std::_Exit(2);
     ::close(fds[0]);
     writer = fds[1];
-    g_stop = 0;
+    g_stop = false;
   }
   ~Stdin() { close(); }
   void send(const char *text) {
@@ -55,7 +55,7 @@ struct Stdin {
   void close() { if (writer >= 0) { ::close(writer); writer = -1; } }
   bool poll(bool wantColor = true) {
     pollCommands(&dev, pending, wantColor, &hd);
-    return g_stop != 0;
+    return g_stop;
   }
 };
 
@@ -135,6 +135,6 @@ int main() {
     check(in.poll(), "and the close that follows does");
   }
 
-  std::printf("[grabber-stdin] %d assertions, %d failed\n", checked, failed);
+  std::printf("the reader: %d assertions, %d failed\n", checked, failed);
   return failed ? 1 : 0;
 }

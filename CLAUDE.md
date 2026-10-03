@@ -123,7 +123,7 @@ Read the assertion count, never the exit code.
 | `cli-check.mjs` | CLI, standby, demand wake, camera and server-owned output | port 8401 free, a synthetic capture, ffmpeg and a GPU browser |
 | `syntax-check.mjs` | every shipped file parses, the cross-language constants agree, the citations resolve, every tool is named here, every check tool is run by CI or listed as not run | nothing |
 | `hd-encoder-check.mjs` | native pairing under encoder backlog, held colour, key range and RGBX, and the join when an encoder's scope ends early | a C++ compiler and TurboJPEG |
-| `grabber-stdin-check.mjs` | the grabber's command reader: `stop` and end-of-file on stdin end the run, a pipe with nothing in it and a line that only resembles `stop` do not | a C++ compiler |
+| `grabber-stdin-check.mjs` | the grabber's stop path against a fake sensor: `stop` and end-of-file on stdin end the run through its teardown, even with stdout unread and the encoder stalled in a write; a pipe with nothing in it and a line that only resembles `stop` do not | a C++ compiler and TurboJPEG |
 | `cpp-check.mjs` | both C++ files parse and typecheck, in eight pipeline and colour-decoder configurations, and each ColorDecoder enumerator exists only where its decoder does | a C++ compiler and turbojpeg's headers |
 | `decoder-check.mjs` | each `ColorDecoder` enumerator builds its own processor in the loaded library, and the grabber offers and defaults to what that library carries | a C++ compiler, `vendor/prefix` and the built grabber |
 | `grabber-args-check.mjs` | the built grabber refuses a depth-clip range it cannot read or that is empty, before it looks for a device | what build-native needs, and libfreenect2 in `vendor/prefix` |

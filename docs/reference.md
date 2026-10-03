@@ -95,13 +95,16 @@ points that already arrived, so putting a preview range on the grabber flags des
 `low-light on|off`, `hd-color on|off`, `key on|off` and `stop`. `stop` and end-of-file both end the
 run through the ordinary teardown, so a grabber started by hand needs a stdin that stays open. A
 terminal has one. A background job in a script reads `/dev/null` instead, and a script holds a
-stdin open with `tail -f /dev/null | native/build/grabber ...`.
+stdin open with `tail -f /dev/null | native/build/grabber ...`. The server keeps reading stdout until
+the grabber exits. A grabber also ends on a stop when its parent has stopped reading, because it
+gives up the write in hand after 100 ms with nothing moving.
 
 ### Staged grabber
 
 `node tools/build-native.mjs --stage DIR` builds as usual, then writes `DIR/bin/grabber` and
-`DIR/lib/`. `lib/` holds libfreenect2, libusb and libturbojpeg, and GLFW on Linux. The system
-supplies the rest, graphics drivers included. The grabber finds `lib/` by `@loader_path/../lib` on
+`DIR/lib/`. `lib/` holds libfreenect2, libusb and libturbojpeg, and GLFW on Linux, and on Linux any
+other library the grabber loads from outside the system library directories, such as a VA-API
+library under `/opt`. The system supplies the rest, graphics drivers included. The grabber finds `lib/` by `@loader_path/../lib` on
 macOS and `$ORIGIN/../lib` on Linux, and each library finds its neighbours by `@loader_path` or
 `$ORIGIN`, so the directory runs from wherever it is moved to. Linux needs `patchelf`, and macOS
 signs each file ad hoc again after its load paths change, which a release replaces with its own
@@ -109,7 +112,9 @@ identity.
 
 The stage is read back with `otool` on macOS, and with `readelf -d` and `ldd` on Linux. It fails on
 an rpath or dependency outside the stage and the system, on a bundled library that resolves from
-anywhere else, and on a staged `--help` that loads one from outside. A `DIR` that is not empty
+anywhere else, and on a staged `--help` that loads one from outside. A Linux dependency needed by
+an absolute path, or two that would share a file name in `lib/`, is refused before anything is
+copied. A `DIR` that is not empty
 and that an earlier `--stage` did not write is refused.
 
 ## Reaching it from another machine

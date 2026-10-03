@@ -40,6 +40,13 @@ End-of-file on stdin stops it as `stop` does, so a grabber whose parent is gone 
 same teardown. Only a read of zero bytes is end-of-file. Stdin is non-blocking, and a pipe with
 nothing in it yet is not a closed one.
 
+Stdout is non-blocking too, so a write to a full pipe waits in a 100 ms poll rather than in the
+kernel. The wait reads stdin, so the grabber sees a `stop` behind a stalled frame at once and
+applies any other command while the write waits. A write gives up when a stop is set and a whole
+interval passes with nothing moving, so a parent that stopped reading cannot hold the run, and a
+parent that keeps reading gets its last frame whole. The encoder thread's writes give up the same
+way. The grabber sets the flag that ends them before the join, on every way out of the loop.
+
 `--min-depth` and `--max-depth` clip on the GPU before a frame is built, so they decide what exists
 at all. The viewer's `nearClip` and `farClip` only hide points that already arrived, and the
 recorder's preview range drives that pair, never the grabber's.

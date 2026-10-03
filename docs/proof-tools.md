@@ -59,7 +59,7 @@ Per tool, read from the source:
 | `module-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a stale anchor |
 | `syntax-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor |
 | `cpp-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor, no compiler or headers |
-| `grabber-stdin-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: a stale anchor, no compiler |
+| `grabber-stdin-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a stale anchor, no compiler or TurboJPEG, a grabber that will not build |
 | `decoder-check` | pass, or a missed mutation | a failed assertion, a catch, or a probe that will not build or run | `DID NOT RUN`: no compiler, no built library or grabber, a stale anchor, a failed rebuild, or a mutated rebuild that changed nothing |
 | `grabber-args-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no `vendor/prefix`, build-native failed, a mutation the binary did not change, a stale anchor |
 | `vendor-check` | pass, or a **catch** | a failed assertion, a miss, or a stale anchor | `PASS on the source, with the artifact untested` |
@@ -910,15 +910,29 @@ is NOT CAUGHT even though it exits 1.
 The early-return row is the part of the grabber's failed corpus write that runs without a sensor:
 an encoder left running when its scope ends is joined. The write itself happens after the device
 starts, so the grabber's exit 1 on a short write needs a sensor and a filesystem that fills during
-the dump, and no tool here reaches it.
+the dump, and no tool here reaches it. `grabber-stdin-check` reaches the exit 1 for a corpus file
+that will not open.
 
 ## `grabber-stdin-check`
 
-The grabber's command reader: what `stop` and end-of-file on stdin do. No sensor, no libfreenect2
-build: the tool extracts `applyLowLight` and `pollCommands` out of `native/grabber.cpp`, compiles
+What `stop` and end-of-file on stdin do to the grabber. No sensor, no libfreenect2 build and no
+port. It runs in two parts.
+
+The reader part extracts `applyLowLight` and `pollCommands` out of `native/grabber.cpp`, compiles
 them with the stubs in `test/fixtures/grabber-stdin.cpp`, and feeds them a real non-blocking pipe on
-descriptor 0. It proves the reader. The capture loop that calls it each frame, and the teardown
-after it, need a sensor.
+descriptor 0.
+
+The stream part builds the whole of `native/grabber.cpp` against `test/fixtures/fake-freenect2.cpp`,
+which defines the libfreenect2 symbols the grabber calls behind the real headers, and runs the
+result as a child. The fake device delivers synthetic frames from a thread, paced by
+`FAKE_DEPTH_MS`, `FAKE_COLOUR_EVERY`, `FAKE_MAX_FRAMES` and `FAKE_REGISTER_MS`. The tool does not
+read the child's stdout until a row says to, so the first frame fills the pipe and the capture loop
+waits in a write when the stop arrives. A stop has 4000 ms. The tool kills a child still running at
+the bound, and its row fails.
+
+It proves the stop path through the real capture loop, the output waits, the encoder thread and the
+teardown. The USB link, libfreenect2's own stop and close, and the server as the parent need a
+sensor and are not in it.
 
 ```
 node tools/grabber-stdin-check.mjs
@@ -926,13 +940,30 @@ node tools/grabber-stdin-check.mjs
 
 | needs | |
 | --- | --- |
-| toolchain | a C++ compiler; without one it exits 2 |
+| toolchain | a C++ compiler for the reader part; the stream part adds TurboJPEG's headers and library. Without them it exits 2 |
 | fixture | none: each row writes into the pipe and closes it itself |
 
 The rows that hold the pipe open are the control for the rows that close it. A reader that took -1
 with `EAGAIN` for end-of-file would stop on a pipe with nothing in it, and the open-pipe rows would
-fail. Exit 2 means it did not finish; a mutation with zero failed assertions is NOT CAUGHT even
-though it exits 1.
+fail. Each stream row that stops a stalled grabber has a row ahead of it showing the grabber stalled:
+no new frame for 450 ms, where depth arrives every 10 ms. The stream rows are:
+
+- a stop line, and end-of-file, with the first frame stuck in an unread pipe;
+- a stop line with the encoder thread holding the write lock on a full pipe while the frame loop
+  waits for it;
+- a command written while a write is stalled is applied at once and does not stop the run, the
+  stalled frame completes, and the stream stays whole. This is the control for a fix that stops on
+  any stdin activity;
+- a stop line to a parent that is still reading, which paces its reads so a write is nearly always
+  waiting: the stream ends on a message boundary. This is the control for a fix that gives a frame
+  up the moment a stop is set;
+- a stop line, and end-of-file, already waiting when the first frame arrives: nothing follows the
+  hello;
+- two exits that no stop requested, each with the encoder stalled in a write: the sensor goes quiet
+  and the loop leaves on its ten-second frame timeout, and a corpus file will not open.
+
+Exit 2 means it did not finish; a mutation with zero failed assertions is NOT CAUGHT even though it
+exits 1. The reader mutations run the reader part and the stream mutations run the stream part.
 
 - **`eof-never-stops`** — end-of-file is compared with a value `read` never returns, and the
   closed-pipe rows fail.
@@ -943,6 +974,22 @@ though it exits 1.
   end-of-file rows stay green.
 - **`stop-matches-a-prefix`** — any line that begins `stop` stops the run, and the near-miss row
   fails.
+- **`stalled-write-never-gives-up`** — a write on a full pipe keeps waiting after the stop is read,
+  and every stalled-stop row hangs.
+- **`stalled-write-ignores-stdin`** — nothing reads stdin while a write waits, and the stalled-stop
+  rows hang and the command row sees its command unread.
+- **`frame-lock-ignores-stdin`** — the loop waiting for the write lock never reads stdin, and the
+  row where the encoder holds the lock hangs.
+- **`stdout-left-blocking`** — stdout stays blocking, so a write sits in the kernel, and the
+  stalled-stop rows hang.
+- **`frame-written-after-stop`** — the loop writes the frame in hand after it reads a stop, and the
+  rows with a stop already waiting find bytes after the hello.
+- **`stalled-write-gives-up-at-once`** — a write gives up as soon as a stop is set, and the
+  reading-parent row and the whole-stream row after the command row end on a cut frame.
+- **`teardown-leaves-the-encoder-writing`** — the flag that ends an encoder's stalled write is not
+  set before the join, and the frame-timeout row hangs.
+- **`corpus-failure-leaves-the-encoder-writing`** — the same flag is not set before the early
+  return that destroys the encoder, and the corpus row hangs.
 
 ## `vcam-check`
 

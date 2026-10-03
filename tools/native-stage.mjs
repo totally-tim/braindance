@@ -17,8 +17,9 @@ const MAC_SYSTEM = ['/usr/lib/', '/System/Library/'];
 export const isMacSystem = (path) => MAC_SYSTEM.some((p) => path.startsWith(p));
 
 // What a Linux box supplies, which is every library in its own library directories. The four that
-// travel are named, because libusb and libturbojpeg sit in those directories beside libc and a
-// distribution's copy is not the one this was built and run against.
+// travel by name are named, because libusb and libturbojpeg sit in those directories beside libc
+// and a distribution's copy is not the one this was built and run against. A library that
+// resolves anywhere else travels as well, because nothing on the target supplies it.
 const LINUX_SYSTEM = ['/lib/', '/lib64/', '/usr/lib/', '/usr/lib64/'];
 export const isLinuxSystem = (path) => LINUX_SYSTEM.some((p) => path.startsWith(p));
 export const LINUX_BUNDLED = /^lib(freenect2|usb-1\.0|turbojpeg|glfw)\.so(\.|$)/;
@@ -74,6 +75,33 @@ export function parseReadelfDynamic(text) {
     if (rp) rpath.push(...rp[1].split(':').filter(Boolean));
   }
   return { needed, rpath };
+}
+
+/**
+ * The libraries of `ldd`'s output that go into lib/, as `{ name, path }` with `name` the file name
+ * the loader will ask for. `loaded` is `parseLdd`'s output with every path already canonical. A
+ * library travels when it is one of the four named, or when its canonical path lies outside the
+ * system directories. It is refused when ldd could not find it, when two would share a name in
+ * lib/, and when it is needed by an absolute path, which no search path redirects. The loader that
+ * ldd lists by its absolute system path is the one such name that is not refused.
+ */
+export function linuxLibrariesToStage(loaded) {
+  const staged = new Map();
+  for (const { name, path } of loaded) {
+    if (path === null) throw new Error(`${name} does not resolve on this machine`);
+    if (isAbsolute(name)) {
+      if (LINUX_BUNDLED.test(basename(name)) || !isLinuxSystem(path)) {
+        throw new Error(`the grabber needs ${name} by an absolute path, which no rpath redirects into the stage`);
+      }
+      continue;
+    }
+    if (!LINUX_BUNDLED.test(name) && isLinuxSystem(path)) continue;
+    if (staged.has(name) && staged.get(name) !== path) {
+      throw new Error(`two libraries are both called ${name}: ${staged.get(name)} and ${path}`);
+    }
+    staged.set(name, path);
+  }
+  return [...staged].map(([name, path]) => ({ name, path }));
 }
 
 /**
@@ -218,18 +246,15 @@ function stageMac(grabber, dir) {
   return [...bundled.keys()];
 }
 
-function stageLinux(grabber, dir) {
+export function stageLinux(grabber, dir) {
   need('patchelf', ['--version'], 'sudo apt install patchelf');
   need('ldd', ['--version'], 'ldd ships with libc-bin');
   const target = join(dir, 'bin/grabber');
   copyIn(grabber, target);
-  const names = [];
-  for (const { name, path } of parseLdd(run('ldd', [grabber]))) {
-    if (!LINUX_BUNDLED.test(name)) continue;
-    if (!path) throw new Error(`${name} does not resolve on this machine`);
-    copyIn(realpathSync(path), join(dir, 'lib', name));
-    names.push(name);
-  }
+  const carried = linuxLibrariesToStage(parseLdd(run('ldd', [grabber]))
+    .map(({ name, path }) => ({ name, path: path && realpathSync(path) })));
+  for (const { name, path } of carried) copyIn(path, join(dir, 'lib', name));
+  const names = carried.map((l) => l.name);
   // Each library gets its own, because a RUNPATH on the grabber does not reach what a library loads.
   run('patchelf', ['--set-rpath', LINUX_BIN_RPATH, target]);
   for (const name of names) run('patchelf', ['--set-rpath', LINUX_LIB_RPATH, join(dir, 'lib', name)]);
