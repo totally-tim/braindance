@@ -10,7 +10,7 @@ import { basename, dirname, join, normalize, extname, sep, resolve } from 'node:
 import { WebSocketServer } from 'ws';
 import { MessageParser, encodeMessage, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, TYPE_KEY, MAX_PAYLOAD_BYTES } from './protocol.js';
 import { openCapture, withCapture, forgetCapture, openCaptureCount, decimatePayload, cloudExtent, colourAfterFrames } from './capture.js';
-import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
+import { ffmpegBinary, handleExportSocket, MAX_FRAME_BYTES } from './export.js';
 import {
   VALID_HASH, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, checkedMarkLog, copyOnNode, downloadTake,
   downloadsInFlight, hashFile, markLogPath, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
@@ -24,7 +24,7 @@ import { gradeSpine } from '../web/grade-shader.js';
 import { moshSpine } from '../web/mosh-shader.js';
 import { Recorder } from './recorder.js';
 import { JobStore } from './jobs.js';
-import { renderVersion } from './render-version.js';
+import { ffmpegVersion, renderVersion } from './render-version.js';
 import { Webcam } from './webcam.js';
 import { IDLE_TICK_MS, IdleDeadline } from './idle.js';
 import { ABSENT_DELAY, RESTART_DELAYS, retryAfter } from './backoff.js';
@@ -147,7 +147,20 @@ const EFFECTS = new EffectStore(
 // Version 2 dropped `outputFps` - the rate is a property of the edit - and a version 1 document is
 // refused rather than read, because it names a rate this build would ignore.
 const DELIVERABLES = new DocumentStore(resolve(flag('--deliverables', join(CAPTURES_DIR, '..', 'deliverables'))), 'deliverable', 2);
-const JOBS = new JobStore(resolve(flag('--jobs', join(ROOT, 'jobs'))));
+// What a render would run on right now, asked when a job is claimed and when it finishes.
+const jobEnvironment = async (renderer) => {
+  const ffmpeg = await ffmpegVersion(ffmpegBinary);
+  return {
+    record: {
+      app: await renderVersion(WEB_DIR, THREE_DIR),
+      effects: Object.fromEntries(EFFECTS.list().map((e) => [e.id, e.version])),
+      renderer,
+      ffmpeg: ffmpeg.version,
+    },
+    problems: ffmpeg.problem ? [{ field: 'ffmpeg', text: ffmpeg.problem }] : [],
+  };
+};
+const JOBS = new JobStore(resolve(flag('--jobs', join(ROOT, 'jobs'))), { exportsDir: EXPORTS_DIR, environment: jobEnvironment });
 const node = NODE_URL ? new NodeLink(NODE_URL, NODE_NAME) : null;
 
 // `--replay` may name a file anywhere, and the take it replays counts as here wherever it is.
@@ -1072,12 +1085,24 @@ const serveWriteCounts = (req, res) => sendJson(res, {
 // A job as anybody may read it, which is a job without its lease. The lease is a capability: left
 // in the record these routes return, `GET /jobs/<id>` handed anyone what `finish` needs to forge.
 const withoutLease = ({ lease, ...job }) => job;
-const serveJobs = async (req, res) => sendJson(res, { jobs: (await JOBS.list()).map(withoutLease) });
+// Only the warnings of the step that just ran, or a finish would print the claim's again.
+const logWarnings = (job, at) => {
+  for (const w of job.warnings.filter((x) => x.at === at)) console.log(`[jobs] ${job.id} warning at ${at}: ${w.text}`);
+};
+const serveJobs = async (req, res) => {
+  const { jobs, refused } = await JOBS.scan();
+  sendJson(res, { jobs: jobs.map(withoutLease), refused });
+};
+// A file that is not there is a 404. One this build refuses by version is a conflict that says why.
+const unreadable = (err, id) => (err.code === 'ENOENT' || /^unusable job id/.test(err.message)
+  ? { status: 404, error: `no job ${id}` }
+  : { status: 409, error: err.message });
 const serveJob = async (req, res, args) => {
   try {
     sendJson(res, withoutLease(await JOBS.read(args[0])));
-  } catch {
-    sendJson(res, { error: `no job ${args[0]}` }, 404);
+  } catch (err) {
+    const { status, error } = unreadable(err, args[0]);
+    sendJson(res, { error }, status);
   }
 };
 
@@ -1096,6 +1121,7 @@ const serveJobClaim = async (req, res) => {
     const body = await readBody(req);
     const { job, blocked, queued } = await JOBS.claim({ worker: body.worker ?? null, renderer: body.renderer });
     if (job) {
+      logWarnings(job, 'claim');
       sendJson(res, { job, queued });
       return;
     }
@@ -1106,7 +1132,7 @@ const serveJobClaim = async (req, res) => {
         queued,
         blocked,
         error: `${blocked.length} job(s) are queued and every one of them is pinned to a different renderer class than ${JSON.stringify(body.renderer)}: `
-          + 'this is a scheduling failure rather than an empty queue, because a re-render on a different rasteriser would not reproduce the original',
+          + 'this is a scheduling failure rather than an empty queue, because a render on a different rasteriser can look different from the original',
       }, 409);
       return;
     }
@@ -1119,13 +1145,15 @@ const serveJobClaim = async (req, res) => {
 const serveJobFinish = async (req, res, args) => {
   try {
     const body = await readBody(req);
-    sendJson(res, await JOBS.finish(args[0], {
+    const job = await JOBS.finish(args[0], {
       state: body.state, error: body.error ?? null, output: body.output ?? null,
       frames: body.frames ?? null,
       // Without it, `POST /jobs/<id>/finish` with `{"state":"done"}` marked a job done that
       // nothing had ever rendered.
       lease: body.lease ?? null,
-    }));
+    });
+    logWarnings(job, 'finish');
+    sendJson(res, job);
   } catch (err) {
     sendJson(res, { error: err.message }, 409);
   }
@@ -1142,11 +1170,22 @@ const serveJobHeartbeat = async (req, res, args) => {
   }
 };
 
+// Without the lease, because a cancel of a running job answers with a record that is still held.
+const serveJobCancel = async (req, res, args) => {
+  try {
+    sendJson(res, withoutLease(await JOBS.cancel(args[0])));
+  } catch (err) {
+    const { status, error } = unreadable(err, args[0]);
+    sendJson(res, { error }, status);
+  }
+};
+
 const serveJobRequeue = async (req, res, args) => {
   try {
     sendJson(res, await JOBS.requeue(args[0]));
   } catch (err) {
-    sendJson(res, { error: err.message }, 404);
+    const { status, error } = unreadable(err, args[0]);
+    sendJson(res, { error }, status);
   }
 };
 const serveRemaining = async (req, res) => sendJson(res, await remaining(CAPTURES_DIR, recordingRate()));
@@ -1430,6 +1469,7 @@ const ROUTES = [
   { path: '/jobs/:id', pattern: /^\/jobs\/(?!claim$)([^/]+)$/, read: serveJob },
   { path: '/jobs/:id/finish', pattern: /^\/jobs\/([^/]+)\/finish$/, write: { methods: ['POST'], run: serveJobFinish } },
   { path: '/jobs/:id/heartbeat', pattern: /^\/jobs\/([^/]+)\/heartbeat$/, write: { methods: ['POST'], run: serveJobHeartbeat } },
+  { path: '/jobs/:id/cancel', pattern: /^\/jobs\/([^/]+)\/cancel$/, write: { methods: ['POST'], run: serveJobCancel } },
   { path: '/jobs/:id/requeue', pattern: /^\/jobs\/([^/]+)\/requeue$/, write: { methods: ['POST'], run: serveJobRequeue } },
 ];
 

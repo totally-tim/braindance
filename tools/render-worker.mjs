@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { JOB_VERSION } from '../server/jobs.js';
+import { BEAT_BUDGET, beatVerdict } from '../server/jobs.js';
 import { testTimer } from '../web/test-timers.js';
 
 const argv = process.argv.slice(2);
@@ -76,12 +76,17 @@ const browser = await chromium.launch({ channel: 'chromium', headless: !has('--h
 
 let claimed = 0;
 let failed = 0;
+let cancelled = 0;
 let blockedExit = false;
 
 try {
-  const page = await browser.newPage();
   const errors = [];
-  page.on('pageerror', (e) => errors.push(e.message));
+  const openPage = async () => {
+    const opened = await browser.newPage();
+    opened.on('pageerror', (e) => errors.push(e.message));
+    return opened;
+  };
+  let page = await openPage();
   // The recorder rather than the root, which is the main menu now. This load exists only to read
   // the renderer class off a page with a WebGL context, and the menu has none.
   await page.goto(`${URL_}/record`, { waitUntil: 'domcontentloaded' });
@@ -237,33 +242,35 @@ try {
     const job = claim.body.job;
     claimed++;
     console.log(`[worker] ${job.id} ${job.width}x${job.height} @${job.fps} -> ${job.output}`);
+    for (const w of job.warnings ?? []) console.log(`[worker] ${job.id} warning at ${w.at}: ${w.text}`);
     errors.length = 0;
     let beat = null;
-    let leaseLost = false;
-    const stopBeating = () => { if (beat) { clearInterval(beat); beat = null; } };
-    const BEAT_BUDGET = 7;
+    // Why this claim stopped rendering, once something has made it: { verdict, reason }.
+    let ending = null;
     let missed = 0;
-    const heartbeat = async () => {
-      if (leaseLost) return;
-      const res = await post(`/jobs/${job.id}/heartbeat`, { lease: job.lease }, { timeoutMs: BEAT_MS });
-      if (res.status === 409) {
-        leaseLost = true;
-        stopBeating();
-        console.error(`[worker] ${job.id} heartbeat refused: ${res.body?.error ?? 'lease lost'}`);
-        page.goto('about:blank').catch(() => { /* the page may already be gone */ });
-        return;
-      }
-      if (res.status !== 200) throw new Error(`the queue answered ${res.status}`);
-      missed = 0;
-    };
-    const missedBeat = (message) => {
-      missed++;
-      console.error(`[worker] ${job.id} heartbeat failed (${missed}/${BEAT_BUDGET}): ${message}`);
-      if (missed < BEAT_BUDGET) return;
+    const stopBeating = () => { if (beat) { clearInterval(beat); beat = null; } };
+    // Closing the page closes the export socket, and the server answers that by killing ffmpeg and
+    // removing the half-written file, so a stopped render leaves no partial artifact behind.
+    const stopRendering = (verdict, reason) => {
+      ending = { verdict, reason };
       stopBeating();
-      console.error(`[worker] ${job.id} ${BEAT_BUDGET} heartbeats failed in a row - this claim now goes quiet while it renders, and a requeue would put a second worker on it`);
+      console.error(`[worker] ${job.id} ${reason}`);
+      page.close().catch(() => { /* the page may already be gone */ });
     };
-    const beatOnce = () => { heartbeat().catch((err) => missedBeat(err.message)); };
+    const heardBack = (answer) => {
+      if (ending) return;
+      const heard = beatVerdict(missed, answer);
+      missed = heard.missed;
+      if (heard.verdict !== 'continue') {
+        stopRendering(heard.verdict, heard.reason);
+      } else if (heard.reason) {
+        console.error(`[worker] ${job.id} heartbeat failed (${missed}/${BEAT_BUDGET}): ${heard.reason}`);
+      }
+    };
+    const beatOnce = () => {
+      post(`/jobs/${job.id}/heartbeat`, { lease: job.lease }, { timeoutMs: BEAT_MS })
+        .then(heardBack, (err) => heardBack({ error: err.message }));
+    };
     const startBeating = () => {
       beat = setInterval(beatOnce, BEAT_MS);
       beat.unref?.();
@@ -273,16 +280,8 @@ try {
       // Inside the try, so a server that cannot be read is this job coming back `failed` naming the
       // read rather than the worker dying before its first claim.
       //
-      // The envelope first, before a field is read out of it: a record from another version names
-      // its footage somewhere else, and reading it would fail in a sentence about a field that is
-      // not there rather than about a job this build cannot run.
-      if (job.version !== JOB_VERSION) {
-        throw new Error(
-          `job ${job.id} is envelope version ${JSON.stringify(job.version)} and this worker runs `
-          + `version ${JOB_VERSION}: this repo ships no conversion, so it is refused rather than `
-          + 'rendered on a guess about which field holds the footage',
-        );
-      }
+      // A page an earlier stop closed is replaced before anything else uses it.
+      if (page.isClosed()) page = await openPage();
       // Opening every take can exceed the queue's stale window, so the lease starts speaking now.
       startBeating();
       const { installed, versions } = await readInstalledEffects();
@@ -375,7 +374,7 @@ try {
       }, job);
       if (errors.length) throw new Error(`the page errored during the render: ${errors[0]}`);
       if (!result?.output) throw new Error('the export did not return an output path');
-      if (leaseLost) throw new Error('the lease was lost during the render, so the outcome is not accepted');
+      if (ending?.verdict === 'lost') throw new Error('the lease was lost during the render, so the outcome is not accepted');
 
       // The frame count travels with the outcome, and `server/export.js` refuses a stream whose
       // count differs from the one the export declared. Stopped before the report rather than after
@@ -388,17 +387,27 @@ try {
       if (fin.status !== 200) throw new Error(`the queue refused the report: ${fin.body.error}`);
       console.log(`[worker] ${job.id} done ${result.output} ${result?.frames ?? ''} frames`);
     } catch (err) {
-      failed++;
-      const message = String(err.message ?? err);
       stopBeating();
-      console.error(`[worker] ${job.id} failed: ${message}`);
-      await post(`/jobs/${job.id}/finish`, { state: 'failed', error: message, lease: job.lease }).catch(() => {});
+      if (ending?.verdict === 'cancel') {
+        cancelled++;
+        console.log(`[worker] ${job.id} cancelled`);
+        await post(`/jobs/${job.id}/finish`, { state: 'cancelled', lease: job.lease }).catch(() => {});
+      } else {
+        failed++;
+        // After a stop the page's own error says its target closed, which is not why.
+        const message = ending?.reason ?? String(err.message ?? err);
+        console.error(`[worker] ${job.id} failed: ${message}`);
+        // A claim the queue has taken back has nothing left to report against.
+        if (ending?.verdict !== 'lost') {
+          await post(`/jobs/${job.id}/finish`, { state: 'failed', error: message, lease: job.lease }).catch(() => {});
+        }
+      }
     }
   }
 } finally {
   await browser.close();
 }
 
-console.log(`[worker] ${claimed} claimed, ${failed} failed`);
+console.log(`[worker] ${claimed} claimed, ${failed} failed, ${cancelled} cancelled`);
 if (blockedExit) process.exit(2);
 process.exit(failed ? 1 : 0);

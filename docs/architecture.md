@@ -153,8 +153,13 @@ for as long as the clip moves under its fetch, and either lands where it was ask
 
 **The render queue** produces video from finished edits. A job is a self-contained project body
 plus the captures it names and an output spec, claimed by a worker pinned to the renderer class it
-draws with, because bit-exactness does not survive a change of GPU. `tools/render-worker.mjs`
-brings a page up on `/edit?take=`, which opens no document, so that page writes nothing.
+draws with, because a different GPU draws a different picture. A re-render is promised to look the
+same. The job records the app build, the installed effects' versions, the GPU renderer and the
+ffmpeg version at claim and at finish, and a render whose record differs from the one before it
+runs anyway, with the difference written into the job and its sidecar. A worker's heartbeat is
+also how a cancel reaches it, and a worker whose heartbeats keep failing stops rendering.
+`tools/render-worker.mjs` brings a page up on `/edit?take=`, which opens no
+document, so that page writes nothing.
 
 ## The effect store
 

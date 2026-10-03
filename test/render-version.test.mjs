@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, statSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, utimesSync, statSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { renderVersion } from '../server/render-version.js';
+import { ffmpegVersion, parseFfmpegVersion, renderVersion } from '../server/render-version.js';
 
 function tree() {
   const root = mkdtempSync(join(tmpdir(), 'render-version-'));
@@ -88,4 +88,36 @@ test('an unchanged tree answers from the memo without reading a file', async () 
     promises.readFile = original;
     syncBuiltinESMExports();
   }
+});
+
+test('the ffmpeg version is the token on the first line, or null for anything else', () => {
+  assert.equal(parseFfmpegVersion('ffmpeg version 7.1.1 Copyright (c) 2000-2025 the FFmpeg developers\nbuilt with Apple clang'), '7.1.1');
+  assert.equal(parseFfmpegVersion('ffmpeg version n7.0-12-gabc built from git'), 'n7.0-12-gabc');
+  assert.equal(parseFfmpegVersion('zsh: command not found'), null);
+  assert.equal(parseFfmpegVersion(''), null);
+});
+
+test('an ffmpeg that cannot be resolved or run is a problem sentence, never a throw', async () => {
+  const unresolved = await ffmpegVersion(() => { throw new Error('no ffmpeg on PATH'); });
+  assert.equal(unresolved.version, null);
+  assert.match(unresolved.problem, /could not be resolved: no ffmpeg on PATH/);
+
+  const missing = await ffmpegVersion(() => join(tmpdir(), 'no-such-ffmpeg-binary'));
+  assert.equal(missing.version, null);
+  assert.match(missing.problem, /did not report a version/);
+});
+
+test('the ffmpeg version comes from the binary the resolver names', { skip: process.platform === 'win32' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ffmpeg-version-'));
+  const fake = join(dir, 'ffmpeg');
+  writeFileSync(fake, '#!/bin/sh\necho "ffmpeg version 7.9.9 Copyright (c) the FFmpeg developers"\n');
+  chmodSync(fake, 0o755);
+  assert.deepEqual(await ffmpegVersion(() => fake), { version: '7.9.9', problem: null });
+
+  const mute = join(dir, 'ffmpeg-mute');
+  writeFileSync(mute, '#!/bin/sh\necho "not a version line"\n');
+  chmodSync(mute, 0o755);
+  const odd = await ffmpegVersion(() => mute);
+  assert.equal(odd.version, null);
+  assert.match(odd.problem, /not a version line/);
 });

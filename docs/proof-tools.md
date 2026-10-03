@@ -1061,8 +1061,9 @@ exits 2, because a crash counted as a failed assertion reads under `--mutate` as
 
 ## `jobs-check`
 
-The queue only hands a job to a machine that can reproduce it, and a job carries enough to be
-reproduced at all.
+The queue only hands a job to a machine that can reproduce it, a job carries enough to be
+reproduced at all, a cancel reaches a queued job and a render under way, and a render records what
+it ran on.
 
 ```
 node tools/jobs-check.mjs
@@ -1089,7 +1090,8 @@ block, so reading every mutation run as `--no-render` is wrong.
   rule, so a take id reaches the queue.
 - **`envelope-takes-the-callers-captures`** — the footage a job renders comes from the caller's
   list instead of being derived from the clips.
-- **`worker-reads-any-job-version`** — the worker's gate on the job envelope's version goes.
+- **`store-reads-any-job-version`** — the store hands out a job file of another version instead of
+  listing it as refused.
 - **`worker-preflights-only-the-first-capture`** — the worker asks its library about the first
   hash a job names instead of every one.
 - **`attestation-passes-on-a-mismatch`** — the worker stops comparing what the page opened against
@@ -1107,6 +1109,11 @@ block, so reading every mutation run as `--no-render` is wrong.
   reclaims one whose worker is gone.
 - **`heartbeat-ignores-lease`** — the heartbeat's lease comparison goes, so another claim's beat
   renews the job.
+- **`cancel-queued-does-nothing`** — a cancel of a queued job answers 200 and leaves it queued.
+- **`claim-skips-environment`** — a claim records no app build, effect versions or renderer class.
+- **`finish-skips-sidecar`** — a done render's sidecar is never amended with the version record.
+- **`worker-ignores-cancel`** — the heartbeat decision stops reading a cancel request, so a cancelled
+  render runs to its end.
 - **`heartbeat-stops-on-first-error`** — the worker stops beating on the first failed beat instead
   of reporting a missed one.
 - **`static-serves-nothing`** — the static route throws after its `stat`, so the worker's page

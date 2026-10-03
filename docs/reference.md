@@ -702,7 +702,8 @@ some `version`, that every clip names a content hash, that `captures` equals tho
 for one and in order, that `project.requires` claims exactly the effect namespaces the values
 and tracks use with no repeats, that `suppressEffects` is a list of effect ids, and that the
 output name, size, rate and codec pass the same validator the export dialog uses. It also
-refuses an output name a queued or running job already holds. It does **not** check the
+refuses an output name a queued or running job already holds, and a `recorded` that is not a
+version record. It does **not** check the
 project's version number beyond its presence, and it stores `deliverable` exactly as given. So
 a project from another build and a malformed deliverable both enqueue cleanly: the page refuses
 a project version it does not read, and `applyDeliverable` refuses a deliverable that is not
@@ -720,6 +721,7 @@ is truthy, so a `false` or `null` one renders the whole clip.
 | `renderer` | no, unpinned | The renderer class a worker must match to claim the job. Unpinned means any worker may take it. |
 | `suppressEffects` | no, empty | Effect ids this render may go without. |
 | `deliverable` | no | A version 2 deliverable document, which trims the render. |
+| `recorded` | no, none | What an earlier render of this edit ran on, in the shape of a sidecar's `versions.finished`. The claim compares against it and warns where it differs. |
 
 The queue derives `requires` from the namespaces the project's own values and tracks carry,
 and derives the footage list from the clips, so a body whose lists disagree with its values is
@@ -731,7 +733,8 @@ A render you have already done carries the same fields in its `.job.json` sideca
 
 ```bash
 jq -s 'max_by(.created) |
-       {project, captures, output: "take2-again", width: 960, height: 540, fps: 30}' \
+       {project, captures, output: "take2-again", width: 960, height: 540, fps: 30,
+        recorded: .versions.finished}' \
    exports/*/take2.mp4.job.json |
   curl -sX POST http://localhost:8080/jobs -H 'content-type: application/json' -d @-
 node tools/render-worker.mjs --url http://localhost:8080 --drain
@@ -739,7 +742,9 @@ node tools/render-worker.mjs --url http://localhost:8080 --drain
 
 `max_by` picks one sidecar when the glob matches several, because exporting `take2` twice
 leaves two directories and two JSON objects concatenated into one body is not JSON at all. The
-object above drops the sidecar's `renderer`, so the re-render is unpinned.
+object above drops the sidecar's `renderer`, so the re-render is unpinned. It carries the render's
+version record as `recorded`, so a worker on a different build, effect, GPU or ffmpeg is warned.
+A sidecar from an export no job made has no record, and `recorded` is then `null`.
 
 **A worker claims only jobs matching its browser's renderer class**, read off the page it will
 actually draw in, so it cannot be handed work that would come back looking different.
@@ -759,13 +764,52 @@ actually draw in, so it cannot be handed work that would come back looking diffe
 **`--drain` bounds the wait and `--max` bounds the work, so exit 0 does not mean the queue is
 empty.** A run stops after `--max` jobs whatever is left behind it, and `--drain` only decides
 whether it waits for more work in the meantime. The exits are 0 when every job it took
-succeeded or the queue answered with no job, 1 when a job failed or the claim request itself
-failed, and 2 when the claim came back 409 or 5xx, which is work pinned to another renderer
-class or a server error.
+succeeded or was cancelled or the queue answered with no job, 1 when a job failed or the claim
+request itself failed, and 2 when the claim came back 409 or 5xx, which is work pinned to another
+renderer class or a server error.
 
 The queue is records on disk, so it survives a restart. A worker heartbeats while it renders,
 and `POST /jobs/:id/requeue` puts a job back, refusing a running job heard from within the
-last 120 seconds.
+last 120 seconds. A requeue clears a pending cancel request.
+
+A job is `queued`, `running`, `done`, `failed` or `cancelled`, and the last three end it. A
+cancelled job can be requeued.
+
+**`POST /jobs/:id/cancel` stops a job.** A queued job is cancelled at once. A running job gets a
+cancel request, which its worker reads in the answer to its next heartbeat. The worker closes its
+page, the server discards the half-written file when the export socket closes, and the worker
+reports `cancelled`. The queue cancels a running job directly when its worker has been quiet for
+120 seconds. A second cancel changes nothing, and a job that is `done` or `failed` refuses one. A
+worker that finishes the encode before it sees the request reports `done` and the file stays. If
+the encode finishes in the moment the worker closes its page, a finished file sits beside a
+cancelled job and no record names it.
+
+**A worker gives a claim up after seven heartbeats fail in a row**, which is 105 seconds at the
+default `--beat`. It stops the same way: it closes its page, reports `failed` if the queue will
+listen, and carries on with its next claim. The queue allows a requeue after 120 seconds of
+silence, so a `--beat` above 17000 ms lets a second worker take the job before the first has
+stopped.
+
+**A job records what it ran on.** At claim and again at finish it stores the app build
+(`renderVersion`), the version of each installed effect by id, the GPU renderer string and the
+ffmpeg version, as `versions.claimed` and `versions.finished`. `versions.recorded` holds what an
+earlier render of the same edit ran on: the `recorded` field of `POST /jobs`, or, on a requeue,
+the job's own `finished` record when it was `done`. A claim whose record differs from
+`versions.recorded` adds an entry to the job's `warnings`, and so does a finish whose record
+differs from the claim's. The job renders either way, because a re-render is promised to look the
+same, and the record says where it may differ.
+
+Each warning is `{ at, field, was, now, text }`, where `at` is `claim` or `finish`. Effects are
+compared for the ids the job requires. ffmpeg is compared when both records read a version. An
+ffmpeg that cannot be resolved or run, or a sidecar that cannot take the record, is a warning of
+its own. The server prints each warning to its log, and the worker prints them at claim.
+
+Before a `done` report lands, the queue writes `versions` and `warnings` into the render's
+`.job.json` sidecar, which must sit inside the exports directory.
+
+**A job file carries the queue's version, `JOB_VERSION`.** The store does not read a file of another
+version, and no worker is handed it. `GET /jobs` lists it under `refused` with its reason, and
+`GET /jobs/:id` answers 409 with the same reason. There is no conversion.
 
 **The trim travels on `deliverable`**, and a job without one renders the whole clip. The
 worker applies it through the door the editor uses, so it is a whole version 2 deliverable
@@ -785,11 +829,10 @@ back yourself.
 A worker launches Chromium at startup, to read its renderer class off a real page. Then, per
 job, it resolves every capture hash against its own library before it loads the project, and a
 hash it has not got fails the job naming the take. After the load it attests what the page
-actually opened against what the job asked for, clip by clip and in order. It refuses a job
-envelope from a version it does not read, and fails a job naming an effect it has not got
-unless `suppressEffects` covers it. A failed read of its own server is retried a few times
-before the job is failed at all, and the job then comes back naming the read itself, never a
-package or a take the machine has not got.
+actually opened against what the job asked for, clip by clip and in order. It fails a job naming
+an effect it has not got unless `suppressEffects` covers it. A failed read of its own server is
+retried a few times before the job is failed at all, and the job then comes back naming the read
+itself, never a package or a take the machine has not got.
 
 ## HTTP routes
 
@@ -845,11 +888,12 @@ hash, `sha256:` and 64 hex digits, percent-encoded; `:id` is its name.
 | `/record/start` | POST | Starts a take. |
 | `/record/stop` | POST | Stops it. |
 | `/record/mark` | POST | Marks the running take. |
-| `/jobs` | GET, POST | Lists the queue and enqueues a render. |
+| `/jobs` | GET, POST | Lists the queue and the job files it refused, and enqueues a render. |
 | `/jobs/claim` | POST | Hands the oldest claimable job to a worker of a named renderer class. |
 | `/jobs/:id` | GET | One job, without its lease. |
-| `/jobs/:id/finish` | POST | Reports an outcome against the lease the claim handed out. |
-| `/jobs/:id/heartbeat` | POST | Says the claim is still rendering. |
+| `/jobs/:id/finish` | POST | Reports `done`, `failed` or `cancelled` against the lease the claim handed out. |
+| `/jobs/:id/heartbeat` | POST | Says the claim is still rendering, and answers with the job, so a cancel request reaches the worker. |
+| `/jobs/:id/cancel` | POST | Cancels a queued job, or asks a running one to stop. |
 | `/jobs/:id/requeue` | POST | Puts a job back on the queue, still pinned. |
 
 Every read route strips a job's `lease`, because the lease is the capability `finish` demands.
