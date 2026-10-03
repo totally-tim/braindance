@@ -30,6 +30,10 @@ const STAGE = join(REPO, '.desktop-check');
 // after `app.exit` runs from seconds to minutes on a loaded machine, so the bound is long and the
 // row reports the load average beside it.
 const APP_EXIT_MS = 180_000;
+// The attached run's cleanup wait. Playwright holds an exiting Electron open while its debugger is
+// attached, and that run claims nothing about exit, so the wait only spares the kill a service
+// that is already gone.
+const ATTACHED_EXIT_MS = 5_000;
 
 // Each names source text in the staged copy and must match exactly once. One row per claim, so a
 // red row names what broke.
@@ -66,9 +70,9 @@ const MUTATIONS = {
   'reveal-any-absolute-path': {
     file: 'desktop/main.js',
     edits: [['    const target = await revealable(path, { picked, roots: Object.values(roots) });', '    const target = path;']],
-    fails: 'the rows that ask to reveal a file nobody chose, a system file, a path that climbs out of '
-      + 'a root, a link out of a root and a path that does not exist; the rows for a path the user '
-      + 'chose and a path in a root stay green',
+    fails: 'the two rows that ask to reveal a file nobody chose, and the rows for a system file, a path '
+      + 'that climbs out of a root, a link out of a root and a path that does not exist; the rows for '
+      + 'a path the user chose and a path in a root stay green',
   },
   // The path is judged as written, so a link inside a root is taken for a file inside it.
   'reveal-skips-realpath': {
@@ -422,7 +426,7 @@ try {
   const attachedService = started[0]?.pid;
   main(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach((w) => w.close())).catch(() => {});
   if (attachedService) await until(() => !alive(attachedService), STOP_GRACE_MS + 10_000, 50);
-  if (!(await Promise.race([gone, sleep(APP_EXIT_MS).then(() => null)]))) electron.kill('SIGKILL');
+  if (!(await Promise.race([gone, sleep(ATTACHED_EXIT_MS).then(() => null)]))) electron.kill('SIGKILL');
   driven = null;
   ok('the attached run left no service and a free port', services().length === 0 && (await portFree(PORT)), `${services().length} left`);
 

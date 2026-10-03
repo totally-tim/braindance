@@ -1123,9 +1123,9 @@ A run that stops before its verdict prints `DID NOT RUN` with the count so far a
 - **`sandbox-off`** — the renderer is not sandboxed. The sandbox row reddens.
 - **`bridge-skips-the-sender-check`** — the bridge answers any sender. The row that asks from a page
   that is not the service reddens, with the row for the dialog it must not open.
-- **`reveal-any-absolute-path`** — the bridge reveals any absolute path. The rows for a file nobody
-  chose, a system file, a `..` climb, the two links and a path that does not exist redden. The rows
-  for a path a dialog returned and a path in a data folder stay green.
+- **`reveal-any-absolute-path`** — the bridge reveals any absolute path. The two rows for a file
+  nobody chose redden, and so do the rows for a system file, a `..` climb, the two links and a path
+  that does not exist. The rows for a path a dialog returned and a path in a data folder stay green.
 - **`reveal-skips-realpath`** — the path is judged as written. The rows for the directory link, the
   file link and the missing path redden. The climb row stays green, because resolving the path
   already removes a `..`.
