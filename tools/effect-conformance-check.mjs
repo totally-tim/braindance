@@ -178,7 +178,8 @@ try {
     packages.push(pkg);
   }
 
-  browser = await chromium.launch();
+  // The full chromium build rather than the headless shell, which lands on SwiftShader.
+  browser = await chromium.launch({ channel: 'chromium' });
   const page = await browser.newPage({ viewport: { width: 900, height: 600 } });
   const pageErrors = [];
   page.on('pageerror', (e) => pageErrors.push(String(e)));

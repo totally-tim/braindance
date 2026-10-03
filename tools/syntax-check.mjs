@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Parses every JavaScript file this repo ships and asks the questions that need no server,
-// browser or sensor: every tool documented, every citation resolving, the decoder spec
+// browser or sensor: every tool documented, every check tool run by CI or listed as not run,
+// every citation resolving, the decoder spec
 // agreeing with its module, the grabber's hello matching the wire format, and every shell id
 // declared by the page that draws it.
 //
@@ -22,6 +23,13 @@ const MUTATIONS = {
     edits: [['export const TYPE_COLOR = 3;', 'export const TYPE_COLOR = 4;']],
   },
 
+  'key-levels-drift': {
+    file: 'web/key-stream.js',
+    edits: [['export const KEY_DEPTH_LEVELS = 255;', 'export const KEY_DEPTH_LEVELS = 254;']],
+    fails: 'and the two declarations of the keyed output\'s depth quantisation disagreeing, which '
+      + 'puts every subject at the wrong distance in a picture that still looks like one',
+  },
+
   'shell-id-renamed': {
     file: 'web/index.html',
     edits: [['id="menuCameraReset"', 'id="menuCameraResetRenamed"']],
@@ -38,14 +46,14 @@ const MUTATIONS = {
   'web-citation-outlives-its-module': {
     file: 'CLAUDE.md',
     edits: [[
-      'which is the fault `web/main.js` has actually shipped twice',
-      'which is the fault `web/render-loop.js` has actually shipped twice',
+      'the reach through property dispatch inside `web/main.js`',
+      'the reach through property dispatch inside `web/render-loop.js`',
     ]],
   },
 
   'line-citation-past-the-end': {
     file: 'docs/proof-tools.md',
-    edits: [['`gpuTimer.poll` in `web/main.js` is and what made', '`gpuTimer.poll` in `web/main.js:98600` is and what made']],
+    edits: [['`gpuTimer.poll` in\n`web/main.js` is that shape', '`gpuTimer.poll` in\n`web/main.js:98600` is that shape']],
   },
 
   'manifest-does-not-parse': {
@@ -114,9 +122,23 @@ const MUTATIONS = {
       + 'declares',
   },
 
+  'ci-forgets-a-tool': {
+    file: '.github/workflows/checks.yml',
+    edits: [['registration registry', 'registry']],
+    fails: 'and a check tool CI neither runs nor lists as not run, so nobody can tell whether it '
+      + 'was left out on purpose',
+  },
+
+  'ci-runs-a-tool-it-lists-as-not-run': {
+    file: '.github/workflows/checks.yml',
+    edits: [['registration registry', 'registration registry syntax']],
+    fails: 'and a tool on both sides of the ledger, which makes the not-run list a claim nobody '
+      + 'can read',
+  },
+
   'doc-line-ends-in-whitespace': {
     file: 'docs/proof-tools.md',
-    edits: [['Counted rather than recalled:', 'Counted rather than recalled: ']],
+    edits: [['Per tool, read from the source:', 'Per tool, read from the source: ']],
     fails: 'and a prose line ending in a space, which is invisible on the page and invisible to '
       + 'a clean `git diff --check`',
   },
@@ -146,7 +168,7 @@ if (mutateAt !== -1 && !MUTATIONS[mutation]) {
 
 // A floor per directory rather than a total, so a tree that stopped being walked says so
 // instead of being covered by another that grew. A tripwire against zero, not a manifest.
-const FLOORS = { server: 5, test: 10, tools: 12, web: 18 };
+const FLOORS = { bin: 2, server: 5, test: 10, tools: 12, web: 18 };
 
 // `PARSES` is what `node --check` can be handed and have its answer mean anything; `SHIPPED`
 // is wider, because what is asked of `tools/` is about the file being ours, not about parsing.
@@ -232,6 +254,39 @@ if (!existsSync(DOC)) {
     fail(`CLAUDE.md never mentions ${undocumented.join(', ')} - a tool nobody documented is a tool nobody runs`);
   } else {
     console.log(`  tools/  all ${shipped.length} named in CLAUDE.md`);
+  }
+}
+
+// Every `tools/*-check.mjs` is run by CI or named on the workflow's `# not-run:` lines, never
+// neither and never both, asked of the directory so a tool added next year is asked by existing.
+{
+  const rel = '.github/workflows/checks.yml';
+  const workflow = sourceWithMutation(rel);
+  const tools = readdirSync(join(ROOT, 'tools'))
+    .map((f) => /^(.+)-check\.mjs$/.exec(f)?.[1])
+    .filter(Boolean)
+    .sort();
+  if (workflow === null) {
+    fail(`${rel} is missing, so nothing says which proof tools CI runs`);
+  } else if (tools.length === 0) {
+    fail('tools/ yielded no check tools, so the CI ledger was asked of nothing');
+  } else {
+    const lines = workflow.split('\n');
+    const code = lines.filter((line) => !/^\s*#/.test(line)).join('\n');
+    const run = new Set([
+      ...[...code.matchAll(/tools\/([\w-]+)-check\.mjs/g)].map((m) => m[1]),
+      ...[...code.matchAll(/sweep-all\.mjs --tools ([\w,-]+)/g)].flatMap((m) => m[1].split(',')),
+    ]);
+    const notRun = lines.flatMap((line) => /^# not-run:(.*)$/.exec(line)?.[1].trim().split(/\s+/).filter(Boolean) ?? []);
+    const neither = tools.filter((t) => !run.has(t) && !notRun.includes(t));
+    const both = tools.filter((t) => run.has(t) && notRun.includes(t));
+    const unknown = [...new Set([...run, ...notRun])].filter((t) => !tools.includes(t));
+    if (neither.length) fail(`${rel} neither runs nor lists as not-run: ${neither.join(', ')}`);
+    if (both.length) fail(`${rel} runs and also lists as not-run: ${both.join(', ')}`);
+    if (unknown.length) fail(`${rel} names ${unknown.join(', ')}, which tools/ does not hold`);
+    if (!neither.length && !both.length && !unknown.length) {
+      console.log(`  ci/     all ${tools.length} check tools accounted for: ${run.size} run, ${notRun.length} listed as not run`);
+    }
   }
 }
 
@@ -505,6 +560,23 @@ const withoutStringBodies = (src) => {
     } else {
       console.log(`  grid/   ${grid.map(({ fromJs }) => fromJs[1]).join('x')} in both languages`);
     }
+
+    // The grabber quantises the keyed output's depth into a byte and the page at /key inverts it,
+    // so the level count is a third declaration in C++. Drift is every subject at the wrong
+    // distance in a picture that still looks like a picture, which is a fault nobody sees.
+    const levelsJs = sourceWithMutation('web/key-stream.js')
+      ?.match(/^export const KEY_DEPTH_LEVELS = (\d+);/m);
+    const levelsCpp = grabber.match(/^static const uint32_t KEY_DEPTH_LEVELS = (\d+);/m);
+    if (!levelsJs || !levelsCpp) {
+      fail(`KEY_DEPTH_LEVELS is not declared where this looked: ${levelsJs ? '' : 'web/key-stream.js '}${levelsCpp ? '' : 'native/grabber.cpp'}`.trim()
+        + ' - one of the two declarations moved, and an undeclared constant cannot be compared with anything');
+    } else if (levelsJs[1] !== levelsCpp[1]) {
+      fail(`KEY_DEPTH_LEVELS is ${levelsJs[1]} in web/key-stream.js and ${levelsCpp[1]} in native/grabber.cpp - `
+        + 'the grabber would quantise against one scale and the keyed page invert it against another, '
+        + 'so every reading comes back at the wrong distance');
+    } else {
+      console.log(`  key/    KEY_DEPTH_LEVELS is ${levelsJs[1]} in both languages`);
+    }
   }
 }
 
@@ -518,8 +590,16 @@ const declaredMutations = new Map();
 {
   const DECLARATION = /^const MUTATIONS = \{$/m;
   const REGISTRATION = 'third_party/libfreenect2/src/registration.cpp';
-  // One name reused for every extraction, so a crash leaks at most one file.
-  const PROBE = join(ROOT, 'tools', '.mutation-table-probe.mjs');
+  // Outside the checkout, so a concurrent run's walk of `tools/` never meets a probe. A cut's
+  // relative imports and `import.meta.url` are pointed back at the tool, so they resolve as there.
+  const PROBES = mkdtempSync(join(tmpdir(), 'syntax-check-tables-'));
+  const inPlace = (cut, name) => {
+    const self = pathToFileURL(join(ROOT, 'tools', name)).href;
+    return cut
+      .replace(/^(import\s[^;]*?from\s+')(\.{1,2}\/[^']+)(';)$/gm,
+        (line, head, spec, tail) => `${head}${new URL(spec, self).href}${tail}`)
+      .replaceAll('import.meta.url', JSON.stringify(self));
+  };
 
   // The declaration alone, with the whole prefix only as a fallback: the prefix makes this row
   // need what the tool needs, a `ws` import CI has not installed or a top-level `git log`.
@@ -542,6 +622,7 @@ const declaredMutations = new Map();
           anchors: spec.edits.map(([from, to, where]) => ({ file: where ?? spec.file, from, to })),
         };
       }
+      if (spec.stores && typeof spec.stores === 'object') return { anchorless: 'store reads pointed at another route' };
     }
     return null;
   };
@@ -569,7 +650,18 @@ const declaredMutations = new Map();
   const isChunk = (file) => /^effects-builtin\/[^/]+\/[^/]+\.glsl$/.test(file);
   const buildsTheProgram = (file) => isSpine(file) || file === ASSEMBLER || isChunk(file);
 
-  const moduleOf = (source) => import(`data:text/javascript;base64,${Buffer.from(source, 'utf8').toString('base64')}`);
+  // A data: URL carries no base to resolve a relative import against, so every `./x.js` a spine
+  // or the assembler names is rewritten to the file URL it points at before the text is handed to
+  // the loader. Only the specifiers move; the source under test is otherwise the staged text. An
+  // import reached this way is read off disk, so a mutation staged against one would not be seen.
+  const moduleOf = (source, file) => {
+    const base = pathToFileURL(join(ROOT, file));
+    const absolute = source.replace(
+      /(^\s*(?:import|export)\b[^;'"]*?\bfrom\s*)'(\.[^']*)'/gm,
+      (_, head, spec) => `${head}'${new URL(spec, base).href}'`,
+    );
+    return import(`data:text/javascript;base64,${Buffer.from(absolute, 'utf8').toString('base64')}`);
+  };
   // A string replacement, not a pattern one: `String.replace` reads `$&` out of a replacement.
   const swap = (body, from, to) => body.replace(from, () => to);
 
@@ -596,9 +688,9 @@ const declaredMutations = new Map();
   const assembleStaged = async (staged = {}) => {
     const spines = {};
     for (const [name, source] of Object.entries(spineSources)) {
-      spines[name] = (await moduleOf(staged.spines?.[name] ?? source))[SPINE_EXPORT[name]];
+      spines[name] = (await moduleOf(staged.spines?.[name] ?? source, SPINES[name]))[SPINE_EXPORT[name]];
     }
-    const { assembleShaders } = await moduleOf(staged.assembler ?? assemblerSource);
+    const { assembleShaders } = await moduleOf(staged.assembler ?? assemblerSource, ASSEMBLER);
     const packages = basePackages.map((p) => ({ ...p, chunks: { ...p.chunks } }));
     if (staged.chunk) {
       const [, id, name] = staged.chunk.file.split('/');
@@ -643,19 +735,16 @@ const declaredMutations = new Map();
       withoutPackages(source.slice(0, end + 3)),
     ];
     for (const [attempt, cut] of cuts.entries()) {
+      const probe = join(PROBES, `${name}.${attempt}.mjs`);
       try {
-        writeFileSync(PROBE, `${cut}\nexport { MUTATIONS };\n`);
-        // Cache-busted, because sixteen tools import through one filename and Node would
-        // otherwise hand back the first tool's table fifteen more times.
-        ({ MUTATIONS: table } = await import(`file://${PROBE}?tool=${encodeURIComponent(name)}&cut=${attempt}`));
+        writeFileSync(probe, `${inPlace(cut, name)}\nexport { MUTATIONS };\n`);
+        ({ MUTATIONS: table } = await import(pathToFileURL(probe).href));
         break;
       } catch (err) {
         if (attempt === cuts.length - 1) {
           unreadable++;
           fail(`${name}: its MUTATIONS table could not be read - ${String(err.message).split('\n')[0]}`);
         }
-      } finally {
-        rmSync(PROBE, { force: true });
       }
     }
     if (!table) continue;
@@ -669,7 +758,7 @@ const declaredMutations = new Map();
         continue;
       }
       if (shape.anchorless) {
-        if (!anchorless.some((a) => a.name === name)) anchorless.push({ name, why: shape.anchorless });
+        if (!anchorless.some((a) => a.name === name && a.why === shape.anchorless)) anchorless.push({ name, why: shape.anchorless });
         continue;
       }
       for (const { file, from, to } of shape.anchors) {
@@ -725,9 +814,10 @@ const declaredMutations = new Map();
     }
     if (carriesAnchors) tablesWithAnchors++;
   }
+  rmSync(PROBES, { recursive: true, force: true });
 
   for (const { name, why } of anchorless) {
-    console.log(`  anchors/ ${name} declares ${why} rather than source anchors, so it has none to check`);
+    console.log(`  anchors/ ${name} declares ${why}, which carry no source anchors to check`);
   }
   if (anchorsChecked === 0) {
     fail('no mutation anchors were checked at all, so this assertion passed on nothing - the tables moved or this scan is looking in the wrong place');
@@ -754,11 +844,9 @@ const declaredMutations = new Map();
 }
 
 // Every mutation the prose *offers* has to be one a tool declares, asked of the tables above so
-// there is no second list of names here to drift from them. Two forms, because they are the two
-// ways a page offers a control rather than remembers one: an invocation, and the control bullets
-// `docs/proof-tools.md` writes its per-control descriptions as. `docs/instruments.md` names
-// withdrawn and rejected controls on purpose - what it says about one is history, and history is
-// not an offer - so a sweep over bare prose names would fire on the case file doing its job.
+// there is no second list of names here to drift from them. Two forms offer a control: an
+// invocation, and the control bullets `docs/proof-tools.md` describes each one with. A bare name
+// in a sentence is a mention, not an offer, and is not asked.
 {
   const declaredBy = new Map();
   for (const [tool, names] of declaredMutations) {

@@ -4,6 +4,7 @@
 // typed a flag saying so. Every refusal row has a positive twin, or a server that refused every
 // upgrade would pass. The bind half asks the real network interface, and is UNPROVEN without one.
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync, readFileSync } from 'node:fs';
 import { Socket } from 'node:net';
 import { networkInterfaces } from 'node:os';
@@ -57,6 +58,14 @@ const MUTATIONS = {
     '  if (/[@/?#\\s\\\\]/.test(rawHost)) return false;',
     '  if (false) return false;',
   ]] },
+  // Node's parser accepts a second Host line and keeps the first, so this line is all that
+  // refuses one.
+  'host-accepts-a-duplicate': {
+    file: 'server/http-guard.js',
+    edits: [['  if (hostCount > 1) return false;', '  if (false) return false;']],
+    fails: 'the duplicate-Host row alone: the server answers 101, and the single-Host twin beside '
+      + 'it stays green',
+  },
   // The rebinding rule reverted to comparing the two headers against each other, which a rebound
   // browser satisfies by construction. It must leave the address rows alone.
   'host-accepts-a-name': { file: 'server/http-guard.js', edits: [[
@@ -107,15 +116,16 @@ if (MUTATE) {
 }
 
 let checked = 0, failed = 0, unproven = 0;
+const fired = [];
 const ok = (label, pass, detail = '') => {
   checked++;
-  if (!pass) failed++;
+  if (!pass) { failed++; fired.push(label); }
   console.log(`  ${pass ? 'PASS' : 'FAIL'}  ${label}${detail ? `  ${detail}` : ''}`);
 };
 
 const servers = [];
 const start = (args) => new Promise((resolve, reject) => {
-  const child = spawn(process.execPath, [join(WORK, 'server/index.js'), '--port', String(PORT), ...args], {
+  const child = spawn(process.execPath, [join(WORK, 'server/index.js'), '--standby-after', '0', '--port', String(PORT), ...args], {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   servers.push(child);
@@ -151,8 +161,9 @@ const upgradeWithHost = (origin, host) => new Promise((resolve) => {
   setTimeout(() => done('timeout'), 5000);
 });
 
-// Two Host headers, which `req.headers.host` collapses to the first. It must not open, either way.
-const duplicateHostUpgrade = () => new Promise((resolve) => {
+// A hand-built upgrade writing one Host line per entry, which the `ws` client cannot send twice.
+// Resolves the status line, or `timeout` or `error`, and a row names the status it wants.
+const rawUpgrade = (hosts) => new Promise((resolve) => {
   const s = new Socket();
   let seen = '';
   const done = (r) => { s.destroy(); resolve(r); };
@@ -166,8 +177,7 @@ const duplicateHostUpgrade = () => new Promise((resolve) => {
   s.connect(PORT, '127.0.0.1', () => {
     s.write([
       'GET / HTTP/1.1',
-      'Host: 127.0.0.1:' + PORT,
-      'Host: evil.example',
+      ...hosts.map((h) => `Host: ${h}`),
       'Upgrade: websocket',
       'Connection: Upgrade',
       'Sec-WebSocket-Key: ' + Buffer.from('0123456789abcdef').toString('base64'),
@@ -191,9 +201,11 @@ const reachable = (host) => new Promise((resolve) => {
 const LAN = Object.values(networkInterfaces()).flat()
   .find((i) => i && i.family === 'IPv4' && !i.internal)?.address ?? null;
 const SAMPLE = join(REPO, 'captures', 'sample.knct');
-// The take id the server lists that capture under - the same derivation `server/capture.js` makes.
-const SAMPLE_ID = 'sample';
+// What the capture routes name that take by: its content hash, never its name.
+const SAMPLE_KEY = existsSync(SAMPLE)
+  ? encodeURIComponent(`sha256:${createHash('sha256').update(readFileSync(SAMPLE)).digest('hex')}`) : 'no-sample';
 
+let crashed = null;
 try {
   console.log(`[guard] ${MUTATE ? `MUTATED: ${MUTATE} (${MUTATIONS[MUTATE].file})` : 'unmutated tree'}`);
   console.log(`[guard] lan address ${LAN ?? '(none - the bind rows cannot be tested here)'}\n`);
@@ -228,18 +240,25 @@ try {
   ok('while spellings of one authority still open - a default port written out, and a host in capitals',
     hostVariants.every((r) => r === 'open'), hostVariants.join(', '));
   // A Host header is an authority and nothing else, and `new URL('http://' + host)` consumes
-  // userinfo, a path, a query or a fragment and normalises what is left.
-  const malformed = await Promise.all([
-    upgradeWithHost(`http://127.0.0.1:${PORT}`, `evil.example@127.0.0.1:${PORT}`),
-    upgradeWithHost(`http://127.0.0.1:${PORT}`, `127.0.0.1:${PORT}/path`),
-    upgradeWithHost(`http://127.0.0.1:${PORT}`, `127.0.0.1:${PORT}?q`),
-    upgradeWithHost(`http://127.0.0.1:${PORT}`, `127.0.0.1:${PORT}#f`),
-  ]);
-  ok('a Host carrying userinfo, a path, a query or a fragment does not upgrade - it is an authority or it is not a Host',
-    malformed.every((r) => r !== 'open'), malformed.join(', '));
-  const dup = await duplicateHostUpgrade();
-  ok('and two Host headers do not upgrade, whoever refuses them - `req.headers.host` keeps only the first, so the one that was checked is not necessarily the one anything downstream believes',
-    !/^HTTP\/1\.1 101/.test(dup), dup.slice(0, 40));
+  // userinfo, a path, a query or a fragment and normalises what is left. One row per spelling, so
+  // a control that reddens one names the spelling that reached the predicate.
+  const malformed = [
+    ['userinfo', `evil.example@127.0.0.1:${PORT}`],
+    ['a path', `127.0.0.1:${PORT}/path`],
+    ['a query', `127.0.0.1:${PORT}?q`],
+    ['a fragment', `127.0.0.1:${PORT}#f`],
+  ];
+  const malformedAnswers = await Promise.all(
+    malformed.map(([, host]) => upgradeWithHost(`http://127.0.0.1:${PORT}`, host)));
+  malformed.forEach(([carries, host], i) => ok(
+    `a Host carrying ${carries} is refused by the guard - it is an authority or it is not a Host`,
+    malformedAnswers[i] === 'refused 403', `${host} -> ${malformedAnswers[i]}`));
+  const single = await rawUpgrade([`127.0.0.1:${PORT}`]);
+  ok('a hand-built upgrade with one Host opens, so the request the next row sends is one this server accepts',
+    /^HTTP\/1\.1 101/.test(single), single.slice(0, 40));
+  const dup = await rawUpgrade([`127.0.0.1:${PORT}`, 'evil.example']);
+  ok('and the same upgrade with a second Host is refused by the guard - `req.headers.host` keeps only the first, so the one checked is not necessarily the one anything downstream believes',
+    /^HTTP\/1\.1 403/.test(dup), dup.slice(0, 40));
 
   // Host equality alone cannot survive DNS rebinding: the attacker re-resolves a name they control
   // onto this address, so both headers carry it. These rows are about loopback
@@ -268,7 +287,7 @@ try {
   // `<img>` sends no `Origin` at all, and several of these reads are expensive. `sec-fetch-site` is
   // set by the browser and cannot be set by a page, so absent must pass or the peer
   // link stops working.
-  const read = (site, path = `/capture/${SAMPLE_ID}/hello`) => fetch(`http://127.0.0.1:${PORT}${path}`, {
+  const read = (site, path = `/capture/${SAMPLE_KEY}/hello`) => fetch(`http://127.0.0.1:${PORT}${path}`, {
     headers: site === null ? {} : { 'sec-fetch-site': site },
   }).then((r) => r.status).catch(() => 'threw');
   const sameOrigin = await read('same-origin');
@@ -287,9 +306,9 @@ try {
   // Route-by-route would close the six that were found; the table's default is what
   // closes the seventh.
   const expensive = await Promise.all([
-    read('cross-site', `/capture/${SAMPLE_ID}/extent?near=0.5&far=6`),
+    read('cross-site', `/capture/${SAMPLE_KEY}/extent?near=0.5&far=6`),
     read('cross-site', '/library/all'),
-    read('cross-site', `/capture/${SAMPLE_ID}/index`),
+    read('cross-site', `/capture/${SAMPLE_KEY}/index`),
   ]);
   ok('every read is refused by default rather than the ones somebody thought of, so a route added later is asked by existing',
     expensive.every((r) => r === 403), expensive.join(', '));
@@ -313,11 +332,18 @@ try {
   ok('the origin guard is unchanged by widening - the bind is not the thing protecting the socket',
     await upgrade('http://evil.example') === 'refused 403');
 } catch (err) {
-  failed++;
-  console.log(`\n  FAIL  the run did not finish: ${err.message}`);
+  // Apart from the assertions: counted as a failed one, a crash reads under --mutate as a catch.
+  crashed = err;
 } finally {
   stopAll();
   rmSync(WORK, { recursive: true, force: true });
+}
+
+if (crashed) {
+  console.log(`\n[guard] DID NOT RUN - ${crashed.message}`);
+  console.log(`[guard] ${checked} assertions ran, ${failed} failed before the crash`);
+  if (fired.length) console.log(`[guard] rows that had already fired: ${fired.join('; ')}`);
+  process.exit(2);
 }
 
 console.log(`\n[guard] ${checked} assertions, ${failed} failed${unproven ? `, ${unproven} unproven` : ''}`);

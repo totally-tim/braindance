@@ -8,15 +8,16 @@ import { pipeline } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join, normalize, extname, sep, resolve } from 'node:path';
 import { WebSocketServer } from 'ws';
-import { MessageParser, encodeMessage, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, MAX_PAYLOAD_BYTES } from './protocol.js';
-import { openCapture, withCapture, captureIdFor, openCaptureCount, decimatePayload, cloudExtent } from './capture.js';
+import { MessageParser, encodeMessage, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, TYPE_KEY, MAX_PAYLOAD_BYTES } from './protocol.js';
+import { openCapture, withCapture, forgetCapture, openCaptureCount, decimatePayload, cloudExtent, colourAfterFrames } from './capture.js';
 import { handleExportSocket, MAX_FRAME_BYTES } from './export.js';
 import { AudioStore } from './audio.js';
 import {
-  VALID_ID, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, downloadTake,
-  downloadsInFlight, hashFile, markWriteCount, readMarkLog, readMarks, reconcile, remaining,
-  removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes,
+  VALID_HASH, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, checkedMarkLog, copyOnNode, downloadTake,
+  downloadsInFlight, hashFile, markLogPath, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
+  adoptNamedMarkLogs, removeName, removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeFileFor,
 } from './library.js';
+import { COLOUR_FRAME_BYTES, nominalTakeRate } from './library.js';
 import { EffectStore } from './effect-store.js';
 import { RESERVED_EFFECT_IDS, doorRefusal, forkRefusal } from './effect-door.js';
 import { cloudSpine } from '../web/cloud-shader.js';
@@ -24,7 +25,13 @@ import { gradeSpine } from '../web/grade-shader.js';
 import { moshSpine } from '../web/mosh-shader.js';
 import { Recorder } from './recorder.js';
 import { JobStore } from './jobs.js';
+import { renderVersion } from './render-version.js';
 import { Webcam } from './webcam.js';
+import { IDLE_TICK_MS, IdleDeadline } from './idle.js';
+import { ABSENT_DELAY, RESTART_DELAYS, retryAfter } from './backoff.js';
+import { testTimer } from '../web/test-timers.js';
+import { Output } from './output.js';
+import { KeyStream } from './key-stream.js';
 import { requireMutation, originAllowed, sameOriginBrowser } from './http-guard.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -46,6 +53,10 @@ const HOST = flag('--host', LOOPBACK);
 const REPLAY = flag('--replay');
 // Recording is a runtime action; this only says whether the first take arms itself at hello.
 const RECORD = has('--record');
+const STANDBY_AFTER_MS = Number(flag('--standby-after', '600')) * 1000;
+if (!Number.isFinite(STANDBY_AFTER_MS) || STANDBY_AFTER_MS < 0) {
+  throw new Error('--standby-after must be a non-negative number of seconds');
+}
 // A node is an ordinary instance of this server with no `--node`, so the link is one-directional.
 const NODE_URL = flag('--node');
 const NODE_NAME = flag('--node-name', 'node');
@@ -81,17 +92,22 @@ const MIME = {
 
 const WEB_DIR = join(ROOT, 'web');
 const THREE_DIR = join(ROOT, 'node_modules/three');
+// A program and the arguments it leads with, as one space-separated flag value. Double quotes keep
+// a path with a space in it whole, which the default Node install on Windows has.
+const commandOf = (value) => [...(value ?? '').matchAll(/"([^"]*)"|(\S+)/g)].map((m) => m[1] ?? m[2]);
+
 // The grabber binary, space-separated so the flag can carry the writer's own arguments.
-const [GRABBER_BIN, ...GRABBER_ARGS] = (flag('--grabber') ?? '').split(' ').filter(Boolean);
+const [GRABBER_BIN, ...GRABBER_ARGS] = commandOf(flag('--grabber'));
 
 // A flag, because a capture node and an editing machine are the same program and the only way to
 // run both on one host is separate directories.
 const CAPTURES_DIR = resolve(flag('--captures', join(ROOT, 'captures')));
 const EXPORTS_DIR = join(ROOT, 'exports');
 
-// The program `POST /library/reveal/:id` starts, substituting the program and nothing else, so a
-// proof tool measures the arguments the platform's file manager would have been given.
-const REVEAL_WITH = flag('--reveal-with', null);
+// The program `POST /library/reveal/:id` starts, and any arguments it leads with, substituting
+// those and nothing else, so a proof tool measures the arguments the platform's file manager
+// would have been given. A prefix is what lets that program be a script run by a named `node`.
+const REVEAL_WITH = commandOf(flag('--reveal-with'));
 
 // A bare startsWith would also match a sibling like `web-private`.
 const isInside = (dir, candidate) => candidate === dir || candidate.startsWith(dir + sep);
@@ -107,12 +123,9 @@ const realOrLexical = (dir) => {
   }
 };
 
-// `--replay` may name a file anywhere, so the replayed take registers its own id here.
-const captureAliases = new Map();
 
 // The node keeps its own preset library on disk: it may be shooting with nothing connected, where
 // a push-per-session scheme leaves a standalone node with an empty selector.
-const AUDIO = new AudioStore(resolve(flag('--audio', join(ROOT, 'audio'))));
 const PROJECTS = new DocumentStore(resolve(flag('--projects', join(ROOT, 'projects'))), 'project');
 // A second *read* root rather than files copied on first run: a builtin is always the current one,
 // a save over its name forks it, and removing the fork brings the shipped look back.
@@ -136,44 +149,58 @@ const EFFECTS = new EffectStore(
 // refused rather than read, because it names a rate this build would ignore.
 const DELIVERABLES = new DocumentStore(resolve(flag('--deliverables', join(CAPTURES_DIR, '..', 'deliverables'))), 'deliverable', 2);
 const JOBS = new JobStore(resolve(flag('--jobs', join(ROOT, 'jobs'))));
+const AUDIO = new AudioStore(resolve(flag('--audio', join(ROOT, 'audio'))));
 const node = NODE_URL ? new NodeLink(NODE_URL, NODE_NAME) : null;
 
-function capturePathFor(id) {
-  if (captureAliases.has(id)) return captureAliases.get(id);
-  return VALID_ID.test(id) ? join(CAPTURES_DIR, `${id}.knct`) : null;
-}
+// `--replay` may name a file anywhere, and the take it replays counts as here wherever it is.
+const REPLAY_PATH = REPLAY ? resolve(REPLAY) : null;
+
+/**
+ * The file here holding the take whose content hash is `hash`, or null: how every `/capture/`
+ * route finds its take. By content rather than by name, because a rename frees a name and the
+ * next take given it is other footage. The take the recorder still owns has no hash yet.
+ */
+const takeFile = (hash) => takeFileFor(CAPTURES_DIR, hash, {
+  owns: (path) => recorder.owns(path),
+  also: REPLAY_PATH ? [REPLAY_PATH] : [],
+});
 
 // The frame API: a single frame is the payload alone, so the pulled and pushed paths hand the
-// same decoder the same input; a run is the file's own slice, framing included, because
-// concatenated payloads have no boundaries left to parse back.
+// same decoder the same input; a run is the frames' own messages, framing included, because
+// concatenated payloads have no boundaries left to parse back, and nothing that lay between them.
 
-// The take the recorder has open is refused through this API until it closes: a scan of a growing
-// file is a full read plus sha256 against the disk being written to, and the hash it would carry
-// names a take that no longer exists a frame later.
-function beingRecorded(path) {
-  return path !== null && path === recorder.openPath;
-}
+const unknownTake = (res) => res.writeHead(404).end('no take here has that content hash');
 
-async function withOpenCapture(res, id, fn) {
-  const path = capturePathFor(id);
-  if (!path) {
-    res.writeHead(404).end('unknown capture');
-    return;
+async function withOpenCapture(res, hash, fn) {
+  // Twice at most: the name found can move before it is opened, and the open capture is asked
+  // which take it is. One held open across a rename made outside this process is let go.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const path = await takeFile(hash);
+    if (!path) {
+      unknownTake(res);
+      return;
+    }
+    let moved = false;
+    await withCapture(path, async (capture) => {
+      if (capture.index.hash !== hash) {
+        moved = true;
+        return;
+      }
+      await fn(capture);
+    }).catch((err) => {
+      if (res.headersSent) return;
+      if (err.code === 'ENOENT') moved = true;
+      else res.writeHead(500).end(`capture unreadable: ${err.message}`);
+    });
+    if (!moved) return;
+    if (path !== REPLAY_PATH) forgetCapture(path);
   }
-  if (beingRecorded(path)) {
-    sendJson(res, { error: `${id} is being recorded right now: it has no settled index or hash until the take closes` }, 409);
-    return;
-  }
-  await withCapture(path, fn).catch((err) => {
-    if (res.headersSent) return;
-    if (err.code === 'ENOENT') res.writeHead(404).end('unknown capture');
-    else res.writeHead(500).end(`capture unreadable: ${err.message}`);
-  });
+  if (!res.headersSent) unknownTake(res);
 }
 
 // The take's own intrinsics: unprojecting on the boot defaults is wrong in a way nothing on screen
 // can show, because every point translates together.
-const serveHello = (req, res, [id]) => withOpenCapture(res, id, async (capture) => {
+const serveHello = (req, res, [hash]) => withOpenCapture(res, hash, async (capture) => {
   const payload = await capture.readHello();
   if (!payload) {
     res.writeHead(404).end('this capture carries no hello');
@@ -187,7 +214,7 @@ const serveHello = (req, res, [id]) => withOpenCapture(res, id, async (capture) 
   res.end(payload);
 });
 
-const serveIndex = (req, res, [id]) => withOpenCapture(res, id, (capture) => {
+const serveIndex = (req, res, [hash]) => withOpenCapture(res, hash, (capture) => {
   const body = Buffer.from(JSON.stringify(capture.index));
   res.writeHead(200, {
     'Content-Type': MIME['.json'],
@@ -199,7 +226,7 @@ const serveIndex = (req, res, [id]) => withOpenCapture(res, id, (capture) => {
 
 const inCapture = (capture, n) => Number.isInteger(n) && n >= 0 && n < capture.frameCount;
 
-const serveFrame = (req, res, [id, index], query) => withOpenCapture(res, id, async (capture) => {
+const serveFrame = (req, res, [hash, index], query) => withOpenCapture(res, hash, async (capture) => {
   const n = Number(index);
   if (!inCapture(capture, n)) {
     res.writeHead(404).end('no such frame');
@@ -236,7 +263,7 @@ const extentCache = new Map();
 // Four numbers per entry, so the bound is about not growing with every range anybody scrubbed.
 const MAX_EXTENTS = 32;
 
-const serveExtent = (req, res, [id], query) => withOpenCapture(res, id, async (capture) => {
+const serveExtent = (req, res, [hash], query) => withOpenCapture(res, hash, async (capture) => {
   const near = Number(query.get('near'));
   const far = Number(query.get('far'));
   // Both required, because a range picked here would be a second declaration of the clip defaults.
@@ -250,52 +277,46 @@ const serveExtent = (req, res, [id], query) => withOpenCapture(res, id, async (c
     return;
   }
   const hello = JSON.parse(payload.toString('utf8'));
-  // The index hash rather than the id, so a take renamed onto an existing name cannot be answered
-  // with the other one's fit.
-  const key = `${capture.index.hash}|${near}|${far}`;
+  const key = `${hash}|${near}|${far}`;
   if (!extentCache.has(key)) {
     if (extentCache.size >= MAX_EXTENTS) extentCache.delete(extentCache.keys().next().value);
     extentCache.set(key, await cloudExtent(capture, hello, near, far));
   }
-  sendJson(res, { id, near, far, ...extentCache.get(key) });
+  sendJson(res, { hash, near, far, ...extentCache.get(key) });
 });
 
-const serveFrameRun = (req, res, [id, from, to]) => withOpenCapture(res, id, async (capture) => {
+const serveFrameRun = (req, res, [hash, from, to]) => withOpenCapture(res, hash, async (capture) => {
   const a = Number(from);
   const b = Number(to);
   if (!inCapture(capture, a) || !inCapture(capture, b) || a > b) {
     res.writeHead(404).end('no such range');
     return;
   }
-  const { start, end } = capture.frameRunSpan(a, b);
+  const { bytes } = capture.frameRunSpans(a, b);
   res.writeHead(200, {
     'Content-Type': 'application/octet-stream',
-    'Content-Length': end - start + 1,
+    'Content-Length': bytes,
     'Cache-Control': 'no-cache',
   });
   // `pipeline` rather than `pipe`, because the headers are already out and a bare pipe leaves a
   // read error as an unhandled stream event. Awaited, because the lease lasts as long as this does.
   await new Promise((done) => {
     pipeline(capture.createFrameRunStream(a, b), res, (err) => {
-      if (err) console.error(`[server] frame run ${id} ${a}-${b} failed: ${err.message}`);
+      if (err) console.error(`[server] frame run ${hash.slice(0, 15)} ${a}-${b} failed: ${err.message}`);
       done();
     });
   });
 });
 
-// Streamed: a take is routinely past the 2 GiB `readFileSync` refuses.
-function serveTakeFile(req, res, [id]) {
-  const path = capturePathFor(id);
-  // A take still being written has no length that will still be true when the transfer ends.
-  if (beingRecorded(path)) {
-    sendJson(res, { error: `${id} is being recorded right now: it is still growing, so there is no whole file to send` }, 409);
-    return;
-  }
+// Streamed: a take is routinely past the 2 GiB `readFileSync` refuses. The copy is hashed where it
+// lands, so the name read here is checked there.
+async function serveTakeFile(req, res, [hash]) {
+  const path = await takeFile(hash);
   let stat;
   try {
     stat = statSync(path ?? '');
   } catch {
-    res.writeHead(404).end('unknown capture');
+    unknownTake(res);
     return;
   }
   res.writeHead(200, {
@@ -304,67 +325,46 @@ function serveTakeFile(req, res, [id]) {
     'Cache-Control': 'no-cache',
   });
   pipeline(createReadStream(path), res, (err) => {
-    if (err) console.error(`[server] serving ${id} failed: ${err.message}`);
+    if (err) console.error(`[server] serving ${basename(path)} failed: ${err.message}`);
   });
 }
 
-// Marks are a sidecar beside the take, and a write is an append - so moving, renaming and
-// deleting a mark are one operation and the two-machine merge is concatenate-and-resolve. `dev`
-// and `ino` rather than the path, because a later take renamed into a freed id is a different take.
-const takeIdentity = (path) => {
-  try {
-    const st = statSync(path ?? '');
-    return { dev: st.dev, ino: st.ino };
-  } catch {
-    return null;
-  }
-};
-const sameTake = (a, b) => a !== null && b !== null && a.dev === b.dev && a.ino === b.ino;
-const takeIsHere = (path) => {
-  try {
-    return takeIdentity(path) !== null;
-  } catch {
-    return false;
-  }
-};
-
-async function serveMarks(req, res, [id], query, { log = false } = {}) {
-  const path = capturePathFor(id);
-  if (!takeIsHere(path)) {
-    res.writeHead(404).end('unknown capture');
+// Marks are an append-only log filed by the take's content hash, so moving, renaming and deleting
+// a mark are one operation, the two-machine merge is concatenate-and-resolve, and a rename moves
+// nothing. The take being recorded has no hash, and its marks are the recorder's until it closes.
+async function serveMarks(req, res, [hash], query, { log = false } = {}) {
+  if (!await takeFile(hash)) {
+    unknownTake(res);
     return;
   }
-  const entries = await readMarkLog(path);
-  sendJson(res, log ? { log: entries } : { marks: resolveMarks(entries) });
+  const entries = await readMarkLog(CAPTURES_DIR, hash);
+  // With the hash it was asked for, so the caller can refuse an answer that checked none.
+  sendJson(res, log ? { log: entries, hash } : { marks: resolveMarks(entries) });
 }
 
-async function serveMarkWrite(req, res, [id]) {
-  const path = capturePathFor(id);
-  // Marks hang off a take, so the take has to exist first: without this the route created a
-  // sidecar for a name nothing holds, with tombstones waiting for a real take of that name.
-  const wasThere = takeIdentity(path);
-  if (wasThere === null) {
-    sendJson(res, { error: `no take ${id} here, so there is nothing to mark` }, 404);
+async function serveMarkWrite(req, res, [hash]) {
+  // Marks hang off a take, so the take has to exist first: a log for footage nothing here holds
+  // would wait for that footage to come back.
+  if (!await takeFile(hash)) {
+    sendJson(res, { error: 'no take here has that content hash, so there is nothing to mark' }, 404);
     return;
   }
   const body = await readBody(req);
-  // Asked again, and asked *which* take: the check above is before an await of up to four
-  // megabytes over a room's wifi, and a rename landing in that gap recreates the old sidecar.
-  if (!sameTake(wasThere, takeIdentity(path))) {
-    sendJson(res, {
-      error: `${id} changed underneath this request - it was renamed or replaced while the marks `
-        + 'were being sent, and they have not been written to anything',
-    }, 409);
-    return;
-  }
   const now = Date.now();
   const records = (body.marks ?? []).map((m) => ({
     ...m,
     // `at` is what orders two machines' edits, and the resolver drops a record without one.
     at: Number.isFinite(m.at) ? m.at : now,
   }));
-  await appendMarks(path, records);
-  sendJson(res, { marks: resolveMarks(await readMarkLog(path)) });
+  // Asked again under the log's lock: the question above is before an await of up to four
+  // megabytes over a room's wifi, and a delete landing in that gap takes the take and its log.
+  if (!await appendMarks(CAPTURES_DIR, hash, records, { present: () => takeFile(hash) })) {
+    sendJson(res, {
+      error: 'the take was deleted while the marks were being sent, and they have not been written to anything',
+    }, 409);
+    return;
+  }
+  sendJson(res, { marks: await readMarks(CAPTURES_DIR, hash) });
 }
 
 
@@ -424,8 +424,8 @@ function readBody(req) {
   });
 }
 
-// The take being written is named on the way in, so the manifest can describe it without scanning.
-const localTakes = () => scanTakes(CAPTURES_DIR, recorder.openPath);
+// The takes the recorder still owns are named on the way in, so the manifest describes them unscanned.
+const localTakes = () => scanTakes(CAPTURES_DIR, (path) => recorder.owns(path));
 
 // Per request rather than per server, because the answer is about the socket: Reveal opens a window
 // on the machine running this process, which is only the operator's when the browser is on it.
@@ -485,11 +485,25 @@ async function serveRename(req, res, [id]) {
   try {
     const done = await renameTake(CAPTURES_DIR, id, body.to, {
       hash: body.hash,
-      recordingPath: recorder.openPath,
+      ownsFile: (identity) => recorder.ownsFile(identity),
     });
     sendJson(res, done);
   } catch (err) {
     sendJson(res, { error: err.message }, 409);
+  }
+}
+
+// A take filed under a second name, which `reconcile` lists and a rename that did not finish leaves.
+async function serveRemoveName(req, res, [id]) {
+  const body = await readBody(req);
+  try {
+    sendJson(res, await removeName(CAPTURES_DIR, id, {
+      keep: body.keep,
+      hash: body.hash,
+      owns: (path) => recorder.owns(path),
+    }));
+  } catch (err) {
+    sendJson(res, { error: err.message }, err.code === 'ENOENT' ? 404 : 409);
   }
 }
 
@@ -521,7 +535,7 @@ async function serveReveal(req, res, [id]) {
     return;
   }
   try {
-    sendJson(res, await revealTake(CAPTURES_DIR, id, { program: REVEAL_WITH }));
+    sendJson(res, await revealTake(CAPTURES_DIR, id, { command: REVEAL_WITH }));
   } catch (err) {
     sendJson(res, { error: err.message }, 409);
   }
@@ -542,7 +556,6 @@ async function serveRemoval(req, res, [id], kind) {
     return;
   }
   const there = node ? await node.takes(left) : null;
-  const theirs = (there ?? []).find((t) => t.hash === (mine?.hash ?? body.hash));
 
   if (kind === 'reclaim') {
     // The surviving copy is the local one, re-hashed rather than trusted: a file truncated since
@@ -551,11 +564,19 @@ async function serveRemoval(req, res, [id], kind) {
       sendJson(res, { error: `${id} is not on this machine, so there is nothing here to keep` }, 409);
       return;
     }
+    let theirs;
+    try {
+      theirs = node ? copyOnNode(node, there, mine.hash) : null;
+    } catch (err) {
+      sendJson(res, { error: `${err.message}, so its copy of ${id} can be neither found nor removed` }, 409);
+      return;
+    }
     if (!theirs) {
       sendJson(res, { error: `${id} is not on ${node?.name ?? 'any node'}: there is nothing to reclaim` }, 409);
       return;
     }
-    const verified = await hashFile(join(CAPTURES_DIR, mine.file));
+    const keptPath = await takeFile(mine.hash);
+    const verified = keptPath ? await hashFile(keptPath).catch((err) => `unreadable (${err.code ?? err.message})`) : 'gone';
     if (verified !== mine.hash) {
       sendJson(res, {
         error: `refusing to reclaim ${id}: the copy here hashes ${verified}, not the ${mine.hash} `
@@ -563,16 +584,36 @@ async function serveRemoval(req, res, [id], kind) {
       }, 409);
       return;
     }
+    // The node's marks come here before its copy goes, because removing a take removes its log.
+    let theirLog;
+    try {
+      theirLog = checkedMarkLog(await node.fetchJson(markLogPath(theirs), { signal: left }), theirs);
+    } catch (err) {
+      sendJson(res, {
+        error: `refusing to reclaim ${id}: the marks on ${node.name}'s copy could not be read (${err.message}), `
+          + 'and removing that copy would remove them with it',
+      }, 502);
+      return;
+    }
+    const marksMerged = await mergeMarkLog(CAPTURES_DIR, mine.hash, theirLog, { present: () => takeFile(mine.hash) });
+    if (marksMerged === null) {
+      sendJson(res, {
+        error: `${id} was removed here while the reclaim ran, so ${node.name}'s marks were not `
+          + 'written and its copy was not removed',
+      }, 409);
+      return;
+    }
     try {
       const done = await node.fetchJson(`/library/delete/${encodeURIComponent(theirs.id)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hash: theirs.hash, confirm: true, verifiedElsewhere: verified }),
+        // With the count of the node's marks merged here, so the node keeps a copy that gained one since.
+        body: JSON.stringify({ hash: theirs.hash, confirm: true, verifiedElsewhere: verified, marksRead: theirLog.length }),
         // A reclaim that hangs here has already asked the node to unlink its copy, so the signal
         // ends this side waiting rather than the request.
         signal: left,
       });
-      sendJson(res, { reclaimed: done, keptHere: verified });
+      sendJson(res, { reclaimed: done, keptHere: verified, marksMerged });
     } catch (err) {
       sendJson(res, { error: `the node refused the reclaim: ${err.message}` }, 502);
     }
@@ -589,18 +630,41 @@ async function serveRemoval(req, res, [id], kind) {
     sendJson(res, { error: `${id} is not on this machine` }, 404);
     return;
   }
-  // `verifiedElsewhere` is what a reclaim from the other machine carries, and it turns this route
-  // into the recoverable action.
-  if (!body.verifiedElsewhere && theirs) {
+  // Delete promises the last copy, and a second name here is the same take staying behind.
+  const alsoNamed = here.takes.filter((t) => t.hash !== null && t.hash === mine.hash && t.id !== id);
+  if (alsoNamed.length) {
     sendJson(res, {
-      error: `${id} exists on ${node.name} as well: reclaim removes a copy, delete removes the last one`,
+      error: `${id} is also filed here as ${alsoNamed.map((t) => t.id).join(', ')}: delete would remove one name `
+        + 'and leave the take under the other, so remove the extra name first',
     }, 409);
     return;
+  }
+  // `verifiedElsewhere` is what a reclaim from the other machine carries, and it turns this route
+  // into the recoverable action. Without it, a node that could not be asked refuses the delete:
+  // the second-copy rule needs its answer, and an unlinked take cannot wait for the node to return.
+  if (!body.verifiedElsewhere && node) {
+    let theirs;
+    try {
+      theirs = copyOnNode(node, there, mine.hash);
+    } catch (err) {
+      sendJson(res, {
+        error: `${err.message}, so whether ${id} has a second copy there is unknown - delete is refused rather than guessed at`,
+      }, 409);
+      return;
+    }
+    if (theirs) {
+      sendJson(res, {
+        error: `${id} exists on ${node.name} as well: reclaim removes a copy, delete removes the last one`,
+      }, 409);
+      return;
+    }
   }
   try {
     const done = await removeTake(CAPTURES_DIR, id, {
       hash: body.hash,
       verifiedElsewhere: body.verifiedElsewhere ?? null,
+      marksRead: body.marksRead ?? null,
+      ownsFile: (identity) => recorder.ownsFile(identity),
     });
     sendJson(res, done);
   } catch (err) {
@@ -608,8 +672,64 @@ async function serveRemoval(req, res, [id], kind) {
   }
 }
 
-async function serveRemoteFrame(req, res, [id, n], query) {
-  if (!node || !VALID_ID.test(id) || !/^\d+$/.test(n)) {
+// A node's reply read whole for a route passing it through, or null once `res` has been answered
+// with why not. `what` names the thing in each refusal. The signal is bound before the fetch: the
+// library asks for a poster on every pointer move, and a scrub across a shelf abandons dozens.
+async function readFromNode(res, path, what, cap) {
+  let upstream;
+  try {
+    upstream = await fetch(`${node.url}${path}`, { signal: untilCallerLeaves(res) });
+  } catch {
+    // The caller going away is the ordinary case here rather than an error.
+    if (!res.writableEnded) res.writeHead(502).end(`the node did not answer for that ${what}`);
+    return null;
+  }
+  if (!upstream.ok) {
+    res.writeHead(upstream.status).end(`the node could not serve that ${what}`);
+    return null;
+  }
+  // The whole reply lands in heap, so it is bounded by the caller's cap rather than by what a
+  // node happens to send.
+  const declared = Number(upstream.headers.get('content-length') ?? NaN);
+  if (Number.isFinite(declared) && declared > cap) {
+    // Cancelled, or the node goes on sending the body it declared into a connection nobody is
+    // draining, and a peer answering every request this way holds one socket per refusal.
+    upstream.body?.cancel().catch(() => { /* the node may already be gone */ });
+    res.writeHead(502).end(`the node offered ${declared} bytes for one ${what}, past the ${cap} allowed`);
+    return null;
+  }
+  // A chunk at a time, because the header above is a claim and this is the arithmetic:
+  // `arrayBuffer()` buffers the whole reply first, so a node answering chunked walked past the
+  // declared-size refusal. `cancel()` rather than a `break`, so the node is told to stop.
+  try {
+    const reader = upstream.body?.getReader();
+    if (!reader) {
+      res.writeHead(502).end(`the node answered that ${what} with no body at all`);
+      return null;
+    }
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > cap) {
+        await reader.cancel().catch(() => {});
+        res.writeHead(502).end(`the node sent past the ${cap} bytes allowed for one ${what},`
+          + ' and was cut off rather than buffered');
+        return null;
+      }
+      chunks.push(value);
+    }
+    return Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)), total);
+  } catch {
+    if (!res.writableEnded) res.writeHead(502).end(`the ${what} stopped arriving from the node`);
+    return null;
+  }
+}
+
+async function serveRemoteFrame(req, res, [hash, n], query) {
+  if (!node || !VALID_HASH.test(hash) || !/^\d+$/.test(n)) {
     res.writeHead(404).end('not found');
     return;
   }
@@ -618,65 +738,36 @@ async function serveRemoteFrame(req, res, [id, n], query) {
     res.writeHead(400).end('decimate must be a whole number from 1 to 16');
     return;
   }
-  // Bound before the fetch: the library asks for a poster on every pointer move, and a scrub
-  // across a shelf abandons dozens of these.
-  let upstream;
-  try {
-    upstream = await fetch(`${node.url}/capture/${encodeURIComponent(id)}/frame/${n}?decimate=${divisor}`,
-      { signal: untilCallerLeaves(res) });
-  } catch {
-    // The caller going away is the ordinary case here rather than an error.
-    if (!res.writableEnded) res.writeHead(502).end('the node did not answer for that frame');
-    return;
-  }
-  if (!upstream.ok) {
-    res.writeHead(upstream.status).end('the node could not serve that frame');
-    return;
-  }
-  // The whole reply lands in heap, so it is bounded by what the format allows a payload to be
-  // rather than by what a node happens to send. A real decimated frame is under 486KB.
-  const declared = Number(upstream.headers.get('content-length') ?? NaN);
-  if (Number.isFinite(declared) && declared > MAX_PAYLOAD_BYTES) {
-    // Cancelled, or the node goes on sending the body it declared into a connection nobody is
-    // draining, and a peer answering every request this way holds one socket per refusal.
-    upstream.body?.cancel().catch(() => { /* the node may already be gone */ });
-    res.writeHead(502).end(`the node offered ${declared} bytes for one frame, past the ${MAX_PAYLOAD_BYTES} this format allows`);
-    return;
-  }
-  // A chunk at a time, because the header above is a claim and this is the arithmetic:
-  // `arrayBuffer()` buffers the whole reply first, so a node answering chunked walked past the
-  // declared-size refusal. `cancel()` rather than a `break`, so the node is told to stop.
-  let body;
-  try {
-    const reader = upstream.body?.getReader();
-    if (!reader) {
-      res.writeHead(502).end('the node answered that frame with no body at all');
-      return;
-    }
-    const chunks = [];
-    let total = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > MAX_PAYLOAD_BYTES) {
-        await reader.cancel().catch(() => {});
-        res.writeHead(502).end(`the node sent past the ${MAX_PAYLOAD_BYTES} bytes this format allows for one frame,`
-          + ' and was cut off rather than buffered');
-        return;
-      }
-      chunks.push(value);
-    }
-    body = Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)), total);
-  } catch {
-    if (!res.writableEnded) res.writeHead(502).end('the frame stopped arriving from the node');
-    return;
-  }
+  // Bounded by what the format allows a payload to be. A real decimated frame is under 486KB.
+  const body = await readFromNode(res, `/capture/${encodeURIComponent(hash)}/frame/${n}?decimate=${divisor}`,
+    'frame', MAX_PAYLOAD_BYTES);
+  if (body === null) return;
   res.writeHead(200, {
     'Content-Type': 'application/octet-stream',
     'Content-Length': body.length,
     'Cache-Control': 'no-cache',
     'X-Depth-Divisor': String(divisor),
+  });
+  res.end(body);
+}
+
+// An index measured 23 bytes a frame on fixture-1g, so this is about a day of a take at 30fps.
+const MAX_REMOTE_INDEX_BYTES = 64 * 1024 * 1024;
+
+// A node-only take's index, for its frame stamps: the library resolves a mark through them, so a
+// take on the node lands a mark on the frame a take here would. Passed through untouched; the
+// page checks the hash against the listing.
+async function serveRemoteIndex(req, res, [hash]) {
+  if (!node || !VALID_HASH.test(hash)) {
+    res.writeHead(404).end('not found');
+    return;
+  }
+  const body = await readFromNode(res, `/capture/${encodeURIComponent(hash)}/index`, 'index', MAX_REMOTE_INDEX_BYTES);
+  if (body === null) return;
+  res.writeHead(200, {
+    'Content-Type': MIME['.json'],
+    'Content-Length': body.length,
+    'Cache-Control': 'no-cache',
   });
   res.end(body);
 }
@@ -703,7 +794,7 @@ async function serveDownload(req, res, [id]) {
     return;
   }
   try {
-    const path = await downloadTake(node, take, CAPTURES_DIR);
+    const path = await downloadTake(node, take, CAPTURES_DIR, { ownsFile: (identity) => recorder.ownsFile(identity) });
     sendJson(res, { downloaded: basename(path), hash: take.hash, bytes: take.bytes });
   } catch (err) {
     sendJson(res, { error: err.message }, 502);
@@ -845,7 +936,7 @@ async function renameDocument(req, res, store, name) {
 
 // Two machines can hold the same take and different marks, and the merge needs no algorithm: the
 // log is append-only and every record carries an id, so the resolver keeps the highest `at`.
-async function serveMarkSync(req, res, [id]) {
+async function serveMarkSync(req, res, [hash]) {
   // Bound before the refusals below as well as before the walk - see `serveLibrary`. After them
   // it would be correct today and rot the moment one of them learns to await something.
   const left = untilCallerLeaves(res);
@@ -853,29 +944,30 @@ async function serveMarkSync(req, res, [id]) {
     sendJson(res, { error: 'no capture node is linked' }, 409);
     return;
   }
-  const path = capturePathFor(id);
-  if (!path) {
-    sendJson(res, { error: `unusable take id ${id}` }, 400);
+  // The take being recorded has no hash, so it is never asked for here.
+  if (!await takeFile(hash)) {
+    sendJson(res, { error: 'no take here has that content hash, so there is nothing to merge marks into' }, 404);
     return;
   }
   try {
-    // The node's *name* for this take, resolved by hash: asking under this machine's name returns
-    // nothing whenever the two named the same footage differently, which is the ordinary case.
-    const here = (await localTakes()).takes.find((t) => t.id === id);
     const theirTakes = await node.takes(left);
-    const match = here && (theirTakes ?? []).find((t) => t.hash === here.hash);
+    // A node that could not be asked throws here and the catch names why: it is not a node that
+    // does not hold this take.
+    const match = copyOnNode(node, theirTakes, hash);
+    // Ungated, because this answer only reads.
     if (!match) {
-      sendJson(res, { merged: 0, marks: await readMarks(path), note: `${node.name} does not hold this take` });
+      sendJson(res, { merged: 0, marks: await readMarks(CAPTURES_DIR, hash), note: `${node.name} does not hold this take` });
       return;
     }
-    const theirs = await node.fetchJson(`/capture/${encodeURIComponent(match.id)}/marks/log`, { signal: left });
-    const mine = await readMarkLog(path);
-    // Appended rather than rewritten, which is what makes this safe to run twice and
-    // from both machines.
-    const known = new Set(mine.map((r) => `${r.id}@${r.at}`));
-    const fresh = (theirs.log ?? []).filter((r) => !known.has(`${r.id}@${r.at}`));
-    await appendMarks(path, fresh);
-    sendJson(res, { merged: fresh.length, marks: await readMarks(path) });
+    const theirLog = checkedMarkLog(await node.fetchJson(markLogPath(match), { signal: left }), match);
+    const merged = await mergeMarkLog(CAPTURES_DIR, hash, theirLog, { present: () => takeFile(hash) });
+    if (merged === null) {
+      sendJson(res, {
+        error: 'the take was deleted here while the marks were being merged, and they have not been written to anything',
+      }, 409);
+      return;
+    }
+    sendJson(res, { merged, marks: await readMarks(CAPTURES_DIR, hash) });
   } catch (err) {
     sendJson(res, { error: err.message }, 502);
   }
@@ -901,6 +993,8 @@ function consumersCostingTheTake() {
       .map((m) => ({ kind: 'monitor', at: `÷${m.divisor} ×${m.stride}` })),
     ...webcam.subscribersCostingTheTake()
       .map(() => ({ kind: 'webcam', at: 'the colour camera at full rate' })),
+    ...keyStream.subscribersCostingTheTake()
+      .map(() => ({ kind: 'key', at: 'the keyed colour camera at full rate' })),
   ];
 }
 
@@ -935,7 +1029,12 @@ const serveRecordStart = shooting(async (req, res) => {
   if (costly.length) {
     console.log(`[server] starting a take with ${costly.length} costly consumer(s): the operator accepted the cost`);
   }
-  sendJson(res, await recorder.start(helloJson));
+  recordingStarts++;
+  try {
+    const state = await recorder.start(helloJson);
+    wakeSensor?.();
+    sendJson(res, state);
+  } finally { recordingStarts--; }
 });
 const serveRecordStop = shooting(async (req, res) => sendJson(res, { stopped: await recorder.stop() }));
 const serveRecordMark = shooting(async (req, res) => {
@@ -1078,8 +1177,8 @@ const serveSensorHealth = (req, res) => sendJson(res, {
   state: sensorState,
   // The last window that carried frames, deliberately older than the window below when the
   // sensor has stopped.
-  fps: observedFps,
-  bytesPerSec: observedBytesPerSec,
+  fps: sensorState === 'standby' ? 0 : observedFps,
+  bytesPerSec: sensorState === 'standby' ? 0 : observedBytesPerSec,
   // And the last window that closed, whether or not anything arrived in it.
   window: lastWindow,
   // Named for what it counts: `stats.dropped` moves per socket whose send buffer is over the
@@ -1087,10 +1186,12 @@ const serveSensorHealth = (req, res) => sendJson(res, {
   monitorDropped: droppedTotal,
   // The first spawn is a start rather than a respawn, and restarts somebody asked for come off it:
   // a flapping count an operator can raise by ticking a checkbox is not a health reading.
-  respawns: Math.max(0, grabberSpawns - 1 - grabberRestarts),
+  respawns: Math.max(0, grabberSpawns - 1 - grabberRestarts - grabberWakes),
   // Beside it rather than folded in, or a node that restarted forty times for forty colour toggles
   // reads zero respawns and the reading that says why is gone.
   restarts: grabberRestarts,
+  wakes: grabberWakes,
+  consumers: { monitors: attachedMonitors().length, webcam: webcam.count, key: keyStream.count, recording: Boolean(recorder.armed || recorder.take) },
 });
 // The monitor half is here so the button can say "this take will refuse" before it is pressed: a
 // check built only out of 409s would pass against a server that refused everything.
@@ -1120,6 +1221,17 @@ const serveRecordState = async (req, res) => {
       served: webcam.served,
       dropped: webcam.dropped,
     },
+    // The same shape for the same kind of consumer, plus the one reading the webcam has no twin
+    // for: a keyed pair needs a colour frame to pair with, and `withoutColour` counts the depth
+    // pictures that arrived before one did.
+    key: {
+      subscribers: keyStream.describe(),
+      available: keyStream.unavailable === null,
+      unavailable: keyStream.unavailable,
+      served: keyStream.served,
+      dropped: keyStream.dropped,
+      withoutColour: keyStream.withoutColour,
+    },
   });
 };
 
@@ -1127,6 +1239,53 @@ async function serveLocalTakes(req, res) {
   const here = await localTakes();
   sendJson(res, { here: HERE_NAME, ...here, storage: await remaining(CAPTURES_DIR, recordingRate()) });
 }
+
+const output = new Output({ presets: PRESETS, effects: EFFECTS, version: PROJECT_VERSION });
+const sendOutput = (ws) => {
+  for (const patch of output.messages()) ws.send(JSON.stringify({ programOut: patch }));
+};
+const broadcastOutput = () => {
+  for (const patch of output.messages()) broadcastText(JSON.stringify({ programOut: patch }));
+};
+const serveOutputWrite = async (req, res) => {
+  try {
+    await output.write(await readBody(req));
+    broadcastOutput();
+    sendJson(res, output.state);
+  } catch (err) { sendJson(res, { error: err.message }, err.status ?? 400); }
+};
+
+const replayRefusal = () => `this server is replaying ${basename(REPLAY)} rather than reading a sensor, so there is no camera to control`;
+// Whether the take being replayed carries the colour camera, known once `startReplay` has indexed it.
+let replayHasColour = false;
+const replayKeyRefusal = () => `this server is replaying ${basename(REPLAY)}, and a take carries no keyed depth, `
+  + 'so there is nothing to key its colour with';
+const replayWebcamRefusal = (state) => (replayHasColour
+  ? `the replay of ${basename(REPLAY)} is ${state}, so there is no colour frame to serve`
+  : `this server is replaying ${basename(REPLAY)}, and that take carries no colour camera frames`);
+const cameraState = () => ({ camera, available: !webcam.unavailable, unavailable: webcam.unavailable });
+const serveStandby = shooting(async (req, res) => {
+  if (REPLAY) throw new Error(replayRefusal());
+  await standbySensor();
+  serveSensorHealth(req, res);
+});
+const serveWake = shooting(async (req, res) => {
+  if (REPLAY) throw new Error(replayRefusal());
+  await wakeSensor();
+  serveSensorHealth(req, res);
+});
+const serveCameraWrite = async (req, res) => {
+  if (REPLAY) return sendJson(res, { error: replayRefusal() }, 409);
+  try {
+    const body = await readBody(req);
+    if (!body || Array.isArray(body) || typeof body !== 'object'
+        || Object.entries(body).some(([key, value]) => !['color', 'lowLight'].includes(key) || typeof value !== 'boolean')) {
+      throw new Error('camera accepts boolean color and lowLight');
+    }
+    const restarting = Boolean(applyCamera({ ...camera, ...body }));
+    sendJson(res, { ...cameraState(), restarting });
+  } catch (err) { sendJson(res, { error: err.message }, 400); }
+};
 
 // The HTTP surface as one table, walked by one dispatcher - the table *is* the dispatch, which is
 // what stops it drifting from the behaviour. Having a `write` is how a route declares that it
@@ -1142,16 +1301,23 @@ const ROUTES = [
     res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': bytes.length, 'Cache-Control': 'private, max-age=31536000, immutable' });
     res.end(req.method === 'HEAD' ? undefined : bytes);
   } },
+  { path: '/output', pattern: /^\/output$/, read: (req, res) => sendJson(res, output.state), write: { methods: ['POST'], run: serveOutputWrite } },
+  { path: '/sensor/standby', pattern: /^\/sensor\/standby$/, write: { methods: ['POST'], run: serveStandby } },
+  { path: '/sensor/wake', pattern: /^\/sensor\/wake$/, write: { methods: ['POST'], run: serveWake } },
+  { path: '/sensor/camera', pattern: /^\/sensor\/camera$/, read: (req, res) => sendJson(res, cameraState()), write: { methods: ['POST'], run: serveCameraWrite } },
+  { path: '/preview/renderer', pattern: /^\/preview\/renderer$/, read: async (req, res) => {
+    sendJson(res, { version: await renderVersion(WEB_DIR, THREE_DIR) });
+  } },
   // ---- a capture, read
-  { path: '/capture/:id/hello', pattern: /^\/capture\/([^/]+)\/hello$/, read: serveHello },
-  { path: '/capture/:id/index', pattern: /^\/capture\/([^/]+)\/index$/, read: serveIndex },
-  { path: '/capture/:id/extent', pattern: /^\/capture\/([^/]+)\/extent$/, read: serveExtent },
-  { path: '/capture/:id/file', pattern: /^\/capture\/([^/]+)\/file$/, read: serveTakeFile },
-  { path: '/capture/:id/frame/:n', pattern: /^\/capture\/([^/]+)\/frame\/(\d+)$/, read: serveFrame },
-  { path: '/capture/:id/frames/:a-:b', pattern: /^\/capture\/([^/]+)\/frames\/(\d+)-(\d+)$/, read: serveFrameRun },
-  { path: '/capture/:id/marks/log', pattern: /^\/capture\/([^/]+)\/marks\/log$/, read: (req, res, args, query) => serveMarks(req, res, args, query, { log: true }) },
+  { path: '/capture/:hash/hello', pattern: /^\/capture\/([^/]+)\/hello$/, read: serveHello },
+  { path: '/capture/:hash/index', pattern: /^\/capture\/([^/]+)\/index$/, read: serveIndex },
+  { path: '/capture/:hash/extent', pattern: /^\/capture\/([^/]+)\/extent$/, read: serveExtent },
+  { path: '/capture/:hash/file', pattern: /^\/capture\/([^/]+)\/file$/, read: serveTakeFile },
+  { path: '/capture/:hash/frame/:n', pattern: /^\/capture\/([^/]+)\/frame\/(\d+)$/, read: serveFrame },
+  { path: '/capture/:hash/frames/:a-:b', pattern: /^\/capture\/([^/]+)\/frames\/(\d+)-(\d+)$/, read: serveFrameRun },
+  { path: '/capture/:hash/marks/log', pattern: /^\/capture\/([^/]+)\/marks\/log$/, read: (req, res, args, query) => serveMarks(req, res, args, query, { log: true }) },
   // ---- a capture, written
-  { path: '/capture/:id/marks', pattern: /^\/capture\/([^/]+)\/marks$/, read: serveMarks, write: { methods: ['POST'], run: serveMarkWrite } },
+  { path: '/capture/:hash/marks', pattern: /^\/capture\/([^/]+)\/marks$/, read: serveMarks, write: { methods: ['POST'], run: serveMarkWrite } },
 
   // ---- the library, read
   { path: '/library/takes', pattern: /^\/library\/takes$/, read: serveLocalTakes },
@@ -1165,14 +1331,16 @@ const ROUTES = [
   { path: '/library/writes', pattern: /^\/library\/writes$/, read: serveWriteCounts },
   // A frame of a node-only take, fetched through here rather than by the browser reaching across:
   // one origin for the page, and the decimation decision stays on the side that knows the link.
-  { path: '/library/remote-frame/:id/:n', pattern: /^\/library\/remote-frame\/([^/]+)\/([^/]+)$/, read: serveRemoteFrame },
+  { path: '/library/remote-frame/:hash/:n', pattern: /^\/library\/remote-frame\/([^/]+)\/([^/]+)$/, read: serveRemoteFrame },
+  { path: '/library/remote-index/:hash', pattern: /^\/library\/remote-index\/([^/]+)$/, read: serveRemoteIndex },
 
   // ---- the library, written
   { path: '/library/download/:id', pattern: /^\/library\/download\/([^/]+)$/, write: { methods: ['POST'], run: serveDownload } },
   { path: '/library/delete/:id', pattern: /^\/library\/delete\/([^/]+)$/, write: { methods: ['POST'], run: (req, res, args) => serveRemoval(req, res, args, 'delete') } },
   { path: '/library/reclaim/:id', pattern: /^\/library\/reclaim\/([^/]+)$/, write: { methods: ['POST'], run: (req, res, args) => serveRemoval(req, res, args, 'reclaim') } },
-  { path: '/library/sync-marks/:id', pattern: /^\/library\/sync-marks\/([^/]+)$/, write: { methods: ['POST'], run: serveMarkSync } },
+  { path: '/library/sync-marks/:hash', pattern: /^\/library\/sync-marks\/([^/]+)$/, write: { methods: ['POST'], run: serveMarkSync } },
   { path: '/library/rename/:id', pattern: /^\/library\/rename\/([^/]+)$/, write: { methods: ['POST'], run: serveRename } },
+  { path: '/library/remove-name/:id', pattern: /^\/library\/remove-name\/([^/]+)$/, write: { methods: ['POST'], run: serveRemoveName } },
   // A `write` although no byte of the library moves, because the slot declares "this route makes
   // something happen" and this is the one route in the program that starts a process.
   { path: '/library/reveal/:id', pattern: /^\/library\/reveal\/([^/]+)$/, write: { methods: ['POST'], run: serveReveal } },
@@ -1243,9 +1411,16 @@ const ROUTES = [
   // ---- the webcam
   //
   // `live` rather than `write`: it changes nothing, but it hands out what the colour camera sees
-  // this second. `embeddable`, and the one route that is, because a media source and a plain
-  // `<img>` in somebody's overlay are documented uses.
-  { path: '/camera.mjpg', pattern: /^\/camera\.mjpg$/, live: true, embeddable: true, read: (req, res) => webcam.attach(req, res) },
+  // this second. OBS opens it as a browser source, a direct load. `embeddable`, and the one route
+  // that is, because a plain `<img>` in somebody's overlay page loads it cross-site.
+  { path: '/camera.mjpg', pattern: /^\/camera\.mjpg$/, live: true, embeddable: true, read: (req, res) => {
+    // Woken only for a request that can be served. A source pointed at a colour camera this server
+    // will never have retries after every idle window, and each retry would start the grabber to
+    // answer a 503. A transient outage is what waking is for, so the first subscriber to a camera
+    // that has not handshaken yet still gets the grabber it is waiting on.
+    if (webcam.unavailable === null || webcam.transient) wakeSensor?.();
+    webcam.attach(req, res);
+  } },
 
   // ---- the sensor
   //
@@ -1330,6 +1505,9 @@ const PAGES = {
   // The program-out source, which OBS opens as a browser source: the same renderer drawing the
   // same scene, so a second page would be a second renderer to keep in step.
   '/program': 'index.html',
+  // The third OBS output: the colour camera keyed by its own depth. A page of its own rather than a
+  // mode of the viewer, because it draws a video frame and never the point cloud.
+  '/key': 'key.html',
 };
 
 // One dispatcher, and the only place a mutating route is let through. Returns false for a path no
@@ -1525,11 +1703,20 @@ exportWss.on('connection', (ws) => {
 });
 
 let helloJson = null;
-const stats = { frames: 0, dropped: 0, bytes: 0, since: Date.now() };
-// The measured byte rate of what is actually arriving, which is what the remaining-time report
-// divides free space by. Falls back to the nominal 486KB at 30fps before anything has arrived.
+const stats = { frames: 0, dropped: 0, bytes: 0, colourBytes: 0, since: Date.now() };
+// The measured byte rate of the frames actually arriving.
 let observedBytesPerSec = 0;
-const recordingRate = () => (observedBytesPerSec > 0 ? observedBytesPerSec : undefined);
+// And of the colour camera's messages, which arrive only while something asks for them.
+let observedColourBytesPerSec = 0;
+// What a take would write each second, which is what the remaining-time report and the refusal to
+// start divide free space by. With colour on a take records the colour camera too: measured while
+// it flows, and otherwise one colour frame per depth frame, the most the camera sends. Before
+// anything has arrived, the nominal rate.
+const recordingRate = () => {
+  if (!(observedBytesPerSec > 0)) return nominalTakeRate(camera.color);
+  if (!camera.color) return observedBytesPerSec;
+  return observedBytesPerSec + (observedColourBytesPerSec > 0 ? observedColourBytesPerSec : observedFps * COLOUR_FRAME_BYTES);
+};
 // Kept beside the byte rate rather than derived from it: a link delivering half the frames at full
 // size and one delivering every frame at half size are the same MB/s and different faults.
 let observedFps = 0;
@@ -1551,6 +1738,10 @@ let grabberSpawns = 0;
 // turns "this node is flapping" into a number a checkbox produces. Counted where the exit is
 // *consumed*, or an arm that never becomes a spawn subtracts a respawn that did happen.
 let grabberRestarts = 0;
+let grabberWakes = 0;
+let recordingStarts = 0;
+let standbySensor = null;
+let wakeSensor = null;
 
 let sensorState = 'starting';
 
@@ -1563,7 +1754,12 @@ function setSensorState(state) {
   broadcastText(JSON.stringify({ status: state }));
   // The webcam cannot outlive the sensor being live, and hanging it off the state change rather
   // than off each path that causes one keeps a route added later from missing a case.
-  if (state !== 'live') webcam.setUnavailable(`the sensor is ${state}`);
+  if (state !== 'live') {
+    webcam.setUnavailable(REPLAY ? replayWebcamRefusal(state) : !camera.color
+      ? 'colour is off on this grabber, so there is no colour camera to serve'
+      : `the sensor is ${state}`, !REPLAY && camera.color && state !== 'absent');
+    keyStream.setUnavailable(REPLAY ? replayKeyRefusal() : `the sensor is ${state}`);
+  }
 }
 
 // Colour on/off has to restart the grabber because it decides which streams the device is told to
@@ -1589,6 +1785,7 @@ const isLoopback = (req) => {
 const whole = (v, max) => (Number.isInteger(v) && v >= 1 && v <= max ? v : null);
 
 wss.on('connection', (ws, req) => {
+  wakeSensor?.();
   ws.binaryType = 'nodebuffer';
   // A loopback socket starts at full rate, its frames never crossing the link the cap is about. A
   // remote one is ineligible until it asks, and finer than the cap is refused rather than clamped.
@@ -1601,7 +1798,9 @@ wss.on('connection', (ws, req) => {
   ws.send(JSON.stringify({ status: sensorState }));
   ws.send(JSON.stringify({ camera }));
   sendMonitor(ws);
+  sendOutput(ws);
   ws.on('error', (err) => console.error('[server] socket error:', err.message));
+  ws.on('close', () => keyStream.detach(ws));
 
   ws.on('message', (raw) => {
     let msg;
@@ -1611,6 +1810,18 @@ wss.on('connection', (ws, req) => {
       return; // a client sending junk is not the server's problem
     }
     if (!msg) return;
+
+    // A socket is a monitor or a key client and never both. The binary channel carries type 2
+    // frames to one and keyed pairs to the other with no discriminator in front of either, so
+    // what keeps them apart is that leaving `monitors` is what `broadcastFrame` skips on.
+    if (msg.key === true) {
+      monitors.delete(ws);
+      keyStream.attach(ws, loopback);
+      // Answered, and the answer is the seam: this socket was granted frames on connect, so the
+      // client needs to know which binary message is the first one that is a pair.
+      ws.send(JSON.stringify({ key: { attached: true, loopback } }));
+      return;
+    }
 
     // Answered on every attempt, accepted or not, so the client renders what it was granted: one
     // that assumed its request took effect would draw a `÷4` label over a full-rate stream.
@@ -1654,10 +1865,18 @@ wss.on('connection', (ws, req) => {
     // parameter means, so one added next year reaches the program-out page without this changing.
     // To others only, or a surface applies its own writes twice and mirror mode fights the hand.
     if (typeof msg.programOut === 'object' && msg.programOut) {
-      const text = raw.toString('utf8');
-      for (const other of wss.clients) {
-        if (other !== ws && other.readyState === other.OPEN) other.send(text);
-      }
+      const patch = msg.programOut;
+      output.write(patch).then(() => {
+        const messages = 'preset' in patch ? output.messages() : [patch];
+        for (const next of messages) {
+          const text = JSON.stringify({ programOut: next });
+          for (const other of wss.clients) {
+            if (other !== ws && other.readyState === other.OPEN) other.send(text);
+          }
+        }
+      }).catch((err) => {
+        if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ outputError: err.message }));
+      });
       return;
     }
 
@@ -1748,9 +1967,23 @@ let requestHdColor = null;
 // where no grabber ever starts: an editing station should say why the camera is unavailable.
 const webcam = new Webcam({
   request: (wanted) => requestHdColor?.(wanted),
+  // Armed rather than recording, so the encode is already running when the next hello opens a take.
+  recording: () => recorder.armed,
+});
+
+// Asks the grabber to start or stop the keyed depth encode. `key on` implies the colour encode, so
+// the colour this pairs with is the frame the webcam is already holding rather than a second decode.
+let requestKey = null;
+
+const keyStream = new KeyStream({
+  request: (wanted) => requestKey?.(wanted),
+  webcam,
+  maxBuffered: MAX_BUFFERED,
 });
 if (REPLAY) {
-  webcam.setUnavailable(`this server is replaying ${basename(REPLAY)}, so there is no colour camera to serve`);
+  // Held rather than refused until `startReplay` has read whether the take carries colour.
+  webcam.setUnavailable(`this server is replaying ${basename(REPLAY)} and has not read it yet`, true);
+  keyStream.setUnavailable(replayKeyRefusal());
 }
 
 // One take is one file, and the recorder holds that identity. Created here rather than inside
@@ -1770,8 +2003,12 @@ const recorder = new Recorder({
   // So the refusal to start a take and the remaining-time readout divide by the same number.
   rateOf: () => recordingRate(),
   // Every monitor sees the recording state change: the control arrives over HTTP, the state comes
-  // back on the socket every client is already listening to.
-  onChange: (state) => broadcastText(JSON.stringify({ recording: state })),
+  // back on the socket every client is already listening to. Arming and disarming also move the
+  // colour camera's demand.
+  onChange: (state) => {
+    webcam.settle();
+    broadcastText(JSON.stringify({ recording: state }));
+  },
 });
 
 function handleMessage(msg) {
@@ -1790,13 +2027,16 @@ function handleMessage(msg) {
     // defined by. The replay loop did not supply it and every frame became a throw in its catch.
     recorder.write(msg.raw);
   } else if (msg.type === TYPE_COLOR) {
-    // The webcam and nothing else: there is deliberately no `recorder.write` here. A capture file
-    // is the wire verbatim, so a type 3 in one would move the content hash of every take - the key
-    // the library joins two machines on. Issue #9 carries what it would take, and
-    // `vcam-check --mutate hd-reaches-recorder` adds the write back and has to fail.
-    //
-    // The payload is [u64 timestampMs][JPEG], and the JPEG goes out untouched.
+    // The payload is [u64 timestampMs][JPEG], and the JPEG goes out untouched. Into the take as well,
+    // whole: a take recorded with colour on carries the colour camera, and the recorder asks for it
+    // through the webcam's demand so what a take holds does not depend on who was watching.
+    stats.colourBytes += msg.payload.length;
     webcam.offer(Buffer.from(msg.payload.subarray(8)), Number(msg.payload.readBigUInt64LE(0)));
+    recorder.write(msg.raw);
+  } else if (msg.type === TYPE_KEY) {
+    // The key clients and nothing else: there is deliberately no `recorder.write` here. A take
+    // records no keyed depth, so a replayed take feeds `/camera.mjpg` and not `/key`.
+    keyStream.offer(msg.payload);
   }
 }
 
@@ -1804,8 +2044,8 @@ setInterval(() => {
   // The window closes before anything decides whether it was interesting: with the reset past the
   // early return, an empty window was never closed and after a sixty-second drop the next window's
   // frames were divided by sixty-five seconds, into the readout that promises card space.
-  const closed = { ms: Date.now() - stats.since, frames: stats.frames, dropped: stats.dropped, bytes: stats.bytes };
-  Object.assign(stats, { frames: 0, dropped: 0, bytes: 0, since: Date.now() });
+  const closed = { ms: Date.now() - stats.since, frames: stats.frames, dropped: stats.dropped, bytes: stats.bytes, colourBytes: stats.colourBytes };
+  Object.assign(stats, { frames: 0, dropped: 0, bytes: 0, colourBytes: 0, since: Date.now() });
   lastWindow = { ms: closed.ms, frames: closed.frames };
   droppedTotal += closed.dropped;
   // What stays behind the return is the derived rate, deliberately left stale: a window that
@@ -1815,18 +2055,10 @@ setInterval(() => {
   const fps = (closed.frames / dt).toFixed(1);
   const mbs = (closed.bytes / dt / 1e6).toFixed(1);
   observedBytesPerSec = closed.bytes / dt;
+  observedColourBytesPerSec = closed.colourBytes / dt;
   observedFps = closed.frames / dt;
   console.log(`[server] ${fps} fps  ${mbs} MB/s  dropped=${closed.dropped}  clients=${wss.clients.size}`);
 }, 5000);
-
-// The Kinect v2 drops off the bus under sustained load on a marginal USB link, so a dead grabber
-// is an expected condition rather than a fatal one.
-const RESTART_DELAYS = [1000, 2000, 4000, 8000];
-
-// How long to leave between attempts once the conclusion is that there is no sensor here. Long,
-// because the enumeration will not find one - but not never, so a sensor plugged in
-// later is picked up.
-const ABSENT_DELAY = 30000;
 
 function startLive() {
   const bin = GRABBER_BIN ? resolve(GRABBER_BIN) : join(ROOT, 'native/build/grabber');
@@ -1841,6 +2073,10 @@ function startLive() {
   let attempt = 0;
   let shuttingDown = false;
   let restarting = false;
+  let standby = false;
+  let spawnTimer = null;
+  let standbyPending = null;
+  const idleRule = new IdleDeadline({ afterMs: STANDBY_AFTER_MS });
   // Whether a sensor has ever handshaken with this process. Monotonic on purpose: it separates
   // "the link dropped" from "nothing is plugged in here", which are one event at the exit handler.
   let everLive = false;
@@ -1856,9 +2092,10 @@ function startLive() {
   // SIGTERM alone is not enough and the failure is silent: the grabber leaves its loop and blocks
   // in libfreenect2's `dev->stop()` with transfers in flight, and every restart runs through the
   // `exit` handler, so the respawn never happens. Observed as eight minutes with no frames.
-  const stopGrabber = ({ holdProcessOpen = false } = {}) => {
+  const stopGrabber = ({ holdProcessOpen = false, grace = STOP_GRACE_MS } = {}) => {
     const dying = child;
-    if (!dying) return;
+    if (!dying) return Promise.resolve();
+    const exited = new Promise((done) => dying.once('exit', done));
     dying.kill('SIGTERM');
     const timer = setTimeout(() => {
       if (dying.exitCode === null && dying.signalCode === null) {
@@ -1866,23 +2103,21 @@ function startLive() {
         killedHard = true;
         dying.kill('SIGKILL');
       }
-    }, STOP_GRACE_MS);
+    }, grace);
     // On a restart the grace period must not hold the process up, so it is unreferenced. On the way
     // out it is the opposite: the sensor would stay claimed by an orphan, which fails the *next*
     // server's enumeration as a broken Kinect.
     if (!holdProcessOpen) timer.unref?.();
     dying.once('exit', () => clearTimeout(timer));
+    return exited;
   };
 
   // Reached from the two ways a grabber can fail to be running: it exited, or it never started.
   // Written out only in the exit handler before, which is why the second way had no backoff.
   const scheduleRetry = () => {
-    // A grabber that has *never* handshaken is a machine with no sensor rather than the flaky USB
-    // link this backoff is for. The full table is spent first, because a node whose sensor is slow
-    // to enumerate at boot is the same shape for a few seconds.
-    const absent = !everLive && attempt >= RESTART_DELAYS.length;
+    if (standby || shuttingDown) return;
+    const { absent, delayMs: delay } = retryAfter({ attempt, everLive });
     setSensorState(absent ? 'absent' : 'lost');
-    const delay = absent ? ABSENT_DELAY : RESTART_DELAYS[Math.min(attempt, RESTART_DELAYS.length - 1)];
     attempt++;
     // Once absent, said once, or this line and libfreenect2's enumeration run every few seconds
     // for as long as the editing station is up.
@@ -1890,13 +2125,11 @@ function startLive() {
     else if (attempt === RESTART_DELAYS.length + 1) {
       console.log(`[server] no sensor found in ${attempt} attempts - looking again every ${ABSENT_DELAY / 1000}s`);
     }
-    setTimeout(spawnGrabber, delay);
+    spawnTimer = setTimeout(() => { spawnTimer = null; spawnGrabber(); }, delay);
   };
 
   const spawnGrabber = () => {
-    // Counted here rather than in the backoff, because every road to a running grabber ends at
-    // this function, so a path added later is counted by going through it.
-    grabberSpawns++;
+    if (standby || shuttingDown || child || spawnTimer) return;
     const grabberArgs = buildArgs();
     console.log(`[server] starting grabber: ${bin} ${grabberArgs.join(' ')}`);
     setSensorState('starting');
@@ -1904,6 +2137,10 @@ function startLive() {
     const parser = new MessageParser();
     // stdin is a pipe, so settings that need no restart reach the running grabber.
     const proc = spawn(bin, grabberArgs, { stdio: ['pipe', 'pipe', 'inherit'] });
+    // Counted when a process exists: a binary that is missing or built for another machine never
+    // emits `spawn`, and counting the attempt reads each backoff retry as the sensor flapping.
+    // Here rather than in the backoff, so a path to a running grabber added later is counted too.
+    proc.on('spawn', () => { grabberSpawns++; });
     child = proc;
     child.stdin.on('error', () => { /* the grabber can exit mid-write */ });
     // A grabber that cannot be spawned at all arrives as an `error` rather than an exit, and an
@@ -1924,6 +2161,7 @@ function startLive() {
     });
 
     child.stdout.on('data', (chunk) => {
+      if (standby || shuttingDown) return;
       try {
         for (const msg of parser.push(chunk)) {
           handleMessage(msg);
@@ -1934,8 +2172,12 @@ function startLive() {
             // A new grabber has never heard of the subscriber still attached and its encoder starts
             // off, so without this the webcam comes back open, subscribed and permanently silent.
             // This is also the one place it becomes available at all.
-            if (camera.color) webcam.setAvailable();
+            if (camera.color) {
+              webcam.setAvailable();
+              keyStream.setAvailable();
+            }
             webcam.reassert();
+            keyStream.reassert();
           }
         }
       } catch (err) {
@@ -1959,11 +2201,19 @@ function startLive() {
       helloJson = null;
       // The picture goes with the grabber too, said as a sentence: a webcam that answers "the
       // grabber is restarting" is one somebody waits three seconds for rather than debugs.
-      webcam.setUnavailable('the grabber is restarting');
+      webcam.setUnavailable('the grabber is restarting', camera.color);
+      keyStream.setUnavailable('the grabber is restarting');
       // The take ends here. One take is one continuous stream with one hello and monotonic stamps,
       // and a blend fraction across a restart seam has no meaning. Nothing is discarded.
       recorder.split().catch((err) => console.error(`[recorder] ${err.message}`));
       if (shuttingDown) return;
+      if (standby) {
+        killedHard = false;
+        attempt = 0;
+        restarting = false;
+        setSensorState('standby');
+        return;
+      }
       if (restarting) {
         // Asked for, not a failure, so it counts toward neither the backoff nor the respawns
         // `/sensor/health` reports. This is the one place that knows the difference.
@@ -1972,7 +2222,7 @@ function startLive() {
         killedHard = false;
         // Counted beside the spawn it excuses: `respawns` is `grabberSpawns - 1 - grabberRestarts`,
         // so incrementing on the exit makes that subtraction run one ahead of itself for the gap.
-        setTimeout(() => { grabberRestarts++; spawnGrabber(); }, delay);
+        spawnTimer = setTimeout(() => { spawnTimer = null; grabberRestarts++; spawnGrabber(); }, delay);
         return;
       }
       scheduleRetry();
@@ -1986,10 +2236,15 @@ function startLive() {
     child?.stdin.write(`hd-color ${wanted ? 'on' : 'off'}\n`);
   };
 
+  requestKey = (wanted) => {
+    if (!camera.color) return;
+    child?.stdin.write(`key ${wanted ? 'on' : 'off'}\n`);
+  };
+
   applyCamera = (next) => {
     const needsRestart = next.color !== camera.color;
     const lowLightChanged = next.lowLight !== camera.lowLight;
-    if (!needsRestart && !lowLightChanged) return;
+    if (!needsRestart && !lowLightChanged) return false;
 
     Object.assign(camera, next);
     broadcastText(JSON.stringify({ camera }));
@@ -2005,14 +2260,22 @@ function startLive() {
       // reason in front of whoever loses the picture.
       if (!camera.color) {
         webcam.setUnavailable('colour is off on this grabber, so there is no colour camera to serve');
+        keyStream.setUnavailable('colour is off on this grabber, so there is no colour camera to key');
       }
       console.log(`[server] colour camera ${camera.color ? 'on' : 'off'} - ${child ? 'restarting grabber' : 'takes effect on the next spawn'}`);
-      if (child) {
+      if (child && !standby) {
         restarting = true;
         attempt = 0;
         stopGrabber();
+        return true;
       }
-      return;
+      // Colour coming back with nothing running has no grabber to tell, and the refusal the colour
+      // left behind reads as permanent, so a request that this change just made servable would be
+      // refused on a reason that no longer holds - and refused without waking, which strands it for
+      // good. The refusal describes the camera and the sensor state together, so it is re-derived
+      // from both rather than edited here.
+      if (camera.color) setSensorState(sensorState);
+      return false;
     }
     // Colour off means there is no exposure to set, but the flag is remembered for when it returns.
     if (camera.color) {
@@ -2020,6 +2283,45 @@ function startLive() {
       child?.stdin.write(`low-light ${camera.lowLight ? 'on' : 'off'}\n`);
     }
   };
+
+  // Conservative bounds; physical teardown and first-frame measurements belong in performance.md.
+  const STANDBY_GRACE_MS = testTimer('standby-grace', 15000);
+  standbySensor = async () => {
+    if (recordingStarts || recorder.armed || recorder.take) throw new Error('cannot enter standby while a take is armed or recording');
+    if (standbyPending) return standbyPending;
+    if (standby) return Promise.resolve();
+    standby = true;
+    clearTimeout(spawnTimer);
+    spawnTimer = null;
+    helloJson = null;
+    standbyPending = stopGrabber({ grace: STANDBY_GRACE_MS }).then(() => {
+      setSensorState('standby');
+      observedFps = 0;
+      observedBytesPerSec = 0;
+      standbyPending = null;
+    });
+    return standbyPending;
+  };
+  wakeSensor = () => {
+    if (!standby || shuttingDown) return;
+    if (standbyPending) {
+      return standbyPending.then(() => wakeSensor());
+    }
+    standby = false;
+    idleRule.reset();
+    attempt = 0;
+    grabberWakes++;
+    spawnGrabber();
+  };
+  if (STANDBY_AFTER_MS > 0) setInterval(() => {
+    // A key page attached while there is no colour to key is a socket waiting for a reason rather
+    // than a consumer, so it does not hold the sensor up.
+    const idle = attachedMonitors().length === 0 && keyStream.demandCount === 0 && webcam.count === 0
+      && !recordingStarts && !recorder.armed && !recorder.take;
+    if (idleRule.ask({ idle, state: sensorState }).expired) {
+      standbySensor().catch((err) => console.error(`[server] ${err.message}`));
+    }
+  }, IDLE_TICK_MS).unref();
 
   // Armed at boot rather than recording at boot, so there is one path into a take file. Armed
   // *before* the grabber is spawned, because a hello arriving during that disk read would find the
@@ -2033,13 +2335,29 @@ function startLive() {
     spawnGrabber();
   }
 
-  process.on('SIGINT', () => {
+  const shutdown = async () => {
+    if (shuttingDown) return;
     shuttingDown = true;
-    stopGrabber({ holdProcessOpen: true });
-    // Closed and scanned before the process goes, because a take without a sidecar is one the
-    // library has to rebuild. A courtesy: the guarantee is that the bytes are already on disk.
-    recorder.close('server stopped').finally(() => process.exit(0));
-  });
+    clearTimeout(spawnTimer);
+    // Settled rather than awaited together. A take whose final index fails is still a take the
+    // grabber has to stop for, and a rejection escaping this listener is an unhandled one that can
+    // end the process before the shutdown grace has asked a stubborn grabber to die, which leaves
+    // the sensor claimed by a process nobody owns.
+    const [grabber, take] = await Promise.allSettled([
+      stopGrabber({ holdProcessOpen: true, grace: STANDBY_GRACE_MS }),
+      recorder.close('server stopped'),
+    ]);
+    // Named rather than dumped: an operator reading this over ssh needs to know which half of the
+    // way out failed, and the two halves fail with messages that look alike in a log.
+    const failed = [['the take', take], ['the grabber', grabber]].filter(([, r]) => r.status === 'rejected');
+    for (const [what, r] of failed) {
+      console.error(`[server] shutdown: ${what} did not finish: ${r.reason?.message ?? r.reason}`);
+    }
+    process.exit(failed.length ? 1 : 0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
 }
 
 async function startReplay() {
@@ -2054,6 +2372,7 @@ async function startReplay() {
       // as a missing file, which is how a capture the reader refused looked like one nobody shot.
       console.error(`[server] cannot open ${REPLAY}: ${err.message}`);
     }
+    webcam.setUnavailable(`this server cannot read ${basename(REPLAY)}, so there is nothing to replay`);
     return;
   }
 
@@ -2061,15 +2380,19 @@ async function startReplay() {
   // whose descriptor is evicted reports every read afterwards as a lost sensor.
   capture.retain();
 
-  // The replayed take is reachable over the frame API under its own id even from outside the
-  // captures directory.
-  captureAliases.set(captureIdFor(REPLAY), resolve(REPLAY));
-
   const stamps = capture.index.frames.stampMs;
   if (stamps.length === 0) {
     console.error('[server] replay file contains no frames');
+    webcam.setUnavailable(`this server is replaying ${basename(REPLAY)}, which holds no frames`);
     return;
   }
+
+  // The colour camera is replayed the way the grabber sends it: asked for, and only while asked.
+  // Each frame is followed by the colour messages that followed it on the wire.
+  replayHasColour = capture.colourCount > 0;
+  const colourFrom = colourAfterFrames(capture.index);
+  let colourWanted = false;
+  if (replayHasColour) requestHdColor = (wanted) => { colourWanted = wanted; };
 
   console.log(`[server] replaying ${REPLAY}`);
   const hello = await capture.readHello();
@@ -2086,7 +2409,17 @@ async function startReplay() {
   );
 
   // A replayed take is as live as this server gets, which is what gives `lost` something to mean.
-  setSensorState('live');
+  const live = () => {
+    setSensorState('live');
+    if (replayHasColour) {
+      webcam.setAvailable();
+      // A subscriber held while the take was being read asked before there was anyone to ask.
+      webcam.reassert();
+    } else {
+      webcam.setUnavailable(replayWebcamRefusal('live'));
+    }
+  };
+  live();
 
   let i = 0;
   let failing = false;
@@ -2098,17 +2431,22 @@ async function startReplay() {
   // Each frame is read when it is due, so a five-minute take costs what a nine-second one does.
   // The read is awaited before the timer is set, measured at 0.07-0.6ms against a 64ms median.
   const tick = () => {
+    const k = i % stamps.length;
     capture
-      .readFrame(i % stamps.length)
-      .then((payload) => {
+      .readFrame(k)
+      .then(async (payload) => {
         if (failing) {
           failing = false;
           console.log('[server] replay reads recovered');
-          setSensorState('live');
+          live();
         }
         // A whole message, framing included, because that is what `handleMessage` takes. The replay
         // handed over a bare payload with no `raw`, unnoticed until a take was open.
         handleMessage({ type: TYPE_FRAME, payload, raw: encodeMessage(TYPE_FRAME, payload) });
+        for (let c = colourFrom[k]; colourWanted && c < colourFrom[k + 1]; c++) {
+          const colour = await capture.readColour(c);
+          handleMessage({ type: TYPE_COLOR, payload: colour, raw: encodeMessage(TYPE_COLOR, colour) });
+        }
         schedule();
       })
       .catch((err) => {
@@ -2143,6 +2481,12 @@ httpServer.listen(PORT, HOST, () => {
   if (HOST !== LOOPBACK) {
     console.log(`[server] reachable from the network on ${HOST} - anyone who can route here can drive the recorder`);
   }
+  // Inside the bind for the same reason: this moves files in the captures directory.
+  adoptNamedMarkLogs(CAPTURES_DIR, { owns: (path) => recorder.owns(path) }).then((adopted) => {
+    for (const { file, take, hash, records } of adopted) {
+      console.log(`[library] moved ${file} into the marks log of ${take} (${hash.slice(0, 15)}…), ${records} new record(s)`);
+    }
+  }, (err) => console.error(`[library] marks logs filed by take name were not moved: ${err.message}`));
   if (REPLAY) startReplay().catch((err) => console.error(`[server] replay failed: ${err.message}`));
   else startLive();
 });

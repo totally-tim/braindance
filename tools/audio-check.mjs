@@ -49,7 +49,7 @@ const command = (bin, args) => {
   return out.stdout;
 };
 async function main() {
-  if (MUTATE && !MUTATIONS[MUTATE]) throw new Error(`unknown mutation; have ${Object.keys(MUTATIONS).join(', ')}`);
+  if (MUTATE && !MUTATIONS[MUTATE]) throw new Error(`unknown mutation ${MUTATE} - have ${Object.keys(MUTATIONS).join(', ')}`);
   const reservation = createServer();
   await new Promise((yes, no) => { reservation.once('error', no); reservation.listen(PORT, '127.0.0.1', yes); });
   await new Promise((yes) => reservation.close(yes));
@@ -271,5 +271,5 @@ finally {
   if (work) rmSync(work, { recursive: true, force: true });
   console.log(`[audio] ${count} assertions, ${failed} failed`);
   if (MUTATE) console.log(failed ? 'mutation caught; read the failed assertions above' : 'NOT CAUGHT');
-  if (!process.exitCode) process.exitCode = failed ? 1 : 0;
+  if (!process.exitCode) process.exitCode = failed || MUTATE ? 1 : 0;
 }

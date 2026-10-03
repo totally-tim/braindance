@@ -6,8 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   EASE_OUT_LINEAR, EASE_IN_LINEAR, SEGMENT_POINT_CEILING, easeAt, easeParam, elevate,
-  keyBefore, HOLD_ENDS, EXTEND_ENDS, scalarAt, scalarSlopeAt, stepAt, hermite, tangentAt,
-  foldRefusal, foldFreeX, retimeSourceSecAt, retimeProgramSecAt,
+  keyBefore, HOLD_ENDS, scalarAt, stepAt, hermite, tangentAt, foldRefusal, foldFreeX,
 } from '../web/curve.js';
 
 /** A key as the tracks build one: a time, a value, and the two handles around it. */
@@ -128,17 +127,15 @@ test('scalarAt interpolates monotonically between two rising keys', () => {
   }
 });
 
-test('HOLD_ENDS holds the outer values and EXTEND_ENDS keeps the slope going', () => {
+test('a query outside the track holds the outer values rather than extending the slope', () => {
   const keys = [key(1, 10), key(2, 20)];
   assert.ok(near(scalarAt(keys, -5, HOLD_ENDS), 10));
   assert.ok(near(scalarAt(keys, 99, HOLD_ENDS), 20));
-  assert.ok(scalarAt(keys, 0, EXTEND_ENDS) < 10, 'extending back should fall below the first key');
-  assert.ok(scalarAt(keys, 3, EXTEND_ENDS) > 20, 'extending on should rise past the last key');
 });
 
 test('a single key answers with its value everywhere, and no keys answers 0', () => {
   assert.equal(scalarAt([key(4, 7)], 0, HOLD_ENDS), 7);
-  assert.equal(scalarAt([key(4, 7)], 99, EXTEND_ENDS), 7);
+  assert.equal(scalarAt([key(4, 7)], 99, HOLD_ENDS), 7);
   assert.equal(scalarAt([], 0, HOLD_ENDS), 0);
 });
 
@@ -155,12 +152,6 @@ test('stepAt holds the earlier value across a segment and never interpolates', (
   assert.equal(stepAt(keys, 0.99), 0);
   assert.equal(stepAt(keys, 1), 1);
   assert.equal(stepAt(keys, -1), 0, 'before the first key it holds the first value');
-});
-
-test('scalarSlopeAt is positive while rising, negative while falling, flat when level', () => {
-  assert.ok(scalarSlopeAt([key(0, 0), key(1, 10)], 0.5) > 0);
-  assert.ok(scalarSlopeAt([key(0, 10), key(1, 0)], 0.5) < 0);
-  assert.ok(near(scalarSlopeAt([key(0, 4), key(1, 4)], 0.5), 0, 1e-6));
 });
 
 test('hermite lands on its endpoints, so a segment meets the keys it spans', () => {
@@ -284,57 +275,4 @@ test('foldFreeX holds the line a drag cannot: no sequence of clamped moves folds
       }
     }
   }
-});
-
-
-// The retime curve, which the editor evaluates against a clip it is rendering and the projects
-// page evaluates against a document it has only read. Both call these, so the cases below are
-// the ones a rendered frame never visits: no keys at all, one key, and a query past both ends.
-
-test('a retime with no keys is its rate, and the inverse undoes it', () => {
-  const curve = { rate: 2, keys: [] };
-  assert.equal(retimeSourceSecAt(curve, 0), 0);
-  assert.equal(retimeSourceSecAt(curve, 3), 6);
-  assert.equal(retimeProgramSecAt(curve, 6), 3);
-});
-
-test('a retime with one key is a line of slope `rate` through it, not a hold', () => {
-  const curve = { rate: 0.5, keys: [key(4, 10)] };
-  assert.equal(retimeSourceSecAt(curve, 4), 10);
-  assert.equal(retimeSourceSecAt(curve, 6), 11);
-  // Before the key as well as after it: a clip trimmed at the head has its one key inside its
-  // own span, so the program seconds before it are footage rather than nothing.
-  assert.equal(retimeSourceSecAt(curve, 2), 9);
-  assert.equal(retimeProgramSecAt(curve, 11), 6);
-});
-
-test('a retime past its last key keeps going, so a take\'s tail stays reachable', () => {
-  const curve = { rate: 1, keys: [key(0, 0), key(2, 4)] };
-  assert.equal(retimeSourceSecAt(curve, 1), 2);
-  // EXTEND_ENDS and not HOLD_ENDS: holding would freeze the program at the last key.
-  assert.ok(near(retimeSourceSecAt(curve, 4), 8, 1e-6));
-  assert.ok(near(retimeSourceSecAt(curve, -1), -2, 1e-6));
-});
-
-test('retimeProgramSecAt inverts retimeSourceSecAt across a keyed, eased curve', () => {
-  const curve = {
-    rate: 1,
-    keys: [
-      { t: 0, value: 0, easeOut: [[0.9, 0.1]], easeIn: [[2 / 3, 2 / 3]] },
-      { t: 3, value: 9, easeOut: [[1 / 3, 1 / 3]], easeIn: [[0.1, 0.9]] },
-      key(6, 12),
-    ],
-  };
-  for (const programSec of [0.2, 1, 1.5, 2.9, 3, 3.1, 4, 5.5, 6]) {
-    const source = retimeSourceSecAt(curve, programSec);
-    assert.ok(near(retimeProgramSecAt(curve, source), programSec, 1e-6),
-      `${programSec}s maps to ${source}s of source and back to ${retimeProgramSecAt(curve, source)}s`);
-  }
-});
-
-test('a clip with no trim runs for what its curve affords, which is the inverse at the take end', () => {
-  // What `serialiseProjectBody` writes for any clip nobody trimmed is `length: null`, so this
-  // is the arithmetic the projects page runs to find where such a clip stops.
-  assert.equal(retimeProgramSecAt({ rate: 2, keys: [] }, 12), 6);
-  assert.equal(retimeProgramSecAt({ rate: 0.5, keys: [] }, 12), 24);
 });

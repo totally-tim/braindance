@@ -4,7 +4,8 @@
 
 import { VALID_ID } from '/format.js';
 import { pollRecordState } from '/record-poll.js';
-import { createSkim, divisorFor, paintMarks } from './take-draw.js';
+import { testTimer } from '/test-timers.js';
+import { createSkim, divisorFor, paintMarks, timesFor } from './take-draw.js';
 
 const grid = document.getElementById('grid');
 const dlg = document.getElementById('confirm');
@@ -77,11 +78,25 @@ function warningsOf(take) {
     });
     return out;
   }
+  if (secondNames(take).length) {
+    out.push({
+      key: 'names',
+      short: `${take.names.length} names`,
+      why: `this take is filed here as ${take.names.join(' and ')}: one take under ${take.names.length} names, so remove the ones you do not want`,
+    });
+  }
   if (take.truncated) {
     out.push({
       key: 'truncated',
       short: 'truncated',
       why: 'the writer stopped mid-frame, so the take is usable up to the cut and no further',
+    });
+  }
+  if (take.dropped > 0) {
+    out.push({
+      key: 'dropped',
+      short: 'dropped frames',
+      why: `the disk could not keep up, so ${take.dropped} frames were never written and the take has a gap where they were`,
     });
   }
   // The reasons in the server's words: written again here, badge and button disagreed.
@@ -96,6 +111,9 @@ function warningsOf(take) {
 }
 
 const cannotOpen = (take) => take.openRefusals[0]?.why ?? '';
+
+/** The names this take is filed under here besides the one it is listed as. */
+const secondNames = (take) => (Array.isArray(take.names) ? take.names.filter((name) => name !== take.id) : []);
 
 
 /** A button, built rather than interpolated, because a label is not markup either. */
@@ -126,6 +144,10 @@ function cannotDelete(take) {
   }
   if (take.state === 'remote') {
     return `${take.id} is only on ${library.node?.name ?? 'the node'}, and delete removes a file on this machine`;
+  }
+  if (secondNames(take).length) {
+    return `this take is filed here as ${take.names.join(' and ')}: delete would remove one name and leave the take `
+      + 'under the other, so remove the extra name first';
   }
   return unnameable(take);
 }
@@ -249,6 +271,15 @@ function menuItemsFor(take) {
         : `reclaim frees the copy on ${nodeName}, and this take is not in two places`,
       run: (tile) => askReclaim(tile, take),
     },
+    // One per name, so either can be the one kept. The server refuses unless both still hold this take.
+    ...(secondNames(take).length ? take.names : []).map((name) => ({
+      item: `remove-name:${name}`,
+      label: `Remove the name ${name}`,
+      enabled: VALID_ID.test(name),
+      why: VALID_ID.test(name) ? '' : unnameable({ id: name }),
+      run: (tile) => run(tile, `removing the name ${name}`, () => post(`/library/remove-name/${encodeURIComponent(name)}`,
+        { hash: take.hash, keep: take.names.find((other) => other !== name) })).catch(() => {}),
+    })),
   ];
 }
 
@@ -669,6 +700,9 @@ function openViewer(key) {
   const take = takeByKey(key);
   if (!take) return;
   closeMenus();
+  // Read as a name before anything here is rebuilt: a focused mark tick is destroyed by
+  // `paintMarks`, and a rebuild `run` asked for reads null.
+  const focusWas = viewer.contains(document.activeElement) ? controlKey(document.activeElement) : null;
   // Where the operator was, kept across a rebuild: `paint` re-opens the viewer on every
   // refresh, so the `setIndex(0)` below sent them back to the first frame.
   const resumeAt = viewing && viewing.key === (take.hash ?? take.id) ? viewing.skim.index : 0;
@@ -692,7 +726,17 @@ function openViewer(key) {
     span.textContent = text;
     return span;
   }));
-  vNote.textContent = warningsOf(take).map((w) => w.why).join(' · ');
+  // A mark is pressed through the take's frame times, so without them its ticks are labels and
+  // the note says why. Rebuilt once they fail, the way a refresh rebuilds it. A take being
+  // recorded has no index yet, and its badge already says so.
+  const timed = take.frames > 0 ? timesFor(take) : null;
+  if (timed && !timed.times && !timed.error) {
+    timed.ready.then(() => { if (timed.error && viewing?.key === key) openViewer(key); });
+  }
+  vNote.textContent = [
+    ...warningsOf(take).map((w) => w.why),
+    timed?.error ? `its marks cannot be pressed: the frame times did not arrive (${timed.error})` : '',
+  ].filter(Boolean).join(' · ');
 
   // One skim for as long as the dialog is open, given each take in turn: the arrow keys and
   // every refresh change the take on this canvas rather than opening a second viewer. The
@@ -708,11 +752,9 @@ function openViewer(key) {
   });
   skim.show(take);
   viewing = { key: take.hash ?? take.id, take, skim };
-  paintMarks(vBar, take, (at) => skim.setT(at));
+  paintMarks(vBar, take, timed && !timed.error ? (sourceSec) => skim.seek(sourceSec) : null);
 
   const acts = document.getElementById('vActs');
-  // Read as a name before the rebuild detaches these nodes; null on a rebuild `run` asked for.
-  const focusWas = viewer.contains(document.activeElement) ? controlKey(document.activeElement) : null;
   acts.replaceChildren();
   // The surface an action runs on is this one: the tile behind the modal is absent whenever
   // the filter does not show this take, and a null host disables nothing.
@@ -838,7 +880,7 @@ function paint() {
 
 // Bounded, because `NodeLink.takes` carries no timeout and the poll's single-flight guard
 // then skips every tick. Only the poll passes `bound`: a cold library takes minutes to index.
-const LISTING_TIMEOUT_MS = 15000;
+const LISTING_TIMEOUT_MS = testTimer('listing-timeout', 15000);
 
 // Which listing is newest: a poll refresh on the wire when Delete is pressed resolves later.
 let refreshGeneration = 0;
@@ -871,11 +913,11 @@ async function refreshNow(mine, bound) {
 
 // Off `local` and `remote`, because the reconciled record is whichever side won the spread.
 const believedFromLibrary = () => ({
-  writingId: library.takes.find((t) => t.local?.recording)?.local.id ?? null,
+  writingIds: library.takes.filter((t) => t.local?.recording).map((t) => t.local.id).sort(),
   node: library.node
     ? {
       reachable: library.node.reachable,
-      writingId: library.takes.find((t) => t.remote?.recording)?.remote.id ?? null,
+      writingIds: library.takes.filter((t) => t.remote?.recording).map((t) => t.remote.id).sort(),
     }
     : null,
 });
@@ -1047,6 +1089,8 @@ globalThis.__library = {
       note: vNote.textContent,
       flags: [...document.querySelectorAll('#vFlags .flag')].map((f) => f.dataset.flag),
       marks: [...vBar.querySelectorAll('.mk')].map((m) => Number.parseFloat(m.style.left)),
+      pressable: [...vBar.querySelectorAll('.mk')].map((m) => m.tagName === 'BUTTON'),
+      pos: Number.parseFloat(vBar.querySelector('.pos').style.left),
       acts: [...document.querySelectorAll('#vActs .act')].map((b) => ({
         item: b.dataset.act, label: b.textContent, disabled: b.disabled, why: b.title,
       })),

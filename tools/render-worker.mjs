@@ -8,6 +8,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { JOB_VERSION } from '../server/jobs.js';
+import { testTimer } from '../web/test-timers.js';
 
 const argv = process.argv.slice(2);
 const flag = (name, dflt = null) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : dflt);
@@ -107,7 +108,7 @@ try {
    * whoever reads the queue to three different machines.
    */
   const STORE_READ_TRIES = 4;
-  const STORE_READ_GAP_MS = 2500;
+  const STORE_READ_GAP_MS = testTimer('store-read-gap', 2500);
   const readStore = async (path, what, held) => {
     let last = null;
     for (let attempt = 0; attempt < STORE_READ_TRIES; attempt++) {

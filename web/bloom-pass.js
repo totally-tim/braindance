@@ -109,8 +109,9 @@ const bloomVertexShader = /* glsl */ `
 `;
 
 export class BloomPass extends Pass {
-  constructor(strength = 1, radius = 1, threshold = 0) {
+  constructor(strength, radius, threshold, type) {
     super();
+    if (type === undefined) throw new Error('the bloom pass needs the pixel type its chain holds');
     this.strength = strength;
     this.radius = radius;
     this.threshold = threshold;
@@ -121,7 +122,7 @@ export class BloomPass extends Pass {
 
     this.targets = [];
     for (let i = 0; i < BLOOM_LEVELS; i++) {
-      const target = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType });
+      const target = new THREE.WebGLRenderTarget(1, 1, { type });
       target.texture.name = `bloom.${i}`;
       target.texture.generateMipmaps = false;
       this.targets.push(target);

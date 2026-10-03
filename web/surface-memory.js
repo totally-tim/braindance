@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 import { DEPTH_H, DEPTH_W } from './format.js';
 import { renderer } from './scene.js';
+import { targetType } from './render-targets.js';
 
 /**
  * How the ghost a ray leaves behind when it lands on a different surface accumulates,
@@ -28,13 +29,11 @@ import { renderer } from './scene.js';
  * at the mercy of how the import list happens to be sorted.
  *
  * This is the one module of the render core that cannot be imported under bare node,
- * and the reason is a single line: the target's pixel type is decided by asking the
- * live context whether it can render to float. That question has to be asked of the
- * renderer that will draw the answer, and the two alternatives were both worse - a
- * type injected from outside puts the first frame's behaviour in the caller's hands,
- * and a fallback that guesses half-float when nothing is there is a second path that
- * would silently degrade the wake and age arithmetic with nothing in the suite to
- * catch it.
+ * because the targets' pixel type is `targetType`'s answer for the live context: float,
+ * then half-float. Below half-float the channels cannot hold millimetres or seconds, so
+ * the memory is off rather than approximated - the step does nothing, the cloud reads a
+ * still state in which every ray has settled and none sheds a ghost, and the viewer
+ * says that ghost and wake are off.
  */
 
 // How long a ray's age is allowed to keep counting, in seconds of source time.
@@ -76,12 +75,12 @@ const makeStateTarget = (type) => new THREE.WebGLRenderTarget(DEPTH_W, DEPTH_H, 
   generateMipmaps: false,
 });
 
-// The selected cloud's two targets, as views rather than as state of their own. Read by
-// `web/main.js`, which seeds the cloud's `stateTex` from the current one and clears both on a
-// reset. They are views rather than a pair anybody may assign, because the only legitimate way
-// for them to change places is the step below having rendered into the far one first.
+// The selected cloud's current target and the texture its cloud reads, as views rather than as
+// state of their own. They are views rather than anything anybody may assign, because the only
+// legitimate way for the targets to change places is the step below having rendered into the far
+// one first. Both follow a memory that is off: no target, and the still state to read.
 export let statePrev = null;
-export let stateNext = null;
+export let stateTexture = null;
 
 // The selected cloud's memory: its two targets, the source textures it ages, and the uniforms
 // and quad the step renders with. Those last two have no reader outside this file, because a
@@ -93,7 +92,18 @@ let selected = null;
 // the step ends by swapping which target is current.
 const pointViews = () => {
   statePrev = selected.statePrev;
-  stateNext = selected.stateNext;
+  stateTexture = memoryTexture(selected);
+};
+
+// A memory that is off, read by the cloud: every ray settled for the whole age ceiling and none
+// of them leaving a ghost, so a point draws at full strength and nothing sheds. Sampled, never
+// rendered into, so it can hold float on a context that cannot draw float.
+const stillState = () => {
+  const data = new Float32Array(DEPTH_W * DEPTH_H * 4);
+  for (let i = 1; i < data.length; i += 4) data[i] = MAX_AGE;
+  const texture = new THREE.DataTexture(data, DEPTH_W, DEPTH_H, THREE.RGBAFormat, THREE.FloatType);
+  texture.needsUpdate = true;
+  return texture;
 };
 
 const stateVertexShader = /* glsl */ `
@@ -159,15 +169,17 @@ const stateFragmentShader = /* glsl */ `
  * sampling nothing.
  */
 export function createSurfaceMemory(textures) {
-  // Float where the context can render to it, half-float where it cannot. Asked of the
-  // live context rather than assumed, because the difference is in what the .g channel
-  // can still resolve after several seconds of 33ms steps.
-  const stateType = renderer.getContext().getExtension('EXT_color_buffer_float')
-    ? THREE.FloatType
-    : THREE.HalfFloatType;
+  // Float where the context renders it, because the difference is in what the .g channel can
+  // still resolve after several seconds of 33ms steps; half-float where only that renders.
+  const stateType = targetType(THREE.FloatType, THREE.HalfFloatType);
+  if (stateType === null) {
+    return { textures, live: false, still: stillState(), statePrev: null, stateNext: null };
+  }
 
   const memory = {
     textures,
+    live: true,
+    still: null,
     statePrev: makeStateTarget(stateType),
     stateNext: makeStateTarget(stateType),
     uniforms: null,
@@ -192,8 +204,18 @@ export function createSurfaceMemory(textures) {
   return memory;
 }
 
-/** Releases one cloud's two targets and the quad that renders into them. */
+/** What one cloud's shader reads as its state: the current target, or the still state when off. */
+export const memoryTexture = (memory) => (memory.live ? memory.statePrev.texture : memory.still);
+
+/** The targets a reset clears: the pair, or none for a memory that is off. */
+export const memoryTargets = (memory) => (memory.live ? [memory.statePrev, memory.stateNext] : []);
+
+/** Releases one cloud's two targets and the quad that renders into them, or its still state. */
 export function disposeSurfaceMemory(memory) {
+  if (!memory.live) {
+    memory.still.dispose();
+    return;
+  }
   memory.statePrev.dispose();
   memory.stateNext.dispose();
   memory.quad.material.dispose();
@@ -219,6 +241,7 @@ export function selectSurfaceMemory(memory) {
  * this step produced.
  */
 export function stepSurfaceMemory(dtSec, snapDelta) {
+  if (!selected.live) return;
   selected.uniforms.depthCurr.value = selected.textures.depthCurr;
   selected.uniforms.statePrev.value = selected.statePrev.texture;
   selected.uniforms.dt.value = dtSec;

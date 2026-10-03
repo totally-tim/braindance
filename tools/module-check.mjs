@@ -44,6 +44,7 @@ const MUTATIONS = {
     edits: [
       ["import { VALID_ID } from '/format.js';", "import { VALID_ID } from './format.js';"],
       ["import { pollRecordState } from '/record-poll.js';", "import { pollRecordState } from './record-poll.js';"],
+      ["import { testTimer } from '/test-timers.js';", "import { testTimer } from './test-timers.js';"],
     ],
   },
 
@@ -73,12 +74,12 @@ const MUTATIONS = {
 
   'export-form-nothing-claims': {
     file: 'web/format.js',
-    edits: [['export const PROJECT_VERSION = 8;', 'export const PROJECT_VERSION = 8;\nexport const { major, minor } = { major: 1, minor: 0 };']],
+    edits: [['export const PROJECT_VERSION = 9;', 'export const PROJECT_VERSION = 9;\nexport const { major, minor } = { major: 1, minor: 0 };']],
   },
 
   'a-barrel-re-export': {
     file: 'web/record-poll.js',
-    edits: [["export const POLLED_NODE_FIELDS = ['writingId'];", "export const POLLED_NODE_FIELDS = ['writingId'];\nexport { DEPTH_W } from '/format.js';"]],
+    edits: [["export const POLLED_NODE_FIELDS = ['writingIds'];", "export const POLLED_NODE_FIELDS = ['writingIds'];\nexport { DEPTH_W } from '/format.js';"]],
   },
 
   'write-through-a-namespace': {
@@ -111,7 +112,7 @@ const MUTATIONS = {
   // The keyword comes off rather than the name changing: a rename reddens a second row as well.
   'exemption-outlives-its-export': {
     file: 'web/record-poll.js',
-    edits: [["export const POLLED_NODE_FIELDS = ['writingId'];", "const POLLED_NODE_FIELDS = ['writingId'];"]],
+    edits: [["export const POLLED_NODE_FIELDS = ['writingIds'];", "const POLLED_NODE_FIELDS = ['writingIds'];"]],
   },
 
   // Promoted to the number it is made of, so the entry still names an export and covers nothing.
@@ -149,7 +150,7 @@ const MUTATIONS = {
     file: 'server/library.js',
     edits: [[
       'const missing = POLLED_NODE_FIELDS.filter((f) => body[f] === undefined);',
-      "const missing = ['writingId'].filter((f) => body[f] === undefined);",
+      "const missing = ['writingIds'].filter((f) => body[f] === undefined);",
     ]],
   },
 

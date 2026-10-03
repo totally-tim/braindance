@@ -88,7 +88,10 @@ const quantile = (xs, q) => {
   return s[Math.min(s.length - 1, Math.floor(q * s.length))];
 };
 
-const index = await (await fetch(`${URL_BASE}/capture/${TAKE}/index`)).json();
+// The capture routes name a take by its content hash, and the listing is where a name becomes one.
+const TAKE_KEY = await fetch(`${URL_BASE}/library/takes`).then((res) => res.json())
+  .then((body) => encodeURIComponent(body.takes.find((t) => t.id === TAKE)?.hash ?? TAKE), () => encodeURIComponent(TAKE));
+const index = await (await fetch(`${URL_BASE}/capture/${TAKE_KEY}/index`)).json();
 const stamps = index.frames.stampMs;
 const DURATION = (stamps[stamps.length - 1] - stamps[0]) / 1000;
 const NEEDS_TAKE_SEC = 12;
@@ -193,10 +196,6 @@ await page.evaluate(`(() => {
     async load(arm, offsets, windowSec, look, warmStart) {
       const base = k.library.serialiseProjectBody();
       const one = base.clips[0];
-      const retimeAt = (inSec, span) => {
-        k.keyframes.setRetime({ rate: 1, keys: [{ t: 0, value: inSec }, { t: span, value: inSec + span }] });
-        return JSON.parse(JSON.stringify(k.library.serialiseProjectBody().clips[0].retime));
-      };
       // Written into each clip's own block rather than applied afterwards: a look applied through
       // the registry lands on the selected clip alone now, so an arm that did that would time one
       // clip at this look and the rest at the registry's defaults - which is half the draw.
@@ -206,7 +205,7 @@ await page.evaluate(`(() => {
       const mine = scoped(look, 'clip');
       const clips = [];
       for (let i = 0; i < arm.live; i++) {
-        clips.push({ ...one, id: 'v' + i, start: 0, length: 12, retime: retimeAt(offsets[i], 12),
+        clips.push({ ...one, id: 'v' + i, start: 0, length: 12, speed: 1, sourceStart: offsets[i],
           params: { ...one.params, ...mine } });
       }
       for (let i = 0; i < arm.warming; i++) {
@@ -218,7 +217,8 @@ await page.evaluate(`(() => {
           id: 'w' + i,
           start: warmStart,
           length: 6,
-          retime: retimeAt(offsets[offsets.length - 1] + 1, 6),
+          speed: 1,
+          sourceStart: offsets[offsets.length - 1] + 1,
           params: { ...one.params, ...mine },
         });
       }
@@ -441,7 +441,7 @@ for (const arm of ARMS) {
     const k = globalThis.__kinect;
     const t = k.timeline.transport();
     const out = await t.seek(${WINDOW_SEC});
-    return out && {
+    return {
       asked: out.plan.frames, rendered: out.frames, capped: out.capped, shortfall: out.shortfall,
       sourceFrames: out.sourceFrames,
     };
@@ -450,10 +450,6 @@ for (const arm of ARMS) {
 }
 console.log(`\n  at fade ${LONG_LOOK.fade}ms plus wake ${LONG_LOOK.wake}ms, all clips on one take:`);
 for (const { arm, seek } of capped) {
-  if (!seek) {
-    console.log(`  ${arm.label.padEnd(22)} the seek stood down`);
-    continue;
-  }
   console.log(`  ${arm.label.padEnd(22)} pre-roll ${String(seek.asked).padStart(3)} frames asked, `
     + `${String(seek.rendered).padStart(3)} rendered, ${seek.sourceFrames} source frames wanted`
     + `${seek.capped ? ` - CAPPED by the cache, ${seek.shortfall} short` : ''}`);

@@ -46,6 +46,20 @@ const RAIN_CONTROL_MIN = 64;
 const RAIN_CONTROL_MIN_PCT = 0.8;
 const RAIN_CONTROL_MIN_MEAN = 0.08;
 
+// The silent give-up: two re-plans, then a repaint and null.
+const SEEK_STANDS_DOWN = [
+  `      if (replans >= SEEK_REPLAN_LIMIT) {
+        throw new Error(
+          \`a seek to \${programSec}s re-planned \${SEEK_REPLAN_LIMIT} times and its span never became \`
+          + 'resident: the clip never held still, or the cache is not keeping what it fetched',
+        );
+      }`,
+  `      if (replans >= 2) {
+        requestRepaint();
+        return null;
+      }`,
+];
+
 const MUTATIONS = {
   // Every clip warms on the selected clip's persistence rather than on its own, so a take's
   // demand stops depending on what each clip cut on it actually asks for. Must redden section
@@ -111,10 +125,10 @@ const MUTATIONS = {
     fails: 'a seek made inside a later clip\'s warm window rebuilding none of the warm history '
       + 'already elapsed. Section 7f\'s equality and plan rows are the catch',
   },
-  // Program time stops being scaled into source time.
-  'rate-ignored': { file: 'web/main.js', edits: [[
-    '  sourceSecAt(programSec) { return retimeSourceSecAt(this, programSec); },',
-    '  sourceSecAt(programSec) { return programSec; },',
+  // The clip's speed stops scaling its local time into source time.
+  'rate-ignored': { file: 'web/clip-plan.js', edits: [[
+    '  return sourceStart + localSec * speed;',
+    '  return sourceStart + localSec;',
   ]] },
   'duplicate-frames': { file: 'web/main.js', edits: [[
     'const offset = Math.min(Math.max(sourceSec - times[i], 0), span);\n'
@@ -197,11 +211,11 @@ const MUTATIONS = {
   // A clip warms and is shown without ever being put back to nothing, so it builds on whatever
   // its ping-pong pair last held. Both clears go, because on every path this build can reach the
   // reset clears the pair a moment before the entry does and either one alone still leaves it
-  // empty - `docs/instruments.md` carries the measurement that says so.
+  // empty.
   'warm-without-reset': { file: 'web/main.js', edits: [
     [
       '  clearFeedback(\n'
-      + '    [statePrev, stateNext],\n'
+      + '    memoryTargets(clip.cloud.memory),\n'
       + "    'the surface memory moved: a clip can no longer be cleared on the frame it enters',\n"
       + '  );',
       '  /* mutation: the clip keeps whatever it last drew */',
@@ -245,11 +259,33 @@ const MUTATIONS = {
   // Every clip opens its own copy of its take, so two clips of one take carry two indexes, two
   // caches and two decodes of every frame they both want.
   'take-not-shared': { file: 'web/main.js', edits: [[
-    '  const take = openTakes.get(id) ?? await IndexedTake.open(id);',
-    '  const take = await IndexedTake.open(id);',
+    '  const take = openTakes.get(hash) ?? await IndexedTake.open({ id, hash });',
+    '  const take = await IndexedTake.open({ id, hash });',
   ]],
     fails: 'every clip opening its own copy of its take, so two clips of one take carry two '
       + 'indexes, two caches and two decodes of every frame they both want',
+  },
+  // A seek overtaken twice stands down and answers null, and the repaint behind it draws wherever
+  // the playhead already was. Must redden section 1e's landing rows.
+  'seek-stands-down': { file: 'web/main.js', edits: [SEEK_STANDS_DOWN],
+    fails: 'a seek overtaken twice answering null with the playhead where it was. Section 1e\'s '
+      + 'landing rows are the catch, and its agreement rows stay green because settled() refuses',
+  },
+  // The same stand-down, with any answer counted as a landing, which is `settled()` reporting
+  // idle either way. Must also redden section 1e's agreement rows.
+  'stand-down-counts-as-landed': { file: 'web/main.js', edits: [
+    SEEK_STANDS_DOWN,
+    ['      if (landed && this.owed === owed) this.owed = null;', '      if (this.owed === owed) this.owed = null;'],
+  ],
+    fails: 'a seek standing down and settled() calling it idle anyway, because any answer counted '
+      + 'as a landing. Section 1e\'s agreement rows are the catch, beside its landing rows',
+  },
+  // `settled()` stops asking whether the last seek landed. Must redden section 1e's refusal row.
+  'settled-ignores-owed': { file: 'web/main.js', edits: [[
+    '          if (timeline?.owed) throw new Error(`a seek to ${timeline.owed.programSec}s ended without landing`);\n',
+    '',
+  ]],
+    fails: 'settled() calling a seek that rejected idle. Section 1e\'s refusal row reddens alone',
   },
   'rain-phase-unread': { file: 'effects-builtin/rain/cell.vert.glsl', edits: [[
     '    vRain = (rainPhase * rainSpeed + room.y) / rainSpan + hash(dot(wc.xz, vec2(269.5, 183.3)));',
@@ -327,7 +363,10 @@ async function loadPlaywright() {
 }
 
 
-const index = await (await fetch(`${URL_BASE}/capture/${TAKE}/index`)).json();
+// The capture routes name a take by its content hash, and the listing is where a name becomes one.
+const TAKE_KEY = await fetch(`${URL_BASE}/library/takes`).then((res) => res.json())
+  .then((body) => encodeURIComponent(body.takes.find((t) => t.id === TAKE)?.hash ?? TAKE), () => encodeURIComponent(TAKE));
+const index = await (await fetch(`${URL_BASE}/capture/${TAKE_KEY}/index`)).json();
 const stamps = index.frames.stampMs;
 const TIMES = stamps.map((s) => (s - stamps[0]) / 1000);
 const DURATION = TIMES[TIMES.length - 1];
@@ -407,7 +446,7 @@ const INSTALL = `(() => {
     // be a second write path to the same thing.
     async configure({ look, rate, fps }) {
       if (look) k.params.apply(look);
-      k.timeline.retime.rate = rate;
+      k.keyframes.setSpeed(rate);
       k.timeline.transport().outputFps = fps;
       this.pinCamera();
       await k.timeline.settled();
@@ -512,6 +551,7 @@ const context = await browser.newContext({
   deviceScaleFactor: 1,
 });
 
+await context.addInitScript(() => localStorage.setItem('braindance.preview.auto', 'off'));
 const page = await context.newPage();
 const errors = [];
 page.on('pageerror', (err) => errors.push(String(err)));
@@ -520,7 +560,7 @@ page.on('response', (res) => { if (!res.ok()) errors.push(`${res.status()} ${res
 // The rejection is caught rather than left floating. A `fulfill` that loses its race - the page
 // gone, the request already answered - rejects with nobody holding it, node takes an unhandled
 // rejection as fatal, and the run dies mid-evaluate reporting `Resulting promise was garbage
-// collected` with zero failed assertions on a non-zero exit. `docs/instruments.md` has the case.
+// collected` with zero failed assertions on a non-zero exit.
 await page.route('**/favicon.ico', (route) => route.fulfill({ status: 204, body: '' }).catch(() => {}));
 
 let mutantServed = 0;
@@ -559,6 +599,8 @@ await page.waitForFunction(() => globalThis.__kinect.takeOpened(), null, { timeo
 // pass. At three it stopped at 626x352 and the guard below threw before the first assertion -
 // on this branch and on a `git archive HEAD` tree alike, so it was never a regression and the
 // only thing wrong was the iteration count.
+// A pass waits for the buffer to move or to land, because every pass before the last lands short
+// of 640x360: a wait for the target alone spends its whole timeout on each of them.
 for (let attempt = 0; attempt < 12; attempt++) {
   await page.evaluate('globalThis.__kinect.timeline.settled()').catch(() => {});
   const furniture = await page.evaluate(`(() => {
@@ -569,6 +611,10 @@ for (let attempt = 0; attempt < 12; attempt++) {
       shell: appBar && !appBar.hidden ? Math.round(appBar.getBoundingClientRect().height) : 0,
     };
   })()`);
+  const was = await page.evaluate(() => {
+    const gl = globalThis.__kinect?.renderer?.getContext?.();
+    return gl ? { w: gl.drawingBufferWidth, h: gl.drawingBufferHeight } : null;
+  });
   await page.setViewportSize({
     width: STAGE.width,
     height: STAGE.height + furniture.strip + furniture.shell,
@@ -576,13 +622,23 @@ for (let attempt = 0; attempt < 12; attempt++) {
   // The predicate answers *false* on a page with no renderer rather than throwing, because
   // a throw inside `waitForFunction` is not caught by it: the twenty seconds a wait is
   // given are never spent, and the failure arrives instantly wearing the shape of a
-  // finding. `docs/instruments.md` records that costing a round on its own.
-  const landed = await page.waitForFunction((want) => {
+  // finding.
+  const landed = await page.waitForFunction(({ want, was }) => {
     const gl = globalThis.__kinect?.renderer?.getContext?.();
-    return !!gl && gl.drawingBufferWidth === want.w && gl.drawingBufferHeight === want.h;
-  }, { w: STAGE.width, h: STAGE.height }, { timeout: 15000 }).then(() => true).catch(() => false);
-  if (landed) break;
+    if (!gl) return false;
+    const w = gl.drawingBufferWidth;
+    const h = gl.drawingBufferHeight;
+    if (w === want.w && h === want.h) return 'target';
+    return !was || w !== was.w || h !== was.h ? 'moved' : false;
+  }, { want: { w: STAGE.width, h: STAGE.height }, was }, { timeout: 15000 })
+    .then((handle) => handle.jsonValue()).catch(() => 'timeout');
+  if (landed === 'target') break;
 }
+// The stage lands seconds after the take opens, with the open's garbage still uncollected, and a
+// collection that falls inside a `page.evaluate` loses its promise: `Resulting promise was garbage
+// collected`, after the page has finished the work. One forced collection here, measured on
+// section 1b: 5 of 8 runs died without it, 0 of 8 with it.
+await (await page.context().newCDPSession(page)).send('HeapProfiler.collectGarbage');
 await page.evaluate(INSTALL);
 
 const gpu = await page.evaluate(() => {
@@ -764,7 +820,7 @@ console.log('\n== 1c. the image at a program position is the frame the index nam
     const tl = globalThis.__tl;
     // A bare request, not the source's cache: a shared fetch path could hand both
     // arms the same wrong frame.
-    const buf = await (await fetch('/capture/${TAKE}/frame/' + n)).arrayBuffer();
+    const buf = await (await fetch('/capture/${TAKE_KEY}/frame/' + n)).arrayBuffer();
     const depthBytes = new DataView(buf).getUint32(0, true);
     k.drive.injectDepth(new Uint16Array(buf.slice(16, 16 + depthBytes)));
     k.renderer.render(k.scene, k.viewCamera());
@@ -812,6 +868,138 @@ console.log('\n== 1d. the timeline binds colour, not just depth ==');
 }
 
 
+console.log('\n== 1e. a seek the clip moves under lands where it was asked, or says it could not ==');
+{
+  // A hand on the in-point, placed deterministically: the fetch a seek awaits ends with the clip
+  // moved under it, the first `nudges` times, so the plan it re-reads is never the one it fetched.
+  // `stall` makes the fetch deliver nothing at all, which no number of re-plans survives.
+  const HAND = `async (o) => {
+    const k = globalThis.__kinect;
+    const t = k.timeline.transport();
+    // Each arm starts from a landed seek, so what an earlier arm left owed under a mutation is
+    // not what refuses this arm's settle.
+    await t.seek(t.programSec);
+    await globalThis.__tl.configure(o.config);
+    const base = k.timeline.read().sourceStart;
+    // A step asks for a second past wherever it is parked, so it is parked somewhere fresh first,
+    // and what it asks for is read before the press moves anything.
+    if (o.fromSec !== undefined) await t.seek(o.fromSec);
+    const askedSec = o.key ? (t.frame + t.outputFps) / t.outputFps : o.targetSec;
+    const hand = { base, hits: 0, askedSec, residentBefore: t.resident(t.planSeek(askedSec).spans) };
+    globalThis.__hand = hand;
+    t.fetch = async (spans) => {
+      if (o.stall) { hand.hits++; return []; }
+      const out = await Object.getPrototypeOf(t).fetch.call(t, spans);
+      if (hand.hits < o.nudges) {
+        hand.hits++;
+        k.keyframes.setSourceStart(base + hand.hits * o.nudgeSec);
+      }
+      return out;
+    };
+    document.activeElement?.blur?.();
+    return true;
+  }`;
+  const SEEK = `async () => {
+    const hand = globalThis.__hand;
+    try {
+      hand.seek = await globalThis.__kinect.timeline.transport().seek(hand.askedSec);
+    } catch (err) {
+      hand.threw = String(err?.message ?? err);
+    }
+    return true;
+  }`;
+  // Settles, lifts the hand and puts the in-point back, reporting what the playhead did meanwhile.
+  const LIFT = `async () => {
+    const k = globalThis.__kinect;
+    const t = k.timeline.transport();
+    const hand = globalThis.__hand;
+    let settledThrew = null;
+    try {
+      await k.timeline.settled();
+    } catch (err) {
+      settledThrew = String(err?.message ?? err);
+    } finally {
+      delete t.fetch;
+    }
+    const out = {
+      residentBefore: hand.residentBefore, hits: hand.hits, askedSec: hand.askedSec,
+      threw: hand.threw ?? null, settledThrew,
+      landed: hand.seek !== undefined && hand.seek !== null,
+      replans: hand.seek?.replans ?? null,
+      target: hand.seek?.target ?? null,
+      want: t.frameAt(hand.askedSec),
+      frame: t.frame,
+    };
+    k.keyframes.setSourceStart(hand.base);
+    return out;
+  }`;
+  const overtake = async (o) => {
+    await page.evaluate(`(${HAND})(${JSON.stringify({
+      config: { look: BLACKWALL_LOOK, rate: 1, fps: 30 }, nudges: 0, nudgeSec: 0.25, stall: false, ...o,
+    })})`);
+    if (o.key) await page.keyboard.press(o.key);
+    else await page.evaluate(`(${SEEK})()`);
+    return page.evaluate(`(${LIFT})()`);
+  };
+  const NUDGES = 3;
+
+  // A seek at a span nothing has fetched yet, overtaken three times before it can land.
+  const moved = await overtake({ targetSec: DURATION * 0.5, nudges: NUDGES });
+  console.log(`  seek to ${moved.askedSec.toFixed(2)}s: resident before ${moved.residentBefore}, `
+    + `${moved.hits} fetches ended with the in-point moved, ${moved.replans} re-plans, `
+    + `${moved.landed ? `landed on ${moved.target}` : 'resolved without landing'}, `
+    + `playhead on ${moved.frame} of ${moved.want}`);
+  check(moved.residentBefore === false && moved.hits > 0,
+    'the probe holds: the span had to be fetched, and the clip moved under the fetch',
+    `resident ${moved.residentBefore}, ${moved.hits} moves`);
+  check(moved.threw === null && moved.landed && moved.hits === NUDGES && moved.replans > NUDGES,
+    `the seek re-planned past all ${NUDGES} moves and answered with a landing`,
+    moved.threw ?? `landed ${moved.landed} after ${moved.hits} moves and ${moved.replans} re-plans`);
+  check(moved.target === moved.want && moved.frame === moved.want,
+    'on the output frame it was asked for', `playhead ${moved.frame}, landing ${moved.target}, asked ${moved.want}`);
+  check(moved.landed ? moved.settledThrew === null : moved.settledThrew !== null,
+    'settled() agrees with the seek: idle after a landing, refused without one',
+    `landed ${moved.landed}, settled() ${moved.settledThrew ?? 'resolved'}`);
+
+  // The same hand under a key press, which is the door a person uses and whose caller only catches.
+  // A step and not End: the out-point stays on the take's last frame however the in-point moves,
+  // so a hand on the in-point never overtakes a seek there.
+  const keyed = await overtake({ key: 'Shift+ArrowRight', fromSec: DURATION * 0.7, nudges: NUDGES });
+  console.log(`  shift+right to ${keyed.askedSec.toFixed(2)}s: resident before ${keyed.residentBefore}, `
+    + `${keyed.hits} moves, playhead on ${keyed.frame} of ${keyed.want}`
+    + `${keyed.settledThrew ? `, settled() refused: ${keyed.settledThrew}` : ''}`);
+  check(keyed.residentBefore === false && keyed.hits > 0,
+    'the probe holds for the key too', `resident ${keyed.residentBefore}, ${keyed.hits} moves`);
+  check(keyed.hits === NUDGES && keyed.frame === keyed.want,
+    'a second\'s step pressed under a moving clip leaves the playhead where it asked',
+    `playhead ${keyed.frame} of ${keyed.want} after ${keyed.hits} moves`);
+  check(keyed.frame === keyed.want ? keyed.settledThrew === null : keyed.settledThrew !== null,
+    'and settled() calls that idle only if it got there', keyed.settledThrew ?? 'settled() resolved');
+
+  // A fetch that never delivers: the seek has to fail out loud, and settled() with it.
+  const stalled = await overtake({ targetSec: DURATION * 0.3, stall: true });
+  console.log(`  seek to ${stalled.askedSec.toFixed(2)}s with a fetch that delivers nothing: `
+    + `${stalled.hits} fetches, ${stalled.threw ? `rejected: ${stalled.threw}` : 'resolved'}; `
+    + `settled() ${stalled.settledThrew ? `refused: ${stalled.settledThrew}` : 'resolved'}`);
+  check(stalled.residentBefore === false && stalled.hits > 0,
+    'the probe holds: the span was missing and the seek asked for it', `resident ${stalled.residentBefore}, ${stalled.hits} fetches`);
+  check(stalled.threw !== null && /never became resident/.test(stalled.threw),
+    'a seek whose span never arrives rejects and says why', stalled.threw ?? 'it resolved');
+  check(stalled.settledThrew !== null && stalled.settledThrew.includes(`${stalled.askedSec}s`),
+    'and settled() refuses to call that idle, naming the seek', stalled.settledThrew ?? 'it resolved');
+  const paid = await page.evaluate(`(async () => {
+    const k = globalThis.__kinect;
+    const t = k.timeline.transport();
+    const seek = await t.seek(${TARGET_SEC});
+    let settledThrew = null;
+    try { await k.timeline.settled(); } catch (err) { settledThrew = String(err?.message ?? err); }
+    return { landed: seek !== null, settledThrew, frame: t.frame, want: t.frameAt(${TARGET_SEC}) };
+  })()`);
+  check(paid.landed && paid.frame === paid.want && paid.settledThrew === null,
+    'and the next seek that lands is what clears it', paid.settledThrew ?? `playhead ${paid.frame} of ${paid.want}`);
+}
+
+
 console.log('\n== 2. pre-roll length is a function of fade, wake, damp and output fps ==');
 const PREROLL_CASES = [
   { label: 'Blackwall, 30 fps, 1.00x', look: {}, rate: 1, fps: 30 },
@@ -845,7 +1033,7 @@ const plans = [];
     'the fade-and-wake half moves with output frame rate',
     `${at('Blackwall, 30 fps, 1.00x').surface} at 30 fps against ${at('Blackwall, 60 fps, 1.00x').surface} at 60`);
   check(at('Blackwall, 30 fps, 1.00x').surface !== at('Blackwall, 30 fps, 0.50x').surface,
-    'and with the retime slope, because fade and wake are source milliseconds',
+    'and with the clip speed, because fade and wake are source milliseconds',
     `${at('Blackwall, 30 fps, 1.00x').surface} at 1.00x against ${at('Blackwall, 30 fps, 0.50x').surface} at 0.50x`);
   check(at('trails 0, wake 0, 30 fps').frames < at('Blackwall, 30 fps, 1.00x').frames,
     'a look with less to remember costs less to seek to',
@@ -1321,7 +1509,7 @@ console.log('\n== 5. a look change while paused rebuilds the image and the estim
       el.dispatchEvent(new Event('input'));
       el.dispatchEvent(new Event('change'));
       await globalThis.__kinect.timeline.settled();
-      return globalThis.__kinect.timeline.retime.rate;
+      return globalThis.__kinect.timeline.read().speed;
     })()`);
     if (Math.abs(landed - rate) > 1e-6) {
       throw new Error(`asked the speed slider for ${rate}x and the page went to ${landed}x`);
@@ -1612,27 +1800,26 @@ console.log('\n== 7. the mosh pass decodes from its own last refresh ==');
 // deliberately not the order of their ids, so a build assigning draw order by array position
 // draws a different composite from one assigning it by id.
 const FIXTURE_CLIPS = [
-  // Two seconds of half speed at the head, then 1x. Its in-point is 20s into the take, so its
-  // head affords far more than any look asks for. It is also the clip the page comes up selected
-  // on, and its persistence is deliberately the shortest here: a build that read the look off
-  // the selection rather than off each clip would compute this clip's pre-roll for all of them.
-  { id: 'c2', start: 3, length: 6, keys: [[0, 20], [2, 21], [6, 25]], second: false,
+  // Half speed with an in-point 20s into the take, so its head affords far more than any look asks
+  // for. It is also the clip the page comes up selected on, and its persistence is deliberately
+  // the shortest here: a build that read the look off the selection rather than off each clip
+  // would compute this clip's pre-roll for all of them.
+  { id: 'c2', start: 3, length: 6, speed: 0.5, sourceStart: 20, second: false,
     look: { fade: 100, wake: 100 } },
   // In-point at source zero, so there is nothing before it to warm with. It enters cold, and a
   // seek to the same instant enters cold too, which is why the invariant holds here. Its
   // brightness is plainly not the others', which is what a broadcast look would flatten.
-  { id: 'c4', start: 6, length: 4, keys: [[0, 0], [4, 4]], second: true,
+  { id: 'c4', start: 6, length: 4, speed: 1, sourceStart: 0, second: true,
     look: { exposure: 2.4 } },
   // A head shorter than the look asks for: 0.6s of source against a full second of persistence.
-  { id: 'c1', start: 0, length: 8, keys: [[0, 0.6], [8, 8.6]], second: false, look: {} },
+  { id: 'c1', start: 0, length: 8, speed: 1, sourceStart: 0.6, second: false, look: {} },
   // The same take as c1, placed elsewhere and offset so it stands on the same source frame at
   // every program position it shares with it. Two clips wanting one frame of one take is the
   // case the per-take half of the pipeline split is about.
-  { id: 'c5', start: 2, length: 2.5, keys: [[0, 2.6], [2.5, 5.1]], second: false, look: {} },
-  // Enters mid-hold. Source time does not move before its in-point, so the walk back reaches no
-  // footage at all and this clip enters cold as well - by a different route from c4's. It is the
-  // only additive clip here, which is what puts a clip on each side of the draw order's split.
-  { id: 'c3', start: 5, length: 4, keys: [[0, 40], [0.8, 40], [4, 43.2]], second: false,
+  { id: 'c5', start: 2, length: 2.5, speed: 1, sourceStart: 2.6, second: false, look: {} },
+  // A deep in-point and the only additive clip here, which is what puts a clip on each side of the
+  // draw order's split.
+  { id: 'c3', start: 5, length: 4, speed: 1, sourceStart: 40, second: false,
     look: { additive: true } },
 ];
 
@@ -1653,15 +1840,6 @@ const MULTI = `(() => {
     ? { id: PRIMARY_TAKE.id, hash: PRIMARY_TAKE.hash }
     : null)};
   globalThis.__mc = {
-    /** One serialised retime, built through the shipped door so its handles are the real ones. */
-    retimeFor(keys) {
-      // The setter writes the selected clip, while the serialised fixture is copied from the
-      // first clip. Make those the same clip before asking the shipped door to build the curve.
-      k.timeline.select(k.timeline.clips()[0].id);
-      k.keyframes.setRetime({ rate: 1, keys: keys.map(([t, value]) => ({ t, value })) });
-      return JSON.parse(JSON.stringify(k.library.serialiseProjectBody().clips[0].retime));
-    },
-
     /**
      * The fixture loaded, with the clips listed in the order given.
      *
@@ -1684,7 +1862,8 @@ const MULTI = `(() => {
         length: c.length,
         take: c.take ? { ...c.take }
           : (c.second && second ? { ...second } : (primary ? { ...primary } : one.take)),
-        retime: this.retimeFor(c.keys),
+        speed: c.speed,
+        sourceStart: c.sourceStart,
         // This clip's own look, written into the document rather than applied afterwards - the
         // loader is the door a per-clip look actually comes through.
         params: { ...one.params, ...scoped(look, 'clip'), ...scoped(c.look ?? {}, 'clip') },
@@ -1715,13 +1894,7 @@ const MULTI = `(() => {
         await t.seek(fromSec);
         await t.runTo(t.frameAt(targetSec));
       } else {
-        // A seek answers null when it stood down for a repaint rather than landing. Asked again
-        // rather than read as a result: null is "come back", and reading it as one is how a
-        // stand-down would arrive here wearing the shape of a finding.
-        for (let attempt = 0; attempt < 4 && seek === null; attempt++) {
-          seek = await t.seek(targetSec, frames === null ? {} : { frames });
-        }
-        if (seek === null) throw new Error('the seek to ' + targetSec + 's stood down four times');
+        seek = await t.seek(targetSec, frames === null ? {} : { frames });
       }
       const pixels = tl.grab(label);
       return {
@@ -1888,9 +2061,8 @@ console.log('\n== 7. more than one clip: the composite, the cut, and what a clip
     'while standing on source frames of their own, so sharing the take did not put one '
     + "clip's frame in front of another's shader", cursors.join(', '));
 
-  // At 4s, and not over the four-clip overlap: `c3` enters mid-hold, and a hold is a span the
-  // pre-roll can never cover, so any position it is live at plans the whole edit and thrashes
-  // the cache. Two clips of one take is what this row is about, and 4s has exactly that.
+  // At 4s, and not over the four-clip overlap: two clips of one take is what this row is about,
+  // and this position has exactly that.
   const DECODE_SEC = 4;
   const decoded = await page.evaluate(`(async () => {
     const k = globalThis.__kinect;
@@ -1927,11 +2099,8 @@ console.log('\n== 7. more than one clip: the composite, the cut, and what a clip
   // 7d. the claim: a clip entered under playback is the clip seeked to.
   console.log('\n  a clip entered under playback against the same clip seeked to');
   const ENTRIES = [
-    { id: 'c2', targetSec: 3.3, fromSec: 0.5, why: 'a two-second half-speed head' },
-    { id: 'c3', targetSec: 5.3, fromSec: 3.4, why: 'entering mid-hold' },
-    // From before c3's in-point, so the playback arm's own seek is not the one c3's hold makes
-    // reach the head of the edit - which is what keeps the two arms doing different amounts of
-    // work now that the frame cache no longer truncates a pre-roll.
+    { id: 'c2', targetSec: 3.3, fromSec: 0.5, why: 'half speed with a deep in-point' },
+    { id: 'c3', targetSec: 5.3, fromSec: 3.4, why: 'an additive clip with a deep in-point' },
     { id: 'c4', targetSec: 6.3, fromSec: 4.9, why: 'no footage before its in-point' },
   ];
   for (const entry of ENTRIES) {
@@ -1963,10 +2132,6 @@ console.log('\n== 7. more than one clip: the composite, the cut, and what a clip
 
     check(liveHere.includes(entry.id),
       `${entry.id}: the clip under test is actually drawn at this position`, liveHere.join(', '));
-    // Different, not one-sided: a seek beside a retime hold pre-rolls to the head of the edit,
-    // because walking back inside a hold never covers the persistence and the walk runs to the
-    // ceiling. That used to be truncated by the frame cache, and the direction this row used to
-    // assert was a fact about that truncation rather than about the two paths.
     check(played.delta.renders !== seeked.delta.renders,
       `${entry.id}: the two arms did different amounts of work`,
       `${played.delta.renders} renders against ${seeked.delta.renders}`);
@@ -2008,9 +2173,6 @@ console.log('\n== 7. more than one clip: the composite, the cut, and what a clip
     'a clip whose footage starts at source zero has nothing to warm with, so it enters cold - '
     + 'and so does a seek to that instant, which is why the rows above hold rather than break',
     `c4 warms ${warmTable.c4} frames`);
-  check(warmTable.c3 === 0,
-    'and so does one entering mid-hold, by the other route: walking back inside a hold reaches '
-    + 'the frame already bound however far it walks', `c3 warms ${warmTable.c3} frames`);
   check(warmTable.c5 > warmTable.c1,
     'and one of the same take with a longer head is warmed further, so the bound is the head '
     + 'rather than a constant', `c5 warms ${warmTable.c5} against c1's ${warmTable.c1}`);
@@ -2174,9 +2336,9 @@ const STACK_LENGTH_SEC = 6;
 const STACK_ARMS = [1, 2, 4, CLIP_CEILING];
 
 const RELEASED_DEMAND_CLIPS = [
-  { id: 'cached', start: 40, length: 8, keys: [[0, 0], [8, 32]], second: false,
+  { id: 'cached', start: 40, length: 8, speed: 4, sourceStart: 0, second: false,
     look: { fade: 2000, wake: 5000 } },
-  { id: 'current', start: 0, length: 6, keys: [[0, 0], [6, 6]], second: true,
+  { id: 'current', start: 0, length: 6, speed: 1, sourceStart: 0, second: true,
     look: { fade: 100, wake: 0 } },
 ];
 
@@ -2185,7 +2347,8 @@ const stackOf = (n) => Array.from({ length: n }, (_, i) => ({
   id: `s${i}`,
   start: 0,
   length: STACK_LENGTH_SEC,
-  keys: [[0, i * STACK_GAP_SEC], [STACK_LENGTH_SEC, i * STACK_GAP_SEC + STACK_LENGTH_SEC]],
+  speed: 1,
+  sourceStart: i * STACK_GAP_SEC,
   second: false,
   look: {},
 }));
@@ -2210,14 +2373,15 @@ console.log('\n== 8. the frame cache is sized by the clips asking for it ==');
     await page.evaluate(
       `globalThis.__mc.load(${JSON.stringify(stackOf(n))}, null, ${JSON.stringify(STACK_LOOK)})`,
     );
-    const curves = await page.evaluate(`__kinect.library.serialiseProjectBody().clips.map((clip) => ({
+    const timings = await page.evaluate(`__kinect.library.serialiseProjectBody().clips.map((clip) => ({
       id: clip.id,
-      keys: clip.retime.keys.map((key) => [key.t, key.value]),
+      speed: clip.speed,
+      sourceStart: clip.sourceStart,
     }))`);
     const shot = await page.evaluate(
       `globalThis.__mc.arm('seek', ${STACK_TARGET_SEC}, 0, 'stack${n}', null)`,
     );
-    stacked.push({ n, shot, curves });
+    stacked.push({ n, shot, timings });
     const s = shot.seek;
     console.log(`  ${String(n).padStart(2)} clip(s): pre-roll ${s.plan.frames} asked `
       + `(surface ${s.plan.surface}, trails ${s.plan.trails}), ${s.frames} `
@@ -2231,12 +2395,12 @@ console.log('\n== 8. the frame cache is sized by the clips asking for it ==');
 
   const one = stacked.find((a) => a.n === 1);
   const most = stacked[stacked.length - 1];
-  console.log(`  the widest arm's retime endpoints: ${most.curves
-    .map((curve) => `${curve.id}:${curve.keys.map((key) => key[1]).join('-')}`).join(' ')}`);
+  console.log(`  the widest arm's clip timings: ${most.timings
+    .map((timing) => `${timing.id}:${timing.sourceStart}@${timing.speed}x`).join(' ')}`);
 
   check(most.shot.clips.every((clip) => clip.take?.id === TAKE)
     && new Set(most.shot.clips.map((clip) => clip.applied)).size === CLIP_CEILING,
-  'the stacked fixture stays on its named take and reaches a different source frame through every retime it authored',
+  'the stacked fixture stays on its named take and reaches a different source frame through every in-point it authored',
   most.shot.clips.map((clip) => `${clip.id}:${clip.take?.id ?? 'none'}@${clip.applied}`).join(' '));
 
   check(stacked.every(({ shot }) => shot.seek.frames === shot.seek.plan.frames),
@@ -2342,10 +2506,10 @@ if (SECOND_TAKE) {
 // take for depends on that clip's own values and on nothing shared.
 const MIXED_TARGET_SEC = 3;
 const MIXED_CLIPS = [
-  { id: 'live', start: 0, length: 12, keys: [[0, 0], [12, 12]], second: false, look: {} },
-  { id: 'warmLong', start: 3.5, length: 4, keys: [[0, 20], [4, 24]], second: false,
+  { id: 'live', start: 0, length: 12, speed: 1, sourceStart: 0, second: false, look: {} },
+  { id: 'warmLong', start: 3.5, length: 4, speed: 1, sourceStart: 20, second: false,
     look: { fade: 1500, wake: 4000 } },
-  { id: 'warmShort', start: 3.5, length: 4, keys: [[0, 40], [4, 44]], second: false,
+  { id: 'warmShort', start: 3.5, length: 4, speed: 1, sourceStart: 40, second: false,
     look: { fade: 100, wake: 0 } },
 ];
 
@@ -2353,7 +2517,8 @@ const PREFETCH_CLIPS = Array.from({ length: CLIP_CEILING }, (_, i) => ({
   id: `p${i}`,
   start: 0,
   length: 2,
-  keys: [[0, i * 5], [2, i * 5 + 8]],
+  speed: 4,
+  sourceStart: i * 5,
   second: false,
   look: {},
 }));
@@ -2448,8 +2613,7 @@ if (errors.length) console.log(`\n[timeline] page errors:\n  ${errors.join('\n  
 check(errors.length === 0, 'the page logged no errors');
 
 await browser.close();
-console.log(`\n[timeline] ${failures === 0
-  ? `PASS (${assertions} assertions)`
-  : `FAIL (${failures}/${assertions} assertions failed)`}`);
+console.log(`\n[timeline] ${assertions} assertions, ${failures} failed`);
+console.log(`[timeline] ${failures === 0 ? 'PASS' : 'FAIL'}`);
 if (MUTATE && MUTATIONS[MUTATE]?.fails) console.log(`[timeline] it should redden: ${MUTATIONS[MUTATE].fails}`);
 process.exit(failures === 0 ? 0 : 1);

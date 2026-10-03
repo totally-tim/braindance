@@ -1,12 +1,11 @@
 // The colour camera's own 1920x1080 picture, served as MJPEG so OBS can open it as a source
 // URL. A type 2 frame carries the registered colour instead; nothing here decodes or crops.
 
+import { OnDemand } from './on-demand.js';
+
 // Appears in the response header and between every part, and the two have to agree.
 const BOUNDARY = 'braindanceframe';
-
-// How long the colour stream stays up after the last subscriber leaves. OBS retries a dead
-// source hard, and without the linger every reconnect toggles the grabber's encoder.
-const LINGER_MS = 6000;
+const HOLD_MS = 45000;
 
 // Drop-to-latest. MJPEG has no divisor or stride to negotiate, so this is the webcam's only
 // backpressure control - a queue would push back through the grabber's pipe and cost the take.
@@ -14,18 +13,19 @@ const MAX_IN_FLIGHT = 1;
 
 export class Webcam {
   // `request` asks the grabber to start or stop encoding. Called only on a change, and
-  // re-called by `reassert` after a restart, because a new grabber's encoder is off.
-  constructor({ request }) {
-    this.request = request;
+  // re-called by `reassert` after a restart, because a new grabber's encoder is off. `recording`
+  // says whether the recorder wants the same picture for its take, which asks for the encode
+  // whether or not anybody is watching; it is not a subscriber and is not charged to the take.
+  constructor({ request, recording = () => false }) {
     this.subscribers = new Set();
     this.latest = null;
     this.latestAt = 0;
-    this.wanted = false;
-    this.lingerTimer = null;
+    this.demand = new OnDemand({ request, count: () => this.subscribers.size + (recording() ? 1 : 0) });
     // Why the picture is not available, or null when it is; served to whoever asked. It asks
     // whether there is a colour camera, never whether a frame has arrived - the grabber encodes
     // only while subscribed, so refusing on "no frame yet" deadlocks the first subscriber.
     this.unavailable = 'no sensor has handshaken with this server yet';
+    this.transient = true;
     this.served = 0;
     this.dropped = 0;
   }
@@ -45,7 +45,7 @@ export class Webcam {
         went = true;
       }
     }
-    if (went) this.#settle();
+    if (went) this.demand.settle();
   }
 
   get count() {
@@ -72,8 +72,13 @@ export class Webcam {
     for (const s of this.subscribers) this.#push(s);
   }
 
-  setUnavailable(reason) {
+  setUnavailable(reason, transient = false) {
     this.unavailable = reason;
+    this.transient = transient;
+    for (const sub of this.subscribers) {
+      if (!transient) sub.res.end(reason);
+      else this.#hold(sub);
+    }
     // Dropped, so a source reconnecting during an outage is not painted a still of a dead sensor.
     this.latest = null;
   }
@@ -82,16 +87,19 @@ export class Webcam {
     this.unavailable = null;
   }
 
-  // Re-ask the grabber for what the subscribers already wanted: a restarted grabber has its
-  // encoder off and has never heard of a subscriber that attached to the old one.
   reassert() {
-    if (this.wanted) this.request(true);
+    this.demand.reassert();
+  }
+
+  /** Asks the encoder again after the recorder's wish changed. */
+  settle() {
+    this.demand.settle();
   }
 
   // The MJPEG route. The origin rule belongs to the dispatcher, which asks it of every route
   // the table marks as serving live sensor bytes; a copy here would be the second copy.
   attach(req, res) {
-    if (this.unavailable) {
+    if (this.unavailable && !this.transient) {
       res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ error: this.unavailable }));
       return;
@@ -107,45 +115,34 @@ export class Webcam {
     });
     console.log(`[webcam] subscriber attached (${this.subscribers.size} total, ${sub.loopback ? 'loopback' : 'remote'})`);
 
+    res.flushHeaders();
+    this.#hold(sub);
     const drop = () => {
+      clearTimeout(sub.hold);
       if (!this.subscribers.delete(sub)) return;
       console.log(`[webcam] subscriber gone (${this.subscribers.size} left)`);
-      this.#settle();
+      this.demand.settle();
     };
     res.on('close', drop);
     res.on('error', drop);
 
-    this.#settle();
+    this.demand.settle();
     // The frame in hand rather than the next one, so a source connecting between frames paints now.
     if (this.latest) this.#push(sub);
   }
 
-  /** Turn the grabber's encoder on or off to match what is attached, with the linger. */
-  #settle() {
-    const want = this.subscribers.size > 0;
-    if (want) {
-      if (this.lingerTimer) {
-        clearTimeout(this.lingerTimer);
-        this.lingerTimer = null;
-      }
-      if (!this.wanted) {
-        this.wanted = true;
-        this.request(true);
-      }
-      return;
-    }
-    if (!this.wanted || this.lingerTimer) return;
-    this.lingerTimer = setTimeout(() => {
-      this.lingerTimer = null;
-      // Re-checked: a subscriber may have arrived while this timer was pending.
-      if (this.subscribers.size > 0) return;
-      this.wanted = false;
-      this.request(false);
-    }, LINGER_MS);
+  #hold(sub) {
+    if (sub.hold) return;
+    sub.hold = setTimeout(() => {
+      sub.res.end(this.unavailable ?? 'no colour frame arrived before the wait expired');
+    }, HOLD_MS);
+    sub.hold.unref?.();
   }
 
   #push(sub) {
     if (!this.latest) return;
+    clearTimeout(sub.hold);
+    sub.hold = null;
     // Drop-to-latest: a subscriber still draining the previous frame is owed the newest, not this.
     if (sub.inFlight >= MAX_IN_FLIGHT) {
       sub.behind++;

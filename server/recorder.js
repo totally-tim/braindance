@@ -2,12 +2,12 @@
 // is library entry is hash - is what the project model, the frame API and the library assume. One
 // take is one continuous stream, one hello, monotonic stamps; a grabber restart splits it.
 
-import { createWriteStream, openSync, readdirSync } from 'node:fs';
+import { createWriteStream, fstatSync, openSync, readdirSync } from 'node:fs';
 import { once } from 'node:events';
 import { join } from 'node:path';
-import { encodeMessage, TYPE_HELLO } from './protocol.js';
-import { buildIndex, forgetCapture } from './capture.js';
-import { appendMarks, remaining, MIN_TAKE_SEC, durationLabel } from './library.js';
+import { encodeMessage, TYPE_HELLO, TYPE_COLOR } from './protocol.js';
+import { buildIndex, cachedIndex, forgetCapture } from './capture.js';
+import { appendMarks, remaining, MIN_TAKE_SEC, durationLabel, sameTake, takeIdentity } from './library.js';
 
 // `2026-07-31-take3`. Synchronous, because opening a take must finish in the same turn as the
 // hello or the frames behind it find no file.
@@ -61,11 +61,24 @@ function settle(take) {
 }
 
 // Marks hang off the take rather than the recorder, or a take that failed mid-write leaves them
-// for whichever take closes next.
-async function flushMarks(take) {
-  if (!take.pendingMarks.length) return;
+// for whichever take closes next. Until the scan gives the take its hash they are the take object's
+// own, and the hash is what files them - once the hello has landed, because its `startedAt` is what
+// makes one take's bytes differ from another's: two takes that died before it hash alike.
+async function flushMarks(dir, take, index) {
+  // The drop count goes into the marks log because it is the one sidecar neither derived from the
+  // take's bytes nor thrown away with them, and a count held in memory is gone at the next restart.
+  // Only when frames were dropped: a take that lost nothing gains no sidecar it did not have.
+  const drop = take.dropped > 0
+    ? [{ id: `drop:${take.id}`, at: Date.now(), kind: 'drop', dropped: take.dropped }]
+    : [];
+  if (!take.pendingMarks.length && !drop.length) return;
+  if (!index.hello) {
+    console.error(`[recorder] take ${take.id}: ${take.pendingMarks.splice(0).length + drop.length} record(s) not filed, `
+      + 'because its hello never reached the file and nothing else tells this take from another');
+    return;
+  }
   try {
-    await appendMarks(take.path, take.pendingMarks.splice(0));
+    await appendMarks(dir, index.hash, [...take.pendingMarks.splice(0), ...drop]);
   } catch (err) {
     console.error(`[recorder] take ${take.id}: could not write its marks: ${err.message}`);
   }
@@ -83,9 +96,9 @@ export class Recorder {
     // intention is unchanged, so the next hello opens the next take with nobody pressing.
     this.armed = false;
     this.take = null;
-    // `close` nulls `this.take` before it awaits the flush, so without this "is the recorder still
-    // holding this file" answered no while it still was.
-    this.finalizing = null;
+    // Every take whose close is still running. A set, because `split()` closes the old take
+    // unawaited while the replacement's hello opens the next, so a restart holds two at once.
+    this.closing = new Set();
   }
 
   get state() {
@@ -102,15 +115,27 @@ export class Recorder {
       buffered: take ? take.stream.writableLength : 0,
       cannotRecord: this.cannotRecord(),
       // A longer window than `recording`: a library tile may not offer Download or Remove until
-      // the index and the hash exist. An id, so a surface can compare it against what it drew.
-      writingId: take?.id ?? this.finalizing?.id ?? null,
+      // the index and the hash exist. Every owned take, because a restart owns two and a tile has
+      // to repaint when either close finishes; sorted, so a surface compares it as a set.
+      writingIds: this.ownedTakes().map((owned) => owned.id).sort(),
     };
   }
 
-  // A known hole: this is one path and a grabber restart can own two, because `split()` closes the
-  // old take unawaited while the replacement's hello opens the next about 250ms later.
-  get openPath() {
-    return this.take?.path ?? this.finalizing?.path ?? null;
+  /** The open take and every take whose close is still running. */
+  ownedTakes() {
+    return [this.take, ...this.closing].filter((take) => take !== null);
+  }
+
+  /** Whether `path` is a file this recorder is still writing: the open take, or one still closing. */
+  owns(path) {
+    // The file rather than the name: an id is joined into a path as given, and a volume that folds
+    // case opens one take under many spellings of it.
+    return Boolean(path) && this.ownedTakes().length > 0 && this.ownsFile(takeIdentity(path));
+  }
+
+  /** The same question about a file already opened, by its `dev` and `ino`. */
+  ownsFile(identity) {
+    return identity !== null && this.ownedTakes().some((take) => sameTake(identity, take.identity));
   }
 
   // Refuses when the disk cannot hold a sensible minimum, because with manual-only deletion the
@@ -180,10 +205,13 @@ export class Recorder {
         const failed = this.take;
         this.take = null;
         this.armed = false;
-        // Into *this* take's sidecar, even though it ended badly: nulling the take without
+        // Into *this* take's log, even though it ended badly: nulling the take without
         // flushing left them for the next take, at a source time meaningless there.
         settle(failed);
-        flushMarks(failed);
+        cachedIndex(failed.path).then(
+          (index) => flushMarks(this.dir, failed, index),
+          (err) => console.error(`[recorder] take ${failed.id}: its marks have no hash to be filed under: ${err.message}`),
+        );
         this.onChange(this.state);
       }
     });
@@ -196,11 +224,14 @@ export class Recorder {
     this.take = {
       id: take.id,
       path: take.path,
+      // Off the descriptor, which the stream closes at the end of the take.
+      identity: fstatSync(take.fd),
       stream,
       startedAt,
       frames: 0,
       bytes: 0,
       dropped: 0,
+      droppedColour: 0,
       stalling: false,
       // Cumulative bytes handed to the stream, and the end offset of every frame not yet known to
       // have reached the file. `inFlightHead` is how far into that queue the drain has got.
@@ -213,15 +244,22 @@ export class Recorder {
     this.onChange(this.state);
   }
 
+  // A frame or a colour message, framing included. Both go into the file in arrival order; only a
+  // frame counts toward `frames` and `dropped`, which are what the monitor and the drop record mean.
   write(raw) {
     const take = this.take;
     if (!take) return;
+    const colour = raw.readUInt32LE(4) === TYPE_COLOR;
     // Drained on the frame path rather than only when something asks for state, which is what
     // bounds the queue by the buffer ceiling below instead of by the length of the take.
     settle(take);
     // A discarded `write` return value made a slow disk into heap that grew until the process was
     // killed, having reported itself healthy throughout.
     if (take.stream.writableLength > MAX_TAKE_BUFFER) {
+      if (colour) {
+        take.droppedColour++;
+        return;
+      }
       take.dropped++;
       if (!take.stalling) {
         take.stalling = true;
@@ -242,7 +280,7 @@ export class Recorder {
     }
     take.stream.write(raw);
     take.accepted += raw.length;
-    take.inFlight.push(take.accepted);
+    if (!colour) take.inFlight.push(take.accepted);
   }
 
   // The scan writes the sidecar index and the content hash, which is what makes the take a library
@@ -251,7 +289,7 @@ export class Recorder {
     const take = this.take;
     if (!take) return null;
     this.take = null;
-    this.finalizing = take;
+    this.closing.add(take);
     take.stream.end();
     let closeError = null;
     try {
@@ -262,22 +300,30 @@ export class Recorder {
       // this last flush used to throw straight out of `close`, past the index and the hash.
       console.error(`[recorder] take ${take.id}: the file did not close cleanly (${err.message}) - indexing what landed`);
     }
-    // Past the catch rather than inside a branch of it: the take has already been nulled, so a
-    // flush skipped here sends the marks forward into whichever take closes next.
+    // Past the catch rather than inside a branch of it: a close that failed still scans what
+    // landed, and the scan is what gives the marks a hash to be filed under.
     let index;
     try {
       settle(take);
-      await flushMarks(take);
       forgetCapture(take.path);
-      index = await buildIndex(take.path);
+      index = await buildIndex(take.path).catch((err) => {
+        if (take.pendingMarks.length) {
+          console.error(`[recorder] take ${take.id}: ${take.pendingMarks.length} mark(s) not filed, because the scan that gives them a hash failed`);
+        }
+        throw err;
+      });
+      await flushMarks(this.dir, take, index);
     } finally {
       // In a `finally`, or an index build that threw leaves this process claiming a file it had
-      // stopped working on, with the library refusing to open or remove it until a restart.
-      this.finalizing = null;
+      // stopped working on, with the library refusing to open or remove it until a restart. This
+      // take and no other: a shared slot cleared here handed a later take's guard away mid-close.
+      this.closing.delete(take);
     }
     console.log(
-      `[recorder] take ${take.id} closed (${reason}): ${index.frames.offset.length} frames, ${index.hash}`
-      + (take.dropped ? `, ${take.dropped} frames dropped to a slow disk` : ''),
+      `[recorder] take ${take.id} closed (${reason}): ${index.frames.offset.length} frames, `
+      + `${index.colour.offset.length} colour frames, ${index.hash}`
+      + (take.dropped ? `, ${take.dropped} frames dropped to a slow disk` : '')
+      + (take.droppedColour ? `, ${take.droppedColour} colour frames dropped to a slow disk` : ''),
     );
     this.onChange(this.state);
     if (closeError) throw closeError;
@@ -285,6 +331,7 @@ export class Recorder {
       id: take.id,
       path: take.path,
       frames: index.frames.offset.length,
+      colourFrames: index.colour.offset.length,
       hash: index.hash,
       bytes: take.bytes,
       dropped: take.dropped,

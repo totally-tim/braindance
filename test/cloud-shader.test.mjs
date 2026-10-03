@@ -83,3 +83,21 @@ for (const program of Object.keys(TABLES)) {
     assert.deepEqual(orphan, [], `keys in web/${TABLES[program].file} the ${program} GLSL never declares: ${orphan.join(', ')}`);
   });
 }
+
+// The crop box's two functions are spliced into the vertex spine out of `web/crop-box.js`. GLSL
+// wants a function defined above the call, and a segment moved below `main` would still assemble
+// here - it would fail on the driver, as a viewport drawing nothing and a log nobody reads.
+test('the crop box is defined above main and called from inside it', () => {
+  const vert = PROGRAMS.cloud.vertexShader;
+  for (const [signature, call] of [
+    ['bool outsideDepthPair(float z) {', 'outsideDepthPair(z)'],
+    ['bool outsideLateral(vec2 xy) {', 'outsideLateral(pos.xy)'],
+  ]) {
+    const defined = vert.indexOf(signature);
+    const called = vert.indexOf(call);
+    assert.notEqual(defined, -1, `the assembled vertex program does not define ${signature}`);
+    assert.notEqual(called, -1, `the assembled vertex program never calls ${call}`);
+    assert.ok(defined < called, `${signature} is assembled below the call that needs it`);
+    assert.ok(called > vert.indexOf('void main() {'), `${call} is called above main rather than in it`);
+  }
+});

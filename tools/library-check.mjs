@@ -13,10 +13,10 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, mkdirSync, readdirSync, rmSync, symlinkSync, existsSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
+import { chmodSync, cpSync, linkSync, mkdirSync, readdirSync, renameSync, rmSync, symlinkSync, lstatSync, existsSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { createConnection } from 'node:net';
-import { createServer } from 'node:http';
+import { createServer, request } from 'node:http';
 import { networkInterfaces } from 'node:os';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
@@ -43,20 +43,21 @@ const MAC_PORT = Number(flag('--mac-port', '8211'));
 // `MAC_PORT + n`, and `startServer` asserts its port is inside the span, so a section added
 // later at `+17` is caught by arithmetic rather than by a wrong reading. `startServer` polls
 // until something answers `/library/takes`, and a stranger on the port answers just as well.
-const PORT_SPAN = 16;
+const PORT_SPAN = 18;
 const MUTATE = flag('--mutate');
 const HEADED = argv.includes('--headed');
 const WORK = flag('--work') ?? join(REPO, '.library-check');
 
 let failures = 0;
 let assertions = 0;
+const fired = [];
 // Claims this run could not make a fixture for, named in the verdict: a check that quietly
 // drops an assertion is a check reporting coverage it does not have.
 const skipped = [];
 const check = (ok, label, detail = '') => {
   assertions++;
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? `  ${detail}` : ''}`);
-  if (!ok) failures++;
+  if (!ok) { failures++; fired.push(label); }
   return ok;
 };
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -84,6 +85,64 @@ const REVEAL_EDITS = {
 };
 const REVEAL_EDIT = REVEAL_EDITS[process.platform] ?? REVEAL_EDITS.darwin;
 
+// Every control the library renders, keyed as `__library.controls()` keys it, and the edit that
+// leaves it on screen doing nothing. The control sweep drives each key and requires this table and
+// its drivers to name the same keys, so `dead-<key>` is the control that key's row can go red.
+const tabGoesDead = (filter) => ({ file: 'web/library.js', edits: [[
+  "  tab.addEventListener('click', () => { filter = tab.dataset.filter; paint(); });",
+  `  tab.addEventListener('click', () => { if (tab.dataset.filter === '${filter}') return; filter = tab.dataset.filter; paint(); });`,
+]] });
+const DEAD_CONTROLS = {
+  toMenu: { file: 'web/library.html', edits: [['id="toMenu" href="/"', 'id="toMenu" href="#"']] },
+  toProjects: { file: 'web/library.html', edits: [['id="toProjects" href="/projects"', 'id="toProjects" href="#"']] },
+  toLibrary: { file: 'web/library.html', edits: [['id="toLibrary" href="/library"', 'id="toLibrary" href="#"']] },
+  all: tabGoesDead('all'),
+  local: tabGoesDead('local'),
+  remote: tabGoesDead('remote'),
+  both: tabGoesDead('both'),
+  'new-project': { file: 'web/library.js', edits: [[
+    '      run: () => { location.href = `/edit?new=${encodeURIComponent(take.id)}`; },', '      run: () => {},',
+  ]] },
+  download: { file: 'web/library.js', edits: [[
+    '        () => post(`/library/download/${encodeURIComponent(take.id)}`),', '        () => Promise.resolve({}),',
+  ]] },
+  delete: { file: 'web/library.js', edits: [['    run: (host) => askDelete(host, take),', '    run: () => {},']] },
+  more: { file: 'web/library.js', edits: [[
+    "  buildMenu(tile.querySelector('.meta'), more, take, () => tile);",
+    "  buildMenu(tile.querySelector('.meta'), document.createElement('button'), take, () => tile);",
+  ]] },
+  rename: { file: 'web/library.js', edits: [['      run: (tile) => askRename(tile, take),', '      run: () => {},']] },
+  reveal: { file: 'web/library.js', edits: [[
+    '      run: (tile) => run(tile, `showing ${take.id} in ${label}`, () => post(`/library/reveal/${encodeURIComponent(take.id)}`), null, { refresh: false }),',
+    '      run: () => {},',
+  ]] },
+  reclaim: { file: 'web/library.js', edits: [['      run: (tile) => askReclaim(tile, take),', '      run: () => {},']] },
+  vMore: { file: 'web/library.js', edits: [[
+    "  buildMenu(viewer.querySelector('.vhead'), freshMore, take, hostOf);",
+    "  buildMenu(viewer.querySelector('.vhead'), document.createElement('button'), take, hostOf);",
+  ]] },
+  mark: { file: 'web/library.js', edits: [['  paintMarks(vBar, take, timed && !timed.error ? (sourceSec) => skim.seek(sourceSec) : null);', '  paintMarks(vBar, take, () => {});']] },
+  vClose: { file: 'web/library.js', edits: [[
+    "document.getElementById('vClose').addEventListener('click', () => viewer.close());",
+    "document.getElementById('vClose').addEventListener('click', () => {});",
+  ]] },
+  cCancel: { file: 'web/library.js', edits: [[
+    "document.getElementById('cCancel').addEventListener('click', () => dlg.close());",
+    "document.getElementById('cCancel').addEventListener('click', () => {});",
+  ]] },
+  cGo: { file: 'web/library.js', edits: [['  dlg.close();\n  confirmAction?.();\n});', '  dlg.close();\n});']] },
+  rName: { file: 'web/library.js', edits: [[
+    "renameInput.addEventListener('input', validateRename);", '/* dead: nothing listens for typing */',
+  ]] },
+  rCancel: { file: 'web/library.js', edits: [[
+    "document.getElementById('rCancel').addEventListener('click', () => renameDlg.close());",
+    "document.getElementById('rCancel').addEventListener('click', () => {});",
+  ]] },
+  rGo: { file: 'web/library.js', edits: [[
+    "renameGo.addEventListener('click', () => commitRename());", "renameGo.addEventListener('click', () => {});",
+  ]] },
+};
+
 const MUTATIONS = {
   // The library joins on the filename instead of the hash.
   'reconcile-by-filename': { file: 'server/library.js', edits: [[
@@ -98,7 +157,7 @@ const MUTATIONS = {
   ]] },
   // Reclaim trusts the listing instead of re-hashing the copy that is supposed to survive.
   'reclaim-trusts-manifest': { file: 'server/index.js', edits: [[
-    '    const verified = await hashFile(join(CAPTURES_DIR, mine.file));',
+    "    const verified = keptPath ? await hashFile(keptPath).catch((err) => `unreadable (${err.code ?? err.message})`) : 'gone';",
     '    const verified = mine.hash;',
   ]] },
   // Descriptors are never evicted, which is the shape step 2 shipped and named as this step's
@@ -223,11 +282,6 @@ const MUTATIONS = {
     "  if (format === CAPTURE_FORMAT) return '';",
     "  return ''; /* mutation: every generation opens on this build's assumptions */",
   ]] },
-  // The retime guard comes off the file door.
-  'load-skips-monotonic': { file: 'web/main.js', edits: [[
-    '    retime.assertMonotonic(keys);',
-    '  /* mutation: the curve arrives unchecked */',
-  ]] },
   // The quaternion length check comes off, which is the gap step 5 carried: four finite numbers
   // accepted as a rotation, and a camera move nobody authored.
   'accept-any-quaternion': { file: 'web/main.js', edits: [[
@@ -259,11 +313,13 @@ const MUTATIONS = {
       }
       await mkdir(this.dir, { recursive: true });`],
   ] },
-  // Marks are drawn at their source fraction rather than through the retime curve, which is
-  // identical at rate 1 with no keys and wrong everywhere else.
+  // Marks are drawn at their source second rather than through the selected clip's placement,
+  // speed and in-point. The name stays because it is part of the proof invocation surface.
   'marks-ignore-retime': { file: 'web/main.js', edits: [[
-    '\n    const program = programSecOfSource(mark.sourceMs / 1000);\n',
-    '\n    const program = mark.sourceMs / 1000;\n',
+    '    const program = programSecOfSource(mark.sourceMs / 1000);\n'
+      + "    const el = document.createElement('button');",
+    '    const program = mark.sourceMs / 1000;\n'
+      + "    const el = document.createElement('button');",
   ]] },
   // The library skims a remote take at full resolution, promising a smoothness the
   // link does not have.
@@ -316,7 +372,7 @@ const MUTATIONS = {
       "  { path: '/library/writes', pattern: /^\\/library\\/writes$/, read: serveWriteCounts },\n"
       + "  { path: '/library/sweep-probe', pattern: /^\\/library\\/sweep-probe$/, read: (req, res) => {\n"
       + "    const victim = readdirSync(CAPTURES_DIR).find((f) => f.endsWith('.knct')\n"
-      + '      && join(CAPTURES_DIR, f) !== recorder.openPath);\n'
+      + '      && !recorder.owns(join(CAPTURES_DIR, f)));\n'
       + '    if (victim) unlinkSync(join(CAPTURES_DIR, victim));\n'
       + '    sendJson(res, { removed: victim ?? null });\n'
       + '  } },'],
@@ -340,14 +396,14 @@ const MUTATIONS = {
     file: 'server/index.js',
     edits: [
       [
-        '  const closed = { ms: Date.now() - stats.since, frames: stats.frames, dropped: stats.dropped, bytes: stats.bytes };\n'
-        + '  Object.assign(stats, { frames: 0, dropped: 0, bytes: 0, since: Date.now() });\n',
-        '  const closed = { ms: Date.now() - stats.since, frames: stats.frames, dropped: stats.dropped, bytes: stats.bytes };\n',
+        '  const closed = { ms: Date.now() - stats.since, frames: stats.frames, dropped: stats.dropped, bytes: stats.bytes, colourBytes: stats.colourBytes };\n'
+        + '  Object.assign(stats, { frames: 0, dropped: 0, bytes: 0, colourBytes: 0, since: Date.now() });\n',
+        '  const closed = { ms: Date.now() - stats.since, frames: stats.frames, dropped: stats.dropped, bytes: stats.bytes, colourBytes: stats.colourBytes };\n',
       ],
       [
         '  console.log(`[server] ${fps} fps  ${mbs} MB/s  dropped=${closed.dropped}  clients=${wss.clients.size}`);\n}, 5000);',
         '  console.log(`[server] ${fps} fps  ${mbs} MB/s  dropped=${closed.dropped}  clients=${wss.clients.size}`);\n'
-        + '  Object.assign(stats, { frames: 0, dropped: 0, bytes: 0, since: Date.now() });\n}, 5000);',
+        + '  Object.assign(stats, { frames: 0, dropped: 0, bytes: 0, colourBytes: 0, since: Date.now() });\n}, 5000);',
       ],
     ],
   },
@@ -367,17 +423,84 @@ const MUTATIONS = {
     'grabberRestarts++; ', '',
   ]] },
 
+  // A launch that never made a process counts as a grabber the sensor went through.
+  'respawns-count-a-failed-launch': { file: 'server/index.js', edits: [
+    ["    proc.on('spawn', () => { grabberSpawns++; });\n", ''],
+    ['    const grabberArgs = buildArgs();', '    grabberSpawns++;\n    const grabberArgs = buildArgs();'],
+  ] },
   // The requested restart is counted where it is learned rather than beside the spawn it
   // excuses, which is where it used to be.
   'respawns-dip-before-the-spawn': { file: 'server/index.js', edits: [[
-    'setTimeout(() => { grabberRestarts++; spawnGrabber(); }, delay);',
-    'grabberRestarts++;\n        setTimeout(spawnGrabber, delay);',
+    'spawnTimer = setTimeout(() => { spawnTimer = null; grabberRestarts++; spawnGrabber(); }, delay);',
+    'grabberRestarts++;\n        spawnTimer = setTimeout(() => { spawnTimer = null; spawnGrabber(); }, delay);',
   ]] },
 
-  // `openPath` goes back to answering only for the take currently being written.
-  'openpath-drops-at-the-stop': { file: 'server/recorder.js', edits: [[
-    'return this.take?.path ?? this.finalizing?.path ?? null;',
-    'return this.take?.path ?? null;',
+  // The recorder goes back to owning only the take currently being written, so a stopped take is
+  // anybody's while its close is still running.
+  'ownership-drops-at-the-stop': { file: 'server/recorder.js', edits: [[
+    '[this.take, ...this.closing]',
+    '[this.take]',
+  ]] },
+  // The shipped shape: one owned take, the open one when there is one. A grabber restart opens the
+  // next take while the last is still closing, and the closing one is anybody's for the overlap.
+  'open-take-shadows-the-closing-one': { file: 'server/recorder.js', edits: [[
+    '[this.take, ...this.closing]',
+    '[this.take ?? [...this.closing].at(-1) ?? null]',
+  ]] },
+  // The recorder reports one take as being written, the newest, so a take whose close finishes
+  // while the next is open changes nothing a gallery compares, and its tile stays refused.
+  'writing-names-one-take': { file: 'server/recorder.js', edits: [[
+    'writingIds: this.ownedTakes().map((owned) => owned.id).sort(),',
+    'writingIds: this.ownedTakes().map((owned) => owned.id).sort().slice(-1),',
+  ]] },
+  // A download stops asking whether the name it probes is the take being recorded here, so the
+  // probe's full read plus sha256 runs against the file the recorder is writing.
+  'download-probes-the-open-take': { file: 'server/library.js', edits: [[
+    '      if (ownsFile(await held.stat())) {',
+    '      if (false) {',
+  ]] },
+  // Every scan of a take writes its sidecar through one scratch name again, so two scans of one
+  // file under ids differing only in case race one rename and the second fails.
+  'sidecar-shares-one-scratch': { file: 'server/capture.js', edits: [[
+    '  const scratch = `${sidecar}.${++indexWrites}.tmp`;',
+    '  const scratch = `${sidecar}.tmp`;',
+  ]] },
+  // The recorder compares paths as strings again, so an id spelled in another case names the take
+  // being recorded on a volume that folds case and walks past every refusal that asks.
+  'owns-compares-names': { file: 'server/recorder.js', edits: [[
+    '    return Boolean(path) && this.ownedTakes().length > 0 && this.ownsFile(takeIdentity(path));',
+    '    return this.ownedTakes().some((take) => take.path === path);',
+  ]] },
+  // The marks sync joins on the listing's bare hash field rather than through `copyOnNode`, so a
+  // node that could not be asked is answered as one that does not hold the take, where the guard
+  // throws and the catch names why.
+  'sync-answers-for-an-unasked-node': { file: 'server/index.js', edits: [[
+    '    const match = copyOnNode(node, theirTakes, hash);',
+    '    const match = (theirTakes ?? []).find((t) => t.hash === hash);',
+  ]] },
+  // The marks sync stops asking whether the take is still here before it appends, so a take deleted
+  // while the node's answer was on its way gets a marks log written for footage nothing holds.
+  'sync-appends-under-a-race': { file: 'server/index.js', edits: [[
+    '    const merged = await mergeMarkLog(CAPTURES_DIR, hash, theirLog, { present: () => takeFile(hash) });',
+    '    const merged = await mergeMarkLog(CAPTURES_DIR, hash, theirLog);',
+  ]] },
+  // A caller takes a node's marks log whatever take the answer says it is for, which is what a
+  // node on an older build, answering by name, relies on.
+  'caller-takes-a-log-by-name': { file: 'server/library.js', edits: [[
+    '  if (body?.hash !== take.hash || !Array.isArray(body.log)) {',
+    '  if (!Array.isArray(body?.log)) {',
+  ]] },
+  // A reclaim's delete goes back to removing the node's copy however many marks it gained since
+  // the other machine read them, so a mark pressed in between goes with the copy.
+  'reclaim-loses-a-late-mark': { file: 'server/library.js', edits: [[
+    '    if (now !== marksRead) {',
+    '    if (false) {',
+  ]] },
+  // A node's log answer stops naming the hash it was asked for, which is what an older build
+  // answering by name sends, and the caller's `checkedMarkLog` refuses it.
+  'node-log-ignores-the-hash': { file: 'server/index.js', edits: [[
+    '  sendJson(res, log ? { log: entries, hash } : { marks: resolveMarks(entries) });',
+    '  sendJson(res, log ? { log: entries } : { marks: resolveMarks(entries) });',
   ]] },
 
   // The library's poll goes back to a first tick that cannot disagree with anything.
@@ -487,9 +610,10 @@ const MUTATIONS = {
       + "    sendJson(res, { error: 'no capture node is linked' }, 409);",
     ],
     [
-      '    const here = (await localTakes()).takes.find((t) => t.id === id);\n',
-      '    const here = (await localTakes()).takes.find((t) => t.id === id);\n'
-      + '    const left = untilCallerLeaves(res);\n',
+      "    sendJson(res, { error: 'no take here has that content hash, so there is nothing to merge marks into' }, 404);\n"
+      + '    return;\n  }\n',
+      "    sendJson(res, { error: 'no take here has that content hash, so there is nothing to merge marks into' }, 404);\n"
+      + '    return;\n  }\n  const left = untilCallerLeaves(res);\n',
     ],
   ],
     fails: 'and bound before the walk rather than after it, which is the shape three of the four '
@@ -544,6 +668,10 @@ const MUTATIONS = {
   'faint-fixed-in-one-page': { file: 'web/library.html', edits: [[
     '    --faint: #828c99;', '    --faint: #6d7683;',
   ]] },
+  // A second declaration of the token in the same block, which is the one the browser renders.
+  'faint-declared-twice': { file: 'web/library.html', edits: [[
+    '    --faint: #828c99;', '    --faint: #828c99;\n    --faint: #6d7683;',
+  ]] },
 
   'namespaces-hardcoded': { file: 'server/index.js', edits: [[
     'export const OWNED_NAMESPACES = new Set(ROUTES.map((r) => {',
@@ -583,9 +711,10 @@ const MUTATIONS = {
   // Marks for a take that is not here, which created its sidecar in the captures directory out
   // of a caller's own JSON.
   'marks-without-a-take': { file: 'server/index.js', edits: [
-    ['  const wasThere = takeIdentity(path);\n  if (wasThere === null) {\n    sendJson(res, { error: `no take ${id} here, so there is nothing to mark` }, 404);\n    return;\n  }',
-      '  const wasThere = takeIdentity(path);'],
-    ['  if (!sameTake(wasThere, takeIdentity(path))) {', '  if (false) {'],
+    ["  if (!await takeFile(hash)) {\n    sendJson(res, { error: 'no take here has that content hash, so there is nothing to mark' }, 404);\n    return;\n  }\n",
+      ''],
+    ['  if (!await appendMarks(CAPTURES_DIR, hash, records, { present: () => takeFile(hash) })) {',
+      '  if (!await appendMarks(CAPTURES_DIR, hash, records)) {'],
   ] },
   // The document store restamps the version instead of checking it, so a project from a build
   // this one is not lands looking like one this build wrote.
@@ -614,7 +743,23 @@ const MUTATIONS = {
   ] },
   // A take that dies mid-write drops the marks pressed during it.
   'mid-write-drops-marks': { file: 'server/recorder.js', edits: [[
-    '        flushMarks(failed);', '        /* mutation: the marks go nowhere */',
+    '          (index) => flushMarks(this.dir, failed, index),', '          () => { /* mutation: the marks go nowhere */ },',
+  ]] },
+  // The drop count reaches the monitor and the close log and stops there, so a take with a hole in
+  // it lists exactly like a whole one once the process that counted is gone.
+  'flush-forgets-the-drop': { file: 'server/recorder.js', edits: [[
+    "    ? [{ id: `drop:${take.id}`, at: Date.now(), kind: 'drop', dropped: take.dropped }]",
+    '    ? [/* mutation: the drop leaves no record */]',
+  ]] },
+  // The record is written and the listing never reads it back.
+  'listing-forgets-the-drop': { file: 'server/library.js', edits: [[
+    '  const dropped = Number.isSafeInteger(drop?.dropped) && drop.dropped > 0 ? drop.dropped : 0;',
+    '  const dropped = 0;',
+  ]] },
+  // The listing carries the count and the tile draws no badge for it.
+  'badge-ignores-the-drop': { file: 'web/library.js', edits: [[
+    '  if (take.dropped > 0) {\n    out.push({\n      key: \'dropped\',',
+    '  if (false) {\n    out.push({\n      key: \'dropped\',',
   ]] },
   // The flush moves out of the `finally`, so a close that rejects loses them - the second way
   // the same orphaning arrived.
@@ -675,10 +820,58 @@ const MUTATIONS = {
     '  /* mutation: the captures directory is assumed */',
   ]] },
   // Delete goes back to trusting the sidecar where reclaim re-hashes, so the irreversible
-  // action carries the weaker check.
+  // action carries the weaker check. Anchored on the descriptor's hash since `removeTake` stopped
+  // hashing by name.
   'delete-trusts-sidecar': { file: 'server/library.js', edits: [[
-    '  const actual = await hashFile(path);', '  const actual = (await cachedIndex(path)).hash;',
+    '  const { identity: hashed, hash: actual } = await hashThrough(path, { id, ownsFile });',
+    '  const hashed = takeIdentity(path);\n  const actual = (await cachedIndex(path)).hash;',
   ]] },
+  // Removal goes back to leaving the marks log under the freed name, where the next take given that
+  // name finds it.
+  'delete-leaves-the-marks': { file: 'server/library.js', edits: [[
+    '  await unlink(marksPathFor(dir, actual)).catch((err) => {\n'
+    + "    if (err.code !== 'ENOENT') console.warn(`[library] ${id} was removed but its marks log was not: ${err.message}`);\n"
+    + '  });\n',
+    '',
+  ]],
+    fails: 'the node-side marks row of the reclaim and the last-copy marks row. The merge, the reclaim '
+      + 'refusal and the reused-name row stay green, because a log filed by hash reaches no other take',
+  },
+  // A reclaim goes back to removing the node's copy without bringing its marks here first.
+  'reclaim-drops-node-marks': { file: 'server/index.js', edits: [[
+    '    const marksMerged = await mergeMarkLog(CAPTURES_DIR, mine.hash, theirLog, { present: () => takeFile(mine.hash) });',
+    '    const marksMerged = 0;',
+  ]],
+    // Three rows, because the merge is also where the kept copy is asked for again: a merge that
+    // never runs never refuses a copy deleted under it, and never lands the renamed one's marks.
+    fails: 'the row saying a reclaim brings the node\'s marks onto the kept copy, the renamed-mid-reclaim '
+      + 'row and the deleted-mid-reclaim refusal',
+  },
+  // A reclaim treats a node marks log it could not read as an empty one and goes on to delete.
+  'reclaim-ignores-an-unread-log': { file: 'server/index.js', edits: [[
+    '      theirLog = checkedMarkLog(await node.fetchJson(markLogPath(theirs), { signal: left }), theirs);',
+    '      theirLog = await node.fetchJson(markLogPath(theirs), { signal: left }).then((b) => b.log)\n'
+    + '        .catch(() => []);',
+  ]],
+    fails: 'the row saying a reclaim whose node marks cannot be read is refused, and no other',
+  },
+  // A reclaim's merge goes back to writing without asking whether the kept copy is still here, so
+  // a delete landing while the node's answer was on its way loses the copy and keeps the marks.
+  'reclaim-merges-under-a-race': { file: 'server/index.js', edits: [[
+    '    const marksMerged = await mergeMarkLog(CAPTURES_DIR, mine.hash, theirLog, { present: () => takeFile(mine.hash) });',
+    '    const marksMerged = await mergeMarkLog(CAPTURES_DIR, mine.hash, theirLog);',
+  ]],
+    fails: 'the deleted-mid-reclaim refusal: the local copy is gone and the node is asked to delete the last one',
+  },
+  // Delete goes back to unlinking whatever the name holds once the hash is done, so a rename during
+  // the hash that moves another take into the name loses that take.
+  'delete-unlinks-under-a-race': { file: 'server/library.js', edits: [[
+    '  if (!sameTake(hashed, takeIdentity(path))) {', '  if (false) {',
+  ]],
+    fails: 'the delete-race refusal and the row saying the take renamed into the name is still on '
+      + 'disk. The row saying the named take survives under its new name stays green, and so does '
+      + 'every other delete row',
+  },
   // The decimation path stops checking that a frame's two declared lengths describe the frame,
   // so an overstated colour length returns the uninitialised tail of an `allocUnsafe` buffer.
   'decimate-skips-length-check': { file: 'server/capture.js', edits: [[
@@ -698,6 +891,26 @@ const MUTATIONS = {
   'list-swallows-unreadable': { file: 'server/library.js', edits: [[
     "    if (required || err?.code !== 'ENOENT') {", '    if (required) {',
   ]] },
+  // The take scan goes back to its own catch, so a captures directory that cannot be read answers
+  // an empty library, and the machine asking it reads a node holding nothing.
+  'scan-swallows-unreadable': { file: 'server/library.js', edits: [[
+    "  const files = (await directoryNames(dir, { what: 'captures directory' })).filter(isKnct);",
+    '  let files;\n  try {\n    files = (await readdir(dir)).filter(isKnct).sort();\n'
+    + '  } catch {\n    return { takes: [], unreadable: [] };\n  }',
+  ]],
+    fails: 'the /library/takes error row, the gallery sentence row, the reclaim row and the delete '
+      + 'row of the unreadable-captures section: the node lies in a 200. Its ENOENT and empty-directory '
+      + 'rows stay green',
+  },
+  // The node's answer goes back to being coalesced, so a node that could not be asked reads as a
+  // node holding no copy and delete's second-copy refusal never fires.
+  'delete-trusts-a-silent-node': { file: 'server/library.js', edits: [[
+    '  if (there === null) throw new Error(`${node.name} could not be asked which takes it holds: ${node.lastError}`);',
+    '  if (there === null) return null;',
+  ]],
+    fails: 'the reclaim row and the delete row of the unreadable-captures section: the node reports '
+      + 'honestly and the consumer ignores it. The /library/takes error row and the gallery row stay green',
+  },
   // The editor goes back to swallowing a library that will not load, which is the empty picker
   // an operator gets told nothing about.
   'open-take-swallows-library': { file: 'web/main.js', edits: [[
@@ -713,6 +926,49 @@ const MUTATIONS = {
       + 'still keeps now the migration is gone: older, later, and a version field that is not '
       + 'a number at all',
   },
+  // The viewer reads where focus was after `paintMarks` has destroyed a focused mark tick.
+  'viewer-reads-focus-after-marks': { file: 'web/library.js', edits: [
+    [`  closeMenus();
+  // Read as a name before anything here is rebuilt: a focused mark tick is destroyed by
+  // \`paintMarks\`, and a rebuild \`run\` asked for reads null.
+  const focusWas = viewer.contains(document.activeElement) ? controlKey(document.activeElement) : null;
+`, '  closeMenus();\n'],
+    ["  const acts = document.getElementById('vActs');\n",
+      "  const acts = document.getElementById('vActs');\n"
+      + '  const focusWas = viewer.contains(document.activeElement) ? controlKey(document.activeElement) : null;\n'],
+  ] },
+  // A source second finds its frame by spacing the take's frames evenly over its duration.
+  'mark-seeks-by-even-spacing': { file: 'web/take-draw.js', edits: [[
+    '      return api.setIndex(frameAtOrBefore(times, sourceSec));',
+    '      return api.setIndex((sourceSec / times[last]) * last);',
+  ]] },
+  // A skim with no stamps moves anyway, which needs a second rule to say where.
+  'untimed-skim-moves': { file: 'web/take-draw.js', edits: [[
+    '      if (k > 0 && !timed()) {',
+    '      if (false && k > 0 && !timed()) {',
+  ]] },
+  // The playhead is placed at the frame's share of the frame count instead of its time.
+  'bar-counts-frames': { file: 'web/take-draw.js', edits: [[
+    '    const at = span > 0 ? Math.max(0, Math.min(1, times[wanted] / span)) : 0;',
+    '    const at = last === 0 ? 0 : wanted / last;',
+  ]] },
+  // A node-only take asks this server for an index it does not hold.
+  'node-take-reads-the-local-index': { file: 'web/take-draw.js', edits: [[
+    `  const url = take.state === 'remote'
+    ? \`/library/remote-index/\${encodeURIComponent(take.hash)}\`
+    : \`/capture/\${encodeURIComponent(take.hash)}/index\`;`,
+    '  const url = `/capture/${encodeURIComponent(take.hash)}/index`;',
+  ]] },
+  // The viewer's ticks stay buttons when the take's stamps did not arrive, so a press guesses.
+  'untimed-marks-guess': { file: 'web/library.js', edits: [[
+    '  paintMarks(vBar, take, timed && !timed.error ? (sourceSec) => skim.seek(sourceSec) : null);',
+    '  paintMarks(vBar, take, (sourceSec) => skim.seek(sourceSec));',
+  ]] },
+  // The shared lookup rounds to the nearest frame, which the editor's bracket does not.
+  'lookup-rounds-to-nearest': { file: 'web/clip-plan.js', edits: [[
+    '  return lo;\n}\n',
+    '  return lo < last && times[lo + 1] - sourceSec < sourceSec - times[lo] ? lo + 1 : lo;\n}\n',
+  ]] },
   'skim-ignores-state': { file: 'web/take-draw.js', edits: [[
     'const DIVISOR = { local: 1, both: 1, remote: 4 };',
     'const DIVISOR = { local: 1, both: 1, remote: 1 };',
@@ -756,8 +1012,11 @@ const MUTATIONS = {
     '  <a class="appback" id="toMenu" href="/"><span class="arrow">&lt;</span><span>Menu</span></a>',
     '  <!-- mutation: no way back -->',
   ]] },
-  // The falsification control for the enumeration, and the only mutation here that is not a
-  // bug being put back.
+  // One per control the sweep drives, each leaving that control rendered and inert.
+  ...Object.fromEntries(Object.entries(DEAD_CONTROLS).map(([key, spec]) => [`dead-${key}`, {
+    ...spec, fails: `the "${key}" row of the control sweep`,
+  }])),
+  // The falsification control for the enumeration: a control the sweep has no driver for.
   'plant-unswept-menu-item': { file: 'web/library.js', edits: [[
     "      item: 'reclaim',",
     `      item: 'planted',
@@ -776,12 +1035,6 @@ const MUTATIONS = {
     '  if (index.hash !== hash) {',
     '  if (false) {',
   ]] },
-  // The marks log is left behind at the old name, where nothing lists it and nothing will ever
-  // look for it again - the take arrives at its new name with no marks and no error.
-  'rename-orphans-marks': { file: 'server/library.js', edits: [[
-    '  const marksMoved = await linkInto(marksPathFor(from), marksPathFor(target));',
-    '  const marksMoved = false;',
-  ]] },
   // The rename goes back to `rename(2)`.
   'rename-clobbers-under-a-race': {
     file: 'server/library.js',
@@ -793,15 +1046,120 @@ const MUTATIONS = {
       ['    await unlink(from);', '    /* mutation: rename moved it already */'],
     ],
   },
+  // The hash resolver goes back to trusting the name it found a hash under last time, so a rename
+  // that freed the name and a take renamed into it answer the old hash with the new footage.
+  'resolver-trusts-the-last-name': { file: 'server/library.js', edits: [[
+    '  if (held && await holdsHash(held, hash, owns)) return held;', '  if (held) return held;',
+  ]],
+    fails: 'the rows asking for a renamed take\'s frames and marks by its hash, which the open-capture '
+      + 'check turns into a 404 rather than the other take\'s bytes',
+  },
+  // A frame request trusts the capture held open under the name it resolved, so a take swapped in
+  // under that name outside this process is answered with the bytes of the one it replaced.
+  'frame-trusts-the-open-capture': { file: 'server/index.js', edits: [[
+    '      if (capture.index.hash !== hash) {\n        moved = true;', '      if (false) {\n        moved = true;',
+  ]],
+    fails: 'the outside-swap row: the hash of the take swapped in is answered with the old one\'s frame',
+  },
+  // The hash resolver stops skipping the take the recorder owns, so asking for a hash that is not
+  // here scans the growing file.
+  'resolver-scans-the-open-take': { file: 'server/library.js', edits: [[
+    '    if (owns(path)) continue;\n    const index = await cachedIndex(path).catch(() => null);',
+    '    const index = await cachedIndex(path).catch(() => null);',
+  ]],
+    fails: 'the row saying a request for a hash that is not here leaves the take being recorded unscanned',
+  },
+  // The editor goes back to asking for frames by the name it opened its take under.
+  'editor-fetches-by-name': { file: 'web/main.js', edits: [[
+    '      ? `/capture/${encodeURIComponent(this.hash)}/frame/${lo}`\n      : `/capture/${encodeURIComponent(this.hash)}/frames/${lo}-${hi}`;',
+    '      ? `/capture/${encodeURIComponent(this.id)}/frame/${lo}`\n      : `/capture/${encodeURIComponent(this.id)}/frames/${lo}-${hi}`;',
+  ]],
+    fails: 'the editor-follows row: its frame requests name the take and are answered 404',
+  },
+  // A marks log filed by a take's name stops being read at all, so a user's marks on footage shot
+  // by an older build are gone from the library.
+  'named-logs-left-unread': { file: 'server/library.js', edits: [[
+    '    if (!take) continue;\n    const path = join(dir, take);',
+    '    if (take || !take) continue;\n    const path = join(dir, take);',
+  ]],
+    fails: 'the two moved-log rows and the said-once row',
+  },
+  // The move appends the named log whole, so a move a crash interrupted appends it a second time.
+  'named-logs-appended-twice': { file: 'server/library.js', edits: [[
+    '      const merged = await mergeHeld(dir, hash, await readLogAt(join(dir, file)));',
+    '      const read = await readLogAt(join(dir, file));\n      await appendLines(dir, hash, read);\n      const merged = read.length;',
+  ]],
+    fails: 'the interrupted-move row alone: the marks still resolve to two, which is why the log is counted',
+  },
+  // The recorder files the marks of a take whose hello never landed, under the hash every empty
+  // take shares.
+  'empty-take-marks-filed': { file: 'server/recorder.js', edits: [[
+    '  if (!index.hello) {\n    console.error(', '  if (false) {\n    console.error(',
+  ]],
+    fails: 'the row saying a take that dies before its hello lands files none of its marks',
+  },
+  // A second name for one hash goes back to being written over the first, so one name vanishes.
+  'second-name-overwrites-the-first': { file: 'server/library.js', edits: [[
+    '    if (held) {\n      held.names.push(take.id);\n      continue;\n    }\n',
+    '',
+  ]],
+    fails: 'the two-names listing row, the gallery flag row and the press row. The one-name row, the '
+      + 'refusals and the copy row stay green, because the route reads the directory rather than the listing',
+  },
+  // Removing a name goes back to trusting that the two names are one file.
+  'remove-name-trusts-the-name': { file: 'server/library.js', edits: [[
+    '    const sameFile = sameTake(dropping, keeping);', '    const sameFile = true;',
+  ]],
+    fails: 'the stranger-name refusal, the swapped-name refusal, and the copy row, whose answer then '
+      + 'reports one file where there are two',
+  },
+  // Two files with one name each go back to losing one without either being hashed.
+  'remove-name-skips-the-rehash': { file: 'server/library.js', edits: [[
+    '        if (actual !== hash) {\n          throw new Error(`${name} is ${actual} here',
+    '        if (false) {\n          throw new Error(`${name} is ${actual} here',
+  ]],
+    fails: 'the stranger-name refusal and the swapped-name refusal, and no other',
+  },
+  // Removing a name stops asking whether the recorder owns either one.
+  'remove-name-during-a-shoot': { file: 'server/library.js', edits: [[
+    '  if (owns(path) || owns(kept)) throw', '  if (false) throw',
+  ]],
+    fails: 'the mid-shoot second-name row, and the row after it: the refusal is gone and the kept '
+      + 'name is scanned, which writes the index of the growing take',
+  },
+  // Delete goes back to removing one name of a take that has another.
+  'delete-ignores-a-second-name': { file: 'server/index.js', edits: [[
+    '  if (alsoNamed.length) {', '  if (false) {',
+  ]],
+    fails: 'the two-names delete refusal, and the press row, whose kept name the delete took',
+  },
+  // The gallery stops saying a take has a second name.
+  'second-name-unflagged': { file: 'web/library.js', edits: [[
+    '  if (secondNames(take).length) {\n    out.push({', '  if (false) {\n    out.push({',
+  ]],
+    fails: 'the gallery flag row, and no other',
+  },
+  // The gallery stops offering to remove a second name.
+  'second-name-cannot-be-removed': { file: 'web/library.js', edits: [[
+    '    ...(secondNames(take).length ? take.names : []).map((name) => ({',
+    '    ...[].map((name) => ({',
+  ]],
+    fails: 'the gallery flag row and the press row',
+  },
   // The take being recorded becomes renameable.
   'rename-during-a-shoot': { file: 'server/library.js', edits: [[
-    '  if (recordingPath !== null && resolve(from) === resolve(recordingPath)) {',
-    '  if (false) {',
+    '      if (ownsFile(await opened.stat())) {',
+    '      if (false) {',
   ]] },
 
   // The path is dropped from the arguments, so the file manager is started on nothing - a route
   // that answers 200 having done something that is not what it says.
   'reveal-drops-the-path': { file: 'server/library.js', edits: [REVEAL_EDIT] },
+  // `--reveal-with` keeps its program and loses the arguments it leads with, so a recorder run by
+  // `node` is never named and `node` is handed the file manager's arguments instead.
+  'reveal-drops-the-prefix': { file: 'server/library.js', edits: [[
+    'const child = spawn(bin, [...prefix, ...args],', 'const child = spawn(bin, args,',
+  ]] },
   // The library page goes back to composing its own refusal.
   'open-decides-its-own-reason': { file: 'web/library.js', edits: [[
     "const cannotOpen = (take) => take.openRefusals[0]?.why ?? '';",
@@ -877,15 +1235,15 @@ const MUTATIONS = {
     'const carriesRefusals = (take) => Array.isArray(take.openRefusals)\n  && take.openRefusals.length > 0\n',
   ]],
     fails: 'and a healthy node not refused for being healthy (wide: takes the link off, so it '
-      + 'stops at 125 of 392 - read the rows, not the total. docs/instruments.md says why)',
+      + 'stops at 125 of 392 - read the rows, not the total)',
   },
   // The link admits a manifest from the build before the refusals moved.
   'node-admits-an-old-manifest': { file: 'server/library.js', edits: [[
-    '      const older = takes.find((t) => !carriesRefusals(t));\n      if (older) {',
-    '      const older = takes.find((t) => !carriesRefusals(t));\n      if (false) {',
+    '      const older = takes.find((t) => !carriesRefusals(t) || t.dropped === undefined);\n      if (older) {',
+    '      const older = takes.find((t) => !carriesRefusals(t) || t.dropped === undefined);\n      if (false) {',
   ]] },
 
-  // The same gate on the other route goes away: a `/record/state` with no `writingId` in it is
+  // The same gate on the other route goes away: a `/record/state` with no `writingIds` in it is
   // read as a recorder that owns no take, which is what `??
   'node-admits-an-old-record-state': { file: 'server/library.js', edits: [[
     '      const missing = POLLED_NODE_FIELDS.filter((f) => body[f] === undefined);',
@@ -936,8 +1294,8 @@ const MUTATIONS = {
   ]] },
   // And a cache that keys on the take and not on the range it was asked about.
   'extent-cache-ignores-the-range': { file: 'server/index.js', edits: [[
-    'const key = `${capture.index.hash}|${near}|${far}`;',
-    'const key = `${capture.index.hash}`;',
+    'const key = `${hash}|${near}|${far}`;',
+    'const key = `${hash}`;',
   ]] },
   // And the other side of the comparison: the definition, narrowed by one group.
   'complete-look-drops-a-group': { file: 'web/main.js', edits: [[
@@ -1178,6 +1536,18 @@ function writeBadLengthTake(dir, id) {
 }
 
 const markLine = (rec) => `${JSON.stringify(rec)}\n`;
+// A take's marks log where this build files it: by the take's content hash, under `marks/`, and
+// never beside the take's name. Hashed here off the file rather than asked of a server.
+const hashOfTake = (dir, id) => `sha256:${createHash('sha256').update(readFileSync(join(dir, `${id}.knct`))).digest('hex')}`;
+const markLogFile = (dir, id) => join(dir, 'marks', `${hashOfTake(dir, id).slice('sha256:'.length)}.jsonl`);
+const writeMarkLog = (dir, id, text) => {
+  mkdirSync(join(dir, 'marks'), { recursive: true });
+  writeFileSync(markLogFile(dir, id), text);
+};
+// Where the capture API answers for the take `id` in `dir` holds now, as a URL prefix.
+const captureAt = (base, dir, id) => `${base}/capture/${encodeURIComponent(hashOfTake(dir, id))}`;
+// A well-formed content hash no take anywhere in this run has.
+const NO_SUCH_HASH = `sha256:${'0'.repeat(64)}`;
 
 // A run of frame payloads for the deterministic drive.
 function pinFixture(count = 6, stride = 4) {
@@ -1215,8 +1585,11 @@ function buildFixture() {
   writeTake(macCaps, 'local-clip', { frames: 60, startedAt: Date.UTC(2026, 6, 15, 18, 5) });
 
   // The take whose cloud widens after its first frame - see `writeWideningTake` for why it is
-  // written rather than found.
+  // written rather than found. Its one mark is the tile section's single-mark case: same-name's
+  // cannot be it, because the append row below re-hashes that take and orphans the log.
   writeWideningTake(macCaps, 'widening-take', 24);
+  writeMarkLog(macCaps, 'widening-take',
+    markLine({ id: 'w1', sourceMs: 500, label: 'lone mark', at: 1000 }));
 
   // The shapes the library has to survive rather than the shapes it likes.
   writeTake(macCaps, 'truncated-take', { frames: 6, truncate: true, startedAt: false });
@@ -1231,19 +1604,23 @@ function buildFixture() {
 
   // Both ends of the capture format's band, and the second one is why there are two.
   writeTake(macCaps, 'future-format-take', { frames: 6, format: CAPTURE_FORMAT + 1 });
-  writeTake(macCaps, 'generation-zero-take', { frames: 6 });
+  // Seven frames rather than six, or it is `same-name`'s bytes and the two share one hash log.
+  writeTake(macCaps, 'generation-zero-take', { frames: 7 });
 
   // Mark counts the tile renders differently.
-  writeFileSync(join(macCaps, 'local-clip.marks.jsonl'),
+  writeMarkLog(macCaps, 'local-clip',
     markLine({ id: 'k0', sourceMs: 0, label: 'first frame', at: 1000 })
     + markLine({ id: 'k1', sourceMs: 1200, label: 'the drop', at: 1000 })
     + markLine({ id: 'k2', sourceMs: 3400, label: 'turn', at: 1000 })
     + markLine({ id: 'kBeyond', sourceMs: 900000, label: 'past the end', at: 1000 }));
-  writeFileSync(join(macCaps, 'same-name.marks.jsonl'),
+  writeMarkLog(macCaps, 'same-name',
     markLine({ id: 'only', sourceMs: 500, label: 'sole mark', at: 1000 }));
+  // The record the recorder writes for a take that lost frames to a slow disk, in its shape.
+  writeFileSync(join(macCaps, 'generation-zero-take.marks.jsonl'),
+    markLine({ id: 'drop:generation-zero-take', at: 1000, kind: 'drop', dropped: 11 }));
   // The node's log for the shared take, which the download has to merge: one mark the mac has
   // never seen, one the mac will supersede, and one already tombstoned.
-  writeFileSync(join(nodeCaps, 'node-name-for-it.marks.jsonl'),
+  writeMarkLog(nodeCaps, 'node-name-for-it',
     markLine({ id: 'n1', sourceMs: 700, label: 'node mark', at: 1000 })
     + markLine({ id: 'n2', sourceMs: 900, label: 'to be moved', at: 1000 })
     + markLine({ id: 'n3', sourceMs: 1100, label: 'doomed', at: 1000 })
@@ -1315,7 +1692,9 @@ async function reservePorts() {
   process.exit(2);
 }
 
-async function startServer(root, args, port) {
+// `ready` is the route polled until the server answers. `/library/takes` unless the fixture's
+// captures directory cannot be listed on purpose, which that route reports as an error.
+async function startServer(root, args, port, { ready = '/library/takes' } = {}) {
   // A port outside the declared span would not have been checked by `reservePorts`, so it is
   // the one thing that could still attach to a stranger.
   if (port !== NODE_PORT && (port < MAC_PORT || port > MAC_PORT + PORT_SPAN)) {
@@ -1326,7 +1705,7 @@ async function startServer(root, args, port) {
   // last holder is dropped rather than left beside the new one.
   const stale = servers.findIndex((s) => s.port === port);
   if (stale !== -1) retired.push(...servers.splice(stale, 1));
-  const child = spawn(process.execPath, [join(root, 'server/index.js'), '--port', String(port), ...args], {
+  const child = spawn(process.execPath, [join(root, 'server/index.js'), '--standby-after', '0', '--port', String(port), ...args], {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const log = [];
@@ -1344,7 +1723,7 @@ async function startServer(root, args, port) {
         + `so anything answering there is not ours:\n${log.join('')}`);
     }
     try {
-      const res = await fetch(`http://localhost:${port}/library/takes`);
+      const res = await fetch(`http://localhost:${port}${ready}`);
       if (res.ok) return `http://localhost:${port}`;
     } catch { /* not listening yet */ }
   }
@@ -1476,7 +1855,13 @@ const FATAL_LOG = [
   /recording is off/, // every recorder failure ends here, and none of them says "Error"
   /no free take name/,
 ];
-const looksFatal = (line) => FATAL_LOG.some((re) => re.test(line)) && !BENIGN_LOG.some((re) => re.test(line));
+// A path is not a diagnosis, and the server prints absolute ones, so a checkout whose directory
+// name holds `error` would otherwise read every `starting grabber:` line as fatal.
+const withoutPaths = (line) => line.replace(/[^\s'"]*[\\/][^\s'"]*/g, '');
+const looksFatal = (line) => {
+  const message = withoutPaths(line);
+  return FATAL_LOG.some((re) => re.test(message)) && !BENIGN_LOG.some((re) => re.test(message));
+};
 
 // The predicate's own falsification control, run before anything else so a sweep that has been
 // quietly blinded says so in the first three lines rather than by passing a mutated tree.
@@ -1493,6 +1878,11 @@ function checkLogPredicate() {
     ['[recorder] 2026-07-31-take1 is already taken, trying the next name', false],
     ['[server] 24.8 fps  12.2 MB/s  dropped=0  clients=1', false],
     ['[recorder] take 2026-07-31-take3 open', false],
+    // The paths a checkout lends every line, and the fatal lines that must survive losing them.
+    ['[server] starting grabber: /w/fixes-an-error-channel/native/build/grabber --source /w/throw/sample.knct', false],
+    ['[server] cannot open /w/unhandled-errors/missing.knct: ENOENT: no such file or directory', false],
+    ['[recorder] cannot open /caps/error-dir/take1.knct: EIO: i/o error - recording is off', true],
+    ['[server] capture request failed: Error: short read at 4096 in /caps/an-error-take.knct', true],
   ];
   const wrong = cases.filter(([line, want]) => looksFatal(line) !== want);
   check(wrong.length === 0,
@@ -1559,7 +1949,7 @@ async function loadPlaywright() {
 }
 
 // Playwright drops the page's execution context on this rig, and it is not the code:
-// `docs/instruments.md` records it as a measured flake. Retried on that signature alone and
+// it is a measured flake. Retried on that signature alone and
 // with the count printed, because a check that retried real failures would report whichever
 // attempt it liked.
 async function retryOnContextLoss(label, work) {
@@ -1582,6 +1972,15 @@ async function retryOnContextLoss(label, work) {
 const recorderPage = (base) => `${base}/record`;
 const editorPage = (base, take) => `${base}/edit?take=${encodeURIComponent(take)}`;
 const libraryPage = (base) => `${base}/library`;
+// The poll's cadence and its listing bound, shortened through `testTimer` for the pages that follow
+// the recorder. They ship at 5000 and 15000, which test/record-poll.test.mjs and the section's
+// own rows hold; the record page keeps the shipped cadence, because its row times a press against it.
+const POLL_MS = 500;
+const LISTING_BOUND_MS = 4000;
+const QUIET_MS = POLL_MS * 4;
+const timedLibraryPage = (base) => `${libraryPage(base)}?test-timers=${encodeURIComponent(JSON.stringify({
+  'record-poll': POLL_MS, 'listing-timeout': LISTING_BOUND_MS,
+}))}`;
 const projectsPage = (base) => `${base}/projects`;
 
 async function openPage(browser, url, viewport = { width: 1100, height: 760 }) {
@@ -1591,10 +1990,15 @@ async function openPage(browser, url, viewport = { width: 1100, height: 760 }) {
   // that never ran.
   await page.addInitScript(REV_IN_PAGE_INSTALL);
   const errors = [];
+  // Every timer the page shortened, which `testTimer` says on the console as the module loads.
+  const timers = [];
   page.on('pageerror', (err) => errors.push(String(err)));
-  page.on('console', (msg) => { if (msg.type() === 'error') errors.push(msg.text()); });
+  page.on('console', (msg) => {
+    if (msg.type() === 'error') errors.push(msg.text());
+    if (msg.text().startsWith('[timers]')) timers.push(msg.text());
+  });
   await page.goto(url, { waitUntil: 'domcontentloaded' });
-  return { page, errors };
+  return { page, errors, timers };
 }
 
 
@@ -1623,24 +2027,29 @@ await requireMutationDelivered(macUrl);
 const { chromium } = await loadPlaywright();
 const browser = await chromium.launch({ headless: !HEADED, args: ['--use-gl=angle', '--use-angle=default'] });
 
+// A crash is recorded apart from the assertions: counted as a failed one, a run that died
+// before it tested anything reads to sweep-all as a caught mutation.
+let crashed = null;
 try {
   await runChecks();
 } catch (err) {
-    // Recorded rather than thrown: an exception out of here used to end the process with no
-    // verdict line and no assertion count, which reads as a caught mutation to a caller.
-  console.log(`\n  FAIL  the run did not finish: ${err.message}`);
-  assertions++;
-  failures++;
+  crashed = err;
 } finally {
   await browser.close();
   stopServers();
 }
 
+if (crashed) {
+  console.log(`\n[library] DID NOT RUN - ${crashed.message}`);
+  console.log(`[library] ${assertions} assertions ran, ${failures} failed before the crash`);
+  if (fired.length) console.log(`[library] rows that had already fired: ${fired.join('; ')}`);
+  process.exit(2);
+}
+
 // The verdict, and a skipped claim reaches all three of it: the count line, the word, and the
 // status this process exits with.
 const note = skipped.length ? `, ${skipped.length} claim${skipped.length === 1 ? '' : 's'} unproven here (${skipped.join(', ')})` : '';
-if (failures) console.log(`\n[library] ${assertions} assertions, ${failures} failed${note}`);
-else console.log(`\n[library] ${assertions} assertions, none failed${note}`);
+console.log(`\n[library] ${assertions} assertions, ${failures} failed${note}`);
 const verdict = failures ? `FAIL (${failures})`
   : skipped.length ? `PASS WITH ${skipped.length} CLAIM${skipped.length === 1 ? '' : 'S'} UNPROVEN HERE (${skipped.join('; ')})`
     : 'PASS';
@@ -1817,6 +2226,12 @@ async function runChecks() {
       `${byId['local-clip'].marks.length} on local-clip`);
     check(byId['same-name'].marks.length === 1 && byId['truncated-take'].marks.length === 0,
       'and the one-mark and no-mark cases are both real');
+    check(byId['generation-zero-take'].dropped === 11 && byId['generation-zero-take'].marks.length === 0,
+      'a take whose marks log records frames dropped to a slow disk lists that count, and the record is not a mark',
+      `dropped ${byId['generation-zero-take'].dropped}, ${byId['generation-zero-take'].marks.length} marks`);
+    check(byId['local-clip'].dropped === 0 && byId['generation-zero-take'].openable === true,
+      'while a take with no such record lists none, and a take with a gap still opens',
+      `local-clip dropped ${byId['local-clip'].dropped}, generation-zero openable ${byId['generation-zero-take'].openable}`);
   }
 
   console.log('\n[library] one library, joined by content hash and never by name');
@@ -1878,6 +2293,7 @@ async function runChecks() {
       ...oldShape,
       id: 'shot-on-this-build',
       hash: `sha256:${'cd'.repeat(32)}`,
+      dropped: 0,
       openRefusals: [{ key: 'short', why: 'a take needs two frames to bracket a position, so there is nothing here to play' }],
     };
     // And the take that carries none, which is nearly every take there is.
@@ -1887,6 +2303,7 @@ async function runChecks() {
       hash: `sha256:${'ef'.repeat(32)}`,
       frames: 60,
       durationSec: 4,
+      dropped: 0,
       openable: true,
       openRefusals: [],
     };
@@ -1896,6 +2313,7 @@ async function runChecks() {
       ['frames', { ...openableShape, id: 'markup-in-frames', frames: scriptish }],
       ['marks', { ...openableShape, id: 'markup-in-marks', marks: { length: scriptish } }],
       ['durationSec', { ...openableShape, id: 'markup-in-duration', durationSec: scriptish }],
+      ['dropped', { ...openableShape, id: 'markup-in-dropped', dropped: scriptish }],
       ['dateSource', { ...openableShape, id: 'a-date-source-that-is-not-one', dateSource: scriptish }],
       ['hello', { ...openableShape, id: 'a-hello-that-is-not-intrinsics', hello: { fx: scriptish, fy: 1, cx: 1, cy: 1 } }],
       // The key as markup rather than as a key this build has not heard of - a node one build.
@@ -1913,6 +2331,16 @@ async function runChecks() {
       check(/older build/.test(oldLink.lastError ?? '') && /shot-on-an-old-node/.test(oldLink.lastError ?? ''),
         'and the link says it is the node\'s build and which take arrived without them, rather than reporting a timeout',
         JSON.stringify(oldLink.lastError));
+
+      // The build before drop counts: open refusals, and no `dropped` on any take.
+      const noDrops = await stub([{ ...newShape, id: 'shot-before-drop-counts', dropped: undefined }]);
+      const noDropsLink = new NodeLink(noDrops.url, 'no-drops-node');
+      const noDropsTakes = await noDropsLink.takes();
+      check(noDropsTakes === null && /older build/.test(noDropsLink.lastError ?? '')
+        && /dropped-frame count/.test(noDropsLink.lastError ?? '') && /shot-before-drop-counts/.test(noDropsLink.lastError ?? ''),
+        'a manifest with refusals and no dropped-frame count is an older build too, and the link says which field it lacks',
+        JSON.stringify(noDropsLink.lastError));
+      noDrops.srv.close();
 
       // The other arm, and the row is unfalsifiable without it.
       const currentLink = new NodeLink(current.url, 'current-node');
@@ -2002,7 +2430,7 @@ async function runChecks() {
       // Written out rather than derived by deleting a key from the current one.
       let served = { recording: false, takeId: null };
       const behind = await twoRoute(() => served);
-      const carries = await twoRoute(() => ({ recording: false, takeId: null, writingId: null }));
+      const carries = await twoRoute(() => ({ recording: false, takeId: null, writingIds: [] }));
       try {
         const blind = new NodeLink(behind.url, 'behind-node');
         check(Array.isArray(await blind.takes()),
@@ -2011,24 +2439,24 @@ async function runChecks() {
 
         const polled = await blind.recordState();
         check(polled.reachable === false,
-          'a recorder state with no writingId in it is refused rather than read as a node that owns no take',
-          `reachable ${polled.reachable}, writingId ${JSON.stringify(polled.writingId)}`);
+          'a recorder state with no writingIds in it is refused rather than read as a node that owns no take',
+          `reachable ${polled.reachable}, writingIds ${JSON.stringify(polled.writingIds)}`);
         const refused = await blind.takes();
-        check(refused === null && /older build/.test(blind.lastError ?? '') && /writingId/.test(blind.lastError ?? ''),
+        check(refused === null && /older build/.test(blind.lastError ?? '') && /writingIds/.test(blind.lastError ?? ''),
           'and the refusal reaches the listing, which is the only one of the two routes that draws anything',
           `${refused === null ? 'null' : `${refused.length} takes`}, ${JSON.stringify(blind.lastError)}`);
 
         // The other arm, and the rows above are unfalsifiable without it.
         const well = new NodeLink(carries.url, 'carrying-node');
         const wellPolled = await well.recordState();
-        check(wellPolled.reachable === true && wellPolled.writingId === null,
+        check(wellPolled.reachable === true && eq(wellPolled.writingIds, []),
           'a node carrying the field and simply not writing is not refused for it, so the gate reads absence rather than an idle recorder',
-          `reachable ${wellPolled.reachable}, writingId ${JSON.stringify(wellPolled.writingId)}`);
+          `reachable ${wellPolled.reachable}, writingIds ${JSON.stringify(wellPolled.writingIds)}`);
         check(Array.isArray(await well.takes()),
           'and its takes still list, so this is a version band rather than the poll switched off',
           `${well.lastError === null ? 'no error' : well.lastError}`);
 
-        served = { recording: false, takeId: null, writingId: null };
+        served = { recording: false, takeId: null, writingIds: [] };
         await blind.recordState();
         const healed = await blind.takes();
         check(healed !== null && blind.lastError === null,
@@ -2049,7 +2477,7 @@ async function runChecks() {
     const sizes = {};
     const bodies = {};
     for (const k of [1, 2, 4, 16]) {
-      const res = await fetch(`${macUrl}/capture/local-clip/frame/4?decimate=${k}`);
+      const res = await fetch(`${captureAt(macUrl, macCaps, 'local-clip')}/frame/4?decimate=${k}`);
       const buf = Buffer.from(await res.arrayBuffer());
       bodies[k] = buf;
       sizes[k] = {
@@ -2081,7 +2509,7 @@ async function runChecks() {
       'divisor 1 is the payload unchanged, so the editor\'s path is what it was');
 
     // A frame whose two declared lengths do not describe the frame.
-    const bentUrl = `${macUrl}/capture/bad-length-take/frame/1`;
+    const bentUrl = `${captureAt(macUrl, macCaps, 'bad-length-take')}/frame/1`;
     const bent = await fetch(`${bentUrl}?decimate=4`);
     check(bent.status >= 400,
       'a frame whose declared lengths overrun the payload is refused rather than sampled past',
@@ -2116,7 +2544,7 @@ async function runChecks() {
       'and the colour block is byte for byte the frame\'s own');
 
     for (const bad of ['0', '17', '1.5', 'lots']) {
-      const res = await fetch(`${macUrl}/capture/local-clip/frame/4?decimate=${bad}`);
+      const res = await fetch(`${captureAt(macUrl, macCaps, 'local-clip')}/frame/4?decimate=${bad}`);
       check(res.status === 400, `a divisor of ${bad} is refused rather than clamped`, `status ${res.status}`);
     }
   }
@@ -2124,7 +2552,7 @@ async function runChecks() {
   console.log('\n[library] where a take\'s cloud reaches, over the whole take');
   {
     const extentOf = async (id, near, far) => {
-      const res = await fetch(`${macUrl}/capture/${id}/extent?near=${near}&far=${far}`);
+      const res = await fetch(`${captureAt(macUrl, macCaps, id)}/extent?near=${near}&far=${far}`);
       return { status: res.status, body: res.status === 200 ? await res.json() : null };
     };
 
@@ -2163,11 +2591,11 @@ async function runChecks() {
       ['?near=3&far=1', 'puts its far plane in front of its near one'],
       ['?near=lots&far=6', 'names a range that is not a number'],
     ]) {
-      const res = await fetch(`${macUrl}/capture/widening-take/extent${query}`);
+      const res = await fetch(`${captureAt(macUrl, macCaps, 'widening-take')}/extent${query}`);
       check(res.status === 400, `a request that ${why} is refused rather than given a default`,
         `status ${res.status}`);
     }
-    const missing = await fetch(`${macUrl}/capture/no-such-take/extent?near=0.05&far=6`);
+    const missing = await fetch(`${macUrl}/capture/${encodeURIComponent(NO_SUCH_HASH)}/extent?near=0.05&far=6`);
     check(missing.status === 404, 'and a take that is not here is a 404 like every other capture route',
       `status ${missing.status}`);
   }
@@ -2177,7 +2605,8 @@ async function runChecks() {
     // Enough takes that an unbounded map is unmistakably over the cap.
     const many = join(WORK, 'many-captures');
     mkdirSync(many, { recursive: true });
-    for (let i = 0; i < 80; i++) writeTake(many, `bulk-${String(i).padStart(3, '0')}`, { frames: 3 });
+    // Stamped apart, so eighty takes are eighty hashes rather than one take under eighty names.
+    for (let i = 0; i < 80; i++) writeTake(many, `bulk-${String(i).padStart(3, '0')}`, { frames: 3, startedAt: Date.UTC(2026, 0, 1) + i });
     // The replayed take lives outside the directory being skimmed.
     const replaySource = join(WORK, 'replay-source');
     mkdirSync(replaySource, { recursive: true });
@@ -2205,7 +2634,7 @@ async function runChecks() {
     const before = (await getJson(`${manyUrl}/library/descriptors`)).open;
     // A skim is a frame read per take, which is the gesture that opens them.
     for (let i = 0; i < 80; i++) {
-      await fetch(`${manyUrl}/capture/bulk-${String(i).padStart(3, '0')}/frame/1`);
+      await fetch(`${captureAt(manyUrl, many, `bulk-${String(i).padStart(3, '0')}`)}/frame/1`);
     }
     const after = (await getJson(`${manyUrl}/library/descriptors`)).open;
     // The status list is deliberately *not* cleared here.
@@ -2331,8 +2760,9 @@ async function runChecks() {
     check(listed?.marks?.[0]?.sourceMs > 0 && listed.marks[0].sourceMs < listed.durationSec * 1000 + 500,
       'stamped inside the footage it flags rather than at an arbitrary offset',
       listed?.marks?.[0] ? `${listed.marks[0].sourceMs}ms into ${(listed.durationSec * 1000).toFixed(0)}ms` : 'no mark landed');
-    check(Boolean(stopped?.id) && existsSync(join(markDir, `${stopped.id}.marks.jsonl`)),
-      'in an append-only sidecar beside the take, which is byte-identical to what the writer produced');
+    check(Boolean(stopped?.id) && existsSync(markLogFile(markDir, stopped.id))
+      && !existsSync(join(markDir, `${stopped.id}.marks.jsonl`)),
+      'in an append-only log filed under the hash the close gave the take, and nothing filed under its name');
     for (const p of servers.filter((s) => s.port === MAC_PORT + 5)) p.child.kill('SIGKILL');
   }
 
@@ -2352,7 +2782,7 @@ async function runChecks() {
       const clashUrl = await startServer(root, [
         '--captures', clash, '--name', 'shooting', '--record', '--no-color',
         '--grabber', `${join(REPO, 'tools/fake-grabber.mjs')} --source ${SAMPLE} --fps 40 --burst 4`,
-      ], MAC_PORT + 6);
+      ], MAC_PORT + 6, { ready: '/record/state' });
       for (let i = 0; i < 40; i++) {
         await new Promise((done) => { setTimeout(done, 250); });
         state = await getJson(`${clashUrl}/record/state`);
@@ -2531,8 +2961,8 @@ async function runChecks() {
       'and it is the sentence about the frame it does not have rather than the one about bracketing a position',
       JSON.stringify(buttonWhy));
 
-    // The second surface that badges a refusal, and the reason there has to be one is in
-    // `docs/instruments.md`: the refusal moved to the server so that one take gets one sentence
+    // The second surface that badges a refusal. The refusal moved to the server so that one take
+    // gets one sentence
     // everywhere, and a control mutating a single surface left the other one's hard-coded copy
     // uncaught. The menu used to be that second surface and no longer composes a sentence at all;
     // the media picker draws the library's warning badges now, so the class has two members again
@@ -2857,6 +3287,11 @@ async function runChecks() {
       'while a take that declares no format carries no such badge, so the badge is about the generation and not about the key being absent',
       zeroTile.flags.join(' ') || 'no badges');
     await page.keyboard.press('Escape');
+    const zeroMenu = await page.evaluate(`globalThis.__library.openMenu(${JSON.stringify(zeroTile.hash)})`);
+    check(eq(zeroTile.flags, ['dropped']) && /11 frames were never written/.test(zeroMenu.note),
+      'a take that lost frames to a slow disk carries a badge, and the sentence behind it gives the count',
+      `${zeroTile.flags.join(' ') || 'no badges'}; ${zeroMenu.note.replace(/\n/g, ' | ').slice(0, 130) || 'the menu says nothing'}`);
+    await page.keyboard.press('Escape');
     const oneFrameTile = one('one-frame-take');
     check(oneFrameTile.flags.includes('short'),
       'while the one-frame take still carries the badge, so the row above is about the wording rather than about the badge going away',
@@ -3046,30 +3481,199 @@ async function runChecks() {
         .catch(() => {});
     }
 
-    await page.evaluate(`globalThis.__library.viewer.open(${JSON.stringify(clipHash2)})`);
-    await page.evaluate('globalThis.__library.viewer.drawn(1)');
-    const DRIVERS = new Set([
-      'toMenu', 'toProjects', 'toLibrary', 'all', 'local', 'remote', 'both',
-      'new-project', 'download', 'delete', 'more',
-      'rename', 'reveal', 'reclaim',
-      'vMore', 'vClose', 'mark',
-      'cCancel', 'cGo', 'rCancel', 'rGo', 'rName',
-    ]);
-    const rendered = await page.evaluate('globalThis.__library.controls()');
-    const unswept = rendered.filter((c) => !DRIVERS.has(c.key));
-    check(unswept.length === 0,
-      `every interactive control the library renders has a driver in this file (${rendered.length} controls)`,
-      unswept.length ? `no driver for ${[...new Set(unswept.map((c) => `${c.where}:${c.key}`))].join(' ')}`
-        : [...new Set(rendered.map((c) => c.key))].join(' '));
-    const present = new Set(rendered.map((c) => c.key));
-    const missing = [...DRIVERS].filter((k) => !present.has(k));
-    check(missing.length === 0,
-      'and every control this file names is one the library still renders',
-      missing.join(' ') || `${present.size} distinct controls on screen`);
-    await page.evaluate('globalThis.__library.viewer.close()');
-
     check(errors.length === 0, 'the library raises no page errors', errors.slice(0, 2).join(' | '));
     await page.close();
+  }
+
+  console.log('\n[library] a mark lands on the frame its stamp names, on a take shot at an uneven rate');
+  {
+    // Twenty frames at 33ms, twenty at 111ms and twenty at 33ms, the shape of a take shot over a
+    // loaded link: past frame 20, spacing the frames evenly over the duration reads late.
+    const stamps = [5_000_000];
+    for (let k = 1; k < 60; k++) stamps.push(stamps[k - 1] + (k >= 20 && k < 40 ? 111 : 33));
+    const msOf = (k) => stamps[k] - stamps[0];
+    const spanMs = msOf(stamps.length - 1);
+    // The answers, by walking every stamp rather than by the search under test.
+    const frameOfMs = (ms) => stamps.reduce((found, s, k) => (s - stamps[0] <= ms ? k : found), 0);
+    const evenOfMs = (ms) => Math.round((ms / spanMs) * (stamps.length - 1));
+    const writeUneven = (dir, id, startedAt) => {
+      const hello = Buffer.from(JSON.stringify({ ...JSON.parse(SRC.hello.toString('utf8')), startedAt }));
+      const parts = [encodeMessage(TYPE_HELLO, hello)];
+      for (let k = 0; k < stamps.length; k++) {
+        const frame = Buffer.from(SRC.frames[k % SRC.frames.length]);
+        // Past the 12-byte message header, the stamp is the payload's third field.
+        frame.writeBigUInt64LE(BigInt(stamps[k]), 12 + 8);
+        parts.push(frame);
+      }
+      writeFileSync(join(dir, `${id}.knct`), Buffer.concat(parts));
+    };
+    const ON_45 = msOf(45);
+    // Nearer 51 than 50, so the frame at or before it, the nearest frame and the even reading
+    // are three different answers.
+    const PAST_50 = msOf(50) + 25;
+    const marks = markLine({ id: 'on-45', sourceMs: ON_45, label: 'on frame 45', at: 1000 })
+      + markLine({ id: 'past-50', sourceMs: PAST_50, label: 'between 50 and 51', at: 1000 });
+
+    const hereCaps = join(WORK, 'gallery-captures');
+    const thereCaps = join(WORK, 'gallery-node-captures');
+    for (const dir of [hereCaps, thereCaps]) mkdirSync(dir, { recursive: true });
+    // Newest first is the viewer's walk order, so the uneven take has two takes below it.
+    writeUneven(hereCaps, 'uneven-take', Date.UTC(2026, 8, 5));
+    writeFileSync(join(hereCaps, 'uneven-take.marks.jsonl'), marks);
+    writeTake(hereCaps, 'plain-a', { frames: 12, startedAt: Date.UTC(2026, 8, 4) });
+    writeTake(hereCaps, 'plain-b', { frames: 9, startedAt: Date.UTC(2026, 8, 3) });
+    writeUneven(thereCaps, 'uneven-on-node', Date.UTC(2026, 8, 2));
+    writeFileSync(join(thereCaps, 'uneven-on-node.marks.jsonl'), marks);
+    writeUneven(thereCaps, 'untimed-on-node', Date.UTC(2026, 8, 1));
+    writeFileSync(join(thereCaps, 'untimed-on-node.marks.jsonl'), marks);
+
+    const galleryNode = await startServer(root, ['--captures', thereCaps, '--name', 'gallery-node'], MAC_PORT + 10);
+    // The link to the node refuses one take's index, which is how a node that stops answering
+    // looks from here, without the take leaving the listing on the next poll.
+    const REFUSED_INDEX = `/capture/${encodeURIComponent(hashOfTake(thereCaps, 'untimed-on-node'))}/index`;
+    const link = createServer(async (req, res) => {
+      if (req.url === REFUSED_INDEX) {
+        res.writeHead(503).end('library-check refuses this index');
+        return;
+      }
+      try {
+        const upstream = await fetch(`${galleryNode}${req.url}`, { method: req.method });
+        const body = Buffer.from(await upstream.arrayBuffer());
+        res.writeHead(upstream.status, { 'Content-Type': upstream.headers.get('content-type') ?? 'application/octet-stream' });
+        res.end(body);
+      } catch {
+        res.writeHead(502).end();
+      }
+    });
+    await new Promise((done) => { link.listen(0, '127.0.0.1', done); });
+    const galleryUrl = await startServer(root, ['--captures', hereCaps, '--name', 'gallery',
+      '--node', `http://127.0.0.1:${link.address().port}`, '--node-name', 'gallery-node'], MAC_PORT + 11);
+
+    // The fixture first, because every row below reads nothing if the server indexed another shape.
+    const indexed = await getJson(`${captureAt(galleryUrl, hereCaps, 'uneven-take')}/index`);
+    check(eq(indexed.frames?.stampMs, stamps),
+      'the uneven take is indexed with the stamps it was written with',
+      `${indexed.frames?.stampMs?.length} frames over ${spanMs}ms, where even spacing would be ${(spanMs / (stamps.length - 1)).toFixed(1)}ms`);
+
+    // A node-only take's stamps reach the page through this server, the way its frames do.
+    const theirs = await (await fetch(`${captureAt(galleryNode, thereCaps, 'uneven-on-node')}/index`)).text();
+    const relayed = await fetch(`${galleryUrl}/library/remote-index/${encodeURIComponent(hashOfTake(thereCaps, 'uneven-on-node'))}`);
+    const relayedBody = await relayed.text();
+    check(relayed.status === 200 && relayedBody === theirs,
+      'a node-only take\'s index is passed through byte for byte by the route beside its frames',
+      `${relayed.status}, ${relayedBody.length} bytes against the node's ${theirs.length}`);
+    const refusedIndex = await fetch(`${galleryUrl}/library/remote-index/${encodeURIComponent(hashOfTake(thereCaps, 'untimed-on-node'))}`);
+    const unusableId = await fetch(`${galleryUrl}/library/remote-index/.hidden`);
+    check(refusedIndex.status === 503 && unusableId.status === 404,
+      'and a node refusing one is passed on as its refusal, while a name that is no hash is refused here',
+      `node refusal ${refusedIndex.status}, unusable id ${unusableId.status}`);
+
+    const { page, errors } = await openPage(browser, libraryPage(galleryUrl));
+    await page.waitForFunction('globalThis.__library?.tiles().length === 5', null, { timeout: 20000 })
+      .catch(() => { /* the rows below say which take is missing */ });
+    const tiles = await page.evaluate('globalThis.__library.tiles()');
+    const hashOf = (id) => tiles.find((t) => t.id === id)?.hash ?? id;
+    const viewerState = () => page.evaluate('globalThis.__library.viewer.state()');
+    const openOn = async (id) => {
+      const before = await page.evaluate('globalThis.__library.viewer.draws()');
+      await page.evaluate(`globalThis.__library.viewer.open(${JSON.stringify(hashOf(id))})`);
+      await page.evaluate(`globalThis.__library.viewer.drawn(${before + 1})`).catch(() => {});
+    };
+    const pressMark = async (n) => {
+      const before = await page.evaluate('globalThis.__library.viewer.draws()');
+      await page.evaluate(`globalThis.__library.viewer.clickMark(${n})`);
+      await page.evaluate(`globalThis.__library.viewer.drawn(${before + 1})`).catch(() => {});
+      return viewerState();
+    };
+
+    // A tile first, on a page that has asked for no stamps yet, so its own skim fetches them.
+    // Seven tenths of the way from frame 30 to 31, where the frame at or before it, the nearest
+    // frame and the even reading are 30, 31 and 32. The poster lands first, so the draw the
+    // scrub waits on is the scrub's own.
+    const midMs = msOf(30) + 0.7 * (msOf(31) - msOf(30));
+    await page.evaluate(`globalThis.__library.drawn(${JSON.stringify(hashOf('uneven-take'))})`);
+    const skimmed = await page.evaluate(`globalThis.__library.skimTo(${JSON.stringify(hashOf('uneven-take'))}, ${midMs / spanMs})`);
+    const wantLeft = (msOf(frameOfMs(midMs)) / spanMs) * 100;
+    check(Math.abs(Number.parseFloat(skimmed.left) - wantLeft) < 0.05,
+      'a tile scrubbed to a point on its bar shows the frame at that time, with its playhead at that frame\'s time',
+      `${skimmed.left} against ${wantLeft.toFixed(3)}% for frame ${frameOfMs(midMs)}; `
+        + `even spacing reads frame ${evenOfMs(midMs)} at ${((evenOfMs(midMs) / (stamps.length - 1)) * 100).toFixed(3)}%`);
+
+    await openOn('uneven-take');
+    const on45 = await pressMark(0);
+    check(on45?.index === frameOfMs(ON_45),
+      'a mark on an unevenly shot take lands on the frame its stamp names',
+      `mark at ${ON_45}ms -> frame ${on45?.index}, want ${frameOfMs(ON_45)}; even spacing reads ${evenOfMs(ON_45)}`);
+    check(on45 !== null && Math.abs(on45.pos - on45.marks[0]) < 0.01,
+      'and the playhead stops on the tick it was pressed from, because the bar is the take\'s time and not its frame count',
+      `playhead ${on45?.pos?.toFixed(3)}%, tick ${on45?.marks?.[0]?.toFixed(3)}%`);
+    const past50 = await pressMark(1);
+    check(past50?.index === frameOfMs(PAST_50),
+      'a mark between two frames lands on the one at or before it, which is the frame the editor brackets it with',
+      `mark at ${PAST_50}ms -> frame ${past50?.index}, want ${frameOfMs(PAST_50)}; `
+        + `the nearest is ${frameOfMs(PAST_50) + 1} and even spacing reads ${evenOfMs(PAST_50)}`);
+
+    await openOn('uneven-on-node');
+    const remote45 = await pressMark(0);
+    check(remote45?.id === 'uneven-on-node' && remote45.index === frameOfMs(ON_45),
+      'and the same on a take that is only on the node, whose stamps come through this server',
+      `${remote45?.id}: mark at ${ON_45}ms -> frame ${remote45?.index}, want ${frameOfMs(ON_45)}`);
+
+    await openOn('untimed-on-node');
+    await page.waitForFunction('globalThis.__library.viewer.state()?.pressable?.some((p) => p) === false', null, { timeout: 10000 })
+      .catch(() => { /* the row below reads what it got */ });
+    const untimed = await viewerState();
+    check(untimed?.id === 'untimed-on-node' && untimed.marks.length === 2
+      && untimed.pressable.every((p) => !p) && /cannot be pressed/.test(untimed.note),
+      'a take whose stamps do not arrive keeps its marks as labels and says why, rather than guessing a frame',
+      `${untimed?.id}: ${untimed?.pressable?.map((p) => (p ? 'button' : 'label')).join(' ')}, note "${untimed?.note}"`);
+    // Focus inside first, so the keys below reach the viewer and staying put is the skim's answer.
+    await page.evaluate("document.getElementById('vMore').focus()");
+    await page.evaluate('globalThis.__library.viewer.key("ArrowRight")');
+    await page.evaluate('globalThis.__library.viewer.key("End")');
+    await page.evaluate('globalThis.__library.viewer.clickMark(0)');
+    await new Promise((done) => { setTimeout(done, 600); });
+    const held = await viewerState();
+    check(held?.id === 'untimed-on-node' && held.index === 0 && held.pos === 0,
+      'and its skim stays on the first frame through an arrow, End and a pressed mark, because a position needs the stamps',
+      `${held?.id}: frame ${held?.index} of ${held?.frames}, playhead at ${held?.pos}%`);
+
+    // A focused mark tick is destroyed by the rebuild an arrow causes, so focus is read before it.
+    await openOn('uneven-take');
+    const onTick = await page.evaluate(`(() => {
+      document.querySelector('#vBar .mk')?.focus();
+      return document.activeElement?.dataset?.act ?? null;
+    })()`);
+    check(onTick === 'mark', 'a mark tick on the viewer\'s bar can hold focus', String(onTick));
+    const movedFrom = async (from) => {
+      for (let i = 0; i < 40; i++) {
+        const id = (await viewerState())?.id;
+        if (id !== from) return id;
+        await new Promise((done) => { setTimeout(done, 50); });
+      }
+      return from;
+    };
+    const firstId = (await viewerState())?.id;
+    await page.keyboard.press('ArrowDown');
+    const secondId = await movedFrom(firstId);
+    const focusedOn = await page.evaluate('document.activeElement?.dataset?.act || document.activeElement?.id || document.activeElement?.tagName');
+    check(secondId !== firstId && await page.evaluate('globalThis.__library.viewer.focusInside()') === true,
+      'an arrow pressed on a focused mark tick moves to the next take and leaves focus inside the viewer',
+      `${firstId} -> ${secondId}, focus on ${focusedOn}`);
+    await page.keyboard.press('ArrowDown');
+    const thirdId = await movedFrom(secondId);
+    check(thirdId !== secondId, 'so a second real arrow moves a second take',
+      `${firstId} -> ${secondId} -> ${thirdId}`);
+    await page.evaluate('globalThis.__library.viewer.close()');
+
+    // The refused index is the one console line this section causes on purpose.
+    const unexpected = errors.filter((e) => !/status of 503/.test(e));
+    check(unexpected.length === 0, 'the library raises no page errors drawing an uneven take',
+      unexpected.slice(0, 2).join(' | '));
+    await page.close();
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 10 || sv.port === MAC_PORT + 11)) p.child.kill('SIGKILL');
+    link.closeAllConnections();
+    link.close();
   }
 
   console.log('\n[library] the capture format band at the door the editor opens');
@@ -3131,13 +3735,16 @@ async function runChecks() {
     writeTake(renameDir, 'before-the-rename', { frames: 8, startedAt: Date.UTC(2026, 6, 20, 11, 0) });
     writeTake(renameDir, 'already-taken', { frames: 4 });
     writeTake(renameDir, 'stale-listing-take', { frames: 5 });
-    writeFileSync(join(renameDir, 'before-the-rename.marks.jsonl'),
+    writeMarkLog(renameDir, 'before-the-rename',
       markLine({ id: 'r1', sourceMs: 40, label: 'the moment', at: 1000 }));
 
     const revealLog = join(WORK, 'reveal-argv.log');
-    const fakeOpener = join(WORK, 'fake-file-manager.sh');
-    writeFileSync(fakeOpener, `#!/bin/sh\nprintf '%s\\n' "$@" >> ${JSON.stringify(revealLog)}\n`);
-    chmodSync(fakeOpener, 0o755);
+    // A script run by this process's own `node`, which starts on every platform the server spawns
+    // on without a shell, where a shebang script cannot start on Windows at all.
+    const recorder = join(WORK, 'fake-file-manager.mjs');
+    writeFileSync(recorder, "import { appendFileSync } from 'node:fs';\n"
+      + `appendFileSync(${JSON.stringify(revealLog)}, process.argv.slice(2).map((a) => \`\${a}\\n\`).join(''));\n`);
+    const fakeOpener = `"${process.execPath}" "${recorder}"`;
     const argvSeen = () => (existsSync(revealLog) ? readFileSync(revealLog, 'utf8').trim().split('\n') : []);
 
     const renameUrl = await startServer(root, [
@@ -3148,6 +3755,12 @@ async function runChecks() {
     const listed = async (id) => (await getJson(`${renameUrl}/library/takes`)).takes.find((t) => t.id === id);
     const before = await listed('before-the-rename');
     const idxBefore = statSync(join(renameDir, 'before-the-rename.idx'));
+    // A frame asked for by the take's hash, before anything moves, to compare against after.
+    const frameBy = async (key, n = 2) => {
+      const res = await fetch(`${renameUrl}/capture/${encodeURIComponent(key)}/frame/${n}`);
+      return { status: res.status, bytes: res.ok ? Buffer.from(await res.arrayBuffer()) : null };
+    };
+    const frameBefore = await frameBy(before.hash);
 
     // A request built against a listing that has gone stale.
     const stale = await post(`${renameUrl}/library/rename/stale-listing-take`,
@@ -3195,6 +3808,46 @@ async function runChecks() {
       'and every one that lost still has its footage under its own name, which is what a silent overwrite takes away',
       `${survivors.length} of ${racers.length - 1} survived: ${survivors.join(' ') || 'nothing'}`);
 
+    // A dangling symlink is a name stat(2) cannot see - it follows the link to nothing - yet the
+    // name is still taken: link(2) refuses EEXIST where rename(2) would replace the entry.
+    symlinkSync(join(raceDir, 'not-there.knct'), join(raceDir, 'dangling-target.knct'));
+    const overDangling = await staged.renameTake(
+      raceDir, 'racer-two', 'dangling-target', { hash: racerHashes[1] },
+    ).then(() => 'accepted', (err) => String(err?.message ?? err));
+    check(/is taken/.test(overDangling),
+      'a target a dangling symlink holds is refused by the kernel rather than renamed over an entry stat could not see',
+      overDangling.slice(0, 90));
+    check(lstatSync(join(raceDir, 'dangling-target.knct'), { throwIfNoEntry: false })?.isSymbolicLink() === true
+      && existsSync(join(raceDir, 'racer-two.knct')),
+      'and the entry it held survived with the take still under its own name',
+      `symlink at target ${lstatSync(join(raceDir, 'dangling-target.knct'), { throwIfNoEntry: false })?.isSymbolicLink()}, racer-two.knct ${existsSync(join(raceDir, 'racer-two.knct'))}`);
+
+    // #10's first half: a mark write in flight while its take is renamed. Headers and half the body
+    // go first, the rename lands, and then the rest.
+    const inFlightTake = await listed('stale-listing-take');
+    const inFlightBody = JSON.stringify({ marks: [{ id: 'in-flight', sourceMs: 20, label: 'sent across a rename', at: 1500 }] });
+    const inFlight = await new Promise((settle) => {
+      const req = request(`${renameUrl}/capture/${encodeURIComponent(inFlightTake?.hash ?? NO_SUCH_HASH)}/marks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(inFlightBody) },
+      }, (res) => {
+        let text = '';
+        res.on('data', (c) => { text += c; });
+        res.on('end', () => settle({ status: res.statusCode, text }));
+      });
+      req.on('error', (err) => settle({ status: null, text: err.message }));
+      req.write(inFlightBody.slice(0, 12));
+      setTimeout(async () => {
+        await post(`${renameUrl}/library/rename/stale-listing-take`, { hash: inFlightTake?.hash, to: 'stale-listing-renamed' });
+        req.end(inFlightBody.slice(12));
+      }, 300);
+    });
+    const inFlightAfter = await listed('stale-listing-renamed');
+    check(inFlight.status === 200 && inFlightAfter?.hash === inFlightTake?.hash
+      && inFlightAfter.marks.some((m) => m.id === 'in-flight'),
+    'a mark write in flight while its take is renamed lands, and is read from the take under its new name',
+    `HTTP ${inFlight.status} ${inFlight.text.slice(0, 60)}; ${inFlightAfter?.id ?? 'not renamed'} has ${JSON.stringify((inFlightAfter?.marks ?? []).map((m) => m.id))}`);
+
     const done = await post(`${renameUrl}/library/rename/before-the-rename`,
       { hash: before.hash, to: 'after-the-rename.knct' });
     check(done.id === 'after-the-rename',
@@ -3209,9 +3862,54 @@ async function runChecks() {
     check(after.marks.length === 1 && after.marks[0].label === 'the moment',
       'the marks came with it - the one artifact here nobody can regenerate, since it is what somebody pressed in the room',
       JSON.stringify(after.marks.map((m) => m.label)));
-    check(!existsSync(join(renameDir, 'before-the-rename.marks.jsonl')),
-      'and nothing is left at the old name for a later take to find beside it',
-      readdirSync(renameDir).sort().join(' '));
+    // The half of #10 that matters: the freed name taken by other footage, through this program
+    // and around it.
+    const taker = await listed('already-taken');
+    const reused = await post(`${renameUrl}/library/rename/already-taken`, { hash: taker?.hash, to: 'before-the-rename' });
+    const heir = await listed('before-the-rename');
+    check(reused.id === 'before-the-rename' && heir?.hash === taker?.hash && heir.marks.length === 0,
+      'a take renamed into the freed name reads none of the marks of the take that had it',
+      reused.error ? reused.error.slice(0, 80) : JSON.stringify(heir?.marks.map((m) => m.label) ?? null));
+    writeTake(renameDir, 'deleted-outside', { frames: 9 });
+    const doomed = await post(`${captureAt(renameUrl, renameDir, 'deleted-outside')}/marks`,
+      { marks: [{ id: 'gone', sourceMs: 30, label: 'on footage now deleted', at: 1000 }] });
+    rmSync(join(renameDir, 'deleted-outside.knct'));
+    writeTake(renameDir, 'deleted-outside', { frames: 10 });
+    const newcomer = await listed('deleted-outside');
+    check((doomed.marks ?? []).length === 1 && newcomer !== undefined && newcomer.marks.length === 0,
+      'and so does a new take given a name whose take was deleted outside this program, marks and all left behind',
+      `${(doomed.marks ?? []).length} mark on the deleted take; the new one has ${JSON.stringify(newcomer?.marks.map((m) => m.label) ?? null)}`);
+
+    // #13 on the wire: a frame asked for by hash follows its take through the rename, the take given
+    // the freed name answers with its own frames, and a name addresses nothing.
+    const frameAfter = await frameBy(before.hash);
+    const indexOf = async (hash) => (await fetch(`${renameUrl}/capture/${encodeURIComponent(hash)}/index`)
+      .then((res) => (res.ok ? res.json() : null)).catch(() => null))?.hash ?? null;
+    const [renamedIndex, heirIndex] = [await indexOf(before.hash), await indexOf(taker?.hash ?? NO_SUCH_HASH)];
+    const byName = await fetch(`${renameUrl}/capture/before-the-rename/frame/2`);
+    check(frameAfter.status === 200 && frameBefore.bytes !== null && Buffer.compare(frameAfter.bytes, frameBefore.bytes) === 0
+      && renamedIndex === before.hash,
+    'a frame and an index asked for by a renamed take\'s hash are still that take\'s',
+    `${frameBefore.status} before, ${frameAfter.status} after, ${frameAfter.bytes && frameBefore.bytes && Buffer.compare(frameAfter.bytes, frameBefore.bytes) === 0 ? 'same bytes' : 'different bytes'}, index ${String(renamedIndex).slice(7, 19)}`);
+    check(heirIndex !== null && heirIndex === taker?.hash && byName.status === 404,
+      'while the take renamed into the freed name answers its own hash with its own index, and the name itself addresses nothing',
+      `heir index ${String(heirIndex).slice(7, 19)} for ${String(taker?.hash).slice(7, 19)}; by name ${byName.status}`);
+
+    // The same outside this process, which takes no lock and tells the server nothing: a frame of A
+    // opens A under its name, then A moves away and B moves into that name.
+    writeTake(renameDir, 'swap-a', { frames: 6 });
+    writeFileSync(join(renameDir, 'swap-b.knct'), Buffer.concat([encodeMessage(TYPE_HELLO, SRC.hello), ...SRC.frames.slice(10, 17)]));
+    const [swapA, swapB] = [hashOfTake(renameDir, 'swap-a'), hashOfTake(renameDir, 'swap-b')];
+    const aBefore = await frameBy(swapA, 1);
+    const bBefore = await frameBy(swapB, 1);
+    renameSync(join(renameDir, 'swap-a.knct'), join(renameDir, 'swap-a-moved.knct'));
+    renameSync(join(renameDir, 'swap-b.knct'), join(renameDir, 'swap-a.knct'));
+    const bAfter = await frameBy(swapB, 1);
+    const aAfter = await frameBy(swapA, 1);
+    const same = (x, y) => x.bytes !== null && y.bytes !== null && Buffer.compare(x.bytes, y.bytes) === 0;
+    check(aBefore.status === 200 && bBefore.status === 200 && !same(aBefore, bBefore) && same(bAfter, bBefore) && same(aAfter, aBefore),
+      'and a take swapped under a name outside this program is answered by what each hash is: B\'s frame for B, A\'s for A, wherever each now sits',
+      `B ${bAfter.status} ${same(bAfter, bBefore) ? 'its own' : 'not its own'}, A ${aAfter.status} ${same(aAfter, aBefore) ? 'its own' : 'not its own'}`);
     const idxAfter = statSync(join(renameDir, 'after-the-rename.idx'));
     check(idxAfter.mtimeMs === idxBefore.mtimeMs && idxAfter.size === idxBefore.size,
       'the index moved with it rather than being rebuilt, which is a full read of the take not taken',
@@ -3272,7 +3970,7 @@ async function runChecks() {
       for (const p of servers.filter((sv) => sv.port === MAC_PORT + 15)) p.child.kill('SIGKILL');
     }
 
-    // `scanTakes` decides which take is open by comparing paths against `recorder.openPath`.
+    // `scanTakes` decides which take is open by asking `recorder.owns` about each path.
     const shootDir = join(WORK, 'rename-shooting');
     rmSync(shootDir, { recursive: true, force: true });
     mkdirSync(shootDir, { recursive: true });
@@ -3297,6 +3995,13 @@ async function runChecks() {
     check(existsSync(join(shootDir, `${shooting.takeId}.knct`))
       && !existsSync(join(shootDir, 'renamed-mid-shoot.knct')),
       'and it is still at the name the recorder has open', readdirSync(shootDir).sort().join(' '));
+    // A second name for the open take: asking which take it holds would scan the growing file.
+    linkSync(join(shootDir, `${shooting.takeId}.knct`), join(shootDir, 'second-name-mid-shoot.knct'));
+    const unnamed = await post(`${shootUrl}/library/remove-name/second-name-mid-shoot`,
+      { hash: openTake?.hash ?? null, keep: shooting.takeId });
+    check(/being recorded right now/.test(unnamed.error ?? '') && existsSync(join(shootDir, 'second-name-mid-shoot.knct')),
+      'and a second name for it is not removed while it records', (unnamed.error ?? 'ACCEPTED').slice(0, 60));
+    rmSync(join(shootDir, 'second-name-mid-shoot.knct'), { force: true });
     await fetch(`${shootUrl}/library/all`).catch(() => {});
     check(!existsSync(join(shootDir, `${shooting.takeId}.idx`)),
       'and the manifest still describes it without scanning it - no sidecar, which is what a full read of a growing take would leave',
@@ -3314,6 +4019,185 @@ async function runChecks() {
     for (const p of servers.filter((sv) => sv.port === MAC_PORT + 14)) p.child.kill('SIGKILL');
   }
 
+  console.log('\n[library] a take under two names shows both, and either name can be taken away');
+  {
+    const namesDir = join(WORK, 'two-names');
+    rmSync(namesDir, { recursive: true, force: true });
+    mkdirSync(namesDir, { recursive: true });
+    // A rename that died between its link and its unlink leaves one file under two names; a copy
+    // made outside this program leaves two files with one hash. Distinct frame counts, distinct hashes.
+    writeTake(namesDir, 'linked-first', { frames: 5 });
+    linkSync(join(namesDir, 'linked-first.knct'), join(namesDir, 'linked-second.knct'));
+    writeTake(namesDir, 'copied-first', { frames: 6 });
+    cpSync(join(namesDir, 'copied-first.knct'), join(namesDir, 'copied-second.knct'));
+    writeTake(namesDir, 'swapped-first', { frames: 7 });
+    linkSync(join(namesDir, 'swapped-first.knct'), join(namesDir, 'swapped-second.knct'));
+    writeTake(namesDir, 'unrelated', { frames: 8 });
+    const namesUrl = await startServer(root, ['--captures', namesDir, '--name', 'two-names',
+      '--projects', join(WORK, 'names-projects'), '--presets', join(WORK, 'names-presets')], MAC_PORT + 14);
+    const entries = async () => (await getJson(`${namesUrl}/library/all`)).takes;
+    const onDisk = () => readdirSync(namesDir).filter((f) => f.endsWith('.knct')).sort().join(' ');
+    // Off the files, so a listing that loses a name cannot also lose the rows asking about it.
+    const hashOf = (id) => `sha256:${createHash('sha256').update(readFileSync(join(namesDir, `${id}.knct`))).digest('hex')}`;
+    const linked = { id: 'linked-first', hash: hashOf('linked-first') };
+    const copied = { id: 'copied-first', hash: hashOf('copied-first') };
+    const swapped = { id: 'swapped-first', hash: hashOf('swapped-first') };
+    const unrelated = { id: 'unrelated', hash: hashOf('unrelated') };
+    let listed = await entries();
+    const entryOf = (hash) => listed.find((t) => t.hash === hash);
+    check(eq([...(entryOf(linked.hash)?.names ?? [])].sort(), ['linked-first', 'linked-second'])
+      && listed.filter((t) => t.hash === linked.hash).length === 1,
+    'one file under two names is one entry that lists both names, rather than one name written over the other',
+    listed.map((t) => `${t.id}[${(t.names ?? []).join(',')}]`).join(' '));
+    check(eq(entryOf(unrelated.hash)?.names, ['unrelated']),
+      'and a take under one name lists that one name', JSON.stringify(entryOf(unrelated.hash)?.names ?? null));
+
+    const { page, errors } = await openPage(browser, libraryPage(namesUrl));
+    await page.waitForSelector(`.tile[data-hash="${linked.hash}"]`, { timeout: 20000 }).catch(() => {});
+    const tileOf = (hash) => page.evaluate((h) => {
+      const tile = document.querySelector(`.tile[data-hash="${h}"]`);
+      return tile ? {
+        flags: [...tile.querySelectorAll('.flag')].map((f) => f.dataset.flag),
+        menu: globalThis.__library.openMenu(h).items,
+        del: [...tile.querySelectorAll('.acts .act')].find((b) => b.dataset.act === 'delete')?.disabled ?? null,
+      } : null;
+    }, hash);
+    const linkedTile = await tileOf(linked.hash);
+    const removable = (linkedTile?.menu ?? []).filter((i) => i.item.startsWith('remove-name:') && !i.disabled)
+      .map((i) => i.item).sort();
+    check(linkedTile?.flags.includes('names')
+      && eq(removable, ['remove-name:linked-first', 'remove-name:linked-second']) && linkedTile.del === true,
+    'the gallery flags that take as having a second name, offers to remove either, and holds Delete down',
+    JSON.stringify(linkedTile));
+    const plainTile = await tileOf(unrelated.hash);
+    check(plainTile !== null && !plainTile.flags.includes('names')
+      && !plainTile.menu.some((i) => i.item.startsWith('remove-name:')) && plainTile.del === false,
+    'while a take with one name carries no flag and no such item', JSON.stringify(plainTile));
+
+    const deleted = await post(`${namesUrl}/library/delete/${linked.id}`, { hash: linked.hash, confirm: true });
+    check(/also filed here as/.test(deleted.error ?? '') && onDisk().includes('linked-first.knct'),
+      'a delete of a take with a second name is refused, because it would remove one name and leave the take',
+      (deleted.error ?? JSON.stringify(deleted)).slice(0, 90));
+
+    // A request built against a listing, naming the kept take's hash and a name that is not that take.
+    const stranger = await post(`${namesUrl}/library/remove-name/unrelated`, { hash: linked.hash, keep: 'linked-first' });
+    check(Boolean(stranger.error) && onDisk().includes('unrelated.knct'),
+      'removing a name that holds a different take than the kept one is refused, and nothing is unlinked',
+      (stranger.error ?? JSON.stringify(stranger)).slice(0, 90));
+    // The second name is given to another take after the listing was read, outside this program.
+    rmSync(join(namesDir, 'swapped-second.knct'));
+    writeTake(namesDir, 'swapped-second', { frames: 9 });
+    const swap = await post(`${namesUrl}/library/remove-name/swapped-second`, { hash: swapped.hash, keep: 'swapped-first' });
+    check(Boolean(swap.error) && onDisk().includes('swapped-second.knct'),
+      'and so is a name that stopped holding the take after the listing was read: the other take under it survives',
+      (swap.error ?? JSON.stringify(swap)).slice(0, 90));
+    const copy = await post(`${namesUrl}/library/remove-name/copied-first`, { hash: copied.hash, keep: 'copied-second' });
+    const keptHash = `sha256:${createHash('sha256').update(readFileSync(join(namesDir, 'copied-second.knct'))).digest('hex')}`;
+    check(copy.removed === 'copied-first.knct' && copy.sameFile === false && !onDisk().includes('copied-first.knct')
+      && keptHash === copied.hash,
+    'two files with one hash lose the named one once both are hashed, and the kept file still has those bytes',
+    copy.error ? copy.error.slice(0, 90) : onDisk());
+
+    // Caught, because a build with no such item throws here and that is the row below reddening.
+    await page.evaluate((h) => globalThis.__library.clickMenuItem(h, 'remove-name:linked-second'), linked.hash)
+      .catch(() => {});
+    for (let i = 0; i < 60 && onDisk().includes('linked-second.knct'); i++) await new Promise((r) => { setTimeout(r, 100); });
+    await page.waitForFunction((h) => {
+      const tile = document.querySelector(`.tile[data-hash="${h}"]`);
+      return tile && ![...tile.querySelectorAll('.flag')].some((f) => f.dataset.flag === 'names');
+    }, linked.hash, { timeout: 10000 }).catch(() => {});
+    listed = await entries();
+    const afterTile = await tileOf(linked.hash);
+    check(!onDisk().includes('linked-second.knct') && onDisk().includes('linked-first.knct')
+      && eq(entryOf(linked.hash)?.names, ['linked-first']) && afterTile?.flags.includes('names') === false,
+    'pressing Remove the name takes that name away from the gallery and the disk, and the take stays under the other',
+    `${onDisk()}; flags ${JSON.stringify(afterTile?.flags ?? null)}`);
+    check(errors.length === 0, 'and the gallery raised no page error through any of it', errors.join(' | ').slice(0, 120));
+    await page.close();
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 14)) p.child.kill('SIGKILL');
+  }
+
+  console.log('\n[library] an editor open on a take follows it through a rename, and never draws the take given its old name');
+  {
+    const followDir = join(WORK, 'editor-follows');
+    rmSync(followDir, { recursive: true, force: true });
+    mkdirSync(followDir, { recursive: true });
+    // The whole sample, so a seek to its far end after the renames is past what the open fetched.
+    writeTake(followDir, 'shot-x', { frames: SRC.frames.length, startedAt: Date.UTC(2026, 7, 1, 10, 0) });
+    writeTake(followDir, 'shot-z', { frames: SRC.frames.length, startedAt: Date.UTC(2026, 7, 1, 11, 0) });
+    const xHash = hashOfTake(followDir, 'shot-x');
+    const zHash = hashOfTake(followDir, 'shot-z');
+    const followUrl = await startServer(root, ['--captures', followDir, '--name', 'following',
+      '--projects', join(WORK, 'follow-projects'), '--presets', join(WORK, 'follow-presets')], MAC_PORT + 14);
+    const { page, errors } = await openPage(browser, editorPage(followUrl, 'shot-x'));
+    const asked = [];
+    page.on('response', (res) => {
+      const url = new URL(res.url());
+      if (url.pathname.startsWith('/capture/')) asked.push({ path: decodeURIComponent(url.pathname), status: res.status() });
+    });
+    const opened = await page.waitForFunction(() => !!globalThis.__kinect?.timeline?.transport(), null, { timeout: 30000 })
+      .then(() => true, () => false);
+    await page.evaluate('globalThis.__kinect.timeline.settled()').catch(() => {});
+    const away = await post(`${followUrl}/library/rename/shot-x`, { hash: xHash, to: 'shot-y' });
+    const into = await post(`${followUrl}/library/rename/shot-z`, { hash: zHash, to: 'shot-x' });
+    asked.length = 0;
+    const lastSec = (SRC.frames.length - 4) / 30;
+    await page.evaluate(`globalThis.__kinect.timeline.transport().seek(${lastSec})`).catch((err) => errors.push(err.message));
+    await page.evaluate('globalThis.__kinect.timeline.settled()').catch(() => {});
+    const clipHash = await page.evaluate('globalThis.__kinect.timeline.clips()[0]?.take?.hash ?? null').catch(() => null);
+    const frameAsks = asked.filter((a) => /\/frames?\//.test(a.path));
+    check(opened && !away.error && !into.error && frameAsks.length > 0 && clipHash === xHash
+      && frameAsks.every((a) => a.path.startsWith(`/capture/${xHash}/`) && a.status === 200),
+    'after its take is renamed away and another renamed into that name, the editor goes on asking for its own take by hash, and every frame it asks for comes back',
+    `${away.error ?? into.error ?? 'renamed'}; ${frameAsks.length} frame requests after, `
+      + `${frameAsks.filter((a) => a.status !== 200 || !a.path.startsWith(`/capture/${xHash}/`)).map((a) => `${a.path.slice(9, 25)}… ${a.status}`).slice(0, 3).join(', ') || 'all its own and answered'}`);
+    await page.evaluate('globalThis.__kinect.library.markHere()').catch((err) => errors.push(err.message));
+    const takesNow = (await getJson(`${followUrl}/library/takes`)).takes;
+    const xNow = takesNow.find((t) => t.hash === xHash);
+    const zNow = takesNow.find((t) => t.hash === zHash);
+    check(xNow?.id === 'shot-y' && xNow.marks.length === 1 && zNow?.id === 'shot-x' && zNow.marks.length === 0,
+      'and a mark pressed now lands on that take under its new name, and none on the take holding its old one',
+      `${xNow?.id} has ${xNow?.marks.length}, ${zNow?.id} has ${zNow?.marks.length}`);
+    check(errors.length === 0, 'and the editor raised no error through any of it', errors.join(' | ').slice(0, 120));
+    await page.close();
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 14)) p.child.kill('SIGKILL');
+  }
+
+  console.log('\n[library] a marks log filed by a take\'s name is moved to the take\'s hash log when the server starts');
+  {
+    const namedDir = join(WORK, 'named-logs');
+    rmSync(namedDir, { recursive: true, force: true });
+    mkdirSync(namedDir, { recursive: true });
+    writeTake(namedDir, 'named-log-take', { frames: 5 });
+    const pressed = [
+      { id: 'old-1', sourceMs: 40, label: 'pressed under an older build', at: 1000 },
+      { id: 'old-2', sourceMs: 90, label: 'and another', at: 1001 },
+    ];
+    writeFileSync(join(namedDir, 'named-log-take.marks.jsonl'), pressed.map(markLine).join(''));
+    // A crash between the merge and the removal: the hash log already holds one of the records.
+    writeMarkLog(namedDir, 'named-log-take', markLine(pressed[0]));
+    writeFileSync(join(namedDir, 'no-take-here.marks.jsonl'), markLine({ id: 'stray', sourceMs: 5, label: 'beside nothing', at: 3 }));
+    const namedUrl = await startServer(root, ['--captures', namedDir, '--name', 'named-logs',
+      '--projects', join(WORK, 'named-projects'), '--presets', join(WORK, 'named-presets')], MAC_PORT + 14);
+    for (let i = 0; i < 40 && existsSync(join(namedDir, 'named-log-take.marks.jsonl')); i++) {
+      await new Promise((done) => { setTimeout(done, 100); });
+    }
+    const adopted = (await getJson(`${namedUrl}/library/takes`)).takes.find((t) => t.id === 'named-log-take');
+    const logLines = existsSync(markLogFile(namedDir, 'named-log-take'))
+      ? readFileSync(markLogFile(namedDir, 'named-log-take'), 'utf8').trim().split('\n') : [];
+    check(eq((adopted?.marks ?? []).map((m) => m.id), ['old-1', 'old-2']) && !existsSync(join(namedDir, 'named-log-take.marks.jsonl')),
+      'the take lists the marks an older build filed beside it by name, and that file is gone',
+      `${JSON.stringify((adopted?.marks ?? []).map((m) => m.id))}; ${readdirSync(namedDir).sort().join(' ')}`);
+    check(logLines.length === 2,
+      'and a move interrupted after its merge is merged again without a second copy of any record',
+      `${logLines.length} records in the hash log`);
+    const said = servers.find((sv) => sv.port === MAC_PORT + 14).log.join('').split('\n').filter((l) => /moved .*marks\.jsonl/.test(l));
+    check(said.length === 1 && said[0].includes('named-log-take') && existsSync(join(namedDir, 'no-take-here.marks.jsonl')),
+      'the server says so once, and leaves a log with no take beside it where it is',
+      `${said.length} line(s): ${(said[0] ?? '').slice(0, 90)}`);
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 14)) p.child.kill('SIGKILL');
+  }
+
   console.log('\n[library] the projects page lists the edits, and says which of them are dark');
   {
     // The page a project is opened from, which this file had no coverage of at all - and a page
@@ -3321,7 +4205,9 @@ async function runChecks() {
     // one that makes every later mutation of `projects.html` mean anything.
     const PRESENT = 'projects-page-present';
     const DARK = 'projects-page-dark';
-    const localHash = (await getJson(`${macUrl}/library/takes`)).takes.find((t) => t.id === 'local-clip').hash;
+    const TRIMMED = 'projects-page-trimmed';
+    const localTake = (await getJson(`${macUrl}/library/takes`)).takes.find((t) => t.id === 'local-clip');
+    const localHash = localTake.hash;
     // Built off a document the editor wrote rather than composed here: `checkProject` demands a
     // weight for every reading and `READINGS` is built at run time out of the installed effect
     // manifests, so a body this file authored would be refused by the loader for reasons that
@@ -3338,6 +4224,9 @@ async function runChecks() {
     const one = JSON.parse(JSON.stringify(seed));
     one.clips = [{ ...one.clips[0], start: 0 }];
     one.clips[0].take = { id: 'local-clip', hash: localHash };
+    const trimmed = JSON.parse(JSON.stringify(one));
+    trimmed.clips[0].sourceStart = Math.min(2, localTake.durationSec / 3);
+    trimmed.clips[0].length = Math.max(1, Math.min(4, localTake.durationSec - trimmed.clips[0].sourceStart));
     const gone = JSON.parse(JSON.stringify(one));
     // Both clips carry their own length, and the missing one has to: `spanOf` falls back to the
     // take's duration, which is precisely what a machine that has not got the take cannot read.
@@ -3352,10 +4241,12 @@ async function runChecks() {
         id: 'nowhere',
         start: 4,
         length: 6,
+        sourceStart: 2.75,
         take: { id: 'reclaimed-take', hash: `sha256:${'a'.repeat(64)}` },
       },
     ];
     await writeDoc(macUrl, 'projects', PRESENT, one);
+    await writeDoc(macUrl, 'projects', TRIMMED, trimmed);
     await writeDoc(macUrl, 'projects', DARK, gone);
 
     const { page, errors } = await openPage(browser, projectsPage(macUrl));
@@ -3370,6 +4261,18 @@ async function runChecks() {
       'the page is served at /projects and lists what the store holds, which is what makes an '
       + 'interception of projects.html land somewhere rather than nowhere',
       rows.map((r) => r.name).join(', ') || 'the listing was empty');
+    await page.evaluate(`globalThis.__projects.drawn(${JSON.stringify(TRIMMED)})`);
+    const trimmedAtHead = await page.evaluate(
+      `globalThis.__projects.showing(${JSON.stringify(TRIMMED)})`,
+    );
+    // The frame at or before the in-point, found by walking the take's own stamps.
+    const localStamps = (await getJson(`${captureAt(macUrl, macCaps, 'local-clip')}/index`)).frames.stampMs;
+    const wantedHeadFrame = localStamps.reduce((found, s, k) =>
+      ((s - localStamps[0]) / 1000 <= trimmed.clips[0].sourceStart ? k : found), 0);
+    check(trimmedAtHead?.frame === wantedHeadFrame && trimmedAtHead?.drawnFrame === wantedHeadFrame,
+      'the projects page starts a trimmed clip skim at its in-point rather than at frame zero',
+      `frame ${trimmedAtHead?.frame}, drawn ${trimmedAtHead?.drawnFrame}, want ${wantedHeadFrame} `
+        + `for source ${trimmed.clips[0].sourceStart.toFixed(3)}s`);
     // Newest written first, and nothing is stored to know it: the dark one was written second.
     check(rows[0]?.name === DARK,
       'and it is ordered by when each project was last written, newest first',
@@ -3380,6 +4283,10 @@ async function runChecks() {
     check(named(DARK)?.missing === 1 && /reclaimed-take/.test(named(DARK)?.dark ?? ''),
       'and one whose footage is not here says so on its own row, naming the take it wants',
       `${named(DARK)?.missing} missing, "${named(DARK)?.dark ?? 'nothing said'}"`);
+    const missingSegment = named(DARK)?.segments?.find((segment) => segment.clip === 'nowhere');
+    check(missingSegment?.sourceStart === 2.75,
+      'a clip whose take is missing keeps its in-point unchanged while the projects page lays it out',
+      `sourceStart ${missingSegment?.sourceStart}`);
     check(/library/i.test(named(DARK)?.darkAct ?? ''),
       'and the control on it goes to the library rather than fetching, because the download and '
       + 'the two-machine state live there and a second copy of them here is the duplicated path',
@@ -3402,6 +4309,7 @@ async function runChecks() {
     await page.close();
     await writeDoc(macUrl, 'projects', PRESENT, null, 'DELETE');
     await writeDoc(macUrl, 'projects', DARK, null, 'DELETE');
+    await writeDoc(macUrl, 'projects', TRIMMED, null, 'DELETE');
   }
 
   console.log('\n[library] a project survives a round trip through a file');
@@ -3455,6 +4363,10 @@ async function runChecks() {
 
     const { page, errors } = await openPage(browser, recorderPage(macUrl), { width: 640, height: 400 });
     await page.waitForFunction('globalThis.__kinect !== undefined', null, { timeout: 40000 });
+    const liveClip = await page.evaluate('globalThis.__kinect.timeline.clips()[0]');
+    check(liveClip.afforded === Infinity && liveClip.length === Infinity,
+      'a streaming source affords an unbounded clip instead of resolving against a finite take duration',
+      `afforded ${String(liveClip.afforded)}, length ${String(liveClip.length)}`);
 
     // A look nothing defaults to, so a restore that did nothing cannot pass.
     const SCRAMBLE = {
@@ -3652,8 +4564,7 @@ async function runChecks() {
       'and putting the clip back leaves nothing parked, so the rows below serialise a document with no missing effect in it',
       JSON.stringify(cleaned));
 
-  // `JSON.stringify` turns NaN and undefined into null, so a case labelled NaN would
-  // silently be a case about null.
+  // Assigned inside the page so NaN and Infinity reach the door without JSON changing them to null.
     const refuse = async (label, source) => page.evaluate(`(() => {
       const k = globalThis.__kinect;
       const p = k.library.serialiseProjectBody();
@@ -3663,13 +4574,16 @@ async function runChecks() {
 
     const cases = [
       ['a project with no version', 'delete p.version;'],
-      ['a project from an older version', 'p.version = 0;'],
+      ['a version 8 project', 'p.version = 8;'],
       // Derived from the version this build writes rather than written down.
       ['a project from a newer version', `p.version = ${PROJECT_VERSION + 1};`],
       ['a version that is not a number', 'p.version = "1";'],
-      ['a retime curve that falls', 'p.clips[0].retime.keys = [{t:0,value:0},{t:1,value:2},{t:2,value:0.5}];'],
-      ['a retime handle outside the unit box',
-        'p.clips[0].retime.keys = [{t:0,value:0,easeOut: [[0.4, 1.9]],easeIn: [[0.6, 0]]},{t:2,value:1,easeOut: [[0.4, 0]],easeIn: [[0.6, 0]]}];'],
+      ['a negative in-point', 'p.clips[0].sourceStart = -0.25;'],
+      ['a non-finite in-point', 'p.clips[0].sourceStart = NaN;'],
+      ['an infinite in-point', 'p.clips[0].sourceStart = Infinity;'],
+      ['an in-point at the end of the footage',
+        'const c = k.timeline.clips()[0]; p.clips[0].sourceStart = c.sourceStart + c.afforded * c.speed;'],
+      ['an in-point past the footage', 'p.clips[0].sourceStart = 1e9;'],
       ['a camera key whose quaternion is not unit length',
         'p.composition.camera = [{t:0,value:{position:[0,0,3],quaternion:[0,0,0,1.4],fov:55}},{t:1,value:{position:[1,0,3],quaternion:[0,0,0,1],fov:55}}];'],
       ['a camera key whose quaternion is all zeros',
@@ -3699,7 +4613,7 @@ async function runChecks() {
       ['a project value in a clip block', 'p.clips[0].params.bloom = 0;'],
       ['a clip value in the project block', 'p.look.params.pointSize = 9;'],
       ['a view parameter in a clip block', 'p.clips[0].params.renderScale = 100;'],
-      ['a retime rate of zero or less', 'p.clips[0].retime.rate = 0;'],
+      ['a clip speed of zero or less', 'p.clips[0].speed = 0;'],
       ['a preset stamp that is not a name and a rev', 'p.clips[0].appliedPreset = { name: 42 };'],
       // The record a deliverable's embedded document carries.
       ['a suppressed list that is not a list', 'p.suppressed = "sparkle";'],
@@ -3718,6 +4632,18 @@ async function runChecks() {
     for (const { label, message } of results) {
       check(message !== 'ACCEPTED', `refused: ${label}`, message === 'ACCEPTED' ? 'ACCEPTED' : message.slice(0, 64));
     }
+    const messageFor = (label) => results.find((result) => result.label === label)?.message ?? '';
+    check(/version 8/.test(messageFor('a version 8 project'))
+      && /reads version 9/.test(messageFor('a version 8 project'))
+      && /no path from here/.test(messageFor('a version 8 project')),
+    'the version 8 refusal names both versions and says this build has no conversion path',
+    messageFor('a version 8 project').slice(0, 150));
+    check(/nothing of the take is left after its in-point/.test(messageFor('an in-point past the footage')),
+      'an in-point past finite footage is refused after the take duration resolves',
+      messageFor('an in-point past the footage').slice(0, 150));
+    check(/nothing of the take is left after its in-point/.test(messageFor('an in-point at the end of the footage')),
+      'and an in-point exactly at the finite footage end is refused by the same resolved-duration gate',
+      messageFor('an in-point at the end of the footage').slice(0, 150));
     const good = await refuse('an unmodified project', '');
     check(good.message === 'ACCEPTED', 'and an unmodified project still loads',
       good.message === 'ACCEPTED' ? '' : good.message.slice(0, 80));
@@ -3730,8 +4656,7 @@ async function runChecks() {
       const names = k.params.names('look').filter((n) => n.startsWith('glyph.'));
       // Read off the live registry rather than off \`spec\`, which answers with a projection
       // carrying \`default\` and not \`def\` - a probe pointed at a field that has never existed
-      // reads \`undefined\` on a correct build, which is the shape docs/instruments.md files
-      // under a reading that is not a finding. \`get\` cannot answer with anything the
+      // reads \`undefined\` on a correct build, which is a probe pointed at nothing, not a finding. \`get\` cannot answer with anything the
       // parameter could not hold.
       // Into the clip's block, because glyph binds the cloud - the two refused cases above
       // are one key short of this document and have to be short of it in the same block.
@@ -4084,7 +5009,7 @@ async function runChecks() {
     await page.close();
   }
 
-  console.log('\n[library] marks on the editor\'s scrubber, through the retime curve');
+  console.log('\n[library] marks on the editor\'s scrubber, through clip timing');
   {
     const { page, errors } = await openPage(browser, editorPage(macUrl, 'local-clip'), { width: 1100, height: 700 });
     await page.waitForFunction('Boolean(globalThis.__kinect?.timeline?.transport())', null, { timeout: 40000 });
@@ -4104,50 +5029,52 @@ async function runChecks() {
     check(flat[flat.length - 1]?.beyond === true,
       'and a mark the edit never reaches is drawn at the edge as unreachable rather than dropped');
 
-    // The probe has to stand where a wrong implementation would disagree.
-    const KEYS = [{ t: 0, value: 0 }, { t: 4, value: 0.6 }, { t: 6, value: 2.4 }];
-    await page.evaluate(`globalThis.__kinect.keyframes.setRetime({ rate: 1, keys: ${JSON.stringify(KEYS)} })`);
+    // The probe has to stand where source time, clip-local time and project time all disagree.
+    const TIMING = { start: 2, length: 10, speed: 0.5, sourceStart: 0.6 };
+    await page.evaluate(`(() => {
+      const k = globalThis.__kinect;
+      const body = k.library.serialiseProjectBody();
+      Object.assign(body.clips[0], ${JSON.stringify(TIMING)});
+      k.library.restoreProject(body);
+      k.editor.selectClipRow(body.clips[0].id);
+    })()`);
     await page.evaluate('globalThis.__kinect.timeline.settled()');
-    const retimed = await page.evaluate('globalThis.__kinect.library.markTicks()');
+    await page.waitForFunction(
+      (count) => globalThis.__kinect.library.marks().length === count,
+      flat.length,
+      { timeout: 15000 },
+    );
+    const timed = await page.evaluate('globalThis.__kinect.library.markTicks()');
     const shown = await page.evaluate('globalThis.__kinect.timeline.read()');
-    check(retimed.length === flat.length, 'a retime does not lose a tick');
+    check(timed.length === flat.length, 'a speed and in-point change does not lose a tick');
 
     // Asserted against positions computed here, not against "they moved".
-    const programOf = (sourceSec) => {
-      if (sourceSec <= KEYS[0].value) return KEYS[0].t;
-      for (let i = 0; i < KEYS.length - 1; i++) {
-        if (KEYS[i + 1].value < sourceSec) continue;
-        const span = (KEYS[i + 1].value - KEYS[i].value) / (KEYS[i + 1].t - KEYS[i].t);
-        return KEYS[i].t + (sourceSec - KEYS[i].value) / span;
-      }
-      const last = KEYS.length - 1;
-      const span = (KEYS[last].value - KEYS[last - 1].value) / (KEYS[last].t - KEYS[last - 1].t);
-      return KEYS[last].t + (sourceSec - KEYS[last].value) / span;
-    };
+    const programOf = (sourceSec) => TIMING.start + (sourceSec - TIMING.sourceStart) / TIMING.speed;
     const pct = (x) => Math.max(0, Math.min(1, x)) * 100;
     const expected = marks.map((m) => pct(programOf(m.sourceMs / 1000) / shown.duration));
-    // Where the wrong implementation would draw each tick.
+    // Where the mutation draws each tick when it treats source seconds as project seconds.
     const naive = marks.map((m) => pct(m.sourceMs / 1000 / shown.duration));
-    const off = marks.map((_, i) => Math.abs((retimed[i]?.left ?? Infinity) - expected[i]));
+    const off = marks.map((_, i) => Math.abs((timed[i]?.left ?? Infinity) - expected[i]));
     const discriminating = marks.map((_, i) => i).filter((i) => Math.abs(expected[i] - naive[i]) > 5);
     check(discriminating.length >= 2,
       'at least two marks land somewhere the source fraction cannot, which is what makes them probes',
-      marks.map((m, i) => `${(m.sourceMs / 1000).toFixed(1)}s: curve ${expected[i].toFixed(1)}% against fraction ${naive[i].toFixed(1)}%`).join('; '));
+      marks.map((m, i) => `${(m.sourceMs / 1000).toFixed(1)}s: timed ${expected[i].toFixed(1)}% against fraction ${naive[i].toFixed(1)}%`).join('; '));
     check(discriminating.every((i) => off[i] < 1.5),
-      'and each tick sits where the curve puts it rather than where the fraction would',
-      marks.map((m, i) => `${(m.sourceMs / 1000).toFixed(1)}s -> ${retimed[i]?.left?.toFixed(1) ?? 'missing'}% (want ${expected[i].toFixed(1)}%)`).join('; '));
+      'and each tick sits where the clip placement, speed and in-point put it',
+      marks.map((m, i) => `${(m.sourceMs / 1000).toFixed(1)}s -> ${timed[i]?.left?.toFixed(1) ?? 'missing'}% (want ${expected[i].toFixed(1)}%)`).join('; '));
 
     // A mark written from the editor lands in the take's sidecar.
-    await page.evaluate('globalThis.__kinect.timeline.transport().seek(1.0)');
+    const MARK_PROGRAM_SEC = 3.0;
+    await page.evaluate(`globalThis.__kinect.timeline.transport().seek(${MARK_PROGRAM_SEC})`);
     await page.evaluate('globalThis.__kinect.timeline.settled()');
     await page.evaluate('globalThis.__kinect.library.markHere()');
-    const written = (await getJson(`${macUrl}/capture/local-clip/marks`)).marks;
-    check(written.length === 5, 'pressing mark writes to the take\'s sidecar', `${written.length} marks now`);
-    const sourceAt1 = await page.evaluate('globalThis.__kinect.timeline.retime.sourceSecAt(1.0)');
+    const written = (await getJson(`${captureAt(macUrl, macCaps, 'local-clip')}/marks`)).marks;
+    check(written.length === 5, 'pressing mark writes to the take\'s log', `${written.length} marks now`);
+    const sourceAtMark = await page.evaluate('globalThis.__kinect.timeline.read().sourceSec');
     const fresh = written.find((m) => !['k0', 'k1', 'k2', 'kBeyond'].includes(m.id));
-    check(Math.abs(fresh.sourceMs - sourceAt1 * 1000) < 40,
+    check(Math.abs(fresh.sourceMs - sourceAtMark * 1000) < 40,
       'and it is stamped in source milliseconds rather than program time',
-      `${fresh.sourceMs}ms against source ${(sourceAt1 * 1000).toFixed(0)}ms at program 1.0s`);
+      `${fresh.sourceMs}ms against source ${(sourceAtMark * 1000).toFixed(0)}ms at program ${MARK_PROGRAM_SEC.toFixed(1)}s`);
 
     check(errors.length === 0, 'the marks path raises no page errors', errors.slice(0, 2).join(' | '));
     await page.close();
@@ -4196,7 +5123,7 @@ async function runChecks() {
       '  while one that fits is stopped only by the node stub being unreachable, so the gate is a gate rather than downloads switched off',
       (fits ?? 'IT DOWNLOADED').slice(0, 90));
 
-    const shared = 'mac-name-for-it';
+    const shared = encodeURIComponent(hashOfTake(macCaps, 'mac-name-for-it'));
     await post(`${macUrl}/library/sync-marks/${shared}`, {});
     const merged = (await getJson(`${macUrl}/capture/${shared}/marks`)).marks;
     check(merged.length === 2 && merged.every((m) => m.id !== 'n3'),
@@ -4293,6 +5220,284 @@ async function runChecks() {
       'and the library no longer lists it');
   }
 
+  console.log('\n[library] a captures directory that cannot be read is reported, and delete does not act on the silence');
+  {
+    const silentDir = join(WORK, 'silent-node-captures');
+    const keptDir = join(WORK, 'silent-mac-captures');
+    for (const d of [silentDir, keptDir]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    writeTake(silentDir, 'on-both-machines', { frames: 6 });
+    cpSync(join(silentDir, 'on-both-machines.knct'), join(keptDir, 'on-both-machines.knct'));
+    // Offsets the rename and preset sections have already released.
+    const silentUrl = await startServer(root, ['--captures', silentDir, '--name', 'pi-silent',
+      '--presets', join(WORK, 'silent-presets'), '--projects', join(WORK, 'silent-projects')], MAC_PORT + 14);
+    const keptUrl = await startServer(root, ['--captures', keptDir, '--name', 'mac-kept',
+      '--node', silentUrl, '--node-name', 'pi-silent',
+      '--presets', join(WORK, 'kept-presets'), '--projects', join(WORK, 'kept-projects')], MAC_PORT + 15);
+    const shared = (await getJson(`${keptUrl}/library/all`)).takes.find((t) => t.id === 'on-both-machines');
+    const armed = await post(`${keptUrl}/library/delete/on-both-machines`, { hash: shared?.hash, confirm: true });
+    check(shared?.state === 'both' && /exists on pi-silent as well/.test(armed.error ?? ''),
+      'a take on both machines, whose delete the node\'s answer refuses, which is the refusal the rows below need armed',
+      `${shared?.state}: ${(armed.error ?? 'ACCEPTED').slice(0, 60)}`);
+
+    // Replaced under the running server, because `startServer` waits for `/library/takes` to answer
+    // 200. A regular file gives ENOTDIR from `readdir` on every platform and for root, where a chmod
+    // does neither.
+    rmSync(silentDir, { recursive: true, force: true });
+    writeFileSync(silentDir, 'a file where the captures directory was\n');
+    const listing = await fetch(`${silentUrl}/library/takes`);
+    const listingBody = await listing.json().catch(() => null);
+    check(!listing.ok && /captures directory .* cannot be read: ENOTDIR/.test(listingBody?.error ?? '')
+      && listingBody?.takes === undefined,
+      '/library/takes on a node whose captures directory cannot be read answers an error rather than an empty list',
+      `${listing.status} ${JSON.stringify(listingBody).slice(0, 110)}`);
+    {
+      const { page: shelf, errors: shelfErrors } = await openPage(browser, libraryPage(silentUrl));
+      const said = await shelf.waitForFunction(
+        '(() => { const t = document.getElementById("note")?.textContent ?? ""; return /cannot be read/.test(t) ? t : null; })()',
+        null, { timeout: 20000 },
+      ).then((h) => h.jsonValue(), () => null);
+      const drawn = await shelf.evaluate('document.getElementById("note")?.textContent ?? ""');
+      check(said !== null && /ENOTDIR/.test(said),
+        'and the gallery on that node shows the server\'s own sentence rather than an empty shelf',
+        JSON.stringify((said ?? drawn).slice(0, 110)));
+      const thrown = shelfErrors.filter((e) => !/Failed to load resource/.test(e));
+      check(thrown.length === 0, 'and saying so raises no page error', thrown.slice(0, 2).join(' | ') || 'none beyond the 500');
+      await shelf.close();
+    }
+    // Reclaim first: it removes nothing here, so a mutated build that lets the delete below
+    // through cannot take this row's fixture with it.
+    const reclaim = await post(`${keptUrl}/library/reclaim/on-both-machines`, {});
+    check(/pi-silent could not be asked/.test(reclaim.error ?? ''),
+      'a reclaim against that node says the node could not be asked, rather than that the take is not on it',
+      (reclaim.error ?? JSON.stringify(reclaim)).slice(0, 110));
+    const refused = await post(`${keptUrl}/library/delete/on-both-machines`, { hash: shared?.hash, confirm: true });
+    check(/pi-silent could not be asked/.test(refused.error ?? '') && existsSync(join(keptDir, 'on-both-machines.knct')),
+      'a delete of a take on both machines is refused when the node cannot say what it holds, and this machine\'s copy is still on disk',
+      (refused.error ?? `REMOVED ${JSON.stringify(refused)}`).slice(0, 110));
+
+    // ENOENT is still an absence, which is the branch the shared rule keeps.
+    rmSync(silentDir, { force: true });
+    const absent = await fetch(`${silentUrl}/library/takes`);
+    const absentBody = await absent.json().catch(() => null);
+    check(absent.ok && Array.isArray(absentBody?.takes) && absentBody.takes.length === 0,
+      'while a captures directory removed from under the server still answers 200 with no takes',
+      `${absent.status} ${JSON.stringify(absentBody?.takes ?? absentBody).slice(0, 60)}`);
+    mkdirSync(silentDir, { recursive: true });
+    const empty = await getJson(`${silentUrl}/library/takes`).catch(() => null);
+    check(Array.isArray(empty?.takes) && empty.takes.length === 0,
+      'and an empty one answers an empty library', JSON.stringify(empty?.takes ?? empty).slice(0, 60));
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 14 || sv.port === MAC_PORT + 15)) {
+      p.child.kill('SIGKILL');
+    }
+  }
+
+  console.log('\n[library] delete unlinks the file it hashed, not whatever holds the name once the hash is done');
+  {
+    // The staged module rather than a route, so a mutated run tests the mutated code and the race
+    // is two renames this process lands, not a request's timing across a socket.
+    const lib = await import(pathToFileURL(join(root, 'server/library.js')).href);
+    const { fstatSync } = await import('node:fs');
+    const raceDir = join(WORK, 'delete-race');
+    rmSync(raceDir, { recursive: true, force: true });
+    mkdirSync(raceDir, { recursive: true });
+    // Sized by frames so the hash outlasts two renames, about 200MB of the sample.
+    writeTake(raceDir, 'asked-to-go', { frames: 400 });
+    writeTake(raceDir, 'never-named', { frames: 5 });
+    // The listing the delete is pressed from, which also builds both indexes: `renameTake` reads
+    // `cachedIndex`, and a cold one is a full parse that would outlast the hash it races.
+    const listed = await lib.scanTakes(raceDir);
+    const asked = listed.takes.find((t) => t.id === 'asked-to-go');
+    const stranger = listed.takes.find((t) => t.id === 'never-named');
+    const inode = statSync(join(raceDir, 'asked-to-go.knct'));
+    // Whether this process holds the take open, read off its own descriptor table.
+    const holding = () => readdirSync('/dev/fd').some((n) => {
+      try {
+        const st = fstatSync(Number(n));
+        return st.dev === inode.dev && st.ino === inode.ino;
+      } catch {
+        return false;
+      }
+    });
+    const heldBefore = holding();
+    let settled = false;
+    const pending = lib.removeTake(raceDir, 'asked-to-go', { hash: asked.hash })
+      .then((done) => ({ done }), (err) => ({ error: err.message }))
+      .finally(() => { settled = true; });
+    for (let i = 0; i < 2000 && !holding() && !settled; i++) await new Promise((r) => { setImmediate(r); });
+    // The descriptor is what says the hash has begun; before it, the removal would hash the take
+    // renamed in and be refused by the hash rather than by the question this section asks.
+    const opened = !heldBefore && holding();
+    // Renamed from outside the server, the way a file manager renames: `renameTake` takes the
+    // take's lock and waits for the removal, so the only rename that can land inside the hash is
+    // one no lock sees, and that is the rename this re-check is for.
+    let renameRefused = null;
+    try {
+      renameSync(join(raceDir, 'asked-to-go.knct'), join(raceDir, 'moved-away.knct'));
+      renameSync(join(raceDir, 'never-named.knct'), join(raceDir, 'asked-to-go.knct'));
+    } catch (err) {
+      renameRefused = err.message;
+    }
+    const inside = opened && renameRefused === null && !settled;
+    const outcome = await pending;
+    const hashOf = async (id) => (existsSync(join(raceDir, `${id}.knct`))
+      ? lib.hashFile(join(raceDir, `${id}.knct`)) : null);
+    if (!inside) {
+      skipped.push('the delete-race refusal, whose renames did not land inside the hash');
+      console.log(`  ...   the renames did not land inside the hash (${heldBefore ? 'the take was already held open'
+        : !opened ? 'the removal never opened the take' : renameRefused ?? 'the removal settled first'}), so the race was not entered`);
+    } else {
+      check(/renamed or replaced while it was being hashed/.test(outcome.error ?? ''),
+        'a delete is refused when its take is renamed away, and another renamed into its name, while it hashes',
+        (outcome.error ?? `REMOVED ${JSON.stringify(outcome.done)}`).slice(0, 100));
+      check(await hashOf('asked-to-go') === stranger.hash,
+        'and the take renamed into that name is still on disk, which is the footage an unlink by name takes',
+        `asked-to-go.knct now hashes ${String(await hashOf('asked-to-go')).slice(7, 19)}, the stranger ${stranger.hash.slice(7, 19)}`);
+      check(await hashOf('moved-away') === asked.hash,
+        'while the take the delete named survives under its new name, because nothing was removed',
+        String(await hashOf('moved-away')).slice(7, 19));
+    }
+    rmSync(raceDir, { recursive: true, force: true });
+  }
+
+  console.log('\n[library] a take\'s marks go with it, and a reclaim brings the node\'s marks here first');
+  {
+    const marksNodeDir = join(WORK, 'marks-node-captures');
+    const marksMacDir = join(WORK, 'marks-mac-captures');
+    for (const d of [marksNodeDir, marksMacDir]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    // Distinct frame counts, so each pair is its own hash and one reclaim cannot reach another.
+    for (const [id, frames] of [['kept-here', 6], ['fails-to-sync', 7], ['moves-mid-reclaim', 8], ['gone-mid-reclaim', 10]]) {
+      writeTake(marksNodeDir, id, { frames });
+      cpSync(join(marksNodeDir, `${id}.knct`), join(marksMacDir, `${id}.knct`));
+    }
+    writeTake(marksMacDir, 'last-copy', { frames: 9 });
+    writeMarkLog(marksMacDir, 'last-copy',
+      markLine({ id: 'lc1', sourceMs: 60, label: 'on the last copy', at: 1000 }));
+    const pairHash = Object.fromEntries(['kept-here', 'moves-mid-reclaim', 'gone-mid-reclaim', 'last-copy']
+      .map((id) => [id, hashOfTake(marksMacDir, id)]));
+    const logAt = (dir, id) => join(dir, 'marks', `${pairHash[id].slice('sha256:'.length)}.jsonl`);
+    const marksNodeUrl = await startServer(root, ['--captures', marksNodeDir, '--name', 'pi-marks',
+      '--presets', join(WORK, 'marks-node-presets'), '--projects', join(WORK, 'marks-node-projects')], MAC_PORT + 12);
+    // The link between the two machines, passed through except where a row needs it to fail or to
+    // hold. Inside the reserved span and closed before the section that needs +16 unanswered.
+    const reached = [];
+    let linkMode = 'pass';
+    let releaseHeld = null;
+    const link = await new Promise((done) => {
+      const srv = createServer(async (req, res) => {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        reached.push(`${req.method} ${req.url}`);
+        if (/\/marks\/log(\?|$)/.test(req.url) && linkMode === 'fail') {
+          res.writeHead(500, { 'content-type': 'application/json' })
+            .end('{"error":"the card holding the marks is not answering"}');
+          return;
+        }
+        if (/\/marks\/log(\?|$)/.test(req.url) && linkMode === 'hold') await new Promise((r) => { releaseHeld = r; });
+        try {
+          const up = await fetch(`${marksNodeUrl}${req.url}`, {
+            method: req.method,
+            headers: { 'content-type': req.headers['content-type'] ?? 'application/json' },
+            body: req.method === 'GET' || req.method === 'HEAD' ? undefined : Buffer.concat(chunks),
+          });
+          res.writeHead(up.status, { 'content-type': up.headers.get('content-type') ?? 'application/json' })
+            .end(Buffer.from(await up.arrayBuffer()));
+        } catch {
+          res.writeHead(502).end();
+        }
+      });
+      srv.listen(MAC_PORT + 16, '127.0.0.1', () => done(srv));
+    });
+    const marksMacUrl = await startServer(root, ['--captures', marksMacDir, '--name', 'mac-marks',
+      '--node', `http://127.0.0.1:${MAC_PORT + 16}`, '--node-name', 'pi-marks',
+      '--presets', join(WORK, 'marks-mac-presets'), '--projects', join(WORK, 'marks-mac-projects')], MAC_PORT + 13);
+    const macMarks = async (id) => ((await getJson(`${marksMacUrl}/capture/${encodeURIComponent(pairHash[id] ?? hashOfTake(marksMacDir, id))}/marks`)).marks ?? [])
+      .map((m) => m.label);
+    const askedToDelete = (id) => reached.some((r) => r === `POST /library/delete/${id}`);
+    for (const id of ['kept-here', 'fails-to-sync', 'moves-mid-reclaim', 'gone-mid-reclaim']) {
+      await post(`${captureAt(marksNodeUrl, marksNodeDir, id)}/marks`,
+        { marks: [{ id: `on-node-${id}`, sourceMs: 90, label: `pressed on the node for ${id}`, at: 7000 }] });
+    }
+    const pairs = (await getJson(`${marksMacUrl}/library/all`)).takes.filter((t) => t.state === 'both');
+    check(pairs.length === 4 && (await macMarks('kept-here')).length === 0,
+      'four takes on both machines, each with a mark pressed only on the node',
+      `${pairs.length} on both, ${(await macMarks('kept-here')).length} marks here on kept-here`);
+
+    const kept = await post(`${marksMacUrl}/library/reclaim/kept-here`, {});
+    check(kept.reclaimed && (await macMarks('kept-here')).includes('pressed on the node for kept-here'),
+      'a reclaim brings the node\'s marks onto the copy it keeps before it asks the node to remove its own',
+      kept.error ? kept.error.slice(0, 90) : `${kept.marksMerged} merged, here: ${JSON.stringify(await macMarks('kept-here'))}`);
+    check(!existsSync(join(marksNodeDir, 'kept-here.knct')) && !existsSync(logAt(marksNodeDir, 'kept-here')),
+      'and the node\'s marks log went with its copy',
+      readdirSync(marksNodeDir).sort().join(' '));
+
+    linkMode = 'fail';
+    const unread = await post(`${marksMacUrl}/library/reclaim/fails-to-sync`, {});
+    check(/marks on pi-marks's copy could not be read/.test(unread.error ?? '') && !askedToDelete('fails-to-sync')
+      && existsSync(join(marksNodeDir, 'fails-to-sync.knct')),
+      'a reclaim whose node marks cannot be read is refused, and the node is never asked to remove its copy',
+      `${(unread.error ?? JSON.stringify(unread)).slice(0, 80)}; delete asked: ${askedToDelete('fails-to-sync')}`);
+
+    // The node's marks held on the link while this machine's copy changes under the reclaim.
+    const heldReclaim = async (id, meanwhile) => {
+      releaseHeld = null;
+      linkMode = 'hold';
+      const racing = post(`${marksMacUrl}/library/reclaim/${id}`, {});
+      for (let i = 0; i < 200 && releaseHeld === null; i++) await new Promise((r) => { setTimeout(r, 25); });
+      const holding = releaseHeld !== null;
+      const done = holding ? await meanwhile() : { error: 'the link never held the marks log' };
+      linkMode = 'pass';
+      releaseHeld?.();
+      return { holding, done, raced: await racing };
+    };
+    const moving = await heldReclaim('moves-mid-reclaim', () => post(`${marksMacUrl}/library/rename/moves-mid-reclaim`,
+      { hash: pairHash['moves-mid-reclaim'], to: 'moved-mid-reclaim' }));
+    if (!moving.holding || moving.done.id !== 'moved-mid-reclaim') {
+      skipped.push('the renamed-mid-reclaim row, whose rename did not land while the node marks were held');
+      console.log(`  ...   the rename did not land inside the reclaim (${(moving.done.error ?? 'no hold').slice(0, 60)})`);
+    } else {
+      check(Boolean(moving.raced.reclaimed) && askedToDelete('moves-mid-reclaim')
+        && (await macMarks('moves-mid-reclaim')).includes('pressed on the node for moves-mid-reclaim'),
+      'a reclaim whose kept copy is renamed while the node\'s marks are on the way goes through, and the marks are on the copy under its new name',
+      `${(moving.raced.error ?? `${moving.raced.marksMerged} merged`).slice(0, 80)}; delete asked: ${askedToDelete('moves-mid-reclaim')}`);
+    }
+    const going = await heldReclaim('gone-mid-reclaim', async () => {
+      // Deleted outside this program, which takes no lock and leaves no name behind.
+      rmSync(join(marksMacDir, 'gone-mid-reclaim.knct'));
+      return { id: 'gone' };
+    });
+    if (!going.holding) {
+      skipped.push('the deleted-mid-reclaim refusal, whose delete did not land while the node marks were held');
+      console.log('  ...   the delete did not land inside the reclaim');
+    } else {
+      check(/removed here while the reclaim ran/.test(going.raced.error ?? '') && !askedToDelete('gone-mid-reclaim')
+        && existsSync(join(marksNodeDir, 'gone-mid-reclaim.knct')),
+      'and one whose kept copy is deleted in that window is refused, and the node is not asked to delete what is now the last copy',
+      `${(going.raced.error ?? JSON.stringify(going.raced)).slice(0, 80)}; delete asked: ${askedToDelete('gone-mid-reclaim')}`);
+    }
+
+    const lastCopy = (await getJson(`${marksMacUrl}/library/takes`)).takes.find((t) => t.id === 'last-copy');
+    const gone = await post(`${marksMacUrl}/library/delete/last-copy`, { hash: lastCopy?.hash, confirm: true });
+    check(gone.removed === 'last-copy.knct' && !existsSync(logAt(marksMacDir, 'last-copy')),
+      'a delete of the last copy removes its marks log with it',
+      gone.error ? gone.error.slice(0, 90) : readdirSync(marksMacDir).sort().join(' '));
+    writeTake(marksMacDir, 'last-copy', { frames: 3 });
+    const reborn = (await getJson(`${marksMacUrl}/library/takes`)).takes.find((t) => t.id === 'last-copy');
+    check(reborn !== undefined && reborn.marks.length === 0,
+      'so a take given that name later starts with no marks, rather than with the deleted take\'s',
+      JSON.stringify(reborn?.marks?.map((m) => m.label) ?? null));
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 12 || sv.port === MAC_PORT + 13)) {
+      p.child.kill('SIGKILL');
+    }
+    link.closeAllConnections();
+    await new Promise((done) => { link.close(done); });
+  }
+
   console.log('\n[library] every route that changes something requires its method, its type and its origin');
   {
     const guardDir = join(WORK, 'guarded');
@@ -4343,8 +5548,9 @@ async function runChecks() {
     console.log(`  ...   ${table.length} routes, ${mutating.length} mutating, `
       + `${writeOnly.length} of those write-only, ${readable.length} answering GET`);
 
-    const concrete = (path, { id = 'no-such-take', name = 'no-such-document' } = {}) => {
+    const concrete = (path, { id = 'no-such-take', hash = NO_SUCH_HASH, name = 'no-such-document' } = {}) => {
       const built = path
+        .replace(':hash', encodeURIComponent(hash))
         .replace(':id', id)
         .replace(':name', name)
         .replace(':hash', '0'.repeat(64))
@@ -4403,7 +5609,7 @@ async function runChecks() {
     const SEEDED_PROJECT = {
       version: PROJECT_VERSION,
       look: { params: {}, tracks: {} },
-      composition: { retime: { rate: 1, keys: [] }, camera: [] },
+      composition: { camera: [] },
       outputSize: '1920x1080',
       appliedPreset: null,
     };
@@ -4450,7 +5656,8 @@ async function runChecks() {
     const descriptorsNow = async () => (await getJson(`${shootUrl}/library/descriptors`)).real;
 
     await fetch(`${shootUrl}/library/all`).catch(() => {});
-    await fetch(`${shootUrl}/capture/a-closed-take/index`).catch(() => {});
+    const closedHash = hashOfTake(shootDir, 'a-closed-take');
+    await fetch(`${shootUrl}/capture/${encodeURIComponent(closedHash)}/index`).catch(() => {});
 
     const before = await snapshot();
     const writesBefore = JSON.stringify(await getJson(`${shootUrl}/library/writes`));
@@ -4460,12 +5667,14 @@ async function runChecks() {
     for (const r of readable) {
       swept.add(r.path);
       for (const id of [shooting.takeId, 'a-closed-take']) {
+        // The open take has no hash, so the hash routes are asked for one nothing holds beside it.
+        const hash = id === 'a-closed-take' ? closedHash : NO_SUCH_HASH;
         for (const name of ['seeded-project', 'nothing']) {
-          const path = concrete(r.path, { id, name: r.path.startsWith('/presets') ? name.replace('project', 'preset') : name });
+          const path = concrete(r.path, { id, hash, name: r.path.startsWith('/presets') ? name.replace('project', 'preset') : name });
           if (path === null) { unbuildable.push(r.path); continue; }
           for (const method of ['GET', 'HEAD']) {
             const code = await fetch(shootUrl + path, { method }).then((x) => x.status).catch(() => 0);
-            // 409 is `beingRecorded` answering before the handler runs.
+            // 409 is a refusal answering before the handler runs.
             if (code !== 409) reached.set(r.path, `${code} on ${id === shooting.takeId ? 'the open take' : 'a closed take'}`);
           }
         }
@@ -4515,12 +5724,12 @@ async function runChecks() {
     for (const p of servers.filter((sv) => sv.port === MAC_PORT + 9)) p.child.kill('SIGKILL');
 
     // Marks used to be creatable for a take that does not exist.
-    const ghost = await post(`${guardUrl}/capture/nosuchtake/marks`,
+    const ghost = await post(`${guardUrl}/capture/${encodeURIComponent(NO_SUCH_HASH)}/marks`,
       { marks: [{ id: 'x', sourceMs: 1, at: 1, label: 'planted' }] });
     check(/nothing to mark|no take/.test(ghost.error ?? ''),
-      'marks on a take that is not here are refused rather than creating its sidecar',
+      'marks on a take that is not here are refused rather than creating its log',
       (ghost.error ?? 'ACCEPTED').slice(0, 70));
-    check(!existsSync(join(guardDir, 'nosuchtake.marks.jsonl')),
+    check(!existsSync(join(guardDir, 'marks', `${NO_SUCH_HASH.slice('sha256:'.length)}.jsonl`)),
       'and nothing was written to the captures directory',
       readdirSync(guardDir).join(' '));
 
@@ -4629,7 +5838,7 @@ async function runChecks() {
     // Read exactly enough to know the response started.
     let received = 0;
     sock.on('data', (c) => { received += c.length; sock.pause(); });
-    sock.write(`GET /capture/leased-take/frames/0-${take.frames - 1} HTTP/1.1\r\nHost: localhost:${MAC_PORT + 11}\r\nConnection: close\r\n\r\n`);
+    sock.write(`GET /capture/${encodeURIComponent(take.hash)}/frames/0-${take.frames - 1} HTTP/1.1\r\nHost: localhost:${MAC_PORT + 11}\r\nConnection: close\r\n\r\n`);
     await new Promise((done) => { setTimeout(done, 1200); });
     const held = await getJson(`${url}/library/descriptors`);
     check(received > 0 && received < take.bytes * 0.9,
@@ -4668,10 +5877,10 @@ async function runChecks() {
 
   console.log('\n[library] the recorder holds its marks and bounds its buffer');
   {
-    // A take whose sidecar was never written has no marks.
+    // A take whose log was never written has no marks.
     const marksOf = (id) => {
       try {
-        return readFileSync(join(WORK, 'recorder-unit', `${id}.marks.jsonl`), 'utf8').trim().split('\n').filter(Boolean);
+        return readFileSync(markLogFile(join(WORK, 'recorder-unit'), id), 'utf8').trim().split('\n').filter(Boolean);
       } catch {
         return [];
       }
@@ -4683,12 +5892,20 @@ async function runChecks() {
     const hello = SRC.hello.toString('utf8');
 
     // A take that dies mid-write used to null itself without flushing.
+    // Until what was written has reached the file: a take's marks are filed by its hash, and a take
+    // that died before its hello landed is one no hash tells from another.
+    const landed = async (rec) => {
+      for (let i = 0; i < 200 && (rec.take?.stream.writableLength ?? 0) > 0; i++) {
+        await new Promise((done) => { setTimeout(done, 5); });
+      }
+    };
     const one = new Recorder({ dir: recDir });
     await one.start(null);
     one.open(hello);
     const firstTake = one.state.takeId;
     one.write(SRC.frames[0]);
     one.mark(1234, 'the moment');
+    await landed(one);
     one.take.stream.destroy(new Error('the card was pulled'));
     await new Promise((done) => { setTimeout(done, 400); });
     check(one.state.recording === false && one.state.armed === false,
@@ -4696,7 +5913,7 @@ async function runChecks() {
       JSON.stringify({ armed: one.state.armed, recording: one.state.recording }));
     const firstMarks = marksOf(firstTake);
     check(firstMarks.length === 1 && JSON.parse(firstMarks[0]).sourceMs === 1234,
-      'and the mark pressed during it is in that take\'s sidecar, written on the way down',
+      'and the mark pressed during it is in that take\'s log, filed under its hash on the way down',
       firstMarks.join(' ').slice(0, 70));
 
     // The other half: the next take must not inherit it.
@@ -4707,7 +5924,7 @@ async function runChecks() {
     two.write(SRC.frames[1]);
     await two.stop();
     check(secondTake !== firstTake, 'the next take is a different file', `${firstTake} then ${secondTake}`);
-    check(!existsSync(join(recDir, `${secondTake}.marks.jsonl`)),
+    check(marksOf(secondTake).length === 0,
       'and it carries no marks at all - the orphaned one did not travel forward into footage it does not describe');
 
     const three = new Recorder({ dir: recDir });
@@ -4716,6 +5933,7 @@ async function runChecks() {
     const thirdTake = three.state.takeId;
     three.write(SRC.frames[2]);
     three.mark(777, 'flagged as it died');
+    await landed(three);
     const stream = three.take.stream;
     const closing = three.close('testing a close that fails').catch((err) => err);
     stream.destroy(new Error('the card went away during the close'));
@@ -4726,6 +5944,24 @@ async function runChecks() {
     check(thirdMarks.length === 1 && JSON.parse(thirdMarks[0]).sourceMs === 777,
       'and the marks are still written, because the flush hangs off the take rather than off the close succeeding',
       thirdMarks.join(' ').slice(0, 70));
+
+    // A take that dies before its hello lands: its file is empty, and every such file hashes alike.
+    const unlanded = new Recorder({ dir: recDir });
+    await unlanded.start(null);
+    unlanded.open(hello);
+    const emptyTake = unlanded.state.takeId;
+    unlanded.mark(55, 'on nothing');
+    const said = [];
+    const quiet = console.error;
+    console.error = (...args) => { said.push(args.join(' ')); };
+    unlanded.take.stream.destroy(new Error('the card was pulled before a byte landed'));
+    await new Promise((done) => { setTimeout(done, 400); });
+    console.error = quiet;
+    const emptyLog = join(recDir, 'marks', `${createHash('sha256').digest('hex')}.jsonl`);
+    const emptySize = existsSync(join(recDir, `${emptyTake}.knct`)) ? statSync(join(recDir, `${emptyTake}.knct`)).size : -1;
+    check(emptySize === 0 && !existsSync(emptyLog) && said.some((line) => /not filed/.test(line)),
+      'a take that dies before its hello lands files none of its marks, and says so, because every such take hashes alike',
+      `${emptySize} bytes; empty-hash log ${existsSync(emptyLog) ? 'written' : 'absent'}; ${said.find((line) => /not filed/.test(line))?.slice(0, 60) ?? 'nothing said'}`);
 
     // The requirement this arm holds the ceiling to is written down here rather than imported.
     const CEILING_REQUIRED = 64 * 1024 * 1024;
@@ -4794,6 +6030,16 @@ async function runChecks() {
     check(closed.frames === BURST - midBurst.dropped,
       'with the frames that landed being the ones that were accepted - a dropped frame is a gap, not a miscount',
       `${closed.frames} scanned, ${BURST} offered, ${midBurst.dropped} dropped`);
+    // The count outlives this process. Both out of the staged tree, like `Recorder` above.
+    const dropRecords = marksOf(burstTake).map((line) => JSON.parse(line)).filter((rec) => rec.kind === 'drop');
+    check(dropRecords.length === 1 && dropRecords[0].dropped === midBurst.dropped,
+      'the take\'s marks log records how many frames it dropped, so the gap is still known once the process that counted it has gone',
+      `${dropRecords.length} drop records, ${JSON.stringify(dropRecords[0] ?? null)}, ${midBurst.dropped} dropped`);
+    const { scanTakes } = await import(pathToFileURL(join(root, 'server/library.js')).href);
+    const listedBurst = (await scanTakes(recDir)).takes.find((t) => t.id === burstTake);
+    check(listedBurst?.dropped === midBurst.dropped,
+      'and the library lists that take with the same count',
+      `listed ${listedBurst?.dropped}, ${midBurst.dropped} dropped`);
 
     // `write` pushes a frame end-offset per frame and `settle` is what removes them.
     const PER_CHUNK = 500;
@@ -4944,6 +6190,536 @@ async function runChecks() {
     for (const p of servers.filter((sv) => sv.port === MAC_PORT + 12)) p.child.kill('SIGKILL');
   }
 
+  // A server this run SIGKILLed is gone once it has exited, not once it was signalled, and the
+  // next section to bind its port before then finds the port held.
+  const exitedOn = (port) => Promise.all(servers.filter((sv) => sv.port === port)
+    .map((sv) => (sv.child.exitCode !== null || sv.child.signalCode !== null ? null
+      : new Promise((done) => { sv.child.once('exit', done); }))));
+
+  console.log('\n[library] a take stays the recorder\'s until its close finishes, after a restart has opened the next');
+  {
+    // The window: a colour toggle restarts the grabber, `split()` closes take A unawaited, and the
+    // replacement's hello opens take B about 250ms later while A's index is still being built. The
+    // index build is a full read plus sha256, so the window scales with A, and A is sized by frames:
+    // 5000 frames of the synthetic sample is about 2.2 GB, read back warm because it was just
+    // written. B opens about 0.45s after the restart; at 3000 frames A's close ran 0.73s, which
+    // left 0.28s of overlap, too little to sample on a contended machine.
+    const OVERLAP_FRAMES = 5000;
+    const INSIDE_FLOOR = 5;
+    // A sample counts as inside only if it started this long before A's "closed" line landed here:
+    // the line crosses a pipe, so a request fired just before it may be answered after the close.
+    const MARGIN_MS = 50;
+    const overlapDir = join(WORK, 'restart-overlap');
+    rmSync(overlapDir, { recursive: true, force: true });
+    mkdirSync(overlapDir, { recursive: true });
+    const overlapUrl = await startServer(root, [
+      '--captures', overlapDir, '--name', 'restarting', '--record', '--no-color',
+      '--grabber', `${join(REPO, 'tools/fake-grabber.mjs')} --source ${SAMPLE} --fps 400`,
+    ], MAC_PORT + 17);
+    // Timed where each line lands in this process, which is the clock the samples are timed on.
+    const began = Date.now();
+    const clock = () => Date.now() - began;
+    const opened = new Map();
+    const closed = new Map();
+    let partial = '';
+    servers.find((sv) => sv.port === MAC_PORT + 17).child.stdout.on('data', (chunk) => {
+      const lines = (partial + chunk.toString()).split('\n');
+      partial = lines.pop();
+      for (const line of lines) {
+        const m = /\[recorder\] take (\S+) (open|closed)/.exec(line);
+        if (m) (m[2] === 'open' ? opened : closed).set(m[1], { at: clock(), line });
+      }
+    });
+
+    // 12.5s at the nominal rate; the ceiling is for a contended machine where the grabber falls short.
+    let shooting = null;
+    for (let i = 0; i < 1800; i++) {
+      await new Promise((done) => { setTimeout(done, 50); });
+      shooting = await getJson(`${overlapUrl}/record/state`);
+      if (shooting.recording && shooting.frames >= OVERLAP_FRAMES) break;
+    }
+    check(shooting?.recording === true && shooting.frames >= OVERLAP_FRAMES,
+      `a take of at least ${OVERLAP_FRAMES} frames is open, which is what gives its close a window to sample`,
+      `${shooting?.takeId}: ${shooting?.frames} frames, ${((shooting?.bytes ?? 0) / 1e9).toFixed(2)} GB`);
+    const takeA = shooting?.takeId;
+
+    // Every `/capture/` route names its take by content hash, off the table the server publishes,
+    // so a route added later under a name is caught by existing. A take the recorder owns has no
+    // hash, so no request can name it: asked for a hash that is not here, each route makes the
+    // resolver look through the directory, and the takes the recorder owns are the ones it skips.
+    const captureRoutes = (await getJson(`${overlapUrl}/library/routes`)).routes.filter((r) => r.path.startsWith('/capture/'));
+    check(captureRoutes.length > 0 && captureRoutes.every((r) => r.path.startsWith('/capture/:hash/')),
+      'every capture route names its take by content hash, so a take still being written, which has none, cannot be asked for',
+      captureRoutes.map((r) => r.path).join(' '));
+    const hashReads = captureRoutes
+      .filter((r) => r.read && !r.live)
+      .map((r) => r.path.replace(':hash', encodeURIComponent(NO_SUCH_HASH)).replace(':a-:b', '0-1').replace(':n', '0'))
+      .filter((path) => !path.includes(':'));
+    const routeAnswers = () => Promise.all(hashReads.map(async (path) => {
+      const res = await fetch(`${overlapUrl}${path}`);
+      await res.body?.cancel().catch(() => {});
+      return `${path.replace(encodeURIComponent(NO_SUCH_HASH), ':hash')} ${res.status}`;
+    }));
+    const whileOpen = await routeAnswers();
+
+    // The recording refusal under another spelling of the id, asked through the one route that takes
+    // a name straight to a path. Where the volume folds case it opens the same file.
+    const spelled = takeA?.toUpperCase();
+    if (!takeA || !existsSync(join(overlapDir, `${spelled}.knct`))) {
+      console.log('  ...  this volume does not fold case, so another spelling of the id names no file here');
+      skipped.push('the recording refusal under another spelling of the id (needs a case-insensitive volume)');
+    } else {
+      const unnamedSpelled = await post(`${overlapUrl}/library/remove-name/${spelled}`, { hash: null, keep: 'no-take-by-this-name' });
+      check(/being recorded right now/.test(unnamedSpelled.error ?? '') && !existsSync(join(overlapDir, `${takeA}.idx`))
+        && existsSync(join(overlapDir, `${takeA}.knct`)),
+      'the take being recorded is refused under another spelling of its id as well, and nothing scanned it - the recorder owns the file, not the name',
+      `${spelled}: ${(unnamedSpelled.error ?? 'ACCEPTED').slice(0, 60)}; ${readdirSync(overlapDir).sort().join(' ')}`);
+    }
+
+    // Fired without waiting on the last: under a broken guard a request inside the window blocks
+    // in a second full scan of A, and a sampler waiting on it stops sampling the window it measures.
+    const samples = [];
+    const inflight = [];
+    let walk = null;
+    await post(`${overlapUrl}/sensor/camera`, { color: true });
+    const giveUp = Date.now() + 30000;
+    while (!closed.has(takeA) && Date.now() < giveUp) {
+      const started = clock();
+      if (walk === null && [...opened.keys()].some((id) => id !== takeA)) {
+        walk = { started, answers: null };
+        inflight.push(routeAnswers().then((answers) => { walk.answers = answers; }));
+      }
+      inflight.push(Promise.all([getJson(`${overlapUrl}/library/takes`), getJson(`${overlapUrl}/record/state`)])
+        .then(([listed, state]) => {
+          const t = listed.takes.find((x) => x.id === takeA);
+          samples.push({ started, recording: t?.recording ?? null, hash: t?.hash ?? null, writing: state.writingIds });
+        }));
+      await new Promise((done) => { setTimeout(done, 25); });
+    }
+    await Promise.all(inflight);
+    // B is still being written, so a sidecar beside it now is a scan a request ran.
+    const takeBNow = [...opened.keys()].find((id) => id !== takeA) ?? null;
+    const bScanned = takeBNow !== null && existsSync(join(overlapDir, `${takeBNow}.idx`));
+    // Asked before B stops, so the answer is about A's close finishing and not about B's.
+    const afterA = await getJson(`${overlapUrl}/record/state`);
+    // B goes on recording at 400fps, so it is stopped before anything else reads this disk.
+    await post(`${overlapUrl}/record/stop`);
+    const takeB = [...opened.keys()].find((id) => id !== takeA) ?? null;
+    const bAt = takeB ? opened.get(takeB).at : null;
+    const aAt = closed.get(takeA)?.at ?? null;
+    const inWindow = (t) => bAt !== null && aAt !== null && t >= bAt && t <= aAt - MARGIN_MS;
+    const inside = samples.filter((s) => inWindow(s.started));
+    check(inside.length >= INSIDE_FLOOR && walk !== null && inWindow(walk.started),
+      'the restart opened the next take while this one was still closing, and the check sampled inside that overlap - which is what makes the rows below readings from inside the window rather than ones that missed it',
+      `${takeB ?? 'no next take'} open at ${bAt}ms, ${takeA} closed at ${aAt}ms (${aAt - bAt}ms overlap), `
+        + `${inside.length} listings and ${walk && inWindow(walk.started) ? 'the route walk' : 'no route walk'} started inside it`);
+    const wrong = inside.filter((s) => s.recording !== true || s.hash !== null);
+    check(inside.length > 0 && wrong.length === 0,
+      'every listing inside the overlap says the closing take is being recorded, with no hash - it is still the recorder\'s, so the gallery offers nothing to open, download, rename or remove',
+      wrong.length ? `${wrong.length} of ${inside.length} said recording ${wrong[0].recording} with hash ${String(wrong[0].hash).slice(0, 15)}`
+        : `${inside.length} of ${inside.length}`);
+    const differs = (walk?.answers ?? []).filter((a, i) => a !== whileOpen[i]);
+    check(walk?.answers !== null && walk?.answers !== undefined && differs.length === 0 && !bScanned,
+      'and every capture route answers inside the overlap as it did with one take open, without scanning the take still being written',
+      differs.length ? `open vs closing: ${differs.map((d) => `${whileOpen[walk.answers.indexOf(d)]} -> ${d.split(' ').pop()}`).join(', ')}`
+        : `${whileOpen.length} routes: ${whileOpen.join(', ')}; ${takeBNow ?? 'no next take'} ${bScanned ? 'was scanned' : 'unscanned'}`);
+    // The gallery repaints when this list changes, so it has to change at each close, not only at B's.
+    const bothWriting = [takeA, takeB].sort();
+    const unlike = inside.filter((s) => !eq(s.writing, bothWriting));
+    check(inside.length > 0 && unlike.length === 0 && eq(afterA.writingIds, [takeB]) && afterA.takeId === takeB,
+      'the recorder reports both takes as being written for the whole overlap, and only the open one once the closing one is done - so a gallery following it repaints the finished take instead of refusing it until the next stop',
+      `${inside.length - unlike.length} of ${inside.length} inside said ${JSON.stringify(bothWriting)}`
+        + `${unlike.length ? ` (one said ${JSON.stringify(unlike[0].writing)})` : ''}, afterwards ${JSON.stringify(afterA.writingIds)}`);
+    const settled = (await getJson(`${overlapUrl}/library/takes`)).takes.find((t) => t.id === takeA);
+    const closedHash = /sha256:[0-9a-f]{64}/.exec(closed.get(takeA)?.line ?? '')?.[0] ?? null;
+    check(settled?.recording === false && closedHash !== null && settled.hash === closedHash,
+      'and once the close finishes the take is a library entry carrying the hash the close computed',
+      `${String(settled?.hash).slice(7, 19)} listed, ${String(closedHash).slice(7, 19)} closed`);
+
+    // Two paths differing only in case are two cache keys and one file where the volume folds case,
+    // so scanning the closed take under four spellings at once runs four scans of one file, each
+    // writing its sidecar. A take this size keeps them overlapping for about a second. Called in this
+    // process, off the staged tree, because no request names a take by a path any more.
+    const variants = [takeA, takeA?.toUpperCase(), takeA?.replace('take', 'Take'), takeA?.replace('take', 'tAKE')];
+    if (!takeA || !existsSync(join(overlapDir, `${variants[1]}.knct`))) {
+      console.log('  ...  this volume does not fold case, so two ids cannot name one take here and the concurrent-scan row has nothing to ask');
+      skipped.push('concurrent sidecar writes (needs a case-insensitive volume)');
+    } else {
+      rmSync(join(overlapDir, `${takeA}.idx`), { force: true });
+      const stagedCapture = await import(pathToFileURL(join(root, 'server/capture.js')).href);
+      const failedWrites = [];
+      const quiet = console.error;
+      console.error = (...args) => { failedWrites.push(args.join(' ')); };
+      const scans = await Promise.all(variants.map(async (id) => {
+        const index = await stagedCapture.buildIndex(join(overlapDir, `${id}.knct`)).catch(() => null);
+        return { id, status: index ? 200 : 500, hash: index?.hash ?? null };
+      })).finally(() => { console.error = quiet; });
+      let sidecar = 'absent';
+      try {
+        sidecar = JSON.parse(readFileSync(join(overlapDir, `${takeA}.idx`), 'utf8')).hash === closedHash ? 'parses' : 'parses, wrong hash';
+      } catch (err) {
+        sidecar = existsSync(join(overlapDir, `${takeA}.idx`)) ? `does not parse (${err.message.slice(0, 40)})` : 'absent';
+      }
+      const leftovers = readdirSync(overlapDir).filter((f) => f.endsWith('.tmp'));
+      check(scans.every((s) => s.status === 200 && s.hash === closedHash) && failedWrites.length === 0
+        && sidecar === 'parses' && leftovers.length === 0,
+        'four scans of one closed take at once, under ids differing only in case, each write their sidecar - no failed rename, one sidecar that parses, no scratch file left behind',
+        `${scans.map((s) => `${s.id}:${s.status}`).join(' ')}; sidecar ${sidecar}; `
+          + `${failedWrites.length ? `log: ${failedWrites[0].slice(0, 90)}` : 'no failed write'}; leftovers ${leftovers.join(' ') || 'none'}`);
+    }
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 17)) p.child.kill('SIGKILL');
+    rmSync(overlapDir, { recursive: true, force: true });
+  }
+
+  console.log('\n[library] two machines shooting on one day: nothing here reads the take this machine is recording');
+  {
+    // Both recorders name takes `<day>-take<n>` off their own directory, so the names collide as
+    // the ordinary case. The node holds a finished `<day>-take1` and records `<day>-take2`; this
+    // machine starts empty and records `<day>-take1`.
+    const now = new Date();
+    const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const take1 = `${day}-take1`;
+    const take2 = `${day}-take2`;
+    const shootNodeDir = join(WORK, 'shooting-node');
+    const shootMacDir = join(WORK, 'shooting-mac');
+    for (const d of [shootNodeDir, shootMacDir]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    cpSync(SAMPLE, join(shootNodeDir, `${take1}.knct`));
+    // A marks log under the name the node's open take gets, as a build that filed marks by name left
+    // one behind when it deleted a take: the next take given that name must not read it.
+    const orphaned = [
+      { id: 'm-orphan-1', sourceMs: 1000, label: 'from a take the node deleted', at: 1 },
+      { id: 'm-orphan-2', sourceMs: 2000, label: 'and another from it', at: 2 },
+    ];
+    writeFileSync(join(shootNodeDir, `${take2}.marks.jsonl`), orphaned.map((r) => `${JSON.stringify(r)}\n`).join(''));
+    const grabbing = `${join(REPO, 'tools/fake-grabber.mjs')} --source ${SAMPLE} --fps 40`;
+    await exitedOn(MAC_PORT + 17);
+    const shootNodeUrl = await startServer(root, [
+      '--captures', shootNodeDir, '--name', 'pi-shooting', '--record', '--no-color', '--grabber', grabbing,
+    ], MAC_PORT + 17);
+    const shootMacUrl = await startServer(root, [
+      '--captures', shootMacDir, '--name', 'mac-shooting', '--record', '--no-color', '--grabber', grabbing,
+      '--node', shootNodeUrl, '--node-name', 'pi-shooting',
+    ], MAC_PORT + 18);
+    const bothShooting = async () => {
+      let pair = [null, null];
+      for (let i = 0; i < 60; i++) {
+        pair = await Promise.all([getJson(`${shootNodeUrl}/record/state`), getJson(`${shootMacUrl}/record/state`)]);
+        if (pair.every((s) => s.recording && s.frames > 5)) break;
+        await new Promise((done) => { setTimeout(done, 250); });
+      }
+      return pair;
+    };
+    const [nodeShot, macShot] = await bothShooting();
+    check(nodeShot?.takeId === take2 && macShot?.takeId === take1,
+      `both machines are recording, the node ${take2} beside a finished ${take1} and this machine ${take1}`,
+      `node ${nodeShot?.takeId} (recording ${nodeShot?.recording}), here ${macShot?.takeId} (recording ${macShot?.recording})`);
+
+    // The download's name probe is a full read plus sha256 of whatever holds the plain name, which
+    // here is the take being recorded. The sidecar is the tell that it ran.
+    const pulled = await post(`${shootMacUrl}/library/download/${take1}`);
+    const stillShooting = await getJson(`${shootMacUrl}/record/state`);
+    check(/being recorded on this machine/.test(pulled.error ?? '') && (pulled.error ?? '').includes(take1),
+      'downloading the node\'s finished take of the same name is refused while this machine records under that name, and the refusal names the take being shot',
+      (pulled.error ?? `ACCEPTED: ${JSON.stringify(pulled)}`).slice(0, 110));
+    check(!existsSync(join(shootMacDir, `${take1}.idx`)) && stillShooting.takeId === take1,
+      'and nothing scanned the take being recorded to decide that - no sidecar beside it, and it is still being written',
+      `${readdirSync(shootMacDir).sort().join(' ')}; recording ${stillShooting.takeId}`);
+
+    // Neither open take has a hash, and a marks sync names its take by hash, so the take being
+    // recorded here cannot be asked for at all: its name is not an address.
+    const macLogs = () => (existsSync(join(shootMacDir, 'marks')) ? readdirSync(join(shootMacDir, 'marks')).sort() : []);
+    const logsBefore = macLogs();
+    const [nodeNow, macNow] = await Promise.all([getJson(`${shootNodeUrl}/record/state`), getJson(`${shootMacUrl}/record/state`)]);
+    const listedOpen = (await getJson(`${shootMacUrl}/library/takes`)).takes.find((t) => t.id === take1);
+    const syncedOpen = await fetch(`${shootMacUrl}/library/sync-marks/${take1}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    const syncedOpenBody = await syncedOpen.json().catch(() => null);
+    check(nodeNow.recording === true && macNow.recording === true && macNow.takeId === take1,
+      'both machines had a take open when the sync was asked for, which is what makes the two rows below about two unhashed takes rather than a finished one',
+      `node ${nodeNow.takeId} (recording ${nodeNow.recording}), here ${macNow.takeId} (recording ${macNow.recording})`);
+    check(listedOpen?.hash === null && syncedOpen.status === 404 && eq(macLogs(), logsBefore),
+      'the take being recorded here is listed with no hash, a sync naming it by its name reaches nothing, and no marks log appears',
+      `hash ${JSON.stringify(listedOpen?.hash)}; HTTP ${syncedOpen.status}: ${JSON.stringify(syncedOpenBody).slice(0, 80)}; logs ${macLogs().join(' ') || 'none'}`);
+
+    await post(`${shootMacUrl}/record/stop`);
+    const closedHere = hashOfTake(shootMacDir, take1);
+    const syncedClosed = await post(`${shootMacUrl}/library/sync-marks/${encodeURIComponent(closedHere)}`);
+    check(syncedClosed.merged === 0 && eq(macLogs(), logsBefore),
+      'and a finished take here is never joined to the node\'s open one: nothing merged and nothing appended',
+      `merged ${syncedClosed.merged}, ${syncedClosed.note ?? syncedClosed.error ?? ''}`.slice(0, 110));
+    const nodeStopped = (await post(`${shootNodeUrl}/record/stop`)).stopped;
+    const nodeTake2 = (await getJson(`${shootNodeUrl}/library/takes`)).takes.find((t) => t.id === take2);
+    check(nodeStopped?.id === take2 && nodeTake2?.hash !== null && (nodeTake2?.marks ?? [null]).length === 0,
+      'and the node\'s take, recorded under a name a deleted take\'s marks were left under, closes with none of them',
+      `${nodeTake2?.id ?? 'no take'}: ${JSON.stringify((nodeTake2?.marks ?? []).map((m) => m.label))}`);
+    const pulledAfter = await post(`${shootMacUrl}/library/download/${take1}`);
+    check(typeof pulledAfter.downloaded === 'string' && pulledAfter.downloaded !== `${take1}.knct`
+      && existsSync(join(shootMacDir, pulledAfter.downloaded)),
+      'and once this machine\'s take has closed the same download goes through, beside it under a name of its own - so the refusal was about the recording and not a download that could not work',
+      pulledAfter.downloaded ?? String(pulledAfter.error).slice(0, 100));
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 17 || sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
+  }
+
+  console.log('\n[library] a marks sync says what the node answered, and nothing else');
+  {
+    // The node is a stub, so what it answers is decided here, on the port the section above used.
+    await exitedOn(MAC_PORT + 17);
+    await exitedOn(MAC_PORT + 18);
+    // `stubTakes` answers `/library/takes`, or returns null to hold the request in `heldTakes`.
+    let stubTakes = () => ({ status: 500, body: { error: 'the stub cannot read its captures directory' } });
+    const heldTakes = [];
+    const stubLog = [{ id: 'm-from-the-node', sourceMs: 500, label: 'pressed on the node', at: 5 }];
+    // This build answers a log with the hash it was asked for; an older one answers by name, with none.
+    let stubEchoesHash = true;
+    const answer = (res, { status, body }) => {
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(body));
+    };
+    const stub = createServer((req, res) => {
+      if (req.url.startsWith('/library/takes')) {
+        const now = stubTakes();
+        if (now === null) heldTakes.push(res);
+        else answer(res, now);
+      } else if (req.url.startsWith('/record/state')) {
+        answer(res, { status: 200, body: { recording: false, takeId: null, writingIds: [] } });
+      } else if (/^\/capture\/[^/]+\/marks\/log(\?|$)/.test(req.url)) {
+        const asked = decodeURIComponent(req.url.match(/^\/capture\/([^/]+)\/marks\/log/)[1]);
+        answer(res, { status: 200, body: stubEchoesHash ? { log: stubLog, hash: asked } : { log: stubLog } });
+      } else {
+        answer(res, { status: 404, body: { error: 'not a stub route' } });
+      }
+    });
+    await new Promise((done) => { stub.listen(MAC_PORT + 17, '127.0.0.1', done); });
+    const syncDir = join(WORK, 'syncing-mac');
+    rmSync(syncDir, { recursive: true, force: true });
+    mkdirSync(syncDir, { recursive: true });
+    cpSync(SAMPLE, join(syncDir, 'sync-stub-take.knct'));
+    try {
+      const syncUrl = await startServer(root, [
+        '--captures', syncDir, '--name', 'mac-syncing',
+        '--node', `http://127.0.0.1:${MAC_PORT + 17}`, '--node-name', 'stub-node',
+      ], MAC_PORT + 18);
+
+      const stubHash = encodeURIComponent(hashOfTake(syncDir, 'sync-stub-take'));
+      const unasked = await fetch(`${syncUrl}/library/sync-marks/${stubHash}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const unaskedBody = await unasked.json().catch(() => null);
+      check(!unasked.ok && /could not be asked/.test(unaskedBody?.error ?? '') && /500/.test(unaskedBody?.error ?? '')
+        && unaskedBody?.merged === undefined,
+        'a marks sync against a node that could not be reached says so rather than saying the node does not hold the take',
+        `HTTP ${unasked.status}: ${JSON.stringify(unaskedBody).slice(0, 120)}`);
+
+      // The node's answer is held while the take is renamed here, so the sync resumes after its name
+      // has moved. The stub's manifest is this machine's own description of the take, which is a
+      // real one and joins by hash.
+      const mine = (await getJson(`${syncUrl}/library/takes`)).takes.find((t) => t.id === 'sync-stub-take');
+      stubTakes = () => null;
+      let raceSettled = false;
+      const racing = fetch(`${syncUrl}/library/sync-marks/${stubHash}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      }).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }))
+        .finally(() => { raceSettled = true; });
+      for (let i = 0; i < 100 && heldTakes.length === 0; i++) await new Promise((done) => { setTimeout(done, 50); });
+      await new Promise((done) => { setTimeout(done, 50); });
+      check(heldTakes.length === 1 && !raceSettled,
+        'the sync is waiting on the node\'s answer, which is the window the rename below lands in',
+        `${heldTakes.length} held, sync ${raceSettled ? 'already answered' : 'still waiting'}`);
+      const renamed = await post(`${syncUrl}/library/rename/sync-stub-take`, { hash: mine?.hash, to: 'sync-stub-renamed' });
+      stubTakes = () => ({ status: 200, body: { takes: [mine] } });
+      for (const res of heldTakes.splice(0)) answer(res, stubTakes());
+      const raced = await racing;
+      const leftBehind = readdirSync(syncDir).filter((f) => f.endsWith('.marks.jsonl'));
+      const underNewName = (await getJson(`${syncUrl}/library/takes`)).takes.find((t) => t.id === 'sync-stub-renamed');
+      check(!renamed.error && raced.status === 200 && raced.body?.merged === 1 && leftBehind.length === 0
+        && (underNewName?.marks ?? []).some((m) => m.id === 'm-from-the-node'),
+      'a take renamed while its sync waited on the node still gets the node\'s mark, filed by its hash and read under its new name, with nothing written beside either name',
+      `rename ${renamed.error ?? 'done'}; HTTP ${raced.status}: ${JSON.stringify(raced.body).slice(0, 80)}; `
+        + `${underNewName?.id ?? 'no take'} has ${JSON.stringify((underNewName?.marks ?? []).map((m) => m.id))}; sidecars ${leftBehind.join(' ') || 'none'}`);
+
+      // A node on an older build ignores the hash and answers whatever the name holds.
+      stubTakes = () => ({ status: 200, body: { takes: [underNewName] } });
+      stubEchoesHash = false;
+      const byName = await fetch(`${syncUrl}/library/sync-marks/${encodeURIComponent(underNewName.hash)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const byNameBody = await byName.json().catch(() => null);
+      check(!byName.ok && /older build/.test(byNameBody?.error ?? '') && byNameBody?.merged === undefined,
+        'a marks sync against a node whose log names no hash is refused and merges nothing',
+        `HTTP ${byName.status}: ${JSON.stringify(byNameBody).slice(0, 110)}`);
+      stubEchoesHash = true;
+      stubLog.push({ id: 'm-after-the-refusal', sourceMs: 700, label: 'pressed on the node since', at: 6 });
+      const echoed = await post(`${syncUrl}/library/sync-marks/${encodeURIComponent(underNewName.hash)}`);
+      check(echoed.merged === 1,
+        'and the same node answering with the hash it was asked for is merged, so the refusal above was about the hash',
+        `merged ${echoed.merged ?? echoed.error}`);
+      for (const p of servers.filter((sv) => sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
+    } finally {
+      stub.close();
+    }
+  }
+
+  console.log('\n[library] a node\'s marks are asked for by what the take is, not by what it is called');
+  {
+    // A real node behind a link this check holds: the node's log is requested by a name read from
+    // its listing, and the node renames between the two. The link listens on a port the kernel
+    // picks, since nothing can be there before it binds.
+    await exitedOn(MAC_PORT + 17);
+    await exitedOn(MAC_PORT + 18);
+    const byContentNode = join(WORK, 'by-content-node');
+    const byContentMac = join(WORK, 'by-content-mac');
+    for (const d of [byContentNode, byContentMac]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    cpSync(SAMPLE, join(byContentNode, 'shot-x.knct'));
+    cpSync(SAMPLE, join(byContentNode, 'other.knct'));
+    // Under a message header's twelve bytes, so the scan reads it as a torn tail and hashes a
+    // different take rather than refusing a desynced one.
+    appendFileSync(join(byContentNode, 'other.knct'), Buffer.from('other'));
+    cpSync(SAMPLE, join(byContentMac, 'shared.knct'));
+    const markA = { id: 'm-on-a', sourceMs: 10, label: 'on the shared take', at: 1 };
+    const markB = { id: 'm-on-b', sourceMs: 20, label: 'on the other take', at: 2 };
+    writeMarkLog(byContentNode, 'shot-x', `${JSON.stringify(markA)}\n`);
+    writeMarkLog(byContentNode, 'other', `${JSON.stringify(markB)}\n`);
+    const nodeUrlHere = await startServer(root, ['--captures', byContentNode, '--name', 'pi-by-content'], MAC_PORT + 17);
+    const heldLogs = [];
+    const link = await new Promise((done) => {
+      const srv = createServer(async (req, res) => {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        if (/\/marks\/log(\?|$)/.test(req.url) && heldLogs.hold) await new Promise((r) => { heldLogs.push(r); });
+        if (req.url.startsWith('/library/delete/') && heldLogs.holdDelete) await new Promise((r) => { heldLogs.push(r); });
+        try {
+          const up = await fetch(`${nodeUrlHere}${req.url}`, {
+            method: req.method,
+            headers: { 'content-type': req.headers['content-type'] ?? 'application/json' },
+            body: req.method === 'GET' || req.method === 'HEAD' ? undefined : Buffer.concat(chunks),
+          });
+          res.writeHead(up.status, { 'content-type': up.headers.get('content-type') ?? 'application/json' })
+            .end(Buffer.from(await up.arrayBuffer()));
+        } catch {
+          res.writeHead(502).end();
+        }
+      });
+      srv.listen(0, '127.0.0.1', () => done(srv));
+    });
+    try {
+      const macUrlHere = await startServer(root, ['--captures', byContentMac, '--name', 'mac-by-content',
+        '--node', `http://127.0.0.1:${link.address().port}`, '--node-name', 'pi-by-content'], MAC_PORT + 18);
+      const onNode = (await getJson(`${nodeUrlHere}/library/takes`)).takes;
+      const takeA = onNode.find((t) => t.id === 'shot-x');
+      const takeB = onNode.find((t) => t.id === 'other');
+      if (!takeA || !takeB || takeA.hash === takeB.hash) {
+        throw new Error(`the node lists ${onNode.map((t) => t.id).join(', ') || 'nothing'}, not two different takes to rename`);
+      }
+      const sharedLog = markLogFile(byContentMac, 'shared');
+      const sharedHash = encodeURIComponent(hashOfTake(byContentMac, 'shared'));
+      const macLog = () => (existsSync(sharedLog) ? readFileSync(sharedLog, 'utf8') : '');
+      // The node renames the shared take away and the other take into its name while the log
+      // request is held, then puts them back.
+      // Each arm starts from an empty log here, so each one's reading is its own.
+      const renamedWhileHeld = async (kind) => {
+        rmSync(sharedLog, { force: true });
+        heldLogs.hold = true;
+        let settled = false;
+        // A sync names its take by hash; a reclaim is a library action on a name.
+        const asked = fetch(`${macUrlHere}/library/${kind}/${kind === 'sync-marks' ? sharedHash : 'shared'}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        }).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }),
+          (err) => ({ status: null, body: { error: err.message } }))
+          .finally(() => { settled = true; });
+        for (let i = 0; i < 200 && heldLogs.length === 0; i++) await new Promise((done) => { setTimeout(done, 50); });
+        const away = await post(`${nodeUrlHere}/library/rename/shot-x`, { hash: takeA.hash, to: 'shot-y' });
+        const into = await post(`${nodeUrlHere}/library/rename/other`, { hash: takeB.hash, to: 'shot-x' });
+        const window = heldLogs.length === 1 && !settled && !away.error && !into.error;
+        heldLogs.hold = false;
+        for (const release of heldLogs.splice(0)) release();
+        const answer = await asked;
+        const nodeHolds = (await getJson(`${nodeUrlHere}/library/takes`)).takes.map((t) => t.id).sort();
+        await post(`${nodeUrlHere}/library/rename/shot-x`, { hash: takeB.hash, to: 'other' });
+        await post(`${nodeUrlHere}/library/rename/shot-y`, { hash: takeA.hash, to: 'shot-x' });
+        return { window, answer, nodeHolds, detail: `${away.error ?? 'renamed away'}, ${into.error ?? 'renamed into its name'}` };
+      };
+
+      const synced = await renamedWhileHeld('sync-marks');
+      check(synced.window,
+        'the log request was held while the node renamed the take away and another take into its name, which is the window the rows below are about',
+        synced.detail);
+      check(synced.answer.status === 200 && /m-on-a/.test(macLog()) && !/m-on-b/.test(macLog()),
+        'a marks sync in that window brings the shared take\'s mark across and never the other take\'s: the node answers by what the take is, whatever it is called now',
+        `HTTP ${synced.answer.status}: ${JSON.stringify(synced.answer.body).slice(0, 90)}; log here: ${macLog().trim() || '(none)'}`.slice(0, 200));
+      const reclaimed = await renamedWhileHeld('reclaim');
+      check(reclaimed.window && !/m-on-b/.test(macLog()) && reclaimed.answer.status !== 200
+        && eq(reclaimed.nodeHolds, ['shot-x', 'shot-y']),
+        'and a reclaim in that window removes nothing: the name it asks the node to delete now holds the other take, and both takes are still on the node',
+        `HTTP ${reclaimed.answer.status}; node holds ${reclaimed.nodeHolds.join(' ')}; log here: ${macLog().trim() || '(none)'}`.slice(0, 200));
+      rmSync(sharedLog, { force: true });
+      const plain = await post(`${macUrlHere}/library/sync-marks/${sharedHash}`);
+      check(plain.merged === 1 && /m-on-a/.test(macLog()) && !/m-on-b/.test(macLog()),
+        'and with nothing renamed the same sync brings the shared take\'s mark across, so the refusals above were about the rename',
+        `merged ${plain.merged ?? plain.error}`);
+
+      // A mark pressed on the node between the reclaim's read of its log and its delete.
+      heldLogs.holdDelete = true;
+      let reclaimSettled = false;
+      const reclaiming = post(`${macUrlHere}/library/reclaim/shared`).finally(() => { reclaimSettled = true; });
+      for (let i = 0; i < 400 && heldLogs.length === 0; i++) await new Promise((done) => { setTimeout(done, 50); });
+      const late = { id: 'm-late-on-node', sourceMs: 30, label: 'pressed while the reclaim ran', at: 3 };
+      const pressed = await post(`${nodeUrlHere}/capture/${encodeURIComponent(takeA.hash)}/marks`, { marks: [late] });
+      const heldDeletes = heldLogs.length;
+      const lateWindow = heldDeletes === 1 && !reclaimSettled && !pressed.error;
+      heldLogs.holdDelete = false;
+      for (const release of heldLogs.splice(0)) release();
+      const lateReclaim = await reclaiming;
+      const stillThere = (await getJson(`${nodeUrlHere}/library/takes`)).takes.find((t) => t.id === 'shot-x');
+      check(lateWindow,
+        'the reclaim\'s delete was held while a mark was pressed on the node\'s copy, after the reclaim had read that copy\'s marks',
+        pressed.error ?? `${heldDeletes} delete held, the mark written`);
+      check(lateReclaim.error !== undefined && stillThere?.marks?.some((m) => m.id === late.id),
+        'and the node keeps its copy and the late mark, rather than deleting a mark nothing here has',
+        `${String(lateReclaim.error ?? JSON.stringify(lateReclaim)).slice(0, 110)}; node ${stillThere ? 'still holds shot-x' : 'removed shot-x'}`);
+
+      // The shared take unlinked here while the node's log answer is still on its way: the merge
+      // asks whether the take is still present under its lock, so it refuses rather than filing
+      // the node's marks for footage nothing holds.
+      rmSync(sharedLog, { force: true });
+      heldLogs.hold = true;
+      let goneSyncSettled = false;
+      const goneSync = fetch(`${macUrlHere}/library/sync-marks/${sharedHash}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      }).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }),
+        (err) => ({ status: null, body: { error: err.message } }))
+        .finally(() => { goneSyncSettled = true; });
+      for (let i = 0; i < 200 && heldLogs.length === 0; i++) await new Promise((done) => { setTimeout(done, 50); });
+      const goneWindow = heldLogs.length === 1 && !goneSyncSettled;
+      rmSync(join(byContentMac, 'shared.knct'), { force: true });
+      heldLogs.hold = false;
+      for (const release of heldLogs.splice(0)) release();
+      const goneAnswer = await goneSync;
+      check(goneWindow,
+        'the node\'s log answer was held while the shared take was deleted here, which is the window the merge refuses to write through',
+        `settled before the delete: ${goneSyncSettled}`);
+      check(goneAnswer.status === 409 && /deleted here/.test(goneAnswer.body?.error ?? '') && !existsSync(sharedLog),
+        'and a marks sync in that window refuses and writes no log for the take that is gone, instead of filing the node\'s marks under a hash nothing holds',
+        `HTTP ${goneAnswer.status}: ${JSON.stringify(goneAnswer.body).slice(0, 110)}; log ${existsSync(sharedLog) ? 'written' : 'not written'}`);
+      cpSync(SAMPLE, join(byContentMac, 'shared.knct'));
+
+      const again = await post(`${macUrlHere}/library/reclaim/shared`);
+      check(again.reclaimed?.removed === 'shot-x.knct' && /m-late-on-node/.test(macLog()),
+        'and reclaiming again brings the late mark across and removes the node\'s copy, so the refusal was about the mark',
+        String(again.error ?? JSON.stringify(again.reclaimed)).slice(0, 110));
+    } finally {
+      link.close();
+      link.closeAllConnections();
+      for (const p of servers.filter((sv) => sv.port === MAC_PORT + 17 || sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
+    }
+  }
+
   console.log('\n[library] a node with no captures directory makes one and says so');
   {
     const fresh = join(WORK, 'never-existed', 'captures');
@@ -4999,9 +6775,13 @@ async function runChecks() {
     check(health.dropped === undefined,
       'and nothing on it is called `dropped` unqualified, since the only count here is monitors failing to keep up with the output rather than the sensor failing to deliver',
       `dropped=${JSON.stringify(health.dropped)}, monitorDropped=${health.monitorDropped}`);
-    check(['lost', 'absent', 'starting'].includes(health.state) && health.respawns >= 1,
-      'a server with no sensor says so and counts the grabbers it has been through, which is the flapping question the backoff\'s own counter cannot answer',
-      `state ${health.state}, ${health.respawns} respawns`);
+    // The staged tree has no `native/`, so every launch on this server fails before a process exists.
+    const macLog = servers.find((sv) => sv.port === MAC_PORT).log.join('');
+    const refusedLaunches = macLog.split('\n').filter((l) => l.includes('[server] grabber could not start')).length;
+    const grabberExits = macLog.split('\n').filter((l) => l.includes('[server] grabber exited')).length;
+    check(['lost', 'absent'].includes(health.state) && refusedLaunches >= 2 && grabberExits === 0 && health.respawns === 0,
+      'a server whose grabber cannot even be launched says the sensor is lost and counts no respawns, because a launch that made no process is not a sensor that dropped',
+      `state ${health.state}, ${health.respawns} respawns, over ${refusedLaunches} launches refused and ${grabberExits} grabbers exited`);
 
     // The window that closed last, on a server where no window has ever carried a frame.
     let closed = null;
@@ -5050,7 +6830,7 @@ async function runChecks() {
       if (running.state === 'live') break;
       await new Promise((done) => { setTimeout(done, 250); });
     }
-    const totalSpawns = (h) => h.respawns + h.restarts + 1;
+    const totalSpawns = (h) => h.respawns + h.restarts + h.wakes + 1;
     const beforeToggle = await getJson(`${toggleUrl}/sensor/health`);
     check(running?.state === 'live' && beforeToggle.respawns === 0 && beforeToggle.restarts === 0,
       'a healthy grabber that has never failed reads zero respawns and zero restarts, which is what the toggle below has to move exactly one of',
@@ -5151,7 +6931,7 @@ async function runChecks() {
       'a take is genuinely open, which is what makes the tile below a tile that is lying rather than one that is right',
       String(shooting?.takeId));
 
-    const { page, errors } = await openPage(browser, libraryPage(liveUrl));
+    const { page, errors } = await openPage(browser, timedLibraryPage(liveUrl));
     await page.waitForFunction('globalThis.__library !== undefined', null, { timeout: 20000 });
     let polls = 0;
     page.on('request', (req) => { if (req.url().endsWith('/record/state')) polls++; });
@@ -5169,14 +6949,18 @@ async function runChecks() {
     await page.evaluate("document.querySelector('.tile').__quietProbe = 'planted'");
     const pollsAtProbe = polls;
     // Comfortably longer than one cadence rather than barely.
-    await new Promise((done) => { setTimeout(done, 8500); });
+    await new Promise((done) => { setTimeout(done, QUIET_MS); });
     const quiet = await page.evaluate(`(() => ({
       probe: document.querySelector('.tile')?.__quietProbe ?? null,
       tiles: globalThis.__library.tiles().length,
     }))()`);
     check(polls > pollsAtProbe,
       'the poll is running, which is what makes the row below about the gate rather than about a page that stopped asking',
-      `${polls - pollsAtProbe} requests to /record/state in 8.5s`);
+      `${polls - pollsAtProbe} requests to /record/state in ${QUIET_MS}ms`);
+    // The wiring row: at the shipped five seconds this window holds one tick at most.
+    check(polls - pollsAtProbe >= 2,
+      'and it polls at the cadence this run planted, so the waits in this section are the shipped poll with its timer shortened',
+      `${polls - pollsAtProbe} requests in ${QUIET_MS}ms at a planted ${POLL_MS}ms`);
     check(quiet.probe === 'planted',
       'and a tick in which the recorder did not move replaces no tile - the menu an operator has open and the skim under their pointer both survive it',
       quiet.probe === 'planted' ? `${quiet.tiles} tiles, the same nodes` : 'the grid was rebuilt');
@@ -5189,7 +6973,7 @@ async function runChecks() {
       '--captures', linkedDir, '--name', 'mac-editing',
       '--node', liveUrl, '--node-name', 'shooting-live',
     ], MAC_PORT + 12);
-    const linked = await openPage(browser, libraryPage(linkedUrl));
+    const linked = await openPage(browser, timedLibraryPage(linkedUrl));
     await linked.page.waitForFunction('globalThis.__library !== undefined', null, { timeout: 20000 });
     let linkedPolls = 0;
     linked.page.on('request', (req) => { if (req.url().endsWith('/record/state')) linkedPolls++; });
@@ -5219,18 +7003,18 @@ async function runChecks() {
       if (s.recording !== false) continue;
       insideSamples++;
       if (askedInside !== null) continue;
-      const asked = await fetch(`${liveUrl}/capture/${shooting.takeId}/index`);
-      const body = await asked.json().catch(() => null);
-      if (!stopSettled) askedInside = { status: asked.status, error: body?.error ?? null };
+      // The listing is what a surface reads a hash off, and no route can name a take without one.
+      const listed = (await getJson(`${liveUrl}/library/takes`)).takes.find((t) => t.id === shooting.takeId);
+      if (!stopSettled) askedInside = { recording: listed?.recording ?? null, hash: listed?.hash ?? null };
     }
     await stopping;
     check(insideSamples > 0,
       'the close was caught while it was still running, which is what makes the row below a reading from inside the window rather than one that missed it',
       `${insideSamples} samples taken inside the close`);
-    check(askedInside?.status === 409,
-      'and the take is still the recorder\'s for the whole of it - the frame API refuses a take whose index and hash do not exist yet, which is the same refusal every surface offering Download, Rename or Remove is drawn from',
-      askedInside === null ? 'no answer came back inside the window at all, which on this route means the server went scanning a file it should have refused'
-        : `HTTP ${askedInside.status}: ${askedInside.error ?? '(no refusal)'}`);
+    check(askedInside?.recording === true && askedInside.hash === null,
+      'and the take is still the recorder\'s for the whole of it - listed with no hash, so no capture route can name it and no surface offers Download, Rename or Remove',
+      askedInside === null ? 'no listing came back inside the window at all, which means the server went scanning a file it should have described unscanned'
+        : `recording ${askedInside.recording}, hash ${String(askedInside.hash).slice(0, 20)}`);
 
     // And the half the gate is not allowed to swallow.
     await page.waitForFunction(
@@ -5299,6 +7083,10 @@ async function runChecks() {
       'and it says which node it could not reach, so the refusal is a fact about the link rather than a control that went dead',
       `"${why.slice(0, 90)}"`);
     check(dark.errors.length === 0, 'and that library raises no page error', dark.errors.slice(0, 2).join(' | '));
+    // The control for the pages above: without the parameter a page keeps every shipped timer.
+    check(dark.timers.length === 0,
+      'and a library page opened without the test-timers parameter shortens no timer, which is every page a normal launch opens',
+      dark.timers.join(' | ') || 'no [timers] line');
     await dark.page.close();
     for (const p2 of servers.filter((sv) => sv.port === MAC_PORT + 11)) p2.child.kill('SIGKILL');
 
@@ -5324,7 +7112,7 @@ async function runChecks() {
       if (releaseTicks) { await route.continue(); return; }
       heldTicks.push(route);
     });
-    await blind.goto(libraryPage(liveUrl), { waitUntil: 'domcontentloaded' });
+    await blind.goto(timedLibraryPage(liveUrl), { waitUntil: 'domcontentloaded' });
     await blind.waitForFunction('globalThis.__library !== undefined', null, { timeout: 20000 });
     const paintedMidWrite = await blind.evaluate(`(() => {
       const t = globalThis.__library.tiles().find((x) => x.id === ${JSON.stringify(shootingAgain?.takeId)});
@@ -5335,9 +7123,9 @@ async function runChecks() {
       `painted mid-write ${paintedMidWrite}, ${heldTicks.length} /record/state held`);
     await post(`${liveUrl}/record/stop`);
     const restedAfter = await getJson(`${liveUrl}/record/state`);
-    check(restedAfter.writingId === null,
+    check(eq(restedAfter.writingIds, []),
       'and the take finished underneath it - index, hash and all - before the tick was let go, so the tick answers about a world that moved while it waited',
-      `writingId ${restedAfter.writingId}, recording ${restedAfter.recording}`);
+      `writingIds ${JSON.stringify(restedAfter.writingIds)}, recording ${restedAfter.recording}`);
     releaseTicks = true;
     for (const route of heldTicks) await route.continue().catch(() => {});
     const cameBack = await blind.waitForFunction(
@@ -5379,7 +7167,7 @@ async function runChecks() {
       if (listings === 2) { refused++; await route.abort('connectionfailed'); return; }
       await route.continue();
     });
-    await flaky.goto(libraryPage(liveUrl), { waitUntil: 'domcontentloaded' });
+    await flaky.goto(timedLibraryPage(liveUrl), { waitUntil: 'domcontentloaded' });
     await flaky.waitForFunction('globalThis.__library !== undefined', null, { timeout: 20000 });
     const flakyPainted = await flaky.evaluate(`(() => {
       const t = globalThis.__library.tiles().find((x) => x.id === ${JSON.stringify(shootingThird?.takeId)});
@@ -5431,17 +7219,17 @@ async function runChecks() {
       heldAt.push(Date.now());
     });
     await hung.route('**/record/state', async (route) => { ticksSeen++; await route.continue(); });
-    await hung.goto(libraryPage(liveUrl), { waitUntil: 'domcontentloaded' });
+    await hung.goto(timedLibraryPage(liveUrl), { waitUntil: 'domcontentloaded' });
     await hung.waitForFunction('globalThis.__library !== undefined', null, { timeout: 20000 });
     await post(`${liveUrl}/record/stop`);
-    await new Promise((done) => { setTimeout(done, 11000); });
+    await new Promise((done) => { setTimeout(done, POLL_MS * 5); });
     const heldCount = heldForever.length;
     const listingsWhileHung = hungListings;
     check(heldCount === 1,
       'it has exactly one listing in flight however long that one takes - a refresh that has not come back is the question already being asked, not a reason to ask it again every five seconds',
       `${heldCount} listings left hanging, ${hungListings} requested in total`);
     // The liveness half is that it comes back on its own.
-    const freeBy = (heldAt[0] ?? Date.now()) + 15000 + 5000 + 6000;
+    const freeBy = (heldAt[0] ?? Date.now()) + LISTING_BOUND_MS + POLL_MS + 3000;
     while (Date.now() < freeBy && hungListings === listingsWhileHung) {
       await new Promise((done) => { setTimeout(done, 250); });
     }
@@ -5558,17 +7346,17 @@ async function runChecks() {
     let coldListings = 0;
     await cold.route('**/library/all', async (route) => {
       coldListings++;
-      if (coldListings === 1) await new Promise((done) => { setTimeout(done, 18000); });
+      if (coldListings === 1) await new Promise((done) => { setTimeout(done, LISTING_BOUND_MS + 3000); });
       await route.continue();
     });
-    await cold.goto(libraryPage(liveUrl), { waitUntil: 'domcontentloaded' });
+    await cold.goto(timedLibraryPage(liveUrl), { waitUntil: 'domcontentloaded' });
     let coldInstalled = true;
     await cold.waitForFunction('globalThis.__library !== undefined', null, { timeout: 30000 })
       .catch(() => { coldInstalled = false; });
     const coldTiles = coldInstalled ? await cold.evaluate('globalThis.__library.tiles().length') : 0;
     check(coldInstalled && coldTiles > 0,
       'a first listing slower than the poll\'s own bound still paints, because a cold library is the case that listing exists to get through rather than a link to give up on',
-      coldInstalled ? `held 18s, ${coldTiles} tiles` : 'the page never installed its hook - module evaluation ended on the load');
+      coldInstalled ? `held ${LISTING_BOUND_MS + 3000}ms, ${coldTiles} tiles` : 'the page never installed its hook - module evaluation ended on the load');
     await cold.close();
 
     const broken = await browser.newPage();
@@ -5720,6 +7508,323 @@ async function runChecks() {
       late.length ? late.join(', ') : `${reaching.length} handlers, all bound ahead of their first await`);
   }
 
+  console.log('\n[library] every control the library renders is driven, and pressing it does what it says');
+  {
+    // Its own pair of machines, because half of these presses delete, rename or copy a take, and a
+    // driver that asserted only a name would pass a control wired to nothing.
+    await exitedOn(MAC_PORT + 17);
+    await exitedOn(MAC_PORT + 18);
+    const sweepNode = join(WORK, 'sweep-node');
+    const sweepMac = join(WORK, 'sweep-mac');
+    for (const d of [sweepNode, sweepMac]) {
+      rmSync(d, { recursive: true, force: true });
+      mkdirSync(d, { recursive: true });
+    }
+    // One take per press that changes the library, so no driver reads another's aftermath.
+    const at = (minute) => ({ startedAt: Date.UTC(2026, 7, 1, 10, minute) });
+    writeTake(sweepNode, 'sweep-remote', { frames: 6, ...at(0) });
+    writeTake(sweepNode, 'sweep-both', { frames: 7, ...at(1) });
+    writeTake(sweepMac, 'sweep-both', { frames: 7, ...at(1) });
+    writeTake(sweepMac, 'sweep-marked', { frames: 30, ...at(2) });
+    writeTake(sweepMac, 'sweep-kept', { frames: 5, ...at(3) });
+    writeTake(sweepMac, 'sweep-doomed', { frames: 4, ...at(4) });
+    writeTake(sweepMac, 'sweep-renamed', { frames: 3, ...at(5) });
+    writeFileSync(join(sweepMac, 'sweep-marked.marks.jsonl'),
+      markLine({ id: 's1', sourceMs: 500, label: 'halfway', at: 1000 }));
+    const sweepLog = join(WORK, 'sweep-reveal-argv.log');
+    const sweepRecorder = join(WORK, 'sweep-file-manager.mjs');
+    writeFileSync(sweepRecorder, "import { appendFileSync } from 'node:fs';\n"
+      + `appendFileSync(${JSON.stringify(sweepLog)}, process.argv.slice(2).map((a) => \`\${a}\\n\`).join(''));\n`);
+    rmSync(sweepLog, { force: true });
+
+    const sweepNodeUrl = await startServer(root, ['--captures', sweepNode, '--name', 'sweep-node',
+      '--projects', join(WORK, 'sweep-node-projects'), '--presets', join(WORK, 'sweep-node-presets')], MAC_PORT + 17);
+    const sweepUrl = await startServer(root, ['--captures', sweepMac, '--name', 'sweep-mac',
+      '--node', sweepNodeUrl, '--node-name', 'sweep-node', '--reveal-with', `"${process.execPath}" "${sweepRecorder}"`,
+      '--projects', join(WORK, 'sweep-projects'), '--presets', join(WORK, 'sweep-presets')], MAC_PORT + 18);
+    const { page } = await openPage(browser, libraryPage(sweepUrl));
+    const ready = async () => {
+      await page.waitForFunction('globalThis.__library !== undefined && document.querySelectorAll(".tile").length > 0',
+        null, { timeout: 20000 });
+    };
+    await ready();
+
+    const listing = async () => (await getJson(`${sweepUrl}/library/all`)).takes;
+    const takeCalled = async (id) => (await listing()).find((t) => t.id === id) ?? null;
+    const until = async (test, ms = 15000) => {
+      for (const end = Date.now() + ms; Date.now() < end;) {
+        if (await test()) return true;
+        await new Promise((done) => { setTimeout(done, 150); });
+      }
+      return test();
+    };
+    // A DOM click on the control itself, which runs the listener a press runs and nothing else,
+    // so a dead opener does not stop the control behind it from being reached by the next driver.
+    const press = (selector) => page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return false;
+      el.click();
+      return true;
+    }, selector);
+    const tileSel = (id, rest) => `.tile[data-id="${id}"] ${rest}`;
+    const dialogOpen = (id) => page.evaluate((d) => document.getElementById(d).open, id);
+    // Back to a page with nothing open and every take shown, whatever the last driver left.
+    const settle = async () => {
+      try {
+        await page.evaluate(() => {
+          for (const d of document.querySelectorAll('dialog[open]')) d.close();
+          document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+          globalThis.__library.filter('all');
+        });
+      } catch {
+        await page.goto(libraryPage(sweepUrl), { waitUntil: 'domcontentloaded' });
+        await ready();
+      }
+    };
+    // Pressing a link is a page load, or it is nothing.
+    const follow = async (selector, wantPath) => {
+      await page.evaluate(() => { globalThis.__beforePress = true; });
+      const loaded = page.waitForEvent('load', { timeout: 8000 }).then(() => true, () => false);
+      const pressed = await press(selector);
+      const landed = pressed && await loaded;
+      const path = new URL(page.url()).pathname;
+      const fresh = landed && await page.evaluate(() => globalThis.__beforePress !== true).catch(() => false);
+      const ok = landed && fresh && path === wantPath;
+      await page.goto(libraryPage(sweepUrl), { waitUntil: 'domcontentloaded' });
+      await ready();
+      return { ok, detail: `${pressed ? 'pressed' : 'not found'}, ${landed ? `loaded ${path}` : `no page load, still ${path}`}` };
+    };
+    const filterTo = async (filter) => {
+      await page.evaluate((f) => globalThis.__library.filter(f === 'all' ? 'local' : 'all'), filter);
+      await press(`.tab[data-filter="${filter}"]`);
+      const shown = await page.evaluate(() => globalThis.__library.tiles().map((t) => t.state));
+      const pressedTab = await page.evaluate((f) => document.querySelector(`.tab[data-filter="${f}"]`)
+        .getAttribute('aria-pressed'), filter);
+      const everyState = new Set((await listing()).map((t) => t.state));
+      const ok = pressedTab === 'true' && shown.length > 0 && (filter === 'all'
+        ? shown.length === (await listing()).length && new Set(shown).size === everyState.size
+        : shown.every((s) => s === filter));
+      return { ok, detail: `aria-pressed ${pressedTab}, tiles ${shown.join(' ') || 'none'}` };
+    };
+    const openRename = async (id) => {
+      await press(tileSel(id, '.mi[data-item="rename"]'));
+      return dialogOpen('rename');
+    };
+    const openDelete = async (id) => {
+      await press(tileSel(id, '.act[data-act="delete"]'));
+      return dialogOpen('confirm');
+    };
+    const openViewerOn = async (id) => {
+      // The key comes off the page's own listing, the one `takeByKey` searches, so a listing in
+      // flight cannot hand `open` a key it does not hold and leave the viewer shut.
+      await until(() => page.evaluate((wanted) => {
+        const take = globalThis.__library.state().takes.find((t) => t.id === wanted);
+        if (!take) return false;
+        globalThis.__library.viewer.open(take.hash ?? take.id);
+        return globalThis.__library.viewer.state()?.id === wanted;
+      }, id));
+      await page.evaluate('globalThis.__library.viewer.drawn(1)');
+    };
+    const markedPath = join(sweepMac, 'sweep-marked.knct');
+
+    // In the order they run. Each presses its control and reads the first thing a press changes.
+    const DRIVERS = {
+      all: { does: 'shows every take again', run: () => filterTo('all') },
+      local: { does: 'shows only the takes on this machine', run: () => filterTo('local') },
+      remote: { does: 'shows only the takes on the node', run: () => filterTo('remote') },
+      both: { does: 'shows only the takes on both', run: () => filterTo('both') },
+      more: {
+        does: 'opens the tile\'s menu',
+        run: async () => {
+          await press(tileSel('sweep-kept', '.act[data-act="more"]'));
+          const open = await page.evaluate(() => [...document.querySelectorAll('.tile')]
+            .find((t) => t.dataset.id === 'sweep-kept').querySelector('.menu').hidden === false);
+          return { ok: open, detail: open ? 'menu shown' : 'menu still hidden' };
+        },
+      },
+      delete: {
+        does: 'asks to delete that take',
+        run: async () => {
+          const open = await openDelete('sweep-kept');
+          const body = await page.evaluate(() => document.getElementById('cBody').textContent);
+          return { ok: open && body === 'sweep-kept', detail: `confirm ${open ? 'open' : 'shut'}, naming ${body || 'nothing'}` };
+        },
+      },
+      cCancel: {
+        does: 'shuts the confirm and deletes nothing',
+        run: async () => {
+          const opened = await openDelete('sweep-kept');
+          await press('#cCancel');
+          const shut = !(await dialogOpen('confirm'));
+          const kept = existsSync(join(sweepMac, 'sweep-kept.knct'));
+          return { ok: opened && shut && kept, detail: `${opened ? 'opened' : 'never opened'}, ${shut ? 'shut' : 'still open'}, take ${kept ? 'kept' : 'gone'}` };
+        },
+      },
+      cGo: {
+        does: 'deletes the take the confirm names',
+        run: async () => {
+          const opened = await openDelete('sweep-doomed');
+          await press('#cGo');
+          const gone = await until(async () => !existsSync(join(sweepMac, 'sweep-doomed.knct'))
+            && !(await takeCalled('sweep-doomed')));
+          return { ok: opened && gone, detail: `${opened ? 'confirm opened' : 'confirm never opened'}, take ${gone ? 'deleted' : 'still there'}` };
+        },
+      },
+      rename: {
+        does: 'opens the rename box on that take',
+        run: async () => {
+          const open = await openRename('sweep-kept');
+          const value = await page.evaluate(() => document.getElementById('rName').value);
+          return { ok: open && value === 'sweep-kept', detail: `box ${open ? 'open' : 'shut'}, holding ${value || 'nothing'}` };
+        },
+      },
+      rName: {
+        does: 'checks the name as it is typed',
+        run: async () => {
+          const opened = await openRename('sweep-kept');
+          const read = () => page.evaluate(() => ({
+            why: document.getElementById('rWhy').textContent,
+            blocked: document.getElementById('rGo').disabled,
+          }));
+          await page.locator('#rName').fill('not a name!', { timeout: 3000 }).catch(() => {});
+          const bad = await read();
+          await page.locator('#rName').fill('sweep-typed-name', { timeout: 3000 }).catch(() => {});
+          const good = await read();
+          const ok = opened && /letters, digits/.test(bad.why) && bad.blocked && good.why === '' && !good.blocked;
+          return { ok, detail: `${opened ? 'opened' : 'never opened'}; "not a name!" -> ${bad.blocked ? 'blocked' : 'allowed'} "${bad.why.slice(0, 30)}"; a legal name -> ${good.blocked ? 'blocked' : 'allowed'}` };
+        },
+      },
+      rCancel: {
+        does: 'shuts the rename box and renames nothing',
+        run: async () => {
+          const opened = await openRename('sweep-kept');
+          await press('#rCancel');
+          const shut = !(await dialogOpen('rename'));
+          const kept = existsSync(join(sweepMac, 'sweep-kept.knct'));
+          return { ok: opened && shut && kept, detail: `${opened ? 'opened' : 'never opened'}, ${shut ? 'shut' : 'still open'}, name ${kept ? 'kept' : 'changed'}` };
+        },
+      },
+      rGo: {
+        does: 'renames the take to what was typed',
+        run: async () => {
+          const opened = await openRename('sweep-renamed');
+          await page.locator('#rName').fill('sweep-renamed-after', { timeout: 3000 }).catch(() => {});
+          await press('#rGo');
+          const moved = await until(async () => existsSync(join(sweepMac, 'sweep-renamed-after.knct'))
+            && Boolean(await takeCalled('sweep-renamed-after')) && !(await takeCalled('sweep-renamed')));
+          return { ok: opened && moved, detail: `${opened ? 'opened' : 'never opened'}, ${moved ? 'listed under the new name' : 'still under the old name'}` };
+        },
+      },
+      reveal: {
+        does: 'starts the file manager on that take',
+        run: async () => {
+          const wanted = REVEAL[process.platform]?.args(markedPath) ?? [markedPath];
+          const seen = () => (existsSync(sweepLog) ? readFileSync(sweepLog, 'utf8').trim().split('\n') : []);
+          await press(tileSel('sweep-marked', '.mi[data-item="reveal"]'));
+          const started = await until(() => wanted.every((arg) => seen().includes(arg)), 6000);
+          return { ok: started, detail: `wanted ${JSON.stringify(wanted).slice(-50)}, saw ${JSON.stringify(seen()).slice(-50)}` };
+        },
+      },
+      reclaim: {
+        does: 'asks to reclaim the node\'s copy',
+        run: async () => {
+          await press(tileSel('sweep-both', '.mi[data-item="reclaim"]'));
+          const open = await dialogOpen('confirm');
+          const said = await page.evaluate(() => `${document.getElementById('cTitle').textContent} / ${document.getElementById('cGo').textContent}`);
+          return { ok: open && said === 'Reclaim on sweep-node / Reclaim', detail: `confirm ${open ? 'open' : 'shut'}: ${said}` };
+        },
+      },
+      download: {
+        does: 'copies the node\'s take to this machine',
+        run: async () => {
+          await press(tileSel('sweep-remote', '.act[data-act="download"]'));
+          const copied = await until(async () => existsSync(join(sweepMac, 'sweep-remote.knct'))
+            && (await takeCalled('sweep-remote'))?.state === 'both');
+          return { ok: copied, detail: `sweep-remote is ${(await takeCalled('sweep-remote'))?.state ?? 'unlisted'}` };
+        },
+      },
+      vMore: {
+        does: 'opens the viewer\'s menu',
+        run: async () => {
+          await openViewerOn('sweep-marked');
+          await press('#vMore');
+          const open = await page.evaluate(() => document.querySelector('#viewer .vhead .menu')?.hidden === false);
+          return { ok: open, detail: open ? 'menu shown' : 'menu still hidden' };
+        },
+      },
+      mark: {
+        does: 'moves the viewer to that mark',
+        run: async () => {
+          await openViewerOn('sweep-marked');
+          const before = (await page.evaluate('globalThis.__library.viewer.state()'))?.index;
+          await press('#viewer .mk');
+          const after = (await page.evaluate('globalThis.__library.viewer.state()'))?.index;
+          return { ok: before === 0 && after > 0, detail: `frame ${before} -> ${after}` };
+        },
+      },
+      vClose: {
+        does: 'shuts the viewer',
+        run: async () => {
+          await openViewerOn('sweep-marked');
+          const opened = await page.evaluate('globalThis.__library.viewer.isOpen()');
+          await press('#vClose');
+          const shut = await page.evaluate('globalThis.__library.viewer.isOpen()') === false;
+          return { ok: opened && shut, detail: `${opened ? 'opened' : 'never opened'}, ${shut ? 'shut' : 'still open'}` };
+        },
+      },
+      'new-project': {
+        does: 'opens the editor on a new project from that take',
+        run: async () => {
+          // The editor itself is not what this presses: a stub answers, so the row is the address.
+          await page.route(/\/edit\?/, (route) => route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>stub</title>' }));
+          const loaded = page.waitForEvent('load', { timeout: 8000 }).then(() => true, () => false);
+          const pressed = await press(tileSel('sweep-marked', '.act[data-act="new-project"]'));
+          const landed = pressed && await loaded;
+          const url = new URL(page.url());
+          await page.unroute(/\/edit\?/);
+          const ok = landed && url.pathname === '/edit' && url.searchParams.get('new') === 'sweep-marked';
+          await page.goto(libraryPage(sweepUrl), { waitUntil: 'domcontentloaded' });
+          await ready();
+          return { ok, detail: landed ? `${url.pathname}${url.search}` : 'no page load' };
+        },
+      },
+      toLibrary: { does: 'reloads the media library', run: () => follow('#toLibrary', '/library') },
+      toProjects: { does: 'goes to the projects', run: () => follow('#toProjects', '/projects') },
+      toMenu: { does: 'goes back to the menu', run: () => follow('#toMenu', '/') },
+    };
+
+    // What the page renders with the viewer open on a marked take, which is when every kind shows.
+    await openViewerOn('sweep-marked');
+    const rendered = await page.evaluate('globalThis.__library.controls()');
+    await settle();
+    const unswept = rendered.filter((c) => !Object.hasOwn(DRIVERS, c.key));
+    check(unswept.length === 0,
+      `every interactive control the library renders has a driver in this file (${rendered.length} controls)`,
+      unswept.length ? `no driver for ${[...new Set(unswept.map((c) => `${c.where}:${c.key}`))].join(' ')}`
+        : [...new Set(rendered.map((c) => c.key))].join(' '));
+    const present = new Set(rendered.map((c) => c.key));
+    const missing = Object.keys(DRIVERS).filter((k) => !present.has(k));
+    check(missing.length === 0,
+      'and every control this file drives is one the library still renders',
+      missing.join(' ') || `${present.size} distinct controls on screen`);
+    check(eq(Object.keys(DRIVERS).sort(), Object.keys(DEAD_CONTROLS).sort()),
+      'and every driven control has a `dead-` mutation leaving it inert, so each row below is one a dead control can redden',
+      `${Object.keys(DRIVERS).length} driven, ${Object.keys(DEAD_CONTROLS).length} with a dead- mutation`);
+
+    for (const [key, driver] of Object.entries(DRIVERS)) {
+      let result;
+      try {
+        result = await driver.run();
+      } catch (err) {
+        result = { ok: false, detail: `the driver threw: ${String(err.message).split('\n')[0]}` };
+      }
+      check(result.ok, `pressing ${key} ${driver.does}`, result.detail);
+      await settle();
+    }
+    await page.close();
+    for (const p of servers.filter((sv) => sv.port === MAC_PORT + 17 || sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
+  }
+
   console.log('\n[library] the faint token clears AA on every page that declares it');
   {
     const channel = (c) => (c / 255 <= 0.04045 ? c / 255 / 12.92 : ((c / 255 + 0.055) / 1.055) ** 2.4);
@@ -5733,7 +7838,10 @@ async function runChecks() {
     };
     // The floor WCAG AA sets for body text, and these are 9px readouts.
     const AA = 4.5;
-    const tokenIn = (css, name) => (css.match(new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{6})`)) ?? [])[1] ?? null;
+    // Every declaration of a token, comments aside. The browser takes the last one in a block, so
+    // a reading of the first measures a value the page may not render.
+    const declarationsOf = (css, name) => [...css.replace(/\/\*[\s\S]*?\*\//g, '')
+      .matchAll(new RegExp(`(?<![\\w-])--${name}\\s*:\\s*([^;}]*)`, 'g'))].map((m) => m[1].trim());
 
     // The build under test, which on a mutated run is not the repo's own tree.
     const sourceOf = (rel) => readFileSync(join(root, rel), 'utf8');
@@ -5741,16 +7849,21 @@ async function runChecks() {
     const pages = readdirSync(join(REPO, 'web')).filter((f) => f.endsWith('.html')).sort();
     const declaring = pages
       .map((file) => ({ file, css: sourceOf(`web/${file}`) }))
-      .filter((p) => tokenIn(p.css, 'faint') !== null);
+      .map((p) => ({ ...p, faints: declarationsOf(p.css, 'faint') }))
+      .filter((p) => p.faints.length > 0);
     check(declaring.length >= 3,
       `every page declaring --faint is measured rather than three being named (${pages.length} pages in web/, ${declaring.length} declaring it)`,
       declaring.map((p) => p.file).join(' '));
 
-    for (const { file, css } of declaring) {
-      const faint = tokenIn(css, 'faint');
+    for (const { file, css, faints } of declaring) {
+      check(faints.length === 1 && /^#[0-9a-fA-F]{6}$/.test(faints[0]),
+        `${file}: declares --faint exactly once, as a colour this can measure`,
+        faints.join(', '));
+      // The one that renders, which is the last whatever the row above found.
+      const faint = faints.at(-1);
       const surfaces = [...css.matchAll(/--(paper(?:-\d)?):\s*(#[0-9a-fA-F]{6})/g)]
         .map((m) => ({ name: m[1], hex: m[2] }));
-      const measured = surfaces.map((s) => ({ ...s, ratio: ratio(faint, s.hex) }));
+      const measured = /^#[0-9a-fA-F]{6}$/.test(faint) ? surfaces.map((s) => ({ ...s, ratio: ratio(faint, s.hex) })) : [];
       const worst = measured.reduce((a, b) => (a.ratio <= b.ratio ? a : b), measured[0]);
       check(measured.length >= 2 && worst.ratio >= AA,
         `${file}: --faint clears ${AA}:1 against every surface the page declares`,
@@ -5758,14 +7871,15 @@ async function runChecks() {
     }
 
     // And the restating itself, which is the finding the contrast is a symptom of.
-    const values = new Set(declaring.map((p) => tokenIn(p.css, 'faint')));
+    const values = new Set(declaring.map((p) => p.faints.at(-1)));
     check(values.size === 1,
       'and every page declares the same value, because nav.css reads the token without declaring one and cannot be right on two pages that disagree',
-      declaring.map((p) => `${p.file} ${tokenIn(p.css, 'faint')}`).join(', '));
+      declaring.map((p) => `${p.file} ${p.faints.at(-1)}`).join(', '));
     const navCss = sourceOf('web/nav.css');
-    check(/var\(--faint\)/.test(navCss) && tokenIn(navCss, 'faint') === null,
+    const navFaints = declarationsOf(navCss, 'faint');
+    check(/var\(--faint\)/.test(navCss) && navFaints.length === 0,
       'which is not a hypothetical: the shared stylesheet uses the token and declares none',
-      `nav.css reads it, declares ${tokenIn(navCss, 'faint') ?? 'nothing'}`);
+      `nav.css reads it, declares ${navFaints.join(', ') || 'nothing'}`);
   }
 
   // Every server this run started, and a row saying so.
@@ -5773,12 +7887,10 @@ async function runChecks() {
   check(swept.length === serversStarted,
     'the fatal-log sweep reads every server this run started, including the ones whose port was later reclaimed',
     `swept ${swept.length} of ${serversStarted} started`);
-  for (const { log } of swept) {
-    const text = log.join('');
-    const bad = text.split('\n').filter(looksFatal);
-    if (bad.length) {
-      console.log(`\n[library] server log:\n  ${bad.slice(0, 4).join('\n  ')}`);
-      failures++;
-    }
+  // A row per server, so a fatal line is a failure this run prints rather than one it counts.
+  for (const { log, port } of swept) {
+    const bad = log.join('').split('\n').filter(looksFatal);
+    check(bad.length === 0, `the server on port ${port} logged nothing that means this run went wrong`,
+      bad.length ? bad.slice(0, 3).join(' | ') : `${log.join('').split('\n').length} lines read`);
   }
 }

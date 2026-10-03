@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Braindance · Keyed webcam</title>
+<link rel="icon" href="data:," />
+<style>
+  /* Transparent all the way down, because OBS composites the page's own alpha and any ground
+     colour under the canvas would arrive as a background it cannot key out again. */
+  html, body {
+    margin: 0;
+    background: transparent;
+    overflow: hidden;
+  }
+
+  /* Pinned at the frame's own size rather than fitted to the window: the source is 1920x1080
+     whatever the browser reading it happens to be, and a scaled canvas would move every pixel
+     away from the depth sample it is keyed by. */
+  #key {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 1920px;
+    height: 1080px;
+  }
+</style>
+</head>
+<body>
+  <canvas id="key"></canvas>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "/vendor/three/build/three.module.js",
+      "three/addons/": "/vendor/three/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="/key.js"></script>
+</body>
+</html>

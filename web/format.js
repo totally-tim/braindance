@@ -1,5 +1,15 @@
-// Version 8 adds a content-addressed audio clip and its modulation settings.
-export const PROJECT_VERSION = 8;
+/**
+ * The document format's version, stamped by the page as it saves and by the server as it
+ * writes, so there is one number rather than two that agree.
+ *
+ * A document from any other version is refused, naming the version it found, rather than
+ * opened on a best guess: this build ships no conversion and no reader of a second shape.
+ * Version 9 carries a `clips` array - each clip its own take, placement, speed, in-point,
+ * the look values that write the cloud and the effects added to it - beside the `look` block
+ * holding the ones that write the post chain, and an `audio` clip with its one mapping.
+ * Version 8 carried no audio and no added effects.
+ */
+export const PROJECT_VERSION = 9;
 
 /**
  * How many clips this build composites.

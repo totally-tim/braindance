@@ -10,7 +10,8 @@
 // It is a stand-in rather than footage: no depth jitter, no confidence gate chattering, no dropped
 // frames, no colour camera halving its rate. Say which sample a number came from.
 
-import { createWriteStream, existsSync, renameSync, rmSync, statSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { encodeMessage, TYPE_HELLO, TYPE_FRAME } from '../server/protocol.js';
 import { DEPTH_W, DEPTH_H } from '../web/format.js';
 
@@ -451,6 +452,8 @@ const hello = JSON.stringify({
 // fixtures` sees a file, exits 0 and adopts the wreck permanently. It also makes `--force` honest,
 // which used to destroy the old capture before a single frame was encoded.
 const TEMP = `${OUT}.part`;
+// `captures/` is gitignored, so a fresh clone has no directory to write into.
+mkdirSync(dirname(OUT), { recursive: true });
 const stream = createWriteStream(TEMP);
 // Removed on any failure, including the ones nothing here catches: `exit` covers the ordinary
 // throw, and the signals do not fire `exit` on their own.

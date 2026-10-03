@@ -14,8 +14,6 @@
 // visible when one clip fills the program and a speed change scales that clip uniformly.
 // A clip inside a larger edit changes the duration non-uniformly; `main.js` then rebases these
 // fractions from the program-second bounds captured at the start of the speed gesture.
-// Dragging one retime key remains different: it changes the map non-uniformly without a speed
-// gesture, so the window keeps its fractions and shifts in program seconds on release.
 //
 // **Two readings arrive at construction rather than being reached for, and that is what
 // makes the arithmetic testable without a browser.** How long the program currently is,

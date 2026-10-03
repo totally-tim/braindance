@@ -29,6 +29,9 @@ const scratch = mkdtempSync(join(tmpdir(), 'release-gate-'));
 const MASK = ['--userconfig', join(scratch, 'user'), '--globalconfig', join(scratch, 'global')];
 writeFileSync(MASK[1], '');
 writeFileSync(MASK[3], '');
+// Under `npm test` the calling npm exports its config as `npm_config_*`, which a nested npm reads
+// as command-line flags, so the machine's own config would reach every probe past MASK.
+const ENV = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^npm_config_/i.test(key)));
 
 let cwd = REPO;
 if (MUTATE) {
@@ -37,8 +40,10 @@ if (MUTATE) {
   if (MUTATIONS[MUTATE] !== null) writeFileSync(join(cwd, '.npmrc'), MUTATIONS[MUTATE]);
 }
 
+let checked = 0;
 let failed = 0;
 const ok = (label, pass, detail = '') => {
+  checked++;
   if (!pass) failed++;
   console.log(`  ${pass ? 'PASS' : 'FAIL'}  ${label}${detail ? `  ${detail}` : ''}`);
 };
@@ -63,12 +68,12 @@ ok('and it names min-release-age, which is the only key npm turns into a cutoff'
 const known = (() => {
   try {
     return /^\s*min-release-age\s*=/m.test(execFileSync('npm', ['config', 'ls', '-l', ...MASK],
-      { cwd: scratch, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+      { cwd: scratch, env: ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
   } catch { return false; }
 })();
 const npmVersion = (() => {
   try {
-    return execFileSync('npm', ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    return execFileSync('npm', ['--version'], { env: ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   } catch { return 'unknown'; }
 })();
 ok('this npm knows min-release-age at all - it arrived in npm 11, and an older one ignores the file entirely while reporting nothing',
@@ -84,7 +89,7 @@ function resolveUnderGate(from) {
   }
   try {
     execFileSync('npm', ['install', PROBE, '--dry-run', '--no-audit', '--no-fund', ...MASK],
-      { cwd: from, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      { cwd: from, env: ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     return '';
   } catch (err) {
     return `${err.stdout ?? ''}${err.stderr ?? ''}`;
@@ -131,7 +136,7 @@ ok('and a directory with no .npmrc draws no cutoff at all, so the one above came
 
 rmSync(scratch, { recursive: true, force: true });
 
-console.log(`\n${failed} failed`);
+console.log(`\n${checked} assertions, ${failed} failed`);
 if (MUTATE) {
 if (MUTATIONS[MUTATE]?.fails) console.log(`[release-gate] it should redden: ${MUTATIONS[MUTATE].fails}`);
   if (failed === 0) { console.log(`NOT CAUGHT - ${MUTATE} passed a check that exists to reject it`); process.exit(1); }

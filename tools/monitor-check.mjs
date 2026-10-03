@@ -42,6 +42,9 @@ const MUTATE = flag('--mutate');
 const NO_BROWSER = argv.includes('--no-browser');
 const WORK = join(REPO, '.monitor-check');
 const SOURCE = join(REPO, 'captures', 'sample.knct');
+// What the capture routes name the replayed take by: its content hash, never its name.
+const SOURCE_KEY = existsSync(SOURCE)
+  ? encodeURIComponent(`sha256:${createHash('sha256').update(readFileSync(SOURCE)).digest('hex')}`) : 'no-sample';
 // The live recorder, which `/` served until the main menu took that path. The menu page defines no
 // `__kinect`, so a stale root here would read as the viewer never coming up rather
 // than as a wrong URL.
@@ -53,8 +56,8 @@ const MUTATIONS = {
   // It leaks into the recorder and nowhere else: decimating at the top of `handleMessage` corrupts
   // the socket too, fails section 1's first row, and aborts the run before it reaches a take.
   'decimate-reaches-recorder': { file: 'server/index.js', edits: [[
-    '    recorder.write(msg.raw);',
-    "    recorder.write(encodeMessage(TYPE_FRAME, decimatePayload(msg.payload, 4, 'leak')));",
+    '    recorder.write(msg.raw);\n  } else if (msg.type === TYPE_COLOR) {',
+    "    recorder.write(encodeMessage(TYPE_FRAME, decimatePayload(msg.payload, 4, 'leak')));\n  } else if (msg.type === TYPE_COLOR) {",
   ]] },
   'stride-ignored': { file: 'server/index.js', edits: [[
     '    if (frameSeq % m.stride !== 0) continue;',
@@ -167,7 +170,7 @@ const ok = (label, pass, detail = '') => {
 
 const servers = [];
 const start = (args) => new Promise((resolve, reject) => {
-  const child = spawn(process.execPath, [join(WORK, 'server/index.js'), '--port', String(PORT), ...args], {
+  const child = spawn(process.execPath, [join(WORK, 'server/index.js'), '--standby-after', '0', '--port', String(PORT), ...args], {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   servers.push(child);
@@ -411,7 +414,7 @@ try {
   // watched on the socket and the two compared byte for byte.
   const viaHttp = {};
   for (const k of [1, 4]) {
-    const res = await fetch(`http://127.0.0.1:${PORT}/capture/sample/frame/7?decimate=${k}`);
+    const res = await fetch(`http://127.0.0.1:${PORT}/capture/${SOURCE_KEY}/frame/7?decimate=${k}`);
     viaHttp[k] = Buffer.from(await res.arrayBuffer());
   }
   ok('the frame API answers a full frame and a ÷4 one',
@@ -755,7 +758,7 @@ try {
         return out;
       }`;
       const same = await page.evaluate(
-        `(${SAME_FRAME})(${JSON.stringify({ take: 'sample', n: 7, divisors: [1, 2, 4, 8] })})`,
+        `(${SAME_FRAME})(${JSON.stringify({ take: SOURCE_KEY, n: 7, divisors: [1, 2, 4, 8] })})`,
       );
       ok('the frame API served frame 7 of the sample at every divisor this compares',
         !same.error, same.error ?? '');
