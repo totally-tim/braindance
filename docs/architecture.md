@@ -168,11 +168,12 @@ each mark, as it is pressed, to a copy beside the take named `<take>.held-<start
 the take and the `startedAt` its hello carries. The mark is answered before that append lands.
 While the close flushes the take's last frames, it appends the drop record and any mark whose append
 failed. Once that append finishes, the close scans the take, files the marks under the hash the scan
-computed, and removes the copy when every record in it reads back from that log. A process killed at any point keeps every record the copy already holds.
-It loses a mark whose append had not landed, which a stalled disk can stretch without bound, and the
-drop record when the close had not yet appended it. A take that died before its hello landed files
-none, because every such take hashes alike. Every append to a marks log or a copy first ends a
-record that a killed writer left unfinished, so the next record starts on its own line. At start,
+computed, and removes the copy when every record in it reads back from that log. A process killed
+at any point keeps every record the copy already holds. It loses a mark whose append had not landed,
+which a stalled disk can stretch without bound, and the drop record when the close had not yet
+appended it. A take that died before its hello landed files none, because every such take hashes
+alike. Every append to a marks log or a copy first ends a record that a killed writer left
+unfinished, so the next record starts on its own line. At start,
 `adoptNamedMarkLogs` moves each log filed by name beside a take into that take's hash log: a held
 copy when the take's hello carries the `startedAt` the copy names, and a log an older build filed as
 `<take>.marks.jsonl`. It removes a log only once every record in it reads back from the hash log,
