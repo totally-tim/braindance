@@ -743,7 +743,7 @@ const MUTATIONS = {
   ] },
   // A take that dies mid-write drops the marks pressed during it.
   'mid-write-drops-marks': { file: 'server/recorder.js', edits: [[
-    '          (index) => flushMarks(this.dir, failed, index),', '          () => { /* mutation: the marks go nowhere */ },',
+    '      (index) => flushMarks(this.dir, failed, index),', '      () => { /* mutation: the marks go nowhere */ },',
   ]] },
   // The drop count reaches the monitor and the close log and stops there, so a take with a hole in
   // it lists exactly like a whole one once the process that counted is gone.

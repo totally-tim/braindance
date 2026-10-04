@@ -4,12 +4,17 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import fsp, { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
+import { hostname, tmpdir } from 'node:os';
+import { join, sep } from 'node:path';
 import { buildIndex } from '../server/capture.js';
-import { adoptNamedMarkLogs, heldMarksPathFor, holdMarks, marksPathFor, readMarkLog, readMarks, releaseFiled } from '../server/library.js';
+import {
+  adoptNamedMarkLogs, heldMarksPathFor, holdMarks, marksPathFor, readMarkLog, readMarks, releaseFiled, renameTake,
+} from '../server/library.js';
 import { encodeMessage, TYPE_FRAME, TYPE_HELLO } from '../server/protocol.js';
 import { Recorder } from '../server/recorder.js';
 
@@ -160,9 +165,13 @@ test('a mark is copied beside its take while the take is still recording', async
     const rec = recorder.mark(40, 'pressed mid-take');
     try {
       const copy = heldMarksPathFor(path, startedAt);
-      for (let waited = 0; !existsSync(copy) && waited < 5000; waited += 10) await new Promise((done) => setTimeout(done, 10));
+      // The whole record rather than the file: the append creates the file before its bytes land.
+      const expected = `${JSON.stringify(rec)}\n`;
+      for (let waited = 0; await readFile(copy, 'utf8').catch(() => '') !== expected && waited < 5000; waited += 10) {
+        await new Promise((done) => setTimeout(done, 10));
+      }
       assert.equal(recorder.state.recording, true, 'the take is still open');
-      assert.deepEqual(JSON.parse(await readFile(copy, 'utf8')), rec);
+      assert.equal(await readFile(copy, 'utf8'), expected);
     } finally {
       await recorder.closeAll('test over');
     }
@@ -186,5 +195,103 @@ test('a mark pressed as its take closes is copied beside the take once', async (
     }
     const lines = (await readFile(heldMarksPathFor(path, startedAt), 'utf8')).trim().split('\n');
     assert.equal(lines.length, 1, lines.join(' | '));
+  });
+});
+
+// A copy named as another process on this host or another host would name it.
+const HOST = hostname().replace(/[^A-Za-z0-9-]/g, '-');
+const copyBy = (path, host, pid) => `${path.replace(/\.knct$/, '')}.held-${STARTED}.${host}.${pid}.jsonl`;
+
+test('a copy whose writer is alive on this host, or on another host, is left to its writer', async () => {
+  await inTempDir(async (dir) => {
+    const path = await writeTake(dir, STARTED);
+    const copies = [copyBy(path, HOST, process.ppid), copyBy(path, 'another-host', 12345)];
+    for (const copy of copies) await writeFile(copy, `${JSON.stringify(MARK)}\n`);
+    const log = console.log;
+    console.log = () => {};
+    try {
+      assert.deepEqual(await adoptNamedMarkLogs(dir), []);
+    } finally {
+      console.log = log;
+    }
+    for (const copy of copies) assert.equal(existsSync(copy), true);
+    assert.equal(existsSync(join(dir, 'marks')), false, 'and the growing take was not filed under');
+  });
+});
+
+test('a copy whose writer on this host is gone is filed', async () => {
+  await inTempDir(async (dir) => {
+    const path = await writeTake(dir, STARTED);
+    const gone = spawn(process.execPath, ['-e', '']);
+    await once(gone, 'exit');
+    await writeFile(copyBy(path, HOST, gone.pid), `${JSON.stringify(MARK)}\n`);
+    const [adopted] = await adoptNamedMarkLogs(dir);
+    assert.equal(adopted?.records, 1);
+  });
+});
+
+test('a take is not renamed onto a name a copy of marks is held under', async () => {
+  await inTempDir(async (dir) => {
+    const path = await writeTake(dir, STARTED);
+    const { hash } = await buildIndex(path);
+    await writeFile(copyBy(join(dir, 'other.knct'), HOST, 99999), `${JSON.stringify(MARK)}\n`);
+    await assert.rejects(renameTake(dir, '2026-10-04-take1', 'other', { hash }), /holds marks under that name/);
+    assert.equal(existsSync(path), true);
+  });
+});
+
+test('a record a copy carries twice is filed once', async () => {
+  await inTempDir(async (dir) => {
+    const path = await writeTake(dir, STARTED);
+    const two = { ...MARK, id: 'm2', at: 2 };
+    await holdMarks(path, STARTED, [MARK, two, MARK]);
+    const [adopted] = await adoptNamedMarkLogs(dir);
+    assert.deepEqual((await readMarkLog(dir, adopted.hash)).map((rec) => rec.id), ['m1', 'm2']);
+  });
+});
+
+// Appends to a marks log under `marks/` report success and write nothing, so a caller that removes
+// a copy without reading its records back loses them.
+async function withMarksLogWritesLost(run) {
+  const { appendFile } = fsp;
+  fsp.appendFile = async (path, ...rest) => (String(path).includes(`${sep}marks${sep}`) ? undefined : appendFile(path, ...rest));
+  syncBuiltinESMExports();
+  try {
+    await run();
+  } finally {
+    fsp.appendFile = appendFile;
+    syncBuiltinESMExports();
+  }
+}
+
+test('adoption keeps a copy whose records do not read back from the marks log', async () => {
+  await inTempDir(async (dir) => {
+    const path = await writeTake(dir, STARTED);
+    await holdMarks(path, STARTED, [MARK]);
+    const error = console.error;
+    console.error = () => {};
+    try {
+      await withMarksLogWritesLost(async () => assert.deepEqual(await adoptNamedMarkLogs(dir), []));
+    } finally {
+      console.error = error;
+    }
+    assert.equal(existsSync(heldMarksPathFor(path, STARTED)), true);
+  });
+});
+
+test('a close keeps the copy when its marks do not read back from the marks log', async () => {
+  await inTempDir(async (dir) => {
+    const recorder = new Recorder({ dir });
+    recorder.open(Buffer.from(JSON.stringify({ fx: 366, fy: 366, cx: 256, cy: 212 })));
+    const { path, startedAt } = recorder.take;
+    recorder.mark(40, 'filed nowhere');
+    const error = console.error;
+    console.error = () => {};
+    try {
+      await withMarksLogWritesLost(() => recorder.closeAll('test over'));
+    } finally {
+      console.error = error;
+    }
+    assert.equal(existsSync(heldMarksPathFor(path, startedAt)), true);
   });
 });

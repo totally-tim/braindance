@@ -55,8 +55,9 @@ chose when `--port` is `0`; `pid`; and `roots`, the absolute `captures`, `projec
 `deliverables`, `effects`, `jobs`, `exports` and `audio` directories. The stop signals and, under
 `--stop-on-stdin`, the `stop` line and the end of stdin run one shutdown. A live server finishes
 the open take and every take a grabber restart left closing, filing their indexes and marks, stops
-the grabber and exits 0. It exits 1 when a take does not close, a take's marks cannot be written, or
-the grabber does not stop, and says which on stderr. A replay server stops accepting connections,
+the grabber and exits 0. It exits 1 when a take does not close, a take's marks cannot be written,
+those of a take that failed mid-write included, or the grabber does not stop, and says which on
+stderr. A replay server stops accepting connections,
 closes its capture and exits 0, or exits 1 when the capture does not close. Both also end a running
 audio import and every running export. The server kills the ffmpeg child and removes its scratch
 before it exits, and exits 1 when a scratch cannot be removed. Once a shutdown begins, the server

@@ -22,7 +22,7 @@ function nextTakeId(dir, atLeast = 0) {
   } catch { /* the directory is made on the way to opening the file, or cannot be listed */ }
   let highest = atLeast;
   for (const file of files) {
-    const m = new RegExp(`^${day}-take(\\d+)\\.(?:knct|held-\\d+\\.jsonl)$`).exec(file);
+    const m = new RegExp(`^${day}-take(\\d+)\\.(?:knct|held-.+\\.jsonl)$`).exec(file);
     if (m) highest = Math.max(highest, Number(m[1]));
   }
   return { id: `${day}-take${highest + 1}`, n: highest + 1 };
@@ -97,7 +97,8 @@ function copyRecords(take, records) {
 // record whose copy failed. The close awaits this before its scan, which on a long take can outlast a
 // host's stop deadline.
 async function holdRecords(take) {
-  take.records = closingRecords(take);
+  // Once, so filing a failed take again neither loses its marks nor writes a second drop record.
+  take.records ??= closingRecords(take);
   // After the appends already under way, or a mark pressed as the take closes is copied twice.
   await take.copying;
   await copyRecords(take, take.records.filter((rec) => !take.copied.has(rec)));
@@ -150,6 +151,8 @@ export class Recorder {
     // Every take whose close is still running. A set, because `split()` closes the old take
     // unawaited while the replacement's hello opens the next, so a restart holds two at once.
     this.closing = new Set();
+    // Takes that failed mid-write and whose records could not be filed, for the next stop to retry.
+    this.unfiled = new Set();
   }
 
   get state() {
@@ -259,19 +262,7 @@ export class Recorder {
         // Into *this* take's log, even though it ended badly: nulling the take without
         // flushing left them for the next take, at a source time meaningless there.
         settle(failed);
-        // Owned until its marks are filed, like a take whose close is running, so a stop waits for it.
-        this.closing.add(failed);
-        failed.closed = holdRecords(failed).then(() => cachedIndex(failed.path)).then(
-          (index) => flushMarks(this.dir, failed, index),
-          (err) => {
-            throw new Error(`take ${failed.id}: its marks have no hash to be filed under: ${err.message}`
-              + (failed.held ? ` - ${basename(failed.held)} holds them` : ''));
-          },
-        ).finally(() => {
-          this.closing.delete(failed);
-          this.onChange(this.state);
-        });
-        failed.closed.catch((err) => console.error(`[recorder] ${err.message}`));
+        this.fileFailed(failed);
         this.onChange(this.state);
       }
     });
@@ -301,7 +292,7 @@ export class Recorder {
       pendingMarks: [],
       // What the close files, taken from `pendingMarks` when it begins; the copy held of the marks,
       // the records it holds, and its last append.
-      records: [],
+      records: null,
       held: null,
       copied: new Set(),
       copying: Promise.resolve(),
@@ -364,10 +355,33 @@ export class Recorder {
    * after every one has finished.
    */
   async closeAll(reason) {
+    // A take whose filing already failed is filed again, so a stop never reports marks it lost.
+    for (const take of [...this.unfiled]) this.fileFailed(take);
     // `close` runs first and moves the open take into `closing`, so a Set holds its close once.
     const closes = new Set([this.close(reason), ...[...this.closing].map((take) => take.closed)]);
     const failed = (await Promise.allSettled(closes)).find((result) => result.status === 'rejected');
     if (failed) throw failed.reason;
+  }
+
+  // Files the records of a take that failed mid-write. It stays owned until that settles, like a take
+  // whose close is running, so a stop waits for it; a filing that fails leaves it in `unfiled`.
+  fileFailed(failed) {
+    this.closing.add(failed);
+    this.unfiled.delete(failed);
+    failed.closed = holdRecords(failed).then(() => cachedIndex(failed.path)).then(
+      (index) => flushMarks(this.dir, failed, index),
+      (err) => {
+        throw new Error(`take ${failed.id}: its marks have no hash to be filed under: ${err.message}`
+          + (failed.held ? ` - ${basename(failed.held)} holds them` : ''));
+      },
+    ).catch((err) => {
+      this.unfiled.add(failed);
+      throw err;
+    }).finally(() => {
+      this.closing.delete(failed);
+      this.onChange(this.state);
+    });
+    failed.closed.catch((err) => console.error(`[recorder] ${err.message}`));
   }
 
   // The scan writes the sidecar index and the content hash, which is what makes the take a library

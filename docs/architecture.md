@@ -103,15 +103,16 @@ rather than demand. MJPEG holds transient outages for up to 45 seconds and refus
 unavailability with 503. SIGINT, SIGTERM and, under `--stop-on-stdin`, a `stop` line or the end of
 stdin run one shutdown. It waits for grabber teardown and for every take the recorder owns, the open
 one and any a restart left closing (`closeAll`), whichever of the two fails, and says which of the
-two failed. It also waits for a take that failed mid-write until its marks are filed. A replay
-server has its own shutdown behind the same triggers: it closes the retained capture and the
-listener, then exits. Both shutdowns also end a running audio import and every running export.
-`AudioStore.stop` and `stopExports` kill the ffmpeg child, wait for it to exit and remove its
-scratch before the process exits. From the moment either is called, the server refuses a new audio
-import, a new export socket and an export's begin, including on a connection it accepted earlier.
-Neither wait has a deadline of its own; under the desktop shell, `STOP_GRACE_MS` bounds the whole
-stop. After the bind the server prints `[server] ready` with its origin and roots, which is how a
-host learns a port it did not choose.
+two failed. It also files the marks of a take that failed mid-write: it waits for a filing still
+running, files again one that already failed, and counts a take whose marks still cannot be filed
+as a take that did not finish. A replay server has its own shutdown behind the same triggers: it
+closes the retained capture and the listener, then exits. Both shutdowns also end a running audio
+import and every running export. `AudioStore.stop` and `stopExports` kill the ffmpeg child, wait for
+it to exit and remove its scratch before the process exits. From the moment either is called, the
+server refuses a new audio import, a new export socket and an export's begin, including on a
+connection it accepted earlier. Neither wait has a deadline of its own; under the desktop shell,
+`STOP_GRACE_MS` bounds the whole stop. After the bind the server prints `[server] ready` with its
+origin and roots, which is how a host learns a port it did not choose.
 
 `server/output.js` owns output state for the server process. Preset reads and patches are
 serialized in arrival order. The record page writes mode and size through HTTP and parameter
@@ -164,8 +165,10 @@ content hash, and `takeFileFor` finds the file that holds it, so an editor open 
 fetching it through a rename, and a take given the freed name is never answered in its place. Marks
 are an append-only log filed by hash in `captures/marks/`, so a rename moves none and a new take
 under a reused name starts with none. A take being recorded has no hash, so the recorder appends
-each mark, as it is pressed, to a copy beside the take named `<take>.held-<startedAt>.jsonl` after
-the take and the `startedAt` its hello carries. The mark is answered before that append lands.
+each mark, as it is pressed, to a copy beside the take named
+`<take>.held-<startedAt>.<host>.<pid>.jsonl` after the take, the `startedAt` its hello carries, and
+the host and process writing it. The mark is
+answered before that append lands.
 While the close flushes the take's last frames, it appends the drop record and any mark whose append
 failed. Once that append finishes, the close scans the take, files the marks under the hash the scan
 computed, and removes the copy when every record in it reads back from that log. A process killed
@@ -176,11 +179,12 @@ alike. Every append to a marks log or a copy first ends a record that a killed w
 unfinished, so the next record starts on its own line. At start,
 `adoptNamedMarkLogs` moves each log filed by name beside a take into that take's hash log: a held
 copy when the take's hello carries the `startedAt` the copy names, and a log an older build filed as
-`<take>.marks.jsonl`. It removes a log only once every record in it reads back from the hash log,
-and leaves one it cannot read. The recorder never gives a take a name a held copy sits under, but a
-take renamed onto such a name with the same `startedAt`, which takes a clock that repeated the
-millisecond, would receive the copy. It cannot tell an older build's log that a deleted take left
-under the name from the marks of the take there now.
+`<take>.marks.jsonl`. It leaves a copy whose writer may still be appending to it, before it hashes
+the take: one written by a live process on this host, as a second server over the same directory
+finds, or by any process on another host, which this one cannot ask about. It removes a log only
+once every record in it reads back from the hash log, and leaves one it cannot read. Neither the
+recorder nor a rename gives a take a name a held copy sits under. It cannot tell an older build's
+log that a deleted take left under the name from the marks of the take there now.
 Two renames at one name are answered by the kernel, and the loser keeps its footage. A rename links
 the new name before it unlinks the old, so a crash between the two leaves one take under two names:
 `reconcile` lists both on one entry, and `removeName` takes one away once both names are shown to

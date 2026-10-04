@@ -170,6 +170,11 @@ async function shoot(server) {
 
 const heldCopies = (server, id) => readdirSync(server.roots.captures).filter((file) => file.startsWith(`${id}.held-`));
 
+// The copy beside take `id` once it holds the whole record of the mark `shoot` pressed. The file
+// exists before its first append's bytes land, so its name alone says nothing about the mark.
+const heldMark = (server, id) => heldCopies(server, id).find((file) => readFileSync(join(server.roots.captures, file), 'utf8')
+  .split('\n').some((line) => line.includes(`"label":"mark-${id}"`) && line.endsWith('}')));
+
 function assertFinished(server, id) {
   assert.ok(existsSync(join(server.roots.captures, `${id}.idx`)), `take ${id} has its index sidecar`);
   const marksDir = join(server.roots.captures, 'marks');
@@ -423,8 +428,7 @@ test('a recording server killed with no stop keeps the marks already copied, and
   const name = 'killed-mid-take';
   const first = await start(name, { flags: ['--stop-on-stdin', '--record', '--grabber', fakeGrabber()] });
   const id = await shoot(first);
-  await eventually(() => heldCopies(first, id).length > 0, 'the mark to be copied beside the take');
-  const [held] = heldCopies(first, id);
+  const held = await eventually(() => heldMark(first, id), 'the mark to be copied beside the take');
   first.child.kill('SIGKILL');
   assert.deepEqual(await first.stops(), { code: null, signal: 'SIGKILL' });
   assert.equal(existsSync(join(first.roots.captures, `${id}.idx`)), false, 'the take was never closed');
@@ -434,6 +438,31 @@ test('a recording server killed with no stop keeps the marks already copied, and
   assertFinished(second, id);
   second.child.stdin.write('stop\n');
   assert.deepEqual(await second.stops(), { code: 0, signal: null });
+});
+
+// A second server started over the captures directory of one that is recording finds the copy the
+// first is still appending to. Filing it then would hash a growing take and remove the copy.
+test('a server started beside a recording one leaves its copy alone, so a later start files the marks under the final hash', { timeout: 120_000 }, async () => {
+  const name = 'beside-a-recorder';
+  const first = await start(name, { flags: ['--stop-on-stdin', '--record', '--grabber', fakeGrabber()] });
+  const id = await shoot(first);
+  const held = await eventually(() => heldMark(first, id), 'the mark to be copied beside the take');
+  const second = await start(name, { flags: ['--stop-on-stdin', '--replay', sample] });
+  await second.until((all) => all.some((line) => line.includes(held)), 'the second server to decide about the copy');
+  assert.ok(second.lines.some((line) => line.startsWith(`[library] ${held} stays where it is`)),
+    `the second server left the copy alone: ${second.lines.filter((line) => line.includes(held)).join(' | ')}`);
+  second.child.stdin.write('stop\n');
+  await second.stops();
+  first.child.kill('SIGKILL');
+  await first.stops();
+
+  const third = await start(name, { flags: ['--stop-on-stdin', '--replay', sample] });
+  await third.until((all) => all.some((line) => line.startsWith(`[library] moved ${held} into the marks log of ${id}.knct`)), 'the copy to be filed');
+  const { hash } = JSON.parse(readFileSync(join(third.roots.captures, `${id}.idx`), 'utf8'));
+  const log = join(third.roots.captures, 'marks', `${hash.slice('sha256:'.length)}.jsonl`);
+  assert.ok(readFileSync(log, 'utf8').includes(`mark-${id}`), 'the mark is filed under the hash of the take as it ended');
+  third.child.stdin.write('stop\n');
+  assert.deepEqual(await third.stops(), { code: 0, signal: null });
 });
 
 test('without --stop-on-stdin a stop line and end of file do nothing', { timeout: 60_000 }, async () => {

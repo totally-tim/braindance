@@ -7,6 +7,7 @@ import { createWriteStream, statSync } from 'node:fs';
 import { readdir, readFile, writeFile, appendFile, stat, unlink, rename, link, mkdir, open, statfs } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
+import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { cachedIndex, forgetCapture, indexPathFor, captureIdFor, loadIndex, readHelloOnce } from './capture.js';
 
@@ -192,19 +193,43 @@ export async function mergeMarkLog(dir, hash, theirLog, { present = null } = {})
 // `mergeMarkLog` once it holds the log's lock.
 async function mergeHeld(dir, hash, theirLog) {
   const known = new Set((await readMarkLog(dir, hash)).map((r) => `${r.id}@${r.at}`));
-  const fresh = theirLog.filter((r) => !known.has(`${r.id}@${r.at}`));
+  // `known` grows as records are taken, because a log can carry one record twice: an append that
+  // wrote its bytes and then failed is tried again.
+  const fresh = [];
+  for (const rec of theirLog) {
+    const key = `${rec.id}@${rec.at}`;
+    if (known.has(key)) continue;
+    known.add(key);
+    fresh.push(rec);
+  }
   await appendLines(dir, hash, fresh);
   return fresh.length;
 }
 
 const NAMED_LOG = '.marks.jsonl';
-const HELD_LOG = /^(.+)\.held-(\d+)\.jsonl$/;
+const HELD_LOG = /^(.+)\.held-(\d+)\.([A-Za-z0-9-]+)\.(\d+)\.jsonl$/;
+const HOST = hostname().replace(/[^A-Za-z0-9-]/g, '-');
 
 /**
- * Where the recorder holds a copy of a take's marks while its close runs: beside the take, under its
- * name and the `startedAt` its hello carries, so a copy is only ever read into the take that wrote it.
+ * Where the recorder holds a copy of a take's marks while it records: beside the take, under its
+ * name and the `startedAt` its hello carries, so a copy is only ever read into the take that wrote
+ * it, and under the host and process writing it, so another server over the same directory can
+ * tell a copy still being written from one a killed process left.
  */
-export const heldMarksPathFor = (capturePath, startedAt) => `${capturePath.replace(/\.knct$/i, '')}.held-${startedAt}.jsonl`;
+export const heldMarksPathFor = (capturePath, startedAt) => `${capturePath.replace(/\.knct$/i, '')}.held-${startedAt}.${HOST}.${process.pid}.jsonl`;
+
+// Whether the process that wrote a copy may still be appending to it: a live process on this host
+// other than this one, or any process on another host, which this one cannot ask about.
+function stillWritten(host, pid) {
+  if (host !== HOST) return true;
+  if (pid === process.pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
 
 /** Appends `records` to the copy the recorder holds for the take at `capturePath`. */
 export async function holdMarks(capturePath, startedAt, records) {
@@ -252,6 +277,11 @@ export async function adoptNamedMarkLogs(dir, { owns = () => false } = {}) {
     if (!take) continue;
     const path = join(dir, take);
     if (owns(path)) continue;
+    // Asked before the take is hashed, because a take another process is recording is still growing.
+    if (held && stillWritten(held[3], Number(held[4]))) {
+      console.log(`[library] ${file} stays where it is: process ${held[4]} on ${held[3]} may still be writing it`);
+      continue;
+    }
     const identity = takeIdentity(path);
     // A take this build cannot read keeps its log where it is, and the rest are still moved. So
     // does a take whose hello does not say it started when the copy held beside it says, which
@@ -1062,6 +1092,10 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
         if (err.code !== 'ENOENT') throw err;
       }
     }
+    // The name a copy of marks is held under is taken too, or a start could read the copy into
+    // the take renamed onto it.
+    const held = (await directoryNames(dir)).find((name) => HELD_LOG.exec(name)?.[1] === to);
+    if (held) throw new Error(`${to} is taken: ${held} holds marks under that name`);
 
     // Linked then unlinked, never renamed: the `stat` loop above is check-then-act and `rename(2)`
     // replaces silently, where `link(2)` fails EEXIST atomically. The window it admits is a take
