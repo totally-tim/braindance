@@ -103,9 +103,17 @@ rather than demand. MJPEG holds transient outages for up to 45 seconds and refus
 unavailability with 503. SIGINT, SIGTERM and, under `--stop-on-stdin`, a `stop` line or the end of
 stdin run one shutdown. It waits for grabber teardown and for every take the recorder owns, the open
 one and any a restart left closing (`closeAll`), whichever of the two fails, and says which of the
-two failed. A replay server has its own shutdown behind the same triggers: it closes the retained
-capture and the listener, then exits. After the bind the server prints `[server] ready` with its
-origin and roots, which is how a host learns a port it did not choose.
+two failed. It also files the marks of a take that failed mid-write and of a take whose earlier
+close could not file them: it waits for a filing still running, files again one that already failed,
+and counts a take whose marks still cannot be filed as a take that did not finish. A replay server
+has its own shutdown behind the same triggers: it closes the retained capture and the listener, then
+exits. Both shutdowns also end a running audio import and every running export. `AudioStore.stop`
+and `stopExports` kill the ffmpeg child, wait for it to exit and remove its scratch before the
+process exits. From the moment either is called, the server refuses a new audio import, a new export
+socket and an export's begin, including on a connection it accepted earlier. Neither wait has a
+deadline of its own; under the desktop shell, `STOP_GRACE_MS` bounds the whole stop. After the bind
+the server prints `[server] ready` with its origin and roots, which is how a host learns a port it
+did not choose.
 
 `server/output.js` owns output state for the server process. Preset reads and patches are
 serialized in arrival order. The record page writes mode and size through HTTP and parameter
@@ -157,11 +165,30 @@ its index to a new name and every project still opens. Every `/capture/` route n
 content hash, and `takeFileFor` finds the file that holds it, so an editor open on a take keeps
 fetching it through a rename, and a take given the freed name is never answered in its place. Marks
 are an append-only log filed by hash in `captures/marks/`, so a rename moves none and a new take
-under a reused name starts with none. A take being recorded has no hash: its marks stay in the
-recorder until the close scans it, and the close files them under the hash it computed. A take that
-died before its hello landed files none, because every such take hashes alike. At start,
-`adoptNamedMarkLogs` moves each log an older build filed by name beside a take into that take's hash
-log; it cannot tell a log a deleted take left under the name from the marks of the take there now.
+under a reused name starts with none. A take being recorded has no hash, so the recorder appends
+each mark, as it is pressed, to a copy beside the take named
+`<take>.held-<startedAt>.<host>.<pid>.jsonl` after the take, the `startedAt` its hello carries, the
+first twelve hex digits of the sha256 of the writing host's name, and the writing process. The mark
+is answered before that append lands.
+While the close flushes the take's last frames, it appends the drop record and any mark whose append
+failed. Once that append finishes, the close scans the take, files the marks under the hash the scan
+computed, and removes the copy when every record in it reads back from that log. A process killed
+at any point keeps every record the copy already holds. It loses a mark whose append had not landed,
+which a stalled disk can stretch without bound, and the drop record when the close had not yet
+appended it. A take that died before its hello landed files none, because every such take hashes
+alike. Every append to a marks log or a copy first ends a record that a killed writer left
+unfinished, so the next record starts on its own line. At start,
+`adoptNamedMarkLogs` moves each log filed by name beside a take into that take's hash log: a held
+copy when the take's hello carries the `startedAt` the copy names, and a log an older build filed as
+`<take>.marks.jsonl`. It leaves a copy whose writer may still be appending to it, before it hashes
+the take: one written by a live process on this host, as a second server over the same directory
+finds, or by any process on a host whose name hashes differently, which this one cannot ask about.
+A host whose name changes after a kill therefore leaves its own earlier copies where they are. It
+removes a log only once every record in it reads back from the hash log, compared record for
+record, and leaves one it cannot read. The recorder never gives a take a name a held copy sits
+under, and a rename refuses to move a take onto such a name, in any spelling of its case, or away
+from a copy held under its own. It cannot tell an older build's log that a deleted take left under
+the name from the marks of the take there now.
 Two renames at one name are answered by the kernel, and the loser keeps its footage. A rename links
 the new name before it unlinks the old, so a crash between the two leaves one take under two names:
 `reconcile` lists both on one entry, and `removeName` takes one away once both names are shown to
@@ -217,7 +244,9 @@ refusal carries the service's last lines.
 **Stop.** Closing the last window quits on every platform. Quit writes `stop` and a newline to the
 service's stdin, which is the stop message on Windows as well, where a signal never reaches the
 service as SIGTERM. The shell waits `STOP_GRACE_MS`, 20 seconds, which is longer than the server's
-15-second standby grace, and kills the service only after that. The app exits with 0 when the
+15-second standby grace, and kills the service only after that. A kill while a long take is being
+scanned loses that take's index, which the next launch rebuilds, and keeps every mark whose append
+to the copy beside the take had landed, which the next launch files. The app exits with 0 when the
 service exited 0 and with 1 otherwise, and `[desktop] service exited` in its output carries the
 code. A service that exits while the window is open is a refusal, and the app quits.
 

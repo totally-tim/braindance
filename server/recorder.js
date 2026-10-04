@@ -3,14 +3,16 @@
 // take is one continuous stream, one hello, monotonic stamps; a grabber restart splits it.
 
 import { createWriteStream, fstatSync, openSync, readdirSync } from 'node:fs';
+import { unlink } from 'node:fs/promises';
 import { once } from 'node:events';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { encodeMessage, TYPE_HELLO, TYPE_COLOR } from './protocol.js';
 import { buildIndex, cachedIndex, forgetCapture } from './capture.js';
-import { appendMarks, remaining, MIN_TAKE_SEC, durationLabel, sameTake, takeIdentity } from './library.js';
+import { heldMarksPathFor, holdMarks, mergeMarkLog, releaseFiled, remaining, MIN_TAKE_SEC, durationLabel, sameTake, takeIdentity } from './library.js';
 
 // `2026-07-31-take3`. Synchronous, because opening a take must finish in the same turn as the
-// hello or the frames behind it find no file.
+// hello or the frames behind it find no file. A copy of marks held beside a name keeps that name
+// taken after its take is gone, so no take is given a name a stale copy waits under.
 function nextTakeId(dir, atLeast = 0) {
   const now = new Date();
   const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -20,7 +22,7 @@ function nextTakeId(dir, atLeast = 0) {
   } catch { /* the directory is made on the way to opening the file, or cannot be listed */ }
   let highest = atLeast;
   for (const file of files) {
-    const m = new RegExp(`^${day}-take(\\d+)\\.knct$`).exec(file);
+    const m = new RegExp(`^${day}-take(\\d+)\\.(?:knct|held-.+\\.jsonl)$`).exec(file);
     if (m) highest = Math.max(highest, Number(m[1]));
   }
   return { id: `${day}-take${highest + 1}`, n: highest + 1 };
@@ -60,28 +62,79 @@ function settle(take) {
   take.bytes = written;
 }
 
-// Marks hang off the take rather than the recorder, or a take that failed mid-write leaves them
-// for whichever take closes next. Until the scan gives the take its hash they are the take object's
-// own, and the hash is what files them - once the hello has landed, because its `startedAt` is what
-// makes one take's bytes differ from another's: two takes that died before it hash alike. A write
-// that fails rejects naming the take, so the way out of the process can say whose marks were lost.
-async function flushMarks(dir, take, index) {
+// Taken once, when the take stops taking frames, so the copy held beside it and the log filed by
+// hash carry the same records and a merge of one into the other adds nothing.
+function closingRecords(take) {
   // The drop count goes into the marks log because it is the one sidecar neither derived from the
   // take's bytes nor thrown away with them, and a count held in memory is gone at the next restart.
   // Only when frames were dropped: a take that lost nothing gains no sidecar it did not have.
   const drop = take.dropped > 0
     ? [{ id: `drop:${take.id}`, at: Date.now(), kind: 'drop', dropped: take.dropped }]
     : [];
-  if (!take.pendingMarks.length && !drop.length) return;
+  return [...take.pendingMarks.splice(0), ...drop];
+}
+
+// Appends records to the copy held beside the take, each append after the one before, so a process
+// killed at any point leaves every record already appended, and the next start files the copy under
+// the hash its own scan gives (`adoptNamedMarkLogs`). A record that cannot be copied stays in memory,
+// where the close files it as it would have anyway, and the close tries the copy again.
+function copyRecords(take, records) {
+  if (!records.length) return take.copying;
+  take.copying = take.copying.then(async () => {
+    try {
+      await holdMarks(take.path, take.startedAt, records);
+      for (const rec of records) take.copied.add(rec);
+      take.held = heldMarksPathFor(take.path, take.startedAt);
+    } catch (err) {
+      console.error(`[recorder] take ${take.id}: ${records.length} record(s) could not be copied beside it (${err.message}), `
+        + 'so a process killed before its close ends loses them');
+    }
+  });
+  return take.copying;
+}
+
+// Each mark is copied as it is pressed, so what is left for the close is the drop record and any
+// record whose copy failed. The close awaits this before its scan, which on a long take can outlast a
+// host's stop deadline.
+async function holdRecords(take) {
+  // Once, so filing a failed take again neither loses its marks nor writes a second drop record.
+  take.records ??= closingRecords(take);
+  // After the appends already under way, or a mark pressed as the take closes is copied twice.
+  await take.copying;
+  await copyRecords(take, take.records.filter((rec) => !take.copied.has(rec)));
+}
+
+// Marks hang off the take rather than the recorder, or a take that failed mid-write leaves them
+// for whichever take closes next. Until the scan gives the take its hash they are the take object's
+// own, and the hash is what files them - once the hello has landed, because its `startedAt` is what
+// makes one take's bytes differ from another's: two takes that died before it hash alike. A write
+// that fails rejects naming the take, so the way out of the process can say whose marks were lost,
+// or where the copy of them waits for the next start.
+async function flushMarks(dir, take, index) {
+  const records = take.records;
+  if (!records.length) return;
   if (!index.hello) {
-    console.error(`[recorder] take ${take.id}: ${take.pendingMarks.splice(0).length + drop.length} record(s) not filed, `
+    console.error(`[recorder] take ${take.id}: ${records.length} record(s) not filed, `
       + 'because its hello never reached the file and nothing else tells this take from another');
+    if (take.held) await unlink(take.held).catch(() => {});
     return;
   }
   try {
-    await appendMarks(dir, index.hash, [...take.pendingMarks.splice(0), ...drop]);
+    // Merged rather than appended, so filing again after an append that wrote and then failed adds
+    // nothing.
+    await mergeMarkLog(dir, index.hash, records);
   } catch (err) {
-    throw new Error(`take ${take.id}: could not write its marks: ${err.message}`);
+    throw new Error(`take ${take.id}: could not write its marks: ${err.message}`
+      + (take.held ? ` - ${basename(take.held)} holds them for the next start to file` : ''));
+  }
+  if (!take.held) return;
+  // A copy left behind is merged again at the next start, which adds nothing.
+  try {
+    if (!await releaseFiled(dir, index.hash, take.held, records)) {
+      console.error(`[recorder] take ${take.id}: not every mark reads back from its marks log, so ${basename(take.held)} stays for the next start`);
+    }
+  } catch (err) {
+    console.error(`[recorder] take ${take.id}: ${basename(take.held)} was not removed: ${err.message}`);
   }
 }
 
@@ -100,6 +153,8 @@ export class Recorder {
     // Every take whose close is still running. A set, because `split()` closes the old take
     // unawaited while the replacement's hello opens the next, so a restart holds two at once.
     this.closing = new Set();
+    // Takes that failed mid-write and whose records could not be filed, for the next stop to retry.
+    this.unfiled = new Set();
   }
 
   get state() {
@@ -209,10 +264,7 @@ export class Recorder {
         // Into *this* take's log, even though it ended badly: nulling the take without
         // flushing left them for the next take, at a source time meaningless there.
         settle(failed);
-        cachedIndex(failed.path).then(
-          (index) => flushMarks(this.dir, failed, index),
-          (err) => console.error(`[recorder] take ${failed.id}: its marks have no hash to be filed under: ${err.message}`),
-        ).catch((err) => console.error(`[recorder] ${err.message}`));
+        this.fileFailed(failed);
         this.onChange(this.state);
       }
     });
@@ -240,6 +292,12 @@ export class Recorder {
       inFlight: [],
       inFlightHead: 0,
       pendingMarks: [],
+      // What the close files, taken from `pendingMarks` when it begins; the copy held of the marks,
+      // the records it holds, and its last append.
+      records: null,
+      held: null,
+      copied: new Set(),
+      copying: Promise.resolve(),
     };
     console.log(`[recorder] take ${take.id} open`);
     this.onChange(this.state);
@@ -299,10 +357,33 @@ export class Recorder {
    * after every one has finished.
    */
   async closeAll(reason) {
+    // A take whose filing already failed is filed again, so a stop never reports marks it lost.
+    for (const take of [...this.unfiled]) this.fileFailed(take);
     // `close` runs first and moves the open take into `closing`, so a Set holds its close once.
     const closes = new Set([this.close(reason), ...[...this.closing].map((take) => take.closed)]);
     const failed = (await Promise.allSettled(closes)).find((result) => result.status === 'rejected');
     if (failed) throw failed.reason;
+  }
+
+  // Files the records of a take that failed mid-write. It stays owned until that settles, like a take
+  // whose close is running, so a stop waits for it; a filing that fails leaves it in `unfiled`.
+  fileFailed(failed) {
+    this.closing.add(failed);
+    this.unfiled.delete(failed);
+    failed.closed = holdRecords(failed).then(() => cachedIndex(failed.path)).then(
+      (index) => flushMarks(this.dir, failed, index),
+      (err) => {
+        throw new Error(`take ${failed.id}: its marks have no hash to be filed under: ${err.message}`
+          + (failed.held ? ` - ${basename(failed.held)} holds them` : ''));
+      },
+    ).catch((err) => {
+      this.unfiled.add(failed);
+      throw err;
+    }).finally(() => {
+      this.closing.delete(failed);
+      this.onChange(this.state);
+    });
+    failed.closed.catch((err) => console.error(`[recorder] ${err.message}`));
   }
 
   // The scan writes the sidecar index and the content hash, which is what makes the take a library
@@ -312,6 +393,9 @@ export class Recorder {
     if (!take) return null;
     this.take = null;
     this.closing.add(take);
+    // Begun beside the flush rather than awaited ahead of it: the stream's close is listened for
+    // in this turn, or one that fails meanwhile closes unheard and the close never ends.
+    const holding = holdRecords(take);
     take.stream.end();
     let closeError = null;
     try {
@@ -326,23 +410,28 @@ export class Recorder {
     // landed, and the scan is what gives the marks a hash to be filed under.
     let index;
     let marksError = null;
+    let filed = false;
     try {
+      await holding;
       settle(take);
       forgetCapture(take.path);
       index = await buildIndex(take.path).catch((err) => {
-        if (take.pendingMarks.length) {
-          console.error(`[recorder] take ${take.id}: ${take.pendingMarks.length} mark(s) not filed, because the scan that gives them a hash failed`);
+        if (take.records.length) {
+          console.error(`[recorder] take ${take.id}: ${take.records.length} record(s) not filed, because the scan that gives them a hash failed`
+            + (take.held ? ` - ${basename(take.held)} holds them` : ''));
         }
         throw err;
       });
       // Held until the take is reported closed: its index is on disk and the library lists it,
       // whatever became of its marks.
-      await flushMarks(this.dir, take, index).catch((err) => { marksError = err; });
+      await flushMarks(this.dir, take, index).then(() => { filed = true; }, (err) => { marksError = err; });
     } finally {
       // In a `finally`, or an index build that threw leaves this process claiming a file it had
       // stopped working on, with the library refusing to open or remove it until a restart. This
       // take and no other: a shared slot cleared here handed a later take's guard away mid-close.
       this.closing.delete(take);
+      // Marks this close could not file wait, as a failed take's do, for the next stop to file.
+      if (!filed && take.records?.length) this.unfiled.add(take);
     }
     console.log(
       `[recorder] take ${take.id} closed (${reason}): ${index.frames.offset.length} frames, `
@@ -398,6 +487,8 @@ export class Recorder {
       at: Date.now(),
     };
     take.pendingMarks.push(rec);
+    // Not awaited: the mark is answered at once, and the copy lands one append later.
+    copyRecords(take, [rec]);
     return rec;
   }
 }

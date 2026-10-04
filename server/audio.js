@@ -18,6 +18,9 @@ export class AudioStore {
     this.uploadMs = uploadMs;
     this.importing = false;
     this.writes = 0;
+    this.stopped = false;
+    // The running import's upload while it arrives and its decoder while it runs, which `stop` ends.
+    this.running = null;
   }
 
   async read(hash) {
@@ -33,8 +36,12 @@ export class AudioStore {
   }
 
   async import(stream) {
+    if (this.stopped) throw new Error('the server is stopping, so it imports no audio');
     if (this.importing) throw new Error('another audio import is running');
     this.importing = true;
+    let settle;
+    const run = { upload: stream, decoder: null, leftover: null, settled: new Promise((done) => { settle = done; }) };
+    this.running = run;
     let scratch = null;
     let deadline = null;
     try {
@@ -53,6 +60,7 @@ export class AudioStore {
         chunks.push(chunk);
       }
       clearTimeout(deadline);
+      run.upload = null;
       if (!size) throw new Error('audio file is empty');
       const input = join(scratch, 'input');
       const file = await open(input, 'wx');
@@ -61,11 +69,17 @@ export class AudioStore {
       } finally { await file.close(); }
       const output = join(scratch, 'audio.wav');
       await new Promise((resolve, reject) => {
+        // With no await between this and the spawn, a stop either finds the decoder or prevents it.
+        if (this.stopped) {
+          reject(new Error('the server stopped before the audio was decoded'));
+          return;
+        }
         const child = spawn(ffmpegBinary(), [
           '-hide_banner', '-nostdin', '-loglevel', 'error', '-protocol_whitelist', 'pipe', '-i', 'pipe:0',
           '-map', '0:a:0', '-vn', '-t', String(AUDIO_SECONDS + 0.01), '-ac', '2', '-ar', String(AUDIO_RATE),
           '-c:a', 'pcm_s16le', '-map_metadata', '-1', '-fflags', '+bitexact', '-flags:a', '+bitexact', output,
         ], { stdio: ['pipe', 'ignore', 'pipe'] });
+        run.decoder = child;
         let error = '';
         const timeout = setTimeout(() => { child.kill('SIGKILL'); }, 60000);
         child.stderr.on('data', (chunk) => { error = (error + chunk).slice(-2000); });
@@ -96,10 +110,27 @@ export class AudioStore {
       try {
         if (scratch) await rm(scratch, { recursive: true, force: true });
       } catch (err) {
-        console.error(`[audio] import scratch ${scratch} was not removed: ${err.message}`);
+        run.leftover = `import scratch ${scratch} was not removed: ${err.message}`;
+        console.error(`[audio] ${run.leftover}`);
       } finally {
         this.importing = false;
+        this.running = null;
+        settle();
       }
     }
+  }
+
+  /**
+   * Refuses every later import and ends the running one: its upload, or its decoder with SIGKILL.
+   * Resolves once the import has removed its scratch, and rejects when it could not.
+   */
+  async stop() {
+    this.stopped = true;
+    const run = this.running;
+    if (!run) return;
+    run.upload?.destroy(new Error('the server stopped during the upload'));
+    run.decoder?.kill('SIGKILL');
+    await run.settled;
+    if (run.leftover) throw new Error(run.leftover);
   }
 }

@@ -7,6 +7,7 @@ import { createWriteStream, statSync } from 'node:fs';
 import { readdir, readFile, writeFile, appendFile, stat, unlink, rename, link, mkdir, open, statfs } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
+import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { cachedIndex, forgetCapture, indexPathFor, captureIdFor, loadIndex, readHelloOnce } from './capture.js';
 
@@ -58,6 +59,10 @@ async function readLogAt(path) {
   } catch {
     return [];
   }
+  return parseLog(text);
+}
+
+function parseLog(text) {
   const out = [];
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
@@ -113,11 +118,35 @@ async function withTakeLock(paths, work) {
 }
 
 async function appendLines(dir, hash, records) {
-  const lines = records.map((rec) => `${JSON.stringify(rec)}\n`).join('');
-  if (!lines) return;
-  markWrites++;
+  if (!records.length) return;
   await mkdir(join(dir, 'marks'), { recursive: true });
-  await appendFile(marksPathFor(dir, hash), lines);
+  await appendRecords(marksPathFor(dir, hash), records);
+}
+
+// A writer killed mid-append leaves the file ending inside a record, and a record appended straight
+// after that fragment joins it and is lost to every reader. A newline first restores the boundary.
+async function appendRecords(path, records) {
+  markWrites++;
+  const lines = records.map((rec) => `${JSON.stringify(rec)}\n`).join('');
+  await appendFile(path, `${await endsMidRecord(path) ? '\n' : ''}${lines}`);
+}
+
+async function endsMidRecord(path) {
+  let file;
+  try {
+    file = await open(path, 'r');
+  } catch (err) {
+    if (err.code === 'ENOENT') return false;
+    throw err;
+  }
+  try {
+    const { size } = await file.stat();
+    if (size === 0) return false;
+    const { buffer } = await file.read(Buffer.alloc(1), 0, 1, size - 1);
+    return buffer[0] !== 0x0a;
+  } finally {
+    await file.close();
+  }
 }
 
 /**
@@ -163,40 +192,123 @@ export async function mergeMarkLog(dir, hash, theirLog, { present = null } = {})
 
 // `mergeMarkLog` once it holds the log's lock.
 async function mergeHeld(dir, hash, theirLog) {
-  const known = new Set((await readMarkLog(dir, hash)).map((r) => `${r.id}@${r.at}`));
-  const fresh = theirLog.filter((r) => !known.has(`${r.id}@${r.at}`));
+  // Whole records rather than `id@at`: a mark and its deletion can share a millisecond, and
+  // `resolveMarks` lets the later of them win. `known` grows as records are taken, because a log
+  // can carry one record twice: an append that wrote its bytes and then failed is tried again.
+  const known = new Set((await readMarkLog(dir, hash)).map((rec) => JSON.stringify(rec)));
+  const fresh = [];
+  for (const rec of theirLog) {
+    const key = JSON.stringify(rec);
+    if (known.has(key)) continue;
+    known.add(key);
+    fresh.push(rec);
+  }
   await appendLines(dir, hash, fresh);
   return fresh.length;
 }
 
 const NAMED_LOG = '.marks.jsonl';
+const HELD_LOG = /^(.+)\.held-(\d+)\.([A-Za-z0-9-]+)\.(\d+)\.jsonl$/;
+// A digest of the exact name, so no two host names share one and a long one keeps the file name short.
+const HOST = createHash('sha256').update(hostname()).digest('hex').slice(0, 12);
 
 /**
- * Moves each marks log a build that filed marks by a take's name left beside that take into the
- * take's hash log, and removes it: the one reader of that naming, run once when the server starts.
- * Merged rather than appended, so a crash between the merge and the removal merges again without
- * a second copy of any mark. A log with no take beside it is left where it is.
+ * Where the recorder holds a copy of a take's marks while it records: beside the take, under its
+ * name and the `startedAt` its hello carries, so a copy is only ever read into the take that wrote
+ * it, and under the host and process writing it, so another server over the same directory can
+ * tell a copy still being written from one a killed process left.
+ */
+export const heldMarksPathFor = (capturePath, startedAt) => `${capturePath.replace(/\.knct$/i, '')}.held-${startedAt}.${HOST}.${process.pid}.jsonl`;
+
+// Whether the process that wrote a copy may still be appending to it: a live process on this host
+// other than this one, or any process on another host, which this one cannot ask about.
+function stillWritten(host, pid) {
+  if (host !== HOST) return true;
+  if (pid === process.pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+
+/** Appends `records` to the copy the recorder holds for the take at `capturePath`. */
+export async function holdMarks(capturePath, startedAt, records) {
+  await appendRecords(heldMarksPathFor(capturePath, startedAt), records);
+}
+
+/**
+ * Removes the log at `source` once every one of `records` reads back from the hash log of `hash`,
+ * and answers whether it did. A log whose records are not all there is kept for the next start.
+ */
+export async function releaseFiled(dir, hash, source, records) {
+  const filed = new Set((await readMarkLog(dir, hash)).map((rec) => JSON.stringify(rec)));
+  if (!records.every((rec) => filed.has(JSON.stringify(rec)))) return false;
+  await unlink(source).catch((err) => {
+    if (err.code !== 'ENOENT') throw err;
+  });
+  return true;
+}
+
+// The log a move reads from, or null when it is gone. Any other failure to read it throws, so the
+// move keeps a log it could not read rather than filing nothing and removing it.
+async function readSourceLog(path) {
+  try {
+    return parseLog(await readFile(path, 'utf8'));
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/**
+ * Moves each marks log filed by name beside a take into the take's hash log, and removes it: a log
+ * an older build wrote, or a copy the recorder held through a close that a kill cut short. Run once
+ * when the server starts. Merged rather than appended, so a crash between the merge and the removal
+ * merges again without a second copy of any mark. A log with no take beside it is left where it is.
  */
 export async function adoptNamedMarkLogs(dir, { owns = () => false } = {}) {
   const names = await directoryNames(dir, { what: 'captures directory' });
   const adopted = [];
-  for (const file of names.filter((name) => name.endsWith(NAMED_LOG))) {
-    const stem = file.slice(0, -NAMED_LOG.length);
+  for (const file of names) {
+    const held = HELD_LOG.exec(file);
+    if (!held && !file.endsWith(NAMED_LOG)) continue;
+    const stem = held ? held[1] : file.slice(0, -NAMED_LOG.length);
     const take = names.find((name) => isKnct(name) && name.slice(0, -'.knct'.length) === stem);
     if (!take) continue;
     const path = join(dir, take);
     if (owns(path)) continue;
+    // Asked before the take is hashed, because a take another process is recording is still growing.
+    if (held && stillWritten(held[3], Number(held[4]))) {
+      console.log(`[library] ${file} stays where it is: process ${held[4]} on ${held[3]} may still be writing it`);
+      continue;
+    }
     const identity = takeIdentity(path);
-    // A take this build cannot read keeps its log where it is, and the rest are still moved.
-    const hash = (await cachedIndex(path).catch(() => null))?.hash;
-    if (!hash) continue;
+    // A take this build cannot read keeps its log where it is, and the rest are still moved. So
+    // does a take whose hello does not say it started when the copy held beside it says, which
+    // makes the copy a log a deleted take left under this name.
+    const index = await cachedIndex(path).catch(() => null);
+    if (!index) continue;
+    if (held && (await readHelloOnce(path, index).catch(() => null))?.startedAt !== Number(held[2])) continue;
+    const { hash } = index;
     // Under the take's lock and its log's, and only while the name still holds the file hashed.
-    const records = await withTakeLock([path, marksPathFor(dir, hash)], async () => {
-      if (!sameTake(identity, takeIdentity(path))) return null;
-      const merged = await mergeHeld(dir, hash, await readLogAt(join(dir, file)));
-      await unlink(join(dir, file));
-      return merged;
-    });
+    let records;
+    try {
+      records = await withTakeLock([path, marksPathFor(dir, hash)], async () => {
+        if (!sameTake(identity, takeIdentity(path))) return null;
+        const read = await readSourceLog(join(dir, file));
+        if (read === null) return null;
+        const merged = await mergeHeld(dir, hash, read);
+        if (!await releaseFiled(dir, hash, join(dir, file), read)) {
+          throw new Error(`not every record in it reads back from the marks log of ${take}`);
+        }
+        return merged;
+      });
+    } catch (err) {
+      console.error(`[library] ${file} stays where it is: ${err.message}`);
+      continue;
+    }
     if (records !== null) adopted.push({ file, take, hash, records });
   }
   return adopted;
@@ -982,6 +1094,11 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
         if (err.code !== 'ENOENT') throw err;
       }
     }
+    // A copy of marks held under either name stays put: a start would read it into the take renamed
+    // onto it, and would never find the take renamed away from it. Folded, as the volume here folds.
+    const names = [id, to].map((name) => name.toLowerCase());
+    const held = (await directoryNames(dir)).find((name) => names.includes(HELD_LOG.exec(name)?.[1].toLowerCase()));
+    if (held) throw new Error(`${id} cannot be renamed to ${to}: ${held} holds marks under one of those names`);
 
     // Linked then unlinked, never renamed: the `stat` loop above is check-then-act and `rename(2)`
     // replaces silently, where `link(2)` fails EEXIST atomically. The window it admits is a take

@@ -743,7 +743,7 @@ const MUTATIONS = {
   ] },
   // A take that dies mid-write drops the marks pressed during it.
   'mid-write-drops-marks': { file: 'server/recorder.js', edits: [[
-    '          (index) => flushMarks(this.dir, failed, index),', '          () => { /* mutation: the marks go nowhere */ },',
+    '      (index) => flushMarks(this.dir, failed, index),', '      () => { /* mutation: the marks go nowhere */ },',
   ]] },
   // The drop count reaches the monitor and the close log and stops there, so a take with a hole in
   // it lists exactly like a whole one once the process that counted is gone.
@@ -1086,8 +1086,8 @@ const MUTATIONS = {
   },
   // The move appends the named log whole, so a move a crash interrupted appends it a second time.
   'named-logs-appended-twice': { file: 'server/library.js', edits: [[
-    '      const merged = await mergeHeld(dir, hash, await readLogAt(join(dir, file)));',
-    '      const read = await readLogAt(join(dir, file));\n      await appendLines(dir, hash, read);\n      const merged = read.length;',
+    '        const merged = await mergeHeld(dir, hash, read);',
+    '        await appendLines(dir, hash, read);\n        const merged = read.length;',
   ]],
     fails: 'the interrupted-move row alone: the marks still resolve to two, which is why the log is counted',
   },

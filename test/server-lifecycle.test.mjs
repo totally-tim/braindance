@@ -17,6 +17,7 @@ import { WebSocket } from 'ws';
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const FAKE_GRABBER = join(REPO, 'tools/fake-grabber.mjs');
 const PROBE = join(REPO, 'test/capture-close-probe.mjs');
+const SCAN_PROBE = join(REPO, 'test/scan-hold-probe.mjs');
 const ROOT_NAMES = ['captures', 'projects', 'presets', 'deliverables', 'effects', 'jobs', 'exports', 'audio'];
 const WAIT_MS = 30_000;
 const noShell = process.platform === 'win32' ? 'the stand-in encoders are shell scripts' : false;
@@ -50,12 +51,38 @@ before(() => {
     chmodSync(file, 0o755);
   }
   mkdirSync(join(work, 'empty'));
+  // A decoder or encoder still working when the stop arrives: it writes its pid and never exits on
+  // its own, so whether it outlives the server says whether the server ended it. A real ffmpeg that
+  // loses its parent ends when its stdin closes, which hides the question. A minute bounds an orphan.
+  const stubborn = join(work, 'stubborn.mjs');
+  writeFileSync(stubborn, [
+    "import { appendFileSync } from 'node:fs';",
+    'appendFileSync(process.env.BRAINDANCE_STANDIN_PIDS, `${process.pid}\n`);',
+    'setTimeout(() => process.exit(3), 60_000);',
+    '',
+  ].join('\n'));
+  mkdirSync(join(work, 'stubborn'));
+  writeFileSync(join(work, 'stubborn/ffmpeg'), `#!/bin/sh\nexec "${process.execPath}" "${stubborn}" "$@"\n`);
+  chmodSync(join(work, 'stubborn/ffmpeg'), 0o755);
 }, { timeout: 120_000 });
 
 after(() => {
   for (const child of children) child.kill('SIGKILL');
+  for (const pid of standInPids()) if (alive(pid)) process.kill(pid, 'SIGKILL');
   rmSync(work, { recursive: true, force: true });
 });
+
+const standInPids = () => (existsSync(join(work, 'stand-in.pids'))
+  ? readFileSync(join(work, 'stand-in.pids'), 'utf8').split('\n').filter(Boolean).map(Number) : []);
+
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
@@ -141,11 +168,19 @@ async function shoot(server) {
   return id;
 }
 
+const heldCopies = (server, id) => readdirSync(server.roots.captures).filter((file) => file.startsWith(`${id}.held-`));
+
+// The copy beside take `id` once it holds the whole record of the mark `shoot` pressed. The file
+// exists before its first append's bytes land, so its name alone says nothing about the mark.
+const heldMark = (server, id) => heldCopies(server, id).find((file) => readFileSync(join(server.roots.captures, file), 'utf8')
+  .split('\n').some((line) => line.includes(`"label":"mark-${id}"`) && line.endsWith('}')));
+
 function assertFinished(server, id) {
   assert.ok(existsSync(join(server.roots.captures, `${id}.idx`)), `take ${id} has its index sidecar`);
   const marksDir = join(server.roots.captures, 'marks');
   const marks = existsSync(marksDir) ? readdirSync(marksDir).map((file) => readFileSync(join(marksDir, file), 'utf8')).join('\n') : '';
   assert.ok(marks.includes(`mark-${id}`), `take ${id} has its mark in the marks log`);
+  assert.deepEqual(heldCopies(server, id), [], `no copy of take ${id}'s marks is left beside it`);
 }
 
 const TRIGGERS = {
@@ -357,6 +392,79 @@ test('a stop that cannot write the take\'s marks exits 1, names the take, and st
   assert.ok(existsSync(join(server.roots.captures, `${id}.idx`)), `take ${id} has its index sidecar`);
 });
 
+// The desktop shell kills a service that has not exited STOP_GRACE_MS after its stop line, and a
+// long take's close can still be scanning then. The probe holds the scan, so the kill lands there
+// whatever the take's size, and the restart is what a user gets on the next launch.
+test('a stop killed while the take is scanned loses only the index, and the next start files the marks', { timeout: 120_000 }, async () => {
+  const name = 'killed-mid-scan';
+  const events = join(work, `${name}.events`);
+  const first = await start(name, {
+    flags: ['--stop-on-stdin', '--record', '--grabber', fakeGrabber()],
+    nodeArgs: ['--import', SCAN_PROBE],
+    env: { BRAINDANCE_PROBE_EVENTS: events },
+  });
+  const id = await shoot(first);
+  first.child.stdin.write('stop\n');
+  await eventually(() => existsSync(events) && readFileSync(events, 'utf8').includes(`${id}.knct\n`), 'the close to begin its scan');
+  first.child.kill('SIGKILL');
+  assert.deepEqual(await first.stops(), { code: null, signal: 'SIGKILL' });
+  assert.equal(existsSync(join(first.roots.captures, `${id}.idx`)), false, 'the kill landed before the index was written');
+  assert.equal(existsSync(join(first.roots.captures, 'marks')), false, 'and before any mark was filed by hash');
+  const [held] = heldCopies(first, id);
+  assert.ok(held, `a copy of the marks was held beside the take before its scan: ${readdirSync(first.roots.captures).join(' ')}`);
+
+  const second = await start(name, { flags: ['--stop-on-stdin', '--replay', sample] });
+  await second.until((all) => all.some((line) => line.startsWith(`[library] moved ${held} into the marks log of ${id}.knct`)), 'the held copy to be filed');
+  assertFinished(second, id);
+  const index = JSON.parse(readFileSync(join(second.roots.captures, `${id}.idx`), 'utf8'));
+  assert.ok(index.frames.offset.length >= 3 && index.truncated === false, `the take is whole: ${index.frames.offset.length} frames`);
+  second.child.stdin.write('stop\n');
+  assert.deepEqual(await second.stops(), { code: 0, signal: null });
+});
+
+// Each mark is copied beside the take as it is pressed, so a server killed mid-take with no stop
+// at all, as a crash or a pulled plug would, still leaves it for the next start to file.
+test('a recording server killed with no stop keeps the marks already copied, and the next start files them', { timeout: 120_000 }, async () => {
+  const name = 'killed-mid-take';
+  const first = await start(name, { flags: ['--stop-on-stdin', '--record', '--grabber', fakeGrabber()] });
+  const id = await shoot(first);
+  const held = await eventually(() => heldMark(first, id), 'the mark to be copied beside the take');
+  first.child.kill('SIGKILL');
+  assert.deepEqual(await first.stops(), { code: null, signal: 'SIGKILL' });
+  assert.equal(existsSync(join(first.roots.captures, `${id}.idx`)), false, 'the take was never closed');
+
+  const second = await start(name, { flags: ['--stop-on-stdin', '--replay', sample] });
+  await second.until((all) => all.some((line) => line.startsWith(`[library] moved ${held} into the marks log of ${id}.knct`)), 'the held copy to be filed');
+  assertFinished(second, id);
+  second.child.stdin.write('stop\n');
+  assert.deepEqual(await second.stops(), { code: 0, signal: null });
+});
+
+// A second server started over the captures directory of one that is recording finds the copy the
+// first is still appending to. Filing it then would hash a growing take and remove the copy.
+test('a server started beside a recording one leaves its copy alone, so a later start files the marks under the final hash', { timeout: 120_000 }, async () => {
+  const name = 'beside-a-recorder';
+  const first = await start(name, { flags: ['--stop-on-stdin', '--record', '--grabber', fakeGrabber()] });
+  const id = await shoot(first);
+  const held = await eventually(() => heldMark(first, id), 'the mark to be copied beside the take');
+  const second = await start(name, { flags: ['--stop-on-stdin', '--replay', sample] });
+  await second.until((all) => all.some((line) => line.includes(held)), 'the second server to decide about the copy');
+  assert.ok(second.lines.some((line) => line.startsWith(`[library] ${held} stays where it is`)),
+    `the second server left the copy alone: ${second.lines.filter((line) => line.includes(held)).join(' | ')}`);
+  second.child.stdin.write('stop\n');
+  await second.stops();
+  first.child.kill('SIGKILL');
+  await first.stops();
+
+  const third = await start(name, { flags: ['--stop-on-stdin', '--replay', sample] });
+  await third.until((all) => all.some((line) => line.startsWith(`[library] moved ${held} into the marks log of ${id}.knct`)), 'the copy to be filed');
+  const { hash } = JSON.parse(readFileSync(join(third.roots.captures, `${id}.idx`), 'utf8'));
+  const log = join(third.roots.captures, 'marks', `${hash.slice('sha256:'.length)}.jsonl`);
+  assert.ok(readFileSync(log, 'utf8').includes(`mark-${id}`), 'the mark is filed under the hash of the take as it ended');
+  third.child.stdin.write('stop\n');
+  assert.deepEqual(await third.stops(), { code: 0, signal: null });
+});
+
 test('without --stop-on-stdin a stop line and end of file do nothing', { timeout: 60_000 }, async () => {
   const server = await start('no-flag', { flags: ['--replay', sample] });
   server.child.stdin.write('stop\n');
@@ -374,6 +482,89 @@ test('a line that is not stop is ignored and said so', { timeout: 60_000 }, asyn
   assert.equal(server.child.exitCode, null);
   server.child.stdin.write('stop\r\n');
   assert.deepEqual((await server.stops()).code, 0, 'and a stop with a Windows line ending still stops');
+});
+
+// ---------------------------------------------------------------------------------------------
+// A stop that arrives while the server is decoding an upload or encoding an export ends that child
+// and removes its scratch before the process exits.
+
+const scratchIn = (dir, pattern) => (existsSync(dir) ? readdirSync(dir).filter((file) => pattern.test(file)) : []);
+
+test('a stop during an audio decode ends the decoder and removes the import\'s scratch before the server exits', { skip: noShell, timeout: 60_000 }, async () => {
+  const pids = join(work, 'stand-in.pids');
+  const before = standInPids().length;
+  const server = await start('stop-mid-decode', {
+    flags: ['--stop-on-stdin', '--replay', sample],
+    env: { FFMPEG: join(work, 'stubborn/ffmpeg'), BRAINDANCE_STANDIN_PIDS: pids },
+  });
+  const upload = fetch(`${server.url}/audio`, {
+    method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: Buffer.alloc(4096, 1),
+  }).then((res) => res.status, (err) => err.message);
+  await eventually(() => standInPids().length > before, 'the decoder to start');
+  const decoder = standInPids().at(-1);
+  assert.equal(scratchIn(server.roots.audio, /^\.import-/).length, 1, 'the import has its scratch while the decoder runs');
+  server.child.stdin.write('stop\n');
+  assert.deepEqual(await server.stops(), { code: 0, signal: null });
+  assert.equal(alive(decoder), false, `the decoder ${decoder} outlived the server`);
+  assert.deepEqual(scratchIn(server.roots.audio, /^\.import-/), [], 'the import\'s scratch outlived the server');
+  await upload;
+});
+
+test('a stop during an export ends the encoder and removes the export\'s scratch before the server exits', { skip: noShell, timeout: 60_000 }, async () => {
+  const pids = join(work, 'stand-in.pids');
+  const before = standInPids().length;
+  const server = await start('stop-mid-export', {
+    flags: ['--stop-on-stdin', '--replay', sample],
+    env: { FFMPEG: join(work, 'stubborn/ffmpeg'), BRAINDANCE_STANDIN_PIDS: pids },
+  });
+  const socket = socketTo(server);
+  await socket.opened;
+  socket.send({ begin: { name: 'cut-short', width: 2, height: 2, fps: 30, frames: 10, codec: 'h264' } });
+  const ready = await socket.next();
+  assert.ok(ready.ready, `the export began: ${JSON.stringify(ready)}`);
+  socket.send(Buffer.alloc(2 * 2 * 4));
+  await eventually(() => standInPids().length > before, 'the encoder to start');
+  const encoder = standInPids().at(-1);
+  assert.equal(scratchIn(server.roots.exports, /\.part$/).length, 1, 'the export has its scratch while the encoder runs');
+  server.child.stdin.write('stop\n');
+  assert.deepEqual(await server.stops(), { code: 0, signal: null });
+  assert.equal(alive(encoder), false, `the encoder ${encoder} outlived the server`);
+  assert.deepEqual(scratchIn(server.roots.exports, /\.part$/), [], 'the export\'s scratch outlived the server');
+});
+
+// The live server keeps listening while a long take closes, so an export can ask to begin after the
+// shutdown has already counted the exports it waits for.
+test('an export asked for after a stop has begun is refused, and nothing it would start outlives the server', { skip: noShell, timeout: 120_000 }, async () => {
+  const name = 'export-after-stop';
+  const events = join(work, `${name}.events`);
+  const release = join(work, `${name}.release`);
+  const server = await start(name, {
+    flags: ['--stop-on-stdin', '--record', '--grabber', fakeGrabber()],
+    nodeArgs: ['--import', SCAN_PROBE],
+    env: {
+      BRAINDANCE_PROBE_EVENTS: events, BRAINDANCE_PROBE_RELEASE: release,
+      FFMPEG: join(work, 'stubborn/ffmpeg'), BRAINDANCE_STANDIN_PIDS: join(work, 'stand-in.pids'),
+    },
+  });
+  const id = await shoot(server);
+  server.child.stdin.write('stop\n');
+  await eventually(() => existsSync(events) && readFileSync(events, 'utf8').includes(`${id}.knct\n`), 'the shutdown to reach the take\'s scan');
+  const before = standInPids().length;
+  const socket = socketTo(server);
+  await socket.opened;
+  socket.send({ begin: { name: 'after-stop', width: 2, height: 2, fps: 30, frames: 10, codec: 'h264' } });
+  const heard = [];
+  for (;;) {
+    const message = await socket.next();
+    heard.push(message);
+    if (message.ready || message.error || message.closed || message.socketError) break;
+  }
+  writeFileSync(release, '');
+  assert.deepEqual(await server.stops(), { code: 0, signal: null });
+  assert.ok(heard.some((message) => /stopping/.test(message.error ?? '')), `the export was refused: ${JSON.stringify(heard)}`);
+  assert.deepEqual(standInPids().slice(before).filter(alive), [], 'an encoder it started outlived the server');
+  assert.equal(standInPids().length, before, 'an encoder was started');
+  assert.deepEqual(scratchIn(server.roots.exports, /\.part$/), [], 'the export\'s scratch outlived the server');
 });
 
 // ---------------------------------------------------------------------------------------------
