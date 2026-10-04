@@ -37,6 +37,10 @@ const V3D = 'ANGLE (Broadcom, V3D 7.1.10.2, OpenGL ES 3.1)';
 
 // Each names source text and must match exactly once, aimed one property at a time.
 const MUTATIONS = {
+  'queue-cannot-measure-takes': { file: 'server/index.js', edits: [[
+    '  takeSeconds: async (hash) => (await localTakes()).takes.find((take) => take.hash === hash)?.durationSec ?? null,',
+    '  takeSeconds: async () => null,',
+  ]] },
   'app-record-is-the-preview-version': { file: 'server/index.js', edits: [[
     '      app: await appVersion(ROOT, THREE_DIR),',
     '      app: await renderVersion(WEB_DIR, THREE_DIR),',
@@ -932,6 +936,22 @@ try {
   const c3 = await post('/jobs/claim', { worker: 'pi', renderer: V3D });
   check(c3.status === 200 && c3.body.job?.id === pinned.body.id,
     'a V3D worker gets it, so the refusal above was about the class and not about the job being unclaimable');
+
+  section('enqueue counts the frames a job selects, through the take it is cut on');
+  {
+    const { takes } = await get('/library/takes');
+    const sample = takes.find((t) => t.id === 'sample');
+    // A clip with no length runs to the end of its take, so where it ends rests on the take's length.
+    const placed = (end) => ({ ...PROJECT, clips: [{ ...PROJECT.clips[0], start: end - sample.durationSec }] });
+    const past = await enqueue({ captures: [sample.hash], project: placed(14_401) });
+    check(refusedBecause(past, 'past the 14400-second ceiling'),
+      'a clip with no length that runs one second past four hours is refused at enqueue, from the length of the take it is cut on',
+      `${past.status} ${String(past.body.error ?? '').slice(0, 90)}`);
+    const inside = await enqueue({ captures: [sample.hash], project: placed(14_399) });
+    check(inside.status === 200, '  and the same clip ending one second inside four hours is queued', `${inside.status} ${inside.body.error ?? ''}`);
+    // Neither may stay queued, or a later row's claim would be handed it.
+    for (const queued of [past, inside]) if (queued.status === 200) await post(`/jobs/${queued.body.id}/cancel`, {});
+  }
 
   section('two jobs cannot be aimed at one file');
   const first = await enqueue({ output: 'contested' });

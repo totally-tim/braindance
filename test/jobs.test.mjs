@@ -679,3 +679,25 @@ test('a job file of another version is listed as refused with a reason and is ne
     await h.cleanup();
   }
 });
+
+test('enqueue counts the frames a job selects and refuses a render past four hours', async () => {
+  const takes = { [HASH]: 10 };
+  const h = await harness({ takeSeconds: async (hash) => takes[hash] ?? null });
+  const clip = (over = {}) => ({ take: { hash: HASH }, start: 0, length: 1, speed: 1, sourceStart: 0, ...over });
+  const project = (clips, extra = {}) => ({ ...PROJECT, clips, ...extra });
+  try {
+    await assert.rejects(h.enqueue({ project: project([clip({ start: 19_999 })]) }),
+      /600001 frames at 30 fps runs 20001 seconds, past the 14400-second ceiling/, 'the whole program of a clip placed at 19,999 s');
+    assert.ok(await h.enqueue({ project: project([clip({ start: 19_999 })]), deliverable: { in: 19_940, out: 20_000 } }),
+      'the same program, with a deliverable selecting its last minute');
+    takes[HASH] = 5 * 3600;
+    await assert.rejects(h.enqueue({ project: project([clip({ length: null })]) }), /past the 14400-second ceiling/,
+      'a clip with no length runs to the end of its five-hour take');
+    await assert.rejects(h.enqueue({ project: project([clip()], { audio: { start: 15_000, duration: 1 } }) }), /past the 14400-second ceiling/,
+      'a song placed past four hours lengthens the program');
+    delete takes[HASH];
+    assert.ok(await h.enqueue({ project: project([clip({ length: null })]) }), 'a take this machine has not got leaves the count to the export socket');
+  } finally {
+    await h.cleanup();
+  }
+});

@@ -32,7 +32,7 @@ import {
 } from './plan-geometry.js';
 import { pickDepth, sensorPoint } from './depth-pick.js';
 import { ZOOM_PER_NOTCH, rulerTickSeconds, tickLabel, makeViewWindow } from './view-window.js';
-import { clipIn, clipOut, clipBoundOrThrow, writeClipRange } from './clip-range.js';
+import { clipIn, clipOut, clipBoundOrThrow, rangeFrames, writeClipRange } from './clip-range.js';
 import {
   RATE_MIN, RATE_MAX, clipAffordedSec, clipProgramSecAt, clipSourceSecAt, frameAtOrBefore,
   frameLoadByTake, framesBackFor, headFramesFor, headTrim, integerMidpoint, rescaleClipKeys,
@@ -5974,8 +5974,7 @@ async function exportClip(options = {}) {
     timeline.outputFps = fps;
     const inSec = options.in !== undefined ? options.in : d.in;
     const outSec = options.out !== undefined ? options.out : d.out;
-    const inFrame = timeline.frameAt(Number(inSec) || 0);
-    const outFrame = timeline.frameAt(outSec === null ? timeline.duration : outSec);
+    const { from: inFrame, to: outFrame } = rangeFrames({ in: inSec, out: outSec }, timeline.duration, fps);
     const from = Math.max(inFrame, Math.min(outFrame, Math.trunc(options.from ?? inFrame)));
     const to = Math.max(inFrame, Math.min(outFrame, Math.trunc(options.to ?? outFrame)));
     if (to < from) throw new Error(`an export of frames ${from}..${to} has nothing in it`);

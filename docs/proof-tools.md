@@ -1405,6 +1405,8 @@ records as failed, and heartbeat replies that arrive after their job has ended.
   that read, leaving `?? []` where they were.
 - **`app-record-is-the-preview-version`** — a job's app build is the preview cache's digest of
   the browser files, so a change to the export's encoder arguments or audio mux warns nobody.
+- **`queue-cannot-measure-takes`** — the queue can no longer read a take's length, so a clip
+  with no length that runs past four hours is queued instead of refused at enqueue.
 
 ## `effect-check`
 

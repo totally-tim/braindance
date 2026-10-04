@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { PassThrough, Readable } from 'node:stream';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { EventEmitter } from 'node:events';
+import { createServer, request } from 'node:http';
 import { MAX_EXPORT_SECONDS, audioFilter, handleExportSocket, validateExport } from '../server/export.js';
 import { OUTPUT_RATES } from '../web/export-sizes.js';
 import { DOCUMENT_VERSIONS } from '../web/format.js';
@@ -229,6 +230,53 @@ test('a stalled upload gives the import slot back at the deadline', { timeout: 1
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('a body that arrived in time is not cut off while it is still being written', { timeout: 10_000 }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'audio-arrived-'));
+  const promises = createRequire(import.meta.url)('node:fs/promises');
+  const original = promises.open;
+  // The first write of the upload outlasts the whole deadline, while the rest of the body waits
+  // in the request, already arrived.
+  promises.open = async (path, ...rest) => {
+    const handle = await original(path, ...rest);
+    if (String(path).endsWith('/input')) {
+      const write = handle.writeFile.bind(handle);
+      let first = true;
+      handle.writeFile = async (data) => {
+        if (first) { first = false; await new Promise((done) => { setTimeout(done, 300); }); }
+        return write(data);
+      };
+    }
+    return handle;
+  };
+  syncBuiltinESMExports();
+  const store = new AudioStore(root, { uploadMs: 100 });
+  let outcome = null;
+  const server = createServer((req, res) => {
+    store.import(req).then(() => 'imported', (err) => err.message).then((said) => { outcome = said; res.end(said); });
+  });
+  t.after(async () => {
+    promises.open = original;
+    syncBuiltinESMExports();
+    await new Promise((done) => { server.close(done); });
+    await rm(root, { recursive: true, force: true });
+  });
+  await new Promise((done) => { server.listen(0, '127.0.0.1', done); });
+  // Three chunks, so two are still unread in the request when the deadline comes.
+  const reply = await new Promise((done) => {
+    const req = request({ host: '127.0.0.1', port: server.address().port, method: 'POST', path: '/' }, (res) => {
+      let text = '';
+      res.on('data', (chunk) => { text += chunk; });
+      res.on('end', () => done(text));
+    });
+    req.on('error', (err) => done(`no reply: ${err.message}`));
+    for (const part of ['not audio, ', 'and all of it ', 'here']) req.write(part);
+    req.end();
+  });
+  assert.doesNotMatch(reply, /took longer|no reply/, 'the request was not destroyed');
+  assert.doesNotMatch(outcome ?? '', /took longer/, 'and the import failed, if it failed, for its own reason');
+  assert.equal(store.importing, false);
+});
+
 test('a scratch folder that cannot be removed neither hides the import error nor keeps the slot', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'audio-rm-'));
   const promises = createRequire(import.meta.url)('node:fs/promises');
@@ -254,8 +302,9 @@ test('a scratch folder that cannot be removed neither hides the import error nor
 
 test('an export runs at a rate the editor offers, for at most four hours', () => {
   const shape = { name: 'limits', width: 320, height: 180, codec: 'lossless' };
-  for (const fps of OUTPUT_RATES) assert.equal(validateExport({ ...shape, fps, frames: 1 }).fps, fps);
-  for (const fps of [0.0001, 1, 25, 240, 1e9]) assert.throws(() => validateExport({ ...shape, fps, frames: 1 }), /bad output rate/, String(fps));
+  assert.deepEqual(OUTPUT_RATES, [24, 30, 60, 120]);
+  for (const fps of [24, 30, 60, 120]) assert.equal(validateExport({ ...shape, fps, frames: 1 }).fps, fps);
+  for (const fps of [0.0001, 1, 25, 29.97, 240, 1e9]) assert.throws(() => validateExport({ ...shape, fps, frames: 1 }), /bad output rate/, String(fps));
   assert.equal(validateExport({ ...shape, fps: 30, frames: MAX_EXPORT_SECONDS * 30 }).maxFrames, MAX_EXPORT_SECONDS * 30);
   assert.throws(() => validateExport({ ...shape, fps: 30, frames: MAX_EXPORT_SECONDS * 30 + 1 }), /past the 14400-second ceiling/);
   assert.equal(validateExport({ ...shape, fps: 24 }).maxFrames, MAX_EXPORT_SECONDS * 24, 'an export with no count stops at the ceiling');

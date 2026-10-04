@@ -36,8 +36,10 @@ export class AudioStore {
     if (this.importing) throw new Error('another audio import is running');
     this.importing = true;
     let scratch = null;
+    // The deadline is on arrival: a request whose whole body has come in is left to finish
+    // writing it, however long the disk takes.
     const deadline = setTimeout(() => {
-      stream.destroy(new Error(`audio upload took longer than ${this.uploadMs / 1000} seconds`));
+      if (!stream.complete) stream.destroy(new Error(`audio upload took longer than ${this.uploadMs / 1000} seconds`));
     }, this.uploadMs);
     try {
       await mkdir(this.root, { recursive: true });

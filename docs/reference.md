@@ -772,18 +772,20 @@ version, and there is no conversion.
 name, size and rate. All four are required. There is no button for this anywhere in the
 browser.
 
-**What enqueue checks and what it does not.** It checks that `project` is an object carrying
-some `version`, that every clip names a content hash, that `captures` equals those hashes one
-for one and in order, that `project.requires` claims exactly the effect namespaces the values
-and tracks use with no repeats, that `suppressEffects` is a list of effect ids, and that the
-output name, size, rate and codec pass the same validator the export dialog uses. It also
-refuses an output name a queued or running job already holds, and a `recorded` that is not a
-version record. It does **not** check the
-project's version number beyond its presence, and it stores `deliverable` exactly as given. So
-a project from another build and a malformed deliverable both enqueue cleanly: the page refuses
-a project version it does not read, and `applyDeliverable` refuses a deliverable that is not
-version 2 or whose `outputSize` is another shape. The worker applies a deliverable only when it
-is truthy, so a `false` or `null` one renders the whole clip.
+**What enqueue checks and what it does not.** It checks that `project` is an object carrying some
+`version`, that every clip names a content hash, that `captures` equals those hashes one for one
+and in order, that `project.requires` claims exactly the effect namespaces the values and tracks
+use with no repeats, that `suppressEffects` is a list of effect ids, and that the output name,
+size, rate and codec pass the same validator the export dialog uses. It counts the frames the
+deliverable selects, as the page will, and refuses a render longer than four hours. A clip whose
+timing is not numbers, or whose length rests on a take this library has not got, leaves that count
+to the export socket, which refuses the same ceiling. It also refuses an output name a queued or
+running job already holds, and a `recorded` that is not a version record. It does **not** check the
+project's version number beyond its presence, and it stores `deliverable` exactly as given. So a
+project from another build and a malformed deliverable both enqueue cleanly: the page refuses a
+project version it does not read, and `applyDeliverable` refuses a deliverable that is not version
+2 or whose `outputSize` is another shape. The worker applies a deliverable only when it is truthy,
+so a `false` or `null` one renders the whole clip.
 
 | Field | Required | What it is |
 | --- | --- | --- |

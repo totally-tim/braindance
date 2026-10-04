@@ -162,7 +162,11 @@ const jobEnvironment = async (renderer) => {
     problems: ffmpeg.problem ? [{ field: 'ffmpeg', text: ffmpeg.problem }] : [],
   };
 };
-const JOBS = new JobStore(resolve(flag('--jobs', join(ROOT, 'jobs'))), { exportsDir: EXPORTS_DIR, environment: jobEnvironment });
+const JOBS = new JobStore(resolve(flag('--jobs', join(ROOT, 'jobs'))), {
+  exportsDir: EXPORTS_DIR,
+  environment: jobEnvironment,
+  takeSeconds: async (hash) => (await localTakes()).takes.find((take) => take.hash === hash)?.durationSec ?? null,
+});
 const AUDIO = new AudioStore(resolve(flag('--audio', join(ROOT, 'audio'))));
 const node = NODE_URL ? new NodeLink(NODE_URL, NODE_NAME) : null;
 

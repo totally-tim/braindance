@@ -52,6 +52,19 @@ export let clipIn = 0;
 export let clipOut = null;
 
 /**
+ * The first and last output frame a range selects in a program `duration` seconds long at `fps`:
+ * the grid and clamps the export walks, so the queue can count a render before a page draws it.
+ */
+export function rangeFrames({ in: inSec, out: outSec }, duration, fps) {
+  const last = Math.max(0, Math.floor(duration * fps));
+  const lo = Math.max(0, Number(inSec) || 0);
+  const hi = outSec === null || outSec === undefined ? duration : Math.min(duration, outSec);
+  const frameAt = (sec) => Math.max(0, Math.min(last, Math.round(Math.max(lo, Math.min(hi, sec)) * fps)));
+  const from = frameAt(lo);
+  return { from, to: Math.max(from, frameAt(hi)) };
+}
+
+/**
  * The pair, written: refused if it is not a time, then held inside the program that is
  * open. `dur` is the program's length in seconds, or `null` when no take is open.
  *
