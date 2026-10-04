@@ -70,7 +70,7 @@ before(() => {
 
 after(() => {
   for (const child of children) child.kill('SIGKILL');
-  for (const pid of standInPids()) if (alive(pid)) process.kill(pid, 'SIGKILL');
+  reapStandIns(standInPids());
   rmSync(work, { recursive: true, force: true });
 });
 
@@ -84,6 +84,19 @@ const alive = (pid) => {
   } catch {
     return false;
   }
+};
+
+// A pid in stand-in.pids names a stand-in only while that stand-in runs. Once it exits the system
+// may give the pid to any process, so its command line is read before it is signalled.
+const standInRunning = (pid) => {
+  try {
+    return execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' }).includes(join(work, 'stubborn.mjs'));
+  } catch {
+    return false;
+  }
+};
+const reapStandIns = (pids) => {
+  for (const pid of pids) if (standInRunning(pid)) process.kill(pid, 'SIGKILL');
 };
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -406,6 +419,23 @@ test('a line that is not stop is ignored and said so', { timeout: 60_000 }, asyn
   assert.deepEqual((await server.stops()).code, 0, 'and a stop with a Windows line ending still stops');
 });
 
+// The pid of a stand-in that has exited can belong to another process by the time the teardown
+// reads it, so the teardown kills a listed pid only while the stand-in still holds it.
+test('the teardown kills a listed stand-in, and not a process that holds a listed pid', { skip: noShell, timeout: 30_000 }, async () => {
+  const pids = join(work, 'reap.pids');
+  const standIn = spawn(join(work, 'stubborn/ffmpeg'), [], { env: { ...process.env, BRAINDANCE_STANDIN_PIDS: pids }, stdio: 'ignore' });
+  const stranger = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)'], { stdio: 'ignore' });
+  children.add(standIn);
+  children.add(stranger);
+  await eventually(() => existsSync(pids) && readFileSync(pids, 'utf8').trim(), 'the stand-in to write its pid');
+  const listed = Number(readFileSync(pids, 'utf8').trim());
+  assert.equal(listed, standIn.pid, 'the stand-in wrote its own pid');
+  reapStandIns([listed, stranger.pid]);
+  await eventually(() => standIn.exitCode !== null || standIn.signalCode !== null, 'the stand-in to be killed', 5000);
+  assert.equal(alive(stranger.pid), true, 'the teardown killed a process that is not a stand-in');
+  stranger.kill('SIGKILL');
+});
+
 // ---------------------------------------------------------------------------------------------
 // A stop that arrives while the server is decoding an upload or encoding an export ends that child
 // and removes its scratch before the process exits.
@@ -513,7 +543,7 @@ test('a stop whose decoder does not take its kill exits 1, names the decoder and
     assert.equal(alive(decoder), true, 'the probe let the kill through');
     assert.equal(scratchIn(server.roots.audio, /^\.import-/).length, 1, 'the scratch was removed while the decoder ran');
   } finally {
-    if (alive(decoder)) process.kill(decoder, 'SIGKILL');
+    reapStandIns([decoder]);
   }
   await upload;
 });
@@ -542,7 +572,7 @@ test('a stop whose encoder does not take its kill exits 1, names the encoder and
       `the shutdown did not name the encoder; the last of the log:\n${server.lines.slice(-8).join('\n')}`);
     assert.equal(alive(encoder), true, 'the probe let the kill through');
   } finally {
-    if (alive(encoder)) process.kill(encoder, 'SIGKILL');
+    reapStandIns([encoder]);
   }
 });
 
@@ -602,7 +632,7 @@ test('an encoder that refused its kill when its socket closed still fails the st
     assert.equal(alive(encoder), true, 'the probe let the kill through');
     assert.equal(scratchIn(server.roots.exports, /\.part$/).length, 1, 'the scratch was removed while the encoder ran');
   } finally {
-    if (alive(encoder)) process.kill(encoder, 'SIGKILL');
+    reapStandIns([encoder]);
   }
 });
 
@@ -709,7 +739,7 @@ test('an error before the encoder\'s exit does not count as its exit', { skip: n
     assert.deepEqual(await server.stops(), { code: 0, signal: null });
     assert.deepEqual(scratchIn(server.roots.exports, /\.part$/), [], 'the export\'s scratch outlived the server');
   } finally {
-    if (alive(encoder)) process.kill(encoder, 'SIGKILL');
+    reapStandIns([encoder]);
   }
 });
 

@@ -153,7 +153,11 @@ function stopThenExit(event) {
   if (stopped) return;
   for (const window of BrowserWindow.getAllWindows()) window.hide();
   stopped = (service?.stop() ?? Promise.resolve({ code: 0 })).then((result) => {
-    if (result.forced) log(`service did not exit in ${STOP_GRACE_MS / 1000} seconds and was killed`);
+    if (result.survived) {
+      log(`service did not exit in ${STOP_GRACE_MS / 1000} seconds and refused SIGKILL (${result.error.message}), so pid ${service.pid} is still running`);
+    } else if (result.forced) {
+      log(`service did not exit in ${STOP_GRACE_MS / 1000} seconds and was killed`);
+    }
     if (result.code !== 0) exitCode = 1;
   }).finally(() => {
     log(`exiting with code ${exitCode}`);

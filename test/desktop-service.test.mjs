@@ -6,7 +6,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
-import { spawn } from 'node:child_process';
+import { ChildProcess, spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
@@ -14,9 +14,28 @@ import { fileURLToPath } from 'node:url';
 import { externalUrl, sameOrigin, senderTrusted } from '../desktop/origin.js';
 import { revealable, within } from '../desktop/reveal.js';
 import {
-  PORT, findNode, lineSplitter, parseReadyLine, portFree, rootsUnder, serviceArgs,
+  PORT, findNode, lineSplitter, parseReadyLine, portFree, rootsUnder, serviceArgs, startService,
 } from '../desktop/service.js';
 import { REAP_MS, STUB, TEST_PORT, alive, sleep, startStub } from './desktop-stub.mjs';
+
+// Every child's `kill` in this file goes through here. A child with no pid never spawned, and Node
+// would pass kill(2) a pid libuv never set, so that call is counted and sends nothing. A pid in
+// `refusing` gets what Node does when kill(2) fails with EPERM: an `error`, false, and a child that
+// runs on.
+const { kill } = ChildProcess.prototype;
+const refusing = new Set();
+let pidlessKills = 0;
+ChildProcess.prototype.kill = function guardedKill(signal) {
+  if (this.pid === undefined) {
+    pidlessKills++;
+    return false;
+  }
+  if (refusing.has(this.pid)) {
+    this.emit('error', Object.assign(new Error('kill EPERM'), { code: 'EPERM', errno: -1, syscall: 'kill' }));
+    return false;
+  }
+  return kill.call(this, signal);
+};
 
 const PROBE = fileURLToPath(new URL('./desktop-leak-probe.mjs', import.meta.url));
 
@@ -111,6 +130,36 @@ test('a service that ignores the stop line lives out the bound and is killed aft
   assert.equal(result.forced, true);
   assert.equal(result.signal, 'SIGKILL');
   assert.equal(alive(service.pid), false);
+});
+
+test('a service that refuses the SIGKILL is reported as still running, with the refusal, and not as gone', async (t) => {
+  const service = run(t, 'deaf', { stopGraceMs: 300 });
+  await service.ready;
+  refusing.add(service.pid);
+  try {
+    const result = await Promise.race([service.stop(), sleep(5000).then(() => 'no answer')]);
+    assert.notEqual(result, 'no answer', 'the stop never answered');
+    assert.deepEqual({ ...result, error: result.error?.code },
+      { code: null, signal: null, error: 'EPERM', survived: true, forced: true });
+    assert.equal(alive(service.pid), true, 'the stand-in let the kill through');
+    const settled = await Promise.race([service.exited.then(() => 'exited'), sleep(300).then(() => 'running')]);
+    assert.equal(settled, 'running', 'the service counted as exited while it ran');
+  } finally {
+    refusing.delete(service.pid);
+    process.kill(service.pid, 'SIGKILL');
+    await service.exited;
+  }
+});
+
+test('a service whose Node cannot be spawned fails the start, and nothing signals it', async () => {
+  const service = startService({
+    node: join(dir, 'no-such-node'), entry: stub, cwd: dir, port: TEST_PORT, roots: rootsUnder(dir),
+  });
+  const before = pidlessKills;
+  const outcome = await Promise.race([service.ready.then(() => 'ready', (err) => err.message), sleep(5000).then(() => 'no answer')]);
+  assert.match(outcome, /exited before it was ready \(spawn .*no-such-node ENOENT\)/);
+  assert.equal((await service.exited).error?.code, 'ENOENT');
+  assert.equal(pidlessKills, before, 'a kill reached a service that never spawned');
 });
 
 test('a service that exits before it is ready fails the start with its code and its last words', async (t) => {
