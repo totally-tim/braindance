@@ -213,12 +213,18 @@ function ffmpegArgs({ width, height, fps, codec, into, audio = null }) {
 
 // The stop of every export socket still open or still cleaning up, for a shutdown to run.
 const running = new Set();
+// Set when a shutdown begins. From then on no socket is admitted and no export begins, including on
+// a connection the server accepted before, so nothing starts that the shutdown did not wait for.
+let stopping = false;
+const STOPPING = 'the server is stopping, so it starts no export';
 
 /**
- * Fails every running export, and resolves once each encoder has exited and each scratch is
- * removed or has become an export. Rejects naming a scratch that could not be removed.
+ * Refuses every later export, fails every running one, and resolves once each encoder has exited
+ * and each scratch is removed or has become an export. Rejects naming a scratch that could not be
+ * removed.
  */
 export async function stopExports() {
+  stopping = true;
   const results = await Promise.allSettled([...running].map((stop) => stop()));
   const failed = results.filter((result) => result.status === 'rejected');
   if (failed.length) throw new Error(failed.map((result) => result.reason.message).join('; '));
@@ -228,6 +234,11 @@ export async function stopExports() {
 // browser said it would send: ffmpeg's rawvideo demuxer reads a short frame as the head of
 // the next one and produces a file that plays and scrolls diagonally.
 export function handleExportSocket(ws, { outDir, audioStore = null, log = console.log }) {
+  if (stopping) {
+    ws.send(JSON.stringify({ error: STOPPING }));
+    ws.close();
+    return;
+  }
   let job = null;
   let child = null;
   // Settled once the encoder has exited, or failed to start.
@@ -283,6 +294,7 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
   running.add(stop);
 
   const begin = async (msg) => {
+    if (stopping) throw new Error(STOPPING);
     const { width, height, fps, frames, maxFrames, codec } = validateExport({
       name: msg.name, width: msg.width, height: msg.height, fps: msg.fps,
       frames: msg.frames, codec: msg.codec ?? 'h264', programStart: msg.programStart ?? null,
