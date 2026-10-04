@@ -224,7 +224,8 @@ const writer = (source, fixture, scratch) => {
   const start = source.indexOf('// How long a write waits on a full pipe');
   const end = source.indexOf('static uint64_t now_ms()', start);
   if (start < 0 || end < 0) fail('write_message extraction anchors moved');
-  // The fixture's ContendedMutex is std::timed_mutex plus a count of the attempts that found it held.
+  // The fixture's ContendedMutex is std::timed_mutex plus a count of the encoder's attempts that
+  // found the frame writer holding it.
   const extracted = source.slice(start, end);
   if (extracted.split('std::timed_mutex').length !== 3) fail('the write lock no longer appears twice as std::timed_mutex');
   writeFileSync(join(scratch, 'write-under-test.h'), extracted.replaceAll('std::timed_mutex', 'ContendedMutex'));

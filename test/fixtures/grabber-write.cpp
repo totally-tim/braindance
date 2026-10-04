@@ -1,7 +1,7 @@
 // The shipped stdout writer under a scripted interleaving of the capture loop and the encoder
 // thread. Each step waits for the one before it to have happened, so no outcome depends on a sleep.
 // The tool compiles the writer with ContendedMutex in place of std::timed_mutex, so the fixture
-// can see a lock attempt that found the lock held.
+// can see the encoder find the frame writer holding the lock.
 //
 //   grabber-write <scenario> <out-file>
 //
@@ -21,7 +21,7 @@
 //            again before the encoder's message starts.
 // What the parent read goes to <out-file>, which is the output itself under `cut`. Stdout says what
 // each writer returned, whether the stop was set when the encoder's message started, and how many
-// lock attempts found the lock held.
+// of the encoder's lock attempts found the frame writer holding the lock.
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -46,22 +46,31 @@
 static const uint32_t MAGIC = 0x4B4E4354;
 static std::atomic<bool> g_stop{false};
 
-// The writer's lock: std::timed_mutex, and a count of the lock attempts that found it held.
+enum Role { NOBODY, FRAME_WRITER, ENCODER };
+static thread_local Role t_role = NOBODY;
+
+// The writer's lock: std::timed_mutex, and a count of the encoder's attempts that found the frame
+// writer holding it. The holder is recorded, because try_lock may fail on a free mutex.
 static std::atomic<int> g_contended{0};
 class ContendedMutex {
  public:
-  void lock() { m_.lock(); }
-  bool try_lock() { return m_.try_lock(); }
-  void unlock() { m_.unlock(); }
+  void unlock() {
+    owner_ = NOBODY;
+    m_.unlock();
+  }
   template <class Rep, class Period>
   bool try_lock_for(const std::chrono::duration<Rep, Period> &timeout) {
-    if (m_.try_lock()) return true;
-    g_contended++;
-    return m_.try_lock_for(timeout);
+    if (!m_.try_lock()) {
+      if (t_role == ENCODER && owner_ == FRAME_WRITER) g_contended++;
+      if (!m_.try_lock_for(timeout)) return false;
+    }
+    owner_ = t_role;
+    return true;
   }
 
  private:
   std::timed_mutex m_;
+  std::atomic<Role> owner_{NOBODY};
 };
 
 #include "write-under-test.h"
@@ -72,7 +81,8 @@ static const rlim_t CUT_AT = 64 * 1024;
 
 static void sleepMs(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
 
-// Until a writer has found the lock held, or 5 s: a writer that never waits is the tool's to report.
+// Until the encoder has found the frame writer holding the lock, or 5 s: an encoder that never
+// waits is the tool's to report.
 static void waitForContention() {
   for (int waited = 0; g_contended == 0 && waited < 5000; waited++) sleepMs(1);
 }
@@ -124,6 +134,7 @@ int main(int argc, char **argv) {
   std::atomic<bool> frameDone{false}, colourDone{false}, stoppedAtColour{false};
 
   std::thread frameWriter([&] {
+    t_role = FRAME_WRITER;
     frameResult = write_message(outFd, TYPE_FRAME, frame.data(), (uint32_t)frame.size(), readCommands);
     frameDone = true;
   });
@@ -131,6 +142,7 @@ int main(int argc, char **argv) {
   std::thread encoder;
   auto startEncoder = [&] {
     encoder = std::thread([&] {
+      t_role = ENCODER;
       stoppedAtColour = g_stop.load();
       colourResult = write_message(outFd, TYPE_COLOR, colour.data(), (uint32_t)colour.size());
       colourDone = true;

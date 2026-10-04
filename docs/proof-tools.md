@@ -943,8 +943,8 @@ pipe the parent leaves unread. The frame writer stalls in a 512 KiB message, a s
 through the stdin its stalled wait reads, and the encoder's message starts while the frame writer
 waits or after it returned. Each step waits for the one before it to have happened, so no outcome
 depends on a sleep. The tool compiles the writer with the fixture's `ContendedMutex` in place of
-`std::timed_mutex`. It forwards every call and counts the lock attempts that found the lock held,
-so the stop goes in only once the encoder is waiting on the lock. The tool reads the stream through
+`std::timed_mutex`. It records which writer holds it and counts the encoder's attempts that found
+the frame writer holding it, so the stop goes in only once the encoder is waiting on the lock. The tool reads the stream through
 `MessageParser` from `server/protocol.js`. In the built grabber a stop and a cut usually come
 together, and either rule alone then refuses the next message. The fixture also separates them: a
 stop with nothing cut, and a cut with no stop. The cut with no stop comes from a file whose size
@@ -1029,8 +1029,8 @@ exits 1. Each mutation runs the part it names: reader, writer or stream.
 - **`new-message-after-stop`** — a writer that finds the lock free after a stop starts its message,
   and the stopped rows find it after the frame.
 - **`queued-encoder-never-waits`** — the fixture starts the encoder only once the frame writer has
-  returned, and the queued row finds that no lock attempt found the lock held. Its other queued rows
-  still pass.
+  returned, and the queued row finds that the encoder never found the frame writer holding the
+  lock. Its other queued rows still pass.
 - **`stalled-write-never-gives-up`** — a write on a full pipe keeps waiting after the stop is read,
   and every stalled-stop row hangs.
 - **`stalled-write-ignores-stdin`** — nothing reads stdin while a write waits, and the stalled-stop
