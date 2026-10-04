@@ -1,6 +1,7 @@
 // The render queue's store, driven in process: cancellation, the heartbeat decision, the version
 // record and the refusal of a job file this build did not write. No server and no browser.
 import { test, mock } from 'node:test';
+import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { constants } from 'node:fs';
 import fsp, { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
@@ -10,6 +11,7 @@ import { join } from 'node:path';
 import {
   BEAT_BUDGET, JOB_VERSION, JobStore, beatVerdict, environmentRefusal, versionDifferences,
 } from '../server/jobs.js';
+import { CLIP_CEILING } from '../web/format.js';
 
 const METAL = 'ANGLE Metal / Apple M2 Max';
 const V3D = 'ANGLE (Broadcom, V3D 7.1.10.2, OpenGL ES 3.1)';
@@ -675,6 +677,84 @@ test('a job file of another version is listed as refused with a reason and is ne
     await assert.rejects(h.store.cancel(old), /no conversion/);
     assert.equal((await claimOne(h)).id, live.id, 'the queue behind it still drains');
     assert.equal((await h.store.claim({ worker: 'w', renderer: METAL })).job, null, 'and the old file was not handed out');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('enqueue counts the frames a job selects and refuses a render past four hours', async () => {
+  const takes = new Map([[HASH, 10]]);
+  const h = await harness({ takeLengths: async () => takes });
+  const clip = (over = {}) => ({ take: { hash: HASH }, start: 0, length: 1, speed: 1, sourceStart: 0, ...over });
+  const project = (clips, extra = {}) => ({ ...PROJECT, clips, ...extra });
+  try {
+    await assert.rejects(h.enqueue({ project: project([clip({ start: 19_999 })]) }),
+      /600001 frames at 30 fps runs 20001 seconds, past the 14400-second ceiling/, 'the whole program of a clip placed at 19,999 s');
+    assert.ok(await h.enqueue({ project: project([clip({ start: 19_999 })]), deliverable: { in: 19_940, out: 20_000 } }),
+      'the same program, with a deliverable selecting its last minute');
+    takes.set(HASH, 5 * 3600);
+    await assert.rejects(h.enqueue({ project: project([clip({ length: null })]) }), /past the 14400-second ceiling/,
+      'a clip with no length runs to the end of its five-hour take');
+    await assert.rejects(h.enqueue({ project: project([clip()], { audio: { start: 15_000, duration: 1 } }) }), /past the 14400-second ceiling/,
+      'a song placed past four hours lengthens the program');
+    takes.delete(HASH);
+    assert.ok(await h.enqueue({ project: project([clip({ length: null })]) }), 'a take this machine has not got leaves the count to the export socket');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('enqueue lists the library once, and refuses more clips than the page composites', async () => {
+  let listings = 0;
+  const h = await harness({ takeLengths: async () => { listings++; return new Map([[HASH, 10]]); } });
+  const job = (n) => ({
+    project: { ...PROJECT, clips: Array.from({ length: n }, (_, i) => ({ take: { hash: HASH }, start: i, length: null, speed: 1, sourceStart: 0 })) },
+    captures: Array(n).fill(HASH),
+  });
+  try {
+    assert.ok(await h.enqueue(job(CLIP_CEILING)));
+    assert.equal(listings, 1, `${CLIP_CEILING} clips running to the end of one take list the library once`);
+    await assert.rejects(h.enqueue(job(CLIP_CEILING + 1)), new RegExp(`holds ${CLIP_CEILING + 1} clips and this build composites ${CLIP_CEILING}`));
+    assert.equal(listings, 1, 'and a project past the ceiling is refused before the library is listed');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a program far past four hours is refused at enqueue, not counted forever', () => {
+  // A program end where a count stepped back one frame at a time never stops at 30 fps: past
+  // 2^53 frames, one less is the same number. Run in a child, because a loop that never ends
+  // cannot be timed out from inside it.
+  const end = 600_967_367_215_625;
+  const job = {
+    project: { ...PROJECT, clips: [{ take: { hash: HASH }, start: end - 1, length: 1, speed: 1, sourceStart: 0 }] },
+    captures: [HASH], output: 'far', width: 64, height: 36, fps: 30,
+  };
+  const probe = `
+    import { mkdtemp, rm } from 'node:fs/promises';
+    import { tmpdir } from 'node:os';
+    import { join } from 'node:path';
+    import { JobStore } from ${JSON.stringify(new URL('../server/jobs.js', import.meta.url).href)};
+    const dir = await mkdtemp(join(tmpdir(), 'braindance-jobs-'));
+    const store = new JobStore(join(dir, 'jobs'), { exportsDir: dir, environment: async () => ({ record: {}, problems: [] }) });
+    try {
+      await store.enqueue(${JSON.stringify(job)});
+      console.log('queued');
+    } catch (err) { console.log(err.message); } finally { await rm(dir, { recursive: true, force: true }); }`;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', probe], { timeout: 10_000, encoding: 'utf8' });
+  assert.equal(child.signal, null, 'enqueue answered rather than being killed at the timeout');
+  assert.match(child.stdout, /past the 14400-second ceiling/, child.stderr);
+});
+
+test('a short render late in a long program is refused where its frames cannot be counted one at a time', async () => {
+  const h = await harness();
+  // A project's last second exported at 120 fps starts at output frame 35,999,999,999,999,880.
+  const project = { ...PROJECT, clips: [{ take: { hash: HASH }, start: 299_999_999_999_999, length: 1, speed: 1, sourceStart: 0 }] };
+  try {
+    await assert.rejects(h.enqueue({ project, fps: 120, deliverable: { in: 299_999_999_999_999, out: 300_000_000_000_000 } }),
+      /at 120 fps is past frame 1125899906842624/);
+    assert.ok(await h.enqueue({ project: { ...project, clips: [{ ...project.clips[0], start: 9_999 }] }, fps: 120, deliverable: { in: 9_999, out: 10_000 } }),
+      'the same second early in the program is queued');
   } finally {
     await h.cleanup();
   }

@@ -1,10 +1,13 @@
 import * as THREE from 'three';
 import {
-  CLIP_CEILING, DEPTH_H, DEPTH_W, POINTS, PROJECT_VERSION, VALID_ID, copyName, documentNameRefusal,
+  CLIP_CEILING, DEPTH_H, DEPTH_W, DOCUMENT_VERSIONS, POINTS, VALID_ID, copyName, documentNameRefusal,
   effectIdsIn, effectOf, nextUntitledName, presetCarriesLookName, snapScalar,
   versionRefusal, captureFormatRefusal, requiresEntryRefusal, requiresListRefusal,
 } from './format.js';
 import { pollRecordState } from './record-poll.js';
+import { checkAudioClip, defaultConditioning, modulatedValue } from './audio-source.js';
+import { createAudioSession } from './audio-session.js';
+import { createAudioPanel } from './audio-panel.js';
 import { pickTakes } from './take-picker.js';
 // The renderer, imported first: its body appends the canvas, so import order is boot order.
 import {
@@ -22,14 +25,16 @@ import {
 } from './fly.js';
 import { verticalFovForFocalLength, focalLengthForVerticalFov } from './lens.js';
 import {
-  EXPORT_SIZES, DEFAULT_EXPORT_SIZE, reduceAspect, exportAspects, sizesForAspect,
+  EXPORT_SIZES, DEFAULT_EXPORT_SIZE, OUTPUT_RATES, reduceAspect, exportAspects, sizesForAspect,
 } from './export-sizes.js';
 import {
   INSET, TOP_CENTRE, PLAN_STRIDE, FRUSTUM_LEN, planScale, planPoint, planWorld, projectThrough,
 } from './plan-geometry.js';
 import { pickDepth, sensorPoint } from './depth-pick.js';
 import { ZOOM_PER_NOTCH, rulerTickSeconds, tickLabel, makeViewWindow } from './view-window.js';
-import { clipIn, clipOut, clipBoundOrThrow, writeClipRange } from './clip-range.js';
+import {
+  clipIn, clipOut, clipBoundOrThrow, lastFrameRefusal, pastOutPoint, rangeFrames, writeClipRange,
+} from './clip-range.js';
 import {
   RATE_MIN, RATE_MAX, clipAffordedSec, clipProgramSecAt, clipSourceSecAt, frameAtOrBefore,
   frameLoadByTake, framesBackFor, headFramesFor, headTrim, integerMidpoint, rescaleClipKeys,
@@ -66,6 +71,11 @@ import { moshSpine } from './mosh-shader.js';
 import { moshFramesBack, moshRefreshes } from './mosh-pass.js';
 import { assembleShaders } from './shader-assembly.js';
 import { createPreviews } from './previews.js';
+
+let audioClip = null;
+let audioPanel = null;
+let audioEditGeneration = 0;
+const audioSession = createAudioSession({ changed: () => requestRepaint(), failed: (error) => showTimelineError(error) });
 
 const revSignature = (effects) => effects.map((e) => `${e.id} ${e.rev}`).join('\n');
 
@@ -223,6 +233,7 @@ const clipGestureLive = () => !EDITING || clipRow !== null;
 const createLook = () => ({
   values: new Map(),
   tracks: new Map(),
+  effects: new Set(),
   parked: { params: {}, tracks: {} },
 });
 
@@ -333,9 +344,6 @@ const sizeForShape = new Map();
 
 // Where the letterboxed stage sits. Written by `resize`, read by the overlay.
 const stageBox = { left: 0, top: 0 };
-
-/** The rates the output can be, and the only list of them. */
-const OUTPUT_RATES = [24, 30, 60, 120];
 
 /** The default shape, taken off the default size so there is still one list. */
 const defaultAspect = () => reduceAspect(...DEFAULT_EXPORT_SIZE.split('x').map(Number));
@@ -1303,6 +1311,8 @@ function makeResetButton(name) {
   button.setAttribute('aria-label', `${name} reset to default`);
   button.append(resetGlyph());
   button.addEventListener('click', () => {
+    // Asked before the rack: retaining the effect is itself a document edit.
+    if (refuseEdit(`resetting ${name}`)) return;
     retainEffectFor(name);
     params.set(name, resetTarget(name));
     history.commit();
@@ -1911,13 +1921,14 @@ function hideOffTab() {
 }
 
 function setPanelTab(tab) {
-  if (!['record', 'camera', 'framing', 'look', 'region'].includes(tab)) return false;
+  if (!['record', 'camera', 'framing', 'look', 'region', 'audio'].includes(tab)) return false;
   activePanelTab = tab;
   for (const button of panelTabButtons) {
     button.setAttribute('aria-selected', String(button.dataset.panelTab === tab));
   }
   hideOffTab();
   document.getElementById('panelBody').scrollTop = 0;
+  if (tab === 'audio' && audioPanel) { audioPanel.paint(); requestRepaint(); }
   return true;
 }
 
@@ -1957,14 +1968,12 @@ function applyPreset(preset) {
 }
 
 // The export settings. Separate from the project, so one edit can spawn several.
-const DELIVERABLE_VERSION = 2;
-
 let activeDeliverable = null;
 
 function ensureActiveDeliverable() {
   if (activeDeliverable) return;
   activeDeliverable = {
-    version: DELIVERABLE_VERSION,
+    version: DOCUMENT_VERSIONS.deliverable,
     in: 0,
     out: null,
     outputSize: openingSizeForAspect(projectAspect) ?? DEFAULT_EXPORT_SIZE,
@@ -1981,13 +1990,13 @@ function setActiveDeliverable(deliverable) {
 
 function applyDeliverable(deliverable) {
   // Asked before anything is touched, so an unreadable document is refused whole.
-  if (deliverable.version !== DELIVERABLE_VERSION) {
+  if (deliverable.version !== DOCUMENT_VERSIONS.deliverable) {
     const named = Number.isFinite(deliverable.outputFps)
       ? ` it was written at ${deliverable.outputFps}fps, which is the only record of that rate,`
       : '';
     throw new Error(
       `this deliverable is version ${JSON.stringify(deliverable.version)} and this build writes `
-      + `${DELIVERABLE_VERSION}: the output rate lives on the project now, so a version 1 document `
+      + `${DOCUMENT_VERSIONS.deliverable}: the output rate lives on the project now, so a version 1 document `
       + `would render at a rate nothing on screen agrees with -${named} so set the rate in Project `
       + 'settings and save the deliverable again',
     );
@@ -2182,34 +2191,16 @@ function storeGroupOverride() {
   }
 }
 
-// Which installed effects are kept in the inspector. Panel state, not project state.
-const EFFECT_RACKED = 'kinect.rackedEffects';
-const rackedEffects = new Set();
-try {
-  const saved = localStorage.getItem(EFFECT_RACKED);
-  if (saved !== null && saved.trim() !== '') {
-    const parsed = JSON.parse(saved);
-    if (Array.isArray(parsed)) {
-      for (const id of parsed) if (typeof id === 'string' && id) rackedEffects.add(id);
-    }
-  }
-} catch {
-  // The values and tracks stay authoritative when storage is unavailable or damaged.
-}
-
-function storeRackedEffects() {
-  try {
-    localStorage.setItem(EFFECT_RACKED, JSON.stringify([...rackedEffects].sort()));
-  } catch {
-    // The rack still works for this page. Only the preference is lost on reload.
-  }
-}
+// The inspector reads explicit additions from the selected clip and the project.
+const rackedEffects = {
+  has: (id) => lookOf().effects.has(id) || projectLook.effects.has(id),
+  add(id) { for (const name of effectParamNames(id)) homeOf(PARAMS[name]).effects.add(id); },
+  delete(id) { for (const look of [...clips.map((clip) => clip.look), projectLook, bootLook]) look.effects.delete(id); },
+};
 
 function retainEffectFor(name) {
   const id = effectOf(name);
-  if (!id || rackedEffects.has(id)) return;
-  rackedEffects.add(id);
-  storeRackedEffects();
+  if (id) homeOf(PARAMS[name]).effects.add(id);
 }
 
 function effectTouched(id) {
@@ -2278,14 +2269,15 @@ function refreshUnderRows() {
 
 function addEffectToRack(id) {
   if (!effectInstalled(id)) return false;
+  if (refuseEdit('adding ' + id)) return false;
   rackedEffects.add(id);
-  storeRackedEffects();
   for (const group of effectGroups(id)) {
     if (!group.collapses) continue;
     groupOverride.set(group.key, true);
     groupOverrideDirty = true;
   }
   refreshPanel();
+  history.commit();
   paintEffectRackDialog();
   document.getElementById('effectRackSearch')?.focus();
   return true;
@@ -2295,8 +2287,8 @@ function removeEffectFromRack(id) {
   if (!effectInstalled(id)) return false;
   if (refuseEdit('taking ' + id + ' out of the rack')) return false;
   const { names } = effectRackEntry(id);
+  if (names.includes(audioClip?.target?.param)) replaceAudio({ ...audioClip, target: null });
   rackedEffects.delete(id);
-  storeRackedEffects();
 
   // Values and tracks leave as one document edit, from every clip: an effect taken out of the
   // rack that kept its values in the clips nobody was looking at would be written back out.
@@ -2316,6 +2308,7 @@ function removeEffectFromRack(id) {
   lanesChanged();
   requestRepaint();
   history.commit();
+  audioPanel?.paint();
   paintEffectRackDialog();
   document.getElementById('effectRackSearch')?.focus();
   return true;
@@ -2526,13 +2519,112 @@ function valueAtProgram(name, t, clip = null) {
   const on = spec.scope === 'clip' ? (clip ?? clipOfLook()) : null;
   const look = on ? on.look : homeOf(spec);
   const track = look.tracks.get(name);
-  if (!track || track.keys.length === 0) {
-    const held = look.values.get(name);
-    // Copied rather than handed out, because a caller writing into a pose would move the value.
-    return WORLD_KINDS.has(spec.kind)
+  const held = look.values.get(name);
+  const base = track?.keys.length
+    ? params.normalise(name, track.valueAt(t - trackEpoch(name, on)))
+    : WORLD_KINDS.has(spec.kind)
       ? { ...held, position: [...held.position], quaternion: [...held.quaternion] } : held;
+  const target = audioClip?.target;
+  if (target?.param === name && target.clip === (on?.id ?? null)) {
+    return params.normalise(name, modulatedValue(base, target.depth, audioSession.value(audioClip, t), spec.min, spec.max));
   }
-  return params.normalise(name, track.valueAt(t - trackEpoch(name, on)));
+  return base;
+}
+
+function checkAudioTarget(target) {
+  if (!target) return;
+  const spec = specOf(target.param);
+  if (!effectOf(target.param) || spec.kind !== 'scalar' || spec.tag !== 'look'
+    || (spec.scope === 'project') !== (target.clip === null)) {
+    throw new Error('audio can drive a scalar effect parameter at its declared scope');
+  }
+  if (Math.abs(target.depth) > spec.max - spec.min) throw new Error('audio depth exceeds the parameter range');
+}
+
+function replaceAudio(next) {
+  audioSession.stop();
+  const target = audioClip?.target;
+  if (target && Object.hasOwn(PARAMS, target.param)) {
+    const clip = target.clip === null ? null : clips.find((c) => c.id === target.clip);
+    if (target.clip === null || clip) {
+      const reset = () => specOf(target.param).apply(params.get(target.param));
+      if (clip) withClip(clip, reset); else reset();
+    }
+  }
+  audioClip = next;
+}
+
+function applyAudio(t) {
+  const signal = audioSession.value(audioClip, t);
+  const target = audioClip?.target;
+  const display = { signal, bins: audioPanel?.visible() ? audioSession.inspect(audioClip, t) : [] };
+  if (!target || !Object.hasOwn(PARAMS, target.param)) { audioPanel?.meter(display); return; }
+  const clip = target.clip === null ? null : clips.find((c) => c.id === target.clip);
+  if (target.clip !== null && !clip) { audioPanel?.meter(display); return; }
+  const spec = specOf(target.param);
+  const look = clip ? clip.look : projectLook;
+  const track = look.tracks.get(target.param);
+  const base = track?.keys.length ? params.normalise(target.param, track.valueAt(t - trackEpoch(target.param, clip))) : look.values.get(target.param);
+  const result = borrowed?.has(target.param) ? base : valueAtProgram(target.param, t, clip);
+  audioPanel?.meter({ ...display, base, result, min: spec.min, max: spec.max });
+  if (borrowed?.has(target.param)) return;
+  const write = () => spec.apply(result);
+  if (clip) withClip(clip, write); else write();
+}
+
+async function changeAudio(patch, imported = null) {
+  if (refuseEdit('changing audio')) return;
+  const generation = documentGeneration;
+  const edit = ++audioEditGeneration;
+  const prior = audioClip;
+  const next = checkAudioClip(imported ?? { ...audioClip, ...patch });
+  checkAudioTarget(next?.target);
+  if (next?.target?.clip !== null && next?.target && !clips.some((c) => c.id === next.target.clip)) {
+    throw new Error('audio target clip is no longer in this project');
+  }
+  pauseTransport();
+  await audioSession.prepare(next);
+  if (edit !== audioEditGeneration || generation !== documentGeneration || prior !== audioClip || refuseEdit('changing audio')) return;
+  replaceAudio(next);
+  if (next?.target) {
+    const targetClip = clips.find((clip) => clip.id === next.target.clip);
+    if (targetClip) withClip(targetClip, () => retainEffectFor(next.target.param));
+    else retainEffectFor(next.target.param);
+  }
+  timingChanged();
+  requestRepaint();
+  history.commit();
+  audioPanel?.paint();
+}
+
+async function importAudio(file) {
+  if (refuseEdit('importing audio')) return;
+  const generation = documentGeneration;
+  const edit = ++audioEditGeneration;
+  const prior = audioClip;
+  pauseTransport();
+  const targetClip = selectedClip.id;
+  const response = await fetch('/audio', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file });
+  const result = await response.json();
+  if (!response.ok || result.error) throw new Error(result.error ?? 'audio import failed');
+  if (edit !== audioEditGeneration || generation !== documentGeneration || prior !== audioClip) return;
+  const first = audioTargets().find((entry) => entry.clip === targetClip);
+  await changeAudio(null, {
+    kind: 'audio-file', ...result, name: file.name.slice(0, 255), start: 0,
+    conditioning: defaultConditioning(),
+    target: first ? { clip: targetClip, param: first.param, depth: (first.max - first.min) / 2 } : null,
+  });
+}
+
+function removeAudio() {
+  if (refuseEdit('removing audio')) return;
+  audioEditGeneration++;
+  pauseTransport();
+  replaceAudio(null);
+  timingChanged();
+  requestRepaint();
+  history.commit();
+  audioPanel?.paint();
 }
 
 // How near an existing key has to be to count as the same key: half an output frame.
@@ -2623,13 +2715,16 @@ function serialiseLookBlock(scope, parked, look) {
     if (mine.some((n) => PARAMS[n].reading)) continue;
     const keyed = mine.some((n) => look.tracks.get(n)?.keys.length);
     const moved = mine.some((n) => values[n] !== PARAMS[n].def);
-    if (keyed || moved) continue;
+    const modulated = audioClip?.target && effectOf(audioClip.target.param) === id
+      && (audioClip.target.clip === null ? look === projectLook : clips.find((c) => c.id === audioClip.target.clip)?.look === look);
+    if (keyed || moved || modulated || look.effects.has(id)) continue;
     for (const n of mine) delete values[n];
   }
   const kept = Object.keys(values);
   return {
     kept,
     block: {
+      ...(look.effects.size ? { effects: [...look.effects].sort() } : {}),
       // Look parameters only, so a snapshot or a render job carries no camera and no scale.
       params: { ...values, ...parked.params },
       tracks: {
@@ -2657,7 +2752,8 @@ function serialiseProjectBody({ suppressed = null } = {}) {
     ...writableRequires(),
   ];
   return {
-    version: PROJECT_VERSION,
+    version: DOCUMENT_VERSIONS.project,
+    audio: audioClip ? structuredClone(audioClip) : null,
     ...(requires.length ? { requires } : {}),
     ...(suppressed ? { suppressed } : {}),
     // The terms that write the post chain, which is the project's however many clips draw into it.
@@ -2679,6 +2775,7 @@ function serialiseProjectBody({ suppressed = null } = {}) {
       // these and they are allowed to disagree, which is what makes a clip's look its own.
       params: perClip[at].block.params,
       tracks: perClip[at].block.tracks,
+      ...(perClip[at].block.effects ? { effects: perClip[at].block.effects } : {}),
     })),
     // The framing the clip was composed for, as the shape rather than as a size.
     aspect: [...projectAspect],
@@ -2758,6 +2855,11 @@ function checkLookBlock(what, block, scope) {
   }
   // Where the missing-effect split happens, as one predicate rather than a special case.
   const names = [...Object.keys(block.params), ...Object.keys(block.tracks)];
+  const effects = block.effects ?? [];
+  if (!Array.isArray(effects) || new Set(effects).size !== effects.length
+    || effects.some((id) => typeof id !== 'string' || !/^[a-z][a-z0-9]*$/.test(id) || !names.some((name) => effectOf(name) === id))) {
+    throw new Error(`${what} carries an effects list whose entries must also have parameters in this block`);
+  }
   const parkedNames = new Set(names.filter(isParkedName));
 
   // A parked name's scope is unknowable here by construction - the manifest declaring where it
@@ -2824,7 +2926,7 @@ function checkLookBlock(what, block, scope) {
     // clip's - so a value refused there leaves the editor holding parts of two documents.
     applied[name] = params.normalise(name, value);
   }
-  return { names, applied, tracks: restored, parked };
+  return { names, applied, tracks: restored, parked, effects: [...effects] };
 }
 
 /**
@@ -2837,8 +2939,8 @@ function checkProject(project) {
     throw new Error(`a project is an object, got ${JSON.stringify(project)}`);
   }
   // The version gate first, because everything below it is interpreted in the version.
-  if (project.version !== PROJECT_VERSION) {
-    throw new Error(versionRefusal('this project', project.version));
+  if (project.version !== DOCUMENT_VERSIONS.project) {
+    throw new Error(versionRefusal('project', project.version));
   }
   if (!project.look || typeof project.look !== 'object' || Array.isArray(project.look)) {
     throw new Error('a project carries a look object');
@@ -2958,7 +3060,7 @@ function checkProject(project) {
     const shortReadings = missingReadings(clip.params);
     if (shortReadings.length) {
       throw new Error(
-        `${what} names no ${shortReadings.join(', ')}: a version ${PROJECT_VERSION} clip carries `
+        `${what} names no ${shortReadings.join(', ')}: a version ${DOCUMENT_VERSIONS.project} clip carries `
         + 'all five reading weights, and the ones it leaves out would come back as defaults rather '
         + 'than as the look it was saved with',
       );
@@ -3030,7 +3132,17 @@ function checkProject(project) {
     }
   }
 
+  const audio = checkAudioClip(project.audio);
+  if (audio?.target) {
+    const target = audio.target;
+    const clip = target.clip === null ? null : plannedClips.find((c) => c.id === target.clip);
+    if (target.clip !== null && !clip) throw new Error('audio targets a clip this project does not contain');
+    const block = clip ? project.clips.find((c) => c.id === target.clip) : project.look;
+    if (!Object.hasOwn(block.params, target.param)) throw new Error('audio target must be carried in its look block');
+    if (!isParkedName(target.param)) checkAudioTarget(target);
+  }
   return {
+    audio,
     project,
     clips: plannedClips,
     // The project's own half, and the only half that is not per clip.
@@ -3067,6 +3179,8 @@ function fitClipCount(want) {
 }
 
 function applyProject(plan, sources = null) {
+  if (!audioSession.ready(plan.audio)) throw new Error('audio is not prepared; open this document through the project loader');
+  replaceAudio(null);
   documentGeneration++;
   const project = plan.project;
   // Read before the refit, because the refit is what can take the selected clip away.
@@ -3099,6 +3213,7 @@ function applyProject(plan, sources = null) {
   params.apply(plan.projectLook.applied);
   for (const [name, keys] of plan.projectLook.tracks) trackFor(name).keys = keys;
   projectLook.parked = plan.parked.project;
+  projectLook.effects = new Set(plan.projectLook.effects);
   trackFor('camera').keys = plan.camera;
 
   parkedRequires = plan.parked.requires;
@@ -3119,6 +3234,7 @@ function applyProject(plan, sources = null) {
       for (const [name, keys] of planned.look.tracks) trackFor(name).keys = keys;
     });
     clip.look.parked = planned.look.parked;
+    clip.look.effects = new Set(planned.look.effects);
     // Only clips whose footage or route label changed are repointed, and the id they come back holding is
     // the one the hash resolved to: a document names its take by hash and carries the id as a
     // label, so adopting the document's copy would put a name the take has been renamed out of
@@ -3148,6 +3264,8 @@ function applyProject(plan, sources = null) {
   if (clipRow) selectClip(clipRow);
   paintClipPanel();
   paintGizmo();
+  audioClip = plan.audio;
+  audioPanel?.paint();
 
   timingChanged();
 }
@@ -4378,6 +4496,7 @@ function renderProgramFrame(t) {
 
     // Every track, look and camera alike, through the registry rather than onto the uniforms.
     evaluateTracks(t);
+    applyAudio(t);
 
     // Source history stays valid while the camera is still. A changed camera is
     // a new projection.
@@ -4914,6 +5033,7 @@ class TimelineTransport {
   get duration() {
     let end = 0;
     for (const clip of clips) if (Number.isFinite(clip.end)) end = Math.max(end, clip.end);
+    if (audioClip) end = Math.max(end, audioClip.start + audioClip.duration);
     return end;
   }
 
@@ -5095,6 +5215,7 @@ class TimelineTransport {
    * far enough back.
    */
   seek(programSec, options = {}) {
+    audioSession.stop();
     const owed = { programSec };
     this.owed = owed;
     return this.exclusive(async () => {
@@ -5299,14 +5420,17 @@ class TimelineTransport {
     const next = this.frame + 1;
     if (next > this.lastFrame) return false;
     const t = next / this.outputFps;
-    if (t > this.clipOutSec + 1e-9) return false;
+    if (pastOutPoint(t, this.clipOutSec)) return false;
     const navigating = this.playing && !exporting && !PREVIEW_RENDERER;
     if (navigating) {
       advanceNavigation(t);
       if (previews?.show(next)) {
         noteViewportFrame();
         evaluating = true;
-        try { evaluateTracks(t); } finally { evaluating = false; }
+        try {
+          evaluateTracks(t);
+          applyAudio(t);
+        } finally { evaluating = false; }
         this.frame = next;
         this.previewed = true;
         chromeStale = true;
@@ -5352,14 +5476,16 @@ class TimelineTransport {
       this.tickNow(nowMs);
     } catch (err) {
       this.playing = false;
+      audioSession.stop();
       this.paint();
       showTimelineError(err);
     }
   }
 
   tickNow(nowMs) {
-    if (!this.playing) return;
+    if (!this.playing) { audioSession.stop(); return; }
     if (this.working) {
+      audioSession.stop();
       this.prefetch();
       return;
     }
@@ -5376,6 +5502,7 @@ class TimelineTransport {
       else this.pause();
     }
     this.behindMs = Math.max(0, nowMs - this.nextDueMs);
+    audioSession.sync(audioClip, this.programSec, this.playing && !exporting && (rendered > 0 || nowMs < this.nextDueMs));
     this.prefetch();
   }
 
@@ -5486,6 +5613,7 @@ class TimelineTransport {
     const gen = this.playGen;
     this.pendingPlay = true;
     try {
+      await audioSession.arm(audioClip);
       // A draft is not what playback would have produced, so it cannot seed the afterimage.
       if (this.drafted) await this.seek(this.programSec);
       // Keep playback inside the clip's in/out points.
@@ -5509,6 +5637,7 @@ class TimelineTransport {
   pause() {
     this.playGen += 1;
     this.playing = false;
+    audioSession.stop();
     if (this.previewed && !this.working) this.seek(this.programSec).catch(showTimelineError);
     this.paint();
   }
@@ -5830,6 +5959,7 @@ async function exportClip(options = {}) {
   }
   const fps = options.fps ?? timeline.outputFps;
   const codec = options.codec ?? d.codec ?? 'h264';
+  if (audioClip && codec === 'pngseq') throw new Error('PNG sequences cannot carry audio; select MP4 or MOV');
 
   const restore = {
     outputFps: timeline.outputFps,
@@ -5846,11 +5976,16 @@ async function exportClip(options = {}) {
     timeline.outputFps = fps;
     const inSec = options.in !== undefined ? options.in : d.in;
     const outSec = options.out !== undefined ? options.out : d.out;
-    const inFrame = timeline.frameAt(Number(inSec) || 0);
-    const outFrame = timeline.frameAt(outSec === null ? timeline.duration : outSec);
+    // Held inside the open range, because the transport seeks and steps nowhere else.
+    const held = (sec) => Math.max(timeline.clipInSec, Math.min(timeline.clipOutSec, sec));
+    const { from: inFrame, to: outFrame } = rangeFrames(
+      { in: held(Number(inSec) || 0), out: held(outSec ?? timeline.duration) }, timeline.duration, fps,
+    );
     const from = Math.max(inFrame, Math.min(outFrame, Math.trunc(options.from ?? inFrame)));
     const to = Math.max(inFrame, Math.min(outFrame, Math.trunc(options.to ?? outFrame)));
     if (to < from) throw new Error(`an export of frames ${from}..${to} has nothing in it`);
+    const refusal = lastFrameRefusal(to, fps);
+    if (refusal) throw new Error(refusal);
 
     // Composition comes from the camera track, so the export sees what the program camera does.
     setViewCamera(programCamera);
@@ -5887,6 +6022,7 @@ async function exportClip(options = {}) {
       height,
       fps,
       frames: to - from + 1,
+      programStart: from / fps,
       codec,
       project: serialiseProjectBody(suppressed.length ? { suppressed } : {}),
       captures: clips.map((clip) => clip.source.index.hash),
@@ -6017,6 +6153,35 @@ const stripCommand = (id, text, title) => {
 ui.addClip = stripCommand('tAddClip', '+', 'Add clips from Media library');
 ui.addClip.classList.add('tclipadd');
 ui.addClip.setAttribute('aria-label', 'Add clips');
+ui.addAudio = stripCommand('tAddAudio', 'Audio', 'Import audio');
+ui.addAudio.addEventListener('click', () => audioPanel.chooseFile());
+function audioTargets() {
+  return Object.entries(PARAMS).flatMap(([param, spec]) => {
+    const effect = effectOf(param);
+    if (!effect || spec.kind !== 'scalar' || spec.tag !== 'look') return [];
+    const owners = spec.scope === 'clip' ? clips : [null];
+    return owners.filter((clip) => {
+      const look = clip?.look ?? projectLook;
+      return look.effects.has(effect) || effectParamNames(effect).some((name) => look.values.has(name)
+        && (look.values.get(name) !== groupDefaults.get(name) || look.tracks.get(name)?.keys.length))
+        || (audioClip?.target?.clip === (clip?.id ?? null) && effectOf(audioClip.target.param) === effect);
+    }).map((clip) => ({
+      clip: clip?.id ?? null, param, min: spec.min, max: spec.max, step: spec.step,
+      effect, effectLabel: effectPackages.find((entry) => entry.id === effect)?.manifest.title ?? effect,
+      label: spec.label ?? param,
+    }));
+  });
+}
+audioPanel = createAudioPanel({
+  getClip: () => audioClip,
+  targets: audioTargets,
+  owners: () => [...clips.map((clip) => ({ id: clip.id, label: `${clip.id} · ${clip.take?.id ?? 'clip'}` })), { id: null, label: 'Project' }],
+  selectedOwner: () => selectedClip.id,
+  change: changeAudio,
+  importFile: importAudio,
+  remove: removeAudio,
+  open: () => { setPanelTab('audio'); setPanelCollapsed(false); },
+});
 ui.deleteClip = stripCommand('tDeleteClip', 'delete clip', 'Delete the selected clip (Del)');
 ui.moveClip = stripCommand('tMoveClip', 'move', 'Move the selected clip in the room (g)');
 ui.rotateClip = stripCommand('tRotateClip', 'rotate', 'Turn the selected clip in the room (g)');
@@ -6810,6 +6975,16 @@ const SHORTCUTS = 'space play/pause · arrows step a frame, with shift a second 
   + 'g moves and turns the selected clip · '
   + 'cmd-z undoes · h hides the panel';
 
+// Space belongs to the transport even when a control still holds focus, except where it types.
+addEventListener('keydown', (e) => {
+  if (e.code !== 'Space' || e.metaKey || e.ctrlKey || e.altKey || !EDITING || !timeline) return;
+  if (takesText(e.target) && e.target.type !== 'number') return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (e.repeat) return;
+  ui.play.click();
+}, true);
+
 /** The editor's keyboard, and the guard that has to come with it. */
 addEventListener('keydown', (e) => {
   // Above the typing guard: shift on its own arrives as a keydown, and releasing it as a keyup
@@ -6879,16 +7054,6 @@ addEventListener('keydown', (e) => {
   };
 
   switch (e.key) {
-    case ' ':
-      // A focused button owns the space bar: that is how a button is pressed without a mouse.
-      if (e.target instanceof HTMLElement && e.target.closest('button, [role=button]')) return;
-      // Or the page scrolls under the strip.
-      e.preventDefault();
-      // `pendingPlay` beside `playing`, because a play warming up from a draft is one
-      // this press stops.
-      if (timeline.playing || timeline.pendingPlay) pauseTransport();
-      else timeline.play().catch(showTimelineError);
-      return;
     case 'ArrowRight': e.preventDefault(); step(e.shiftKey ? timeline.outputFps : 1); return;
     case 'ArrowLeft': e.preventDefault(); step(e.shiftKey ? -timeline.outputFps : -1); return;
     case 'Home': e.preventDefault(); goTo(timeline.clipInSec); return;
@@ -7321,6 +7486,7 @@ function laneRows() {
       });
     }
   }
+  if (audioClip) rows.push({ owner: 'audio', label: 'Audio', kind: 'audio', height: 32 });
   rows.push({ owner: 'clip-add', label: '', kind: 'clip-add', height: CLIP_ADD_H });
   // The project's own curves at the foot, which is everything a clip does not hold: the camera,
   // and the post chain every clip is seen through.
@@ -7371,7 +7537,7 @@ const withLaneClip = (owner, write) => {
 
 // A clip row and the bar above it own no keys, so a lane's key list is empty rather than absent.
 const keysOf = (owner) => {
-  if (owner === 'clip-add' || isClipRow(owner)) return [];
+  if (owner === 'clip-add' || owner === 'audio' || isClipRow(owner)) return [];
   return trackOf(owner)?.keys ?? [];
 };
 
@@ -7380,6 +7546,7 @@ const clipOf = (owner) => (isClipRow(owner) ? laneClip(owner) : null);
 
 function laneReadout(owner) {
   if (owner === 'clip-add') return '';
+  if (owner === 'audio') return audioClip ? `${audioClip.duration.toFixed(2)}s` : '';
   const clip = clipOf(owner);
   // The length rather than the placement: where a clip sits is what its box already says, and
   // the rail is 96px wide, which fits one number and not two.
@@ -7423,7 +7590,7 @@ function rebuildLanes() {
     }
     if (row.kind === 'clip-add') {
       rail.classList.add('clip-add-row');
-      rail.append(ui.addClip);
+      rail.append(ui.addClip, ui.addAudio);
     } else {
       rail.append(label, value);
     }
@@ -7452,6 +7619,12 @@ function repositionLanes() {
   for (const lane of ui.lanes.querySelectorAll('.tlane')) {
     const row = lane.__row;
     if (!row) return false;
+    if (row.kind === 'audio') {
+      const box = lane.querySelector('.taudio');
+      if (!box || !audioClip) return false;
+      placeClipBox(box, { start: audioClip.start, end: audioClip.start + audioClip.duration });
+      continue;
+    }
     if (row.kind === 'clip') {
       const box = lane.querySelector('.tclip');
       if (!box || box.__clip !== row.clip) return false;
@@ -7519,8 +7692,57 @@ function placeClipBox(box, clip) {
   box.hidden = to < -5 || from > 105;
 }
 
+function beginAudioDrag(e) {
+  if (e.button !== 0 || !audioClip || refuseEdit('moving audio')) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const box = e.currentTarget;
+  const held = audioClip;
+  const generation = documentGeneration;
+  const from = view.timeAt(e.clientX);
+  let start = held.start;
+  box.setPointerCapture(e.pointerId);
+  const move = (event) => {
+    start = Math.max(0, Math.min(86400, held.start + view.timeAt(event.clientX) - from));
+    start = Math.round(start * timeline.outputFps) / timeline.outputFps;
+    placeClipBox(box, { start, end: start + held.duration });
+  };
+  const finish = (event) => {
+    box.removeEventListener('pointermove', move);
+    box.removeEventListener('pointerup', finish);
+    box.removeEventListener('pointercancel', finish);
+    if (box.hasPointerCapture(event.pointerId)) box.releasePointerCapture(event.pointerId);
+    if (event.type === 'pointerup' && held === audioClip && generation === documentGeneration && start !== held.start) {
+      changeAudio({ start }).catch(showTimelineError);
+    } else if (held === audioClip) {
+      placeClipBox(box, { start: held.start, end: held.start + held.duration });
+    }
+  };
+  box.addEventListener('pointermove', move);
+  box.addEventListener('pointerup', finish);
+  box.addEventListener('pointercancel', finish);
+}
+
 function drawLane(lane, row) {
   if (row.kind === 'clip-add') return;
+  if (row.kind === 'audio') {
+    const box = document.createElement('button');
+    box.type = 'button'; box.className = 'taudio';
+    box.setAttribute('aria-label', `Audio clip: ${audioClip.name}`);
+    const label = document.createElement('span'); label.textContent = audioClip.name;
+    const graph = svg('svg', { viewBox: '0 0 1000 100', preserveAspectRatio: 'none' });
+    const points = Array.from({ length: 501 }, (_, i) => {
+      const second = audioClip.start + i / 500 * audioClip.duration;
+      return `${i * 2},${95 - audioSession.value(audioClip, second) * 90}`;
+    });
+    graph.append(svg('polyline', { points: points.join(' '), fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2 }));
+    box.append(graph, label);
+    placeClipBox(box, { start: audioClip.start, end: audioClip.start + audioClip.duration });
+    box.addEventListener('click', () => audioPanel.open());
+    box.addEventListener('pointerdown', beginAudioDrag);
+    lane.append(box);
+    return;
+  }
   if (row.kind === 'clip') {
     // A positive box, unlike the trim chrome on the ruler, which draws the region the export
     // leaves out. `#tMiniRange` is the precedent: a clip is a thing that is there.
@@ -7940,7 +8162,7 @@ function presetFromCurrentLook(names) {
     }
   }
   const requires = requiresFor(Object.keys(values));
-  return { version: PROJECT_VERSION, ...(requires.length ? { requires } : {}), values };
+  return { version: DOCUMENT_VERSIONS.preset, ...(requires.length ? { requires } : {}), values };
 }
 
 /** Every look parameter of one effect, in declaration order. */
@@ -8139,15 +8361,15 @@ function pickPresetSubset({ title, verb, name }) {
 
 /** Everything about a preset that can be refused without writing anything. */
 function refusePresetBody(name, body) {
-  if (body?.version !== PROJECT_VERSION) {
-    throw new Error(versionRefusal(`preset ${name}`, body?.version));
+  if (body?.version !== DOCUMENT_VERSIONS.preset) {
+    throw new Error(`preset ${name}: ${versionRefusal('preset', body?.version)}`);
   }
   // The envelope, checked with the same suspicion as what is inside it.
   const PRESET_KEYS = ['version', 'requires', 'values'];
   const stray = Object.keys(body).filter((k) => !PRESET_KEYS.includes(k));
   if (stray.length) {
     throw new Error(
-      `preset ${name} carries ${stray.join(', ')}, which a version ${PROJECT_VERSION} preset has no `
+      `preset ${name} carries ${stray.join(', ')}, which a version ${DOCUMENT_VERSIONS.preset} preset has no `
       + `place for: a preset is ${PRESET_KEYS.join(', ')} and nothing else, so a key beside them is `
       + 'either a field an older version had or a typo, and both would be read as neither',
     );
@@ -8590,6 +8812,7 @@ const laneProgramAt = (clientX) => view.timeAt(clientX);
 
 // Known gap: an undo between this pointerdown and its pointerup rebuilds every track.
 ui.beds.addEventListener('pointerdown', (e) => {
+  if (e.target.closest('.taudio')) return;
   const box = e.target.closest('.tclip');
   if (box && timeline) {
     e.preventDefault();
@@ -8830,6 +9053,7 @@ async function addClipFromTake(take, start) {
     return null;
   }
   const from = withClip(initiating, () => params.values(scopeNames('clip')));
+  const addedEffects = new Set(initiating.look.effects);
   const generation = documentGeneration;
   pendingClipAdds++;
   paintClipCommands();
@@ -8855,6 +9079,7 @@ async function addClipFromTake(take, start) {
   adoptSource(clip, opened);
   clip.start = start;
   withClip(clip, () => params.apply(from));
+  clip.look.effects = addedEffects;
   orderClips();
   selectClipRow(clip);
   history.commit();
@@ -8904,6 +9129,8 @@ function deleteSelectedClip() {
   timeline.pause();
   const at = clips.indexOf(clip);
   clips.splice(at, 1);
+  // A new object rather than an edit in place, so an audio change already waiting on its analysis sees it.
+  if (audioClip?.target?.clip === clip.id) { replaceAudio({ ...audioClip, target: null }); audioPanel?.paint(); }
   clipLanesShut.delete(clip.id);
   // Onto whatever took its place rather than onto nothing: the panel's clip half greys when the
   // strip holds no clip, and an edit that still has clips has one under the panel.
@@ -11141,6 +11368,7 @@ async function loadProjectNamed(name, offered = null) {
   // the shape checks, the fold refusals and the requires check all run over the document before
   // this page opens a take on its say-so.
   const plan = checkProject(doc.body);
+  await audioSession.prepare(plan.audio);
   const sources = await sourcesFor(plan);
   if (refuseEdit(`opening ${name}`)) return null;
   refuseResolvedDurations(plan, sources);
@@ -11887,6 +12115,11 @@ globalThis.__kinect = {
   viewCamera: () => viewCamera,
 
   // The timeline, and the counters read instead of taking the transport's word for it.
+  audio: {
+    clip: () => audioClip ? structuredClone(audioClip) : null,
+    signal: (t) => audioSession.value(audioClip, t),
+    value: (name, t, clipId = null) => valueAtProgram(name, t, clips.find((c) => c.id === clipId) ?? null),
+  },
   timeline: {
     open: openTake,
     transport: () => timeline,
@@ -12011,7 +12244,7 @@ globalThis.__kinect = {
   },
 
   library: {
-    PROJECT_VERSION,
+    DOCUMENT_VERSIONS,
     CLIP_CEILING,
     restoreProject,
     serialiseProjectBody,

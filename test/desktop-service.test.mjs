@@ -39,7 +39,7 @@ test('the service is started on the fixed port with every root named', () => {
   const roots = rootsUnder('/data');
   const args = serviceArgs({ entry: '/app/server/index.js', port: PORT, roots });
   assert.deepEqual(args.slice(0, 4), ['/app/server/index.js', '--port', '8480', '--stop-on-stdin']);
-  for (const name of ['captures', 'projects', 'presets', 'deliverables', 'effects', 'jobs', 'exports']) {
+  for (const name of ['captures', 'projects', 'presets', 'deliverables', 'effects', 'jobs', 'exports', 'audio']) {
     assert.equal(args[args.indexOf(`--${name}`) + 1], `/data/${name}`, `--${name} points at its own directory`);
   }
 });

@@ -29,6 +29,7 @@ the checkout.
 | `--jobs DIR` | `jobs/` | The render queue's records. |
 | `--exports DIR` | `exports/` | Where a render lands, and what `/exports/` serves. |
 | `--stop-on-stdin` | off | Reads stdin as the host's channel: the line `stop` shuts the server down as SIGTERM does, and so does the end of stdin. |
+| `--audio DIR` | `audio/` | Imported audio, one WAV per content hash. |
 | `--node URL` | none | A capture node this instance links to, so its takes appear in the library here. |
 | `--node-name NAME` | `node` | The label that node is listed under. |
 | `--name NAME` | `mac` when `--node` is given, else `node` | The name this instance reports as. |
@@ -51,7 +52,7 @@ message naming both.
 **A host reads one line to know the server is up.** Once the server is bound it prints
 `[server] ready ` and a JSON object on the same line: `url`, the origin with the port the system
 chose when `--port` is `0`; `pid`; and `roots`, the absolute `captures`, `projects`, `presets`,
-`deliverables`, `effects`, `jobs` and `exports` directories. The stop signals and, under
+`deliverables`, `effects`, `jobs`, `exports` and `audio` directories. The stop signals and, under
 `--stop-on-stdin`, the `stop` line and the end of stdin run one shutdown. A live server finishes
 the open take and every take a grabber restart left closing, filing their indexes and marks, stops
 the grabber and exits 0. It exits 1 when a take does not close, a take's marks cannot be written, or
@@ -237,9 +238,9 @@ levelled room in the normal view, the sensor's own vertical in sensor view. Flyi
 orbit pivot with the camera.
 
 **A focused text field keeps the whole keyboard**, and gaining text focus releases any flight
-keys being held. Sliders, dropdowns and other non-text inputs keep only the arrows, space,
-enter, home, end and the page keys, so a focused slider still nudges with the arrows while
-shift-`w` flies and `cmd-z` undoes.
+keys being held. Sliders, dropdowns and other non-text inputs keep only the arrows, enter, home,
+end and the page keys, so a focused slider still nudges with the arrows while shift-`w` flies
+and `cmd-z` undoes. Space plays and pauses whatever else has focus, a number field included.
 
 **A shift-drag turns the view the way you drag it**, which is the opposite of an orbit: drag
 right and the view turns right, so the scene sweeps left. A drag the height of the stage turns
@@ -388,6 +389,33 @@ depends on point size, depth and output size. Bloom, vignette and the glyph legi
 also remain screen-space effects, so brightness can still change and dust can become characters
 through a longer lens. Existing shots at other lenses change appearance.
 
+## Audio
+
+**Audio** in the timeline imports one file of up to 64 MiB. The upload must arrive within two
+minutes, and the server refuses a song longer than ten minutes. FFmpeg converts it to 48 kHz stereo
+PCM, and the project names the result by its SHA-256 hash. `--audio DIR` chooses where the assets
+live. A project moved to another machine needs its audio asset as well as its takes, and the page
+refuses a project whose asset is missing or changed before opening it.
+
+Choose **Clip**, **Effect**, then **Parameter**. The effects offered are those added to that
+clip, those with changed values or keys, and the one the mapping already drives; post effects
+are under **Project**. **Depth** is signed and in the parameter's units. The result is the base
+value or its keys plus depth times the signal, held to the parameter's range and step. The base
+and its keys stay editable and the signal never replaces them.
+
+**Low**, **Mid** and **High** split at 200 Hz and 2 kHz, and **Gain** follows them. **Threshold**
+and **Ceiling** map the RMS level onto 0 to 1; **Attack** and **Release** smooth the rise and the
+fall. The spectrum shows the input and the EQ output at the playhead, paused or playing. These
+controls shape the signal only. Playback and export carry the song as imported.
+
+**Start**, or dragging the audio lane, places the song in program seconds. A clip's speed and
+in-point do not move it. The project saves the audio settings and the mapping, and undo restores
+them. MP4, MOV and lossless exports carry the song trimmed to the export range, with silence
+outside the audio clip. Export refuses a PNG sequence while the project has audio.
+
+A project holds one audio clip and one mapping onto one scalar effect parameter. Audio comes
+from a file.
+
 ## The edit, and what comes out of it
 
 **Clips are the rows at the head of the lane stack**, one box each from where a clip starts to
@@ -420,7 +448,12 @@ the project's shape. Two sizes of one shape are the same picture, because every 
 term is expressed against 1080p. A project stores the shape as the reduced integer pair, so
 "1.90:1 DCI" is `[256, 135]`, which is exact where 1.8963 is 0.2% off.
 
-Project settings offers 24, 30, 60 and 120 frames a second.
+Project settings offers 24, 30, 60 and 120 frames a second, and the export server accepts no other
+rate. An export runs for at most four hours, and an export that declares no frame count stops there.
+The export server refuses an export whose last output frame is past `LAST_EXPORT_FRAME` (2^50),
+counted at the export's rate from the `programStart` the client declares. It trusts that start,
+and it skips the check for a begin that declares none. The editor declares one with every export,
+queued renders included, and the render queue checks a job against the frames it counts itself.
 
 | Shape | Sizes |
 | --- | --- |
@@ -591,9 +624,11 @@ amplifiers end where the live picture stops producing a useful new setting.
 
 Rows declared under another parameter hide while that master sits at its absent value.
 Package-effect rows stay hidden until the effect is added with **+ add effect** or one of its
-values or tracks carries work. Removing an effect resets every value and deletes every track
-in one undoable edit and asks nothing first: **remove** in the picker and the cross on a group
-header are the same edit, and undo takes either back.
+values or tracks carries work. An added effect is saved with the look that owns its parameters,
+the selected clip's or the project's, so another clip shows its own rack. Removing an effect
+resets every value and deletes every track in one undoable edit and asks nothing first:
+**remove** in the picker and the cross on a group header are the same edit, and undo takes
+either back.
 
 **Units.** Displacements are metres in the levelled room, so a look gives the same picture at
 any export size. `pointSize` and every other screen-space term are pixels at 1080p. `trails`,
@@ -730,9 +765,10 @@ screen, which is not the document the picker names once you have moved a slider,
 scalar carrying a string fails at the key that is wrong and `__proto__` is refused as an
 unknown parameter.
 
-**This build reads project version 8 alone**, which places footage with each clip's `speed`
-and `sourceStart`. A file from any older version is refused naming its own version, and there
-is no conversion.
+**This build reads project version 9 alone**, which places footage with each clip's `speed` and
+`sourceStart`, records the effects added to each look, and carries the audio clip. Presets are
+version 8 and deliverables version 2. A file from any other version is refused naming its own
+version, and there is no conversion.
 
 ## Batch rendering
 
@@ -740,18 +776,23 @@ is no conversion.
 name, size and rate. All four are required. There is no button for this anywhere in the
 browser.
 
-**What enqueue checks and what it does not.** It checks that `project` is an object carrying
-some `version`, that every clip names a content hash, that `captures` equals those hashes one
-for one and in order, that `project.requires` claims exactly the effect namespaces the values
-and tracks use with no repeats, that `suppressEffects` is a list of effect ids, and that the
-output name, size, rate and codec pass the same validator the export dialog uses. It also
-refuses an output name a queued or running job already holds, and a `recorded` that is not a
-version record. It does **not** check the
-project's version number beyond its presence, and it stores `deliverable` exactly as given. So
-a project from another build and a malformed deliverable both enqueue cleanly: the page refuses
-a project version it does not read, and `applyDeliverable` refuses a deliverable that is not
-version 2 or whose `outputSize` is another shape. The worker applies a deliverable only when it
-is truthy, so a `false` or `null` one renders the whole clip.
+**What enqueue checks and what it does not.** It checks that `project` is an object carrying some
+`version`, that every clip names a content hash, that `captures` equals those hashes one for one and
+in order, that `project.requires` claims exactly the effect namespaces the values and tracks use
+with no repeats, that `suppressEffects` is a list of effect ids, and that the output name, size,
+rate and codec pass the same validator the export dialog uses. It refuses a project of more clips
+than `CLIP_CEILING`, as the page does on open. It counts the frames the deliverable selects, as the
+page will, and refuses a render longer than four hours or reaching past `LAST_EXPORT_FRAME`. A clip
+that runs to the end of its take reads the take's length from one listing of the library per
+enqueue; a library that cannot be listed refuses the enqueue with that error. A clip whose timing is
+not numbers, or whose length rests on a take this library has not got, leaves the count to the
+export socket, which refuses the same ceiling. It also refuses an output name a queued or running
+job already holds, and a `recorded` that is not a version record. It does **not** check the
+project's version number beyond its presence, and it stores `deliverable` exactly as given. So a
+project from another build and a malformed deliverable both enqueue cleanly: the page refuses a
+project version it does not read, and `applyDeliverable` refuses a deliverable that is not version 2
+or whose `outputSize` is another shape. The worker applies a deliverable only when it is truthy, so
+a `false` or `null` one renders the whole clip.
 
 | Field | Required | What it is |
 | --- | --- | --- |
@@ -837,9 +878,10 @@ heartbeats of a claim end with it, and a reply that arrives after the job has fi
 is ignored.
 
 **A job records what it ran on.** At claim and again at finish it stores the app build
-(`renderVersion`), the version of each installed effect by id, the GPU renderer string and the
-ffmpeg version, as `versions.claimed` and `versions.finished`. `versions.recorded` holds what an
-earlier render of the same edit ran on: the `recorded` field of `POST /jobs`, or, on a requeue,
+(`appVersion`: the browser files, Three.js and `server/export.js`, whose encoder arguments and
+audio mux decide the file), the version of each installed effect by id, the GPU renderer string and
+the ffmpeg version, as `versions.claimed` and `versions.finished`. `versions.recorded` holds what
+an earlier render of the same edit ran on: the `recorded` field of `POST /jobs`, or, on a requeue,
 the job's own `finished` record when it was `done`. A claim whose record differs from
 `versions.recorded` adds an entry to the job's `warnings`, and so does a finish whose record
 differs from the claim's. The job renders either way, because a re-render is promised to look the

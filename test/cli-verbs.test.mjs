@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parse, format, VERBS } from '../bin/verbs.js';
 import { Output } from '../server/output.js';
+import { DOCUMENT_VERSIONS } from '../web/format.js';
 
 test('every verb parses its arguments through the command table', () => {
   const argumentsFor = { 'camera color': ['on'], 'camera low-light': ['off'], 'output mode': ['mirror'],
@@ -24,8 +25,8 @@ test('arguments refuse malformed input and URL overrides environment', () => {
   assert.deepEqual(parse(['output', 'set', 'camera={"fov":50}', 'crop=false']).body.params, { camera: { fov: 50 }, crop: false });
   assert.equal(format({ state: 'standby', consumers: { webcam: 0 } }), 'state: standby\nconsumers.webcam: 0');
 });
-const store = () => new Output({ version: 7, effects: { list: () => [{ id: 'bloom' }] },
-  presets: { read: async (name) => ({ body: { version: name === 'old' ? 6 : 7,
+const store = () => new Output({ effects: { list: () => [{ id: 'bloom' }] },
+  presets: { read: async (name) => ({ body: { version: DOCUMENT_VERSIONS.preset - (name === 'old' ? 1 : 0),
     requires: name === 'missing' ? [{ id: 'gone' }] : [], values: { exposure: 1 } } }) } });
 test('preset clears look edits while preserving composition and tags', async () => {
   const output = store();

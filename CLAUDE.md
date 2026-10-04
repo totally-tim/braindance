@@ -107,6 +107,7 @@ Read the assertion count, never the exit code.
 | `timeline-check.mjs` | seek equals playback | `--url`, a take of ≥12s |
 | `keyframe-check.mjs` | tracks, undo | `--url`, a take of ≥24s |
 | `export-check.mjs` | resolution, export, the file, the size door | `--url`, ffmpeg and ffprobe |
+| `audio-check.mjs` | audio import, EQ, mapping, undo, reload and exact exported samples | port 8196 free, ffmpeg and a GPU browser |
 | `editor-check.mjs` | the editor's controls exist, and pressing them changes something | `--url`, a take of ≥32s |
 | `library-check.mjs` | the library, the recorder, the routes | a free port span |
 | `boot-check.mjs` | after boot, every control shows the value the registry holds for the selected clip; the document door adopts a whole document or none; the undo stack is the session's and the file is the document's | port 8391 free |
@@ -133,9 +134,9 @@ Read the assertion count, never the exit code.
 | `release-gate-check.mjs` | the `.npmrc` supply-chain gate is actually armed, in the root and in `desktop/` | the npm registry |
 
 **Ports.** `cli-check` probes port 8401 before staging under `.cli-check/`. These tools spawn their own server and need the port free:
-`desktop-check` 8480, `guard-check` 8321, `jobs-check` 8231 and 8232, `effect-check` 8281, `level-check` 8377,
-`monitor-check` 8341, `vcam-check` 8361, `boot-check` 8391, `library-check` 8210 (`--node-port`)
-and 8211..8229 (`--mac-port`..`+18`), `index-check` 8251 under `--stage` or `--mutate` only, and
+`desktop-check` 8480, `guard-check` 8321, `jobs-check` 8231 and 8232, `effect-check` 8281,
+`audio-check` 8196, `level-check` 8377, `monitor-check` 8341, `vcam-check` 8361, `boot-check` 8391,
+`library-check` 8210 (`--node-port`) and 8211..8229 (`--mac-port`..`+18`), `index-check` 8251 under `--stage` or `--mutate` only, and
 `sensor-view-check` 8131 for the section needing its own capture. A stranger on the port answers
 the tool, and its green run proves nothing. `library-check`, `boot-check`, `effect-check`,
 `index-check` and `desktop-check` probe the port first and exit 2 naming what answers. Everywhere else, run

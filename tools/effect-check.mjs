@@ -1275,8 +1275,8 @@ try {
   await page.locator('[data-effect-add="probe"]').click();
   const racked = await page.evaluate(() => {
     const row = document.getElementById('probe.amount')?.closest('.row, .checkrow');
-    let stored = [];
-    try { stored = JSON.parse(localStorage.getItem('kinect.rackedEffects') ?? '[]'); } catch {}
+    const doc = globalThis.__kinect.library.serialiseProjectBody();
+    const stored = [...new Set([...(doc.look.effects ?? []), ...doc.clips.flatMap((clip) => clip.effects ?? [])])];
     return {
       hidden: row?.hidden ?? null,
       stored,

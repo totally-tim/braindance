@@ -15,10 +15,9 @@ export { VALID_ID };
 // A node's hash reaches a filename, so it is held to this before it can be joined to a path.
 export const VALID_HASH = /^sha256:[0-9a-f]{64}$/;
 
-import { PROJECT_VERSION, VALID_ID, captureFormatRefusal, documentNameRefusal } from '../web/format.js';
+import { DOCUMENT_VERSIONS, VALID_ID, captureFormatRefusal, documentNameRefusal } from '../web/format.js';
 import { POLLED_NODE_FIELDS } from '../web/record-poll.js';
 
-export { PROJECT_VERSION };
 
 // Measured on this sensor: 424KB of depth plus 51KB of colour per frame at 30fps.
 const FRAME_BYTES = 486 * 1024;
@@ -1087,10 +1086,11 @@ export class DocumentStore {
   #inFlight = new Map();
 
   /** `builtinDir` is read and never written, which is what makes saving over a built-in fork it. */
-  constructor(dir, kind, version = PROJECT_VERSION, builtinDir = null) {
+  constructor(dir, kind, builtinDir = null) {
     this.dir = dir;
     this.kind = kind;
-    this.version = version;
+    this.version = DOCUMENT_VERSIONS[kind];
+    if (!Number.isInteger(this.version)) throw new Error(`no document version is declared for kind ${kind}`);
     this.builtinDir = builtinDir;
     this.writes = 0;
     this.reservedBy = new Map();

@@ -17,7 +17,7 @@ import { WebSocket } from 'ws';
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const FAKE_GRABBER = join(REPO, 'tools/fake-grabber.mjs');
 const PROBE = join(REPO, 'test/capture-close-probe.mjs');
-const ROOT_NAMES = ['captures', 'projects', 'presets', 'deliverables', 'effects', 'jobs', 'exports'];
+const ROOT_NAMES = ['captures', 'projects', 'presets', 'deliverables', 'effects', 'jobs', 'exports', 'audio'];
 const WAIT_MS = 30_000;
 const noShell = process.platform === 'win32' ? 'the stand-in encoders are shell scripts' : false;
 

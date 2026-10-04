@@ -7,6 +7,10 @@ import { createHash } from 'node:crypto';
 import { accessSync, constants, statSync } from 'node:fs';
 import { mkdir, readdir, writeFile, stat, rm, rename } from 'node:fs/promises';
 import { delimiter, dirname, join, resolve } from 'node:path';
+import { AUDIO_RATE, checkAudioClip, readAudioWav } from '../web/audio-source.js';
+import { DOCUMENT_VERSIONS, versionRefusal } from '../web/format.js';
+import { OUTPUT_RATES } from '../web/export-sizes.js';
+import { lastFrameRefusal } from '../web/clip-range.js';
 
 // The encoder `FFMPEG` names, read once at import. Unset, `ffmpeg` is looked up on PATH at each
 // export, so one installed after the server started is found without a restart.
@@ -45,9 +49,12 @@ export function ffmpegBinary({ named = FFMPEG_NAMED, searchPath = process.env.PA
   );
 }
 
-// How many frames may be in flight. A courtesy the client extends rather than something this
-// server enforces - nothing below counts unacked frames.
-const ACK_WINDOW = 4;
+// How many frames may be in flight. A frame past it is refused, because each one waits in memory
+// until ffmpeg takes it and a frame can be 96 MiB.
+export const ACK_WINDOW = 4;
+
+// The longest export, which bounds the soundtrack the mux writes as well as the frames.
+export const MAX_EXPORT_SECONDS = 4 * 3600;
 
 // 4K RGBA is 33MB, so the ceiling sits above the largest frame anything will ask for.
 export const MAX_FRAME_BYTES = 96 * 1024 * 1024;
@@ -101,7 +108,7 @@ for (const [name, spec] of Object.entries(CODECS)) {
 }
 
 // Exported so the queue can validate a job before it is claimed.
-export function validateExport({ name, width, height, fps, frames = null, codec }) {
+export function validateExport({ name, width, height, fps, frames = null, codec, programStart = null }) {
   if (!VALID_NAME.test(String(name ?? ''))) {
     throw new Error(`bad output name ${JSON.stringify(name)}: it names a file in the exports directory, so it is letters, digits, dot, dash and underscore`);
   }
@@ -118,16 +125,27 @@ export function validateExport({ name, width, height, fps, frames = null, codec 
   if (spec.evenDimensions && (w % 2 || h % 2)) {
     throw new Error(`${codec} needs even dimensions, got ${w}x${h}`);
   }
-  if (!Number.isFinite(f) || f <= 0) throw new Error(`bad output rate ${fps}`);
+  if (!OUTPUT_RATES.includes(f)) {
+    throw new Error(`bad output rate ${fps}: an export runs at ${OUTPUT_RATES.join(', ')} frames per second`);
+  }
   if (frames !== null) {
     const fc = Math.trunc(frames);
     if (!Number.isInteger(fc) || fc <= 0) throw new Error(`an export of ${frames} frames has nothing to encode`);
+    if (fc / f > MAX_EXPORT_SECONDS) {
+      throw new Error(`an export of ${fc} frames at ${f} fps runs ${Math.ceil(fc / f)} seconds, past the ${MAX_EXPORT_SECONDS}-second ceiling`);
+    }
   }
   const frameBytes = w * h * 4;
   if (frameBytes > MAX_FRAME_BYTES) {
     throw new Error(`a ${w}x${h} frame is ${frameBytes} bytes, past the ${MAX_FRAME_BYTES} ceiling`);
   }
-  return { width: w, height: h, fps: f, frames: frames !== null ? Math.trunc(frames) : null, codec };
+  // An export that declares no count stops at the ceiling instead.
+  const maxFrames = frames !== null ? Math.trunc(frames) : MAX_EXPORT_SECONDS * f;
+  if (programStart !== null) {
+    const refusal = lastFrameRefusal(Math.round(Number(programStart) * f) + maxFrames - 1, f);
+    if (refusal) throw new Error(refusal);
+  }
+  return { width: w, height: h, fps: f, frames: frames !== null ? Math.trunc(frames) : null, maxFrames, codec };
 }
 
 // Distinguishes one export's scratch from another's; `-fflags +bitexact` keeps it out of the bytes.
@@ -155,13 +173,35 @@ async function artifactBytes(spec, artifact, frames) {
   return total;
 }
 
-function ffmpegArgs({ width, height, fps, codec, into }) {
+// Silence is generated as a stream, so a clip placed hours into the edit needs no delay buffer.
+export function audioFilter(clip, from, frames, fps) {
+  const count = Math.round(frames * AUDIO_RATE / fps);
+  const outputStart = Math.round(from * AUDIO_RATE);
+  const sourceStart = Math.round(clip.start * AUDIO_RATE);
+  const sourceEnd = sourceStart + Math.round(clip.duration * AUDIO_RATE);
+  const begin = Math.max(outputStart, sourceStart);
+  const end = Math.min(outputStart + count, sourceEnd);
+  const silence = (n, name) => `anullsrc=r=${AUDIO_RATE}:cl=stereo,atrim=end_sample=${n}[${name}]`;
+  if (end <= begin) return `${silence(count, 'audio')}`;
+  const filters = [];
+  const parts = [];
+  if (begin > outputStart) { filters.push(silence(begin - outputStart, 'lead')); parts.push('[lead]'); }
+  filters.push(`[1:a]atrim=start_sample=${begin - sourceStart}:end_sample=${end - sourceStart},asetpts=PTS-STARTPTS[body]`);
+  parts.push('[body]');
+  if (end < outputStart + count) { filters.push(silence(outputStart + count - end, 'tail')); parts.push('[tail]'); }
+  filters.push(`${parts.join('')}concat=n=${parts.length}:v=0:a=1[audio]`);
+  return filters.join(';');
+}
+
+function ffmpegArgs({ width, height, fps, codec, into, audio = null }) {
   return [
     '-hide_banner', '-nostdin', '-loglevel', 'error',
     // Without it the container carries the encoder's version string and a creation time, so the
     // same frames would produce a different file every run.
     '-fflags', '+bitexact',
     '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${width}x${height}`, '-r', String(fps), '-i', '-',
+    ...(audio ? ['-i', audio.path, '-filter_complex', audio.filter, '-map', '0:v:0', '-map', '[audio]',
+      '-c:a', codec === 'h264' ? 'aac' : 'pcm_s16le'] : []),
     // readPixels reads the drawing buffer bottom-up, which is upside down to every video format.
     '-vf', 'vflip',
     ...CODECS[codec].args,
@@ -174,10 +214,11 @@ function ffmpegArgs({ width, height, fps, codec, into }) {
 // One export, from the begin message to the file. Everything is validated against what the
 // browser said it would send: ffmpeg's rawvideo demuxer reads a short frame as the head of
 // the next one and produces a file that plays and scrolls diagonally.
-export function handleExportSocket(ws, { outDir, log = console.log }) {
+export function handleExportSocket(ws, { outDir, audioStore = null, log = console.log }) {
   let job = null;
   let child = null;
   let received = 0;
+  let acked = 0;
   let bytes = 0;
   let ended = false;
   let finished = false;
@@ -203,10 +244,13 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
   };
 
   const begin = async (msg) => {
-    const { width, height, fps, frames, codec } = validateExport({
+    const { width, height, fps, frames, maxFrames, codec } = validateExport({
       name: msg.name, width: msg.width, height: msg.height, fps: msg.fps,
-      frames: msg.frames, codec: msg.codec ?? 'h264',
+      frames: msg.frames, codec: msg.codec ?? 'h264', programStart: msg.programStart ?? null,
     });
+    if (msg.project != null && msg.project.version !== DOCUMENT_VERSIONS.project) {
+      throw new Error(versionRefusal('project', msg.project.version));
+    }
 
     const spec = CODECS[codec];
     const ext = spec.ext;
@@ -224,19 +268,40 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
     // Assigned before the first await, because `job` is what says an export is already running:
     // two begins in one tick both found it null and the second overwrote the first's record.
     job = {
-      width, height, fps, frames, codec, frameBytes, output, outputDir, temp, scratchArtifact, href, name: msg.name, began: Date.now(),
+      width, height, fps, frames, maxFrames, codec, frameBytes, output, outputDir, temp, scratchArtifact, href, name: msg.name, began: Date.now(),
       project: msg.project ?? null,
+      programStart: msg.programStart ?? null,
       captures: Array.isArray(msg.captures) ? msg.captures.slice() : null,
       renderer: msg.renderer ?? null,
     };
 
-    // Before anything is created, so a machine with no encoder refuses with nothing to clean up.
+    // Before anything is created, so a refused export or a machine with no encoder leaves nothing
+    // to clean up. An audio export needs its frame count, which is what bounds the soundtrack.
+    const audioClip = checkAudioClip(msg.project?.audio);
+    if (audioClip) {
+      if (codec === 'pngseq') throw new Error('PNG sequences cannot carry audio; select MP4 or MOV');
+      if (!audioStore) throw new Error('this server has no audio store');
+      if (!Number.isFinite(msg.programStart) || msg.programStart < 0 || msg.programStart > 86400
+        || frames === null) throw new Error('audio export needs a program start and frame count');
+    }
     const ffmpeg = ffmpegBinary();
 
     // The directory the target is in rather than the scratch directory - one level deeper for a
     // sequence, because the image2 muxer opens each frame by name and creates nothing.
     await mkdir(dirname(target), { recursive: true });
-    const args = ffmpegArgs({ width, height, fps, codec, into: target });
+    if (finished) { await rm(temp, { recursive: true, force: true }); return; }
+    let audio = null;
+    if (audioClip) {
+      const wav = await audioStore.read(audioClip.hash);
+      if (finished) return;
+      const { duration } = readAudioWav(wav);
+      if (Math.abs(duration - audioClip.duration) > 0.5 / AUDIO_RATE) throw new Error('audio duration does not match its asset');
+      const audioPath = join(temp, 'audio-input.wav');
+      await writeFile(audioPath, wav, { flag: 'wx' });
+      if (finished) { await rm(temp, { recursive: true, force: true }); return; }
+      audio = { path: audioPath, filter: audioFilter(audioClip, msg.programStart, frames, fps) };
+    }
+    const args = ffmpegArgs({ width, height, fps, codec, into: target, audio });
     log(`[export] ${ffmpeg} ${args.join(' ')}`);
     child = spawn(ffmpeg, args, { stdio: ['pipe', 'ignore', 'pipe'] });
     child.stderr.on('data', (chunk) => stderr.push(chunk.toString('utf8')));
@@ -265,10 +330,13 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
         + `${job.width}x${job.height} RGBA frame is`,
       );
     }
-    // Only when a count was declared: `frames` is optional, and a bare `received >= job.frames`
-    // coerces null to zero and refuses the first frame of a legal open-ended export.
-    if (job.frames !== null && received >= job.frames) {
-      throw new Error(`more frames arrived than the ${job.frames} this export declared`);
+    if (received >= job.maxFrames) {
+      throw new Error(job.frames !== null
+        ? `more frames arrived than the ${job.frames} this export declared`
+        : `an export with no declared count stops at ${job.maxFrames} frames, the ${MAX_EXPORT_SECONDS}-second ceiling`);
+    }
+    if (received - acked >= ACK_WINDOW) {
+      throw new Error(`frame ${received} arrived with ${received - acked} unacknowledged, past the window of ${ACK_WINDOW}`);
     }
     received++;
     bytes += data.length;
@@ -287,6 +355,7 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
       }
       const ok = child.stdin.write(data, (err) => (err ? reject(err) : null));
       const done = () => {
+        acked = n;
         send({ ack: n });
         resolve();
       };
@@ -315,6 +384,7 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
     // once old jobs exist.
     const record = {
       project: job.project ?? null,
+      programStart: job.programStart,
       captures: job.captures ?? null,
       renderer: job.renderer ?? null,
       output: job.output,
@@ -333,6 +403,7 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
     // into the output.
     finished = true;
     try {
+      await rm(join(job.temp, 'audio-input.wav'), { force: true });
       await rename(job.temp, job.outputDir);
     } catch (err) {
       // And it comes back down if the rename is what failed: `fail` reads the flag as "already
@@ -374,7 +445,7 @@ export function handleExportSocket(ws, { outDir, log = console.log }) {
         throw new Error(`unknown export message ${Object.keys(msg).join(',')}`);
       }
     };
-    run().catch((err) => fail(String(err.message ?? err)));
+    return run().catch((err) => fail(String(err.message ?? err)));
   });
 
   ws.on('close', () => {

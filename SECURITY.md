@@ -11,7 +11,9 @@ default nothing off the machine can reach it. It prints on stdout when you widen
 
 **The origin rule, which only speaks to browsers.** A request carrying an `Origin` header
 must be same-origin, and a mutating HTTP route also requires a matching method and a JSON
-content type. A page you merely visit cannot produce those together. A request with no
+content type. The audio upload requires `application/octet-stream` instead. A cross-origin
+request with either type needs a browser preflight, so a page you merely visit cannot produce
+those together. A request with no
 `Origin` skips the origin check, because every call across the capture-node link is a
 server-side `fetch` and Node has no origin to declare. So the rule stops hostile web pages and
 nothing else: curl, a script, or another machine on the Wi-Fi sends no `Origin` and is allowed
@@ -45,8 +47,9 @@ Everything, to everyone who can route to the port:
 | `POST /library/rename/:id` | rename a take; the content hash does not move, so projects still resolve |
 | `PUT` and `DELETE` on `/projects/:name`, `/presets/:name`, `/deliverables/:name` | overwrite or delete saved work |
 | `POST /jobs` | queue renders without limit on the disk the takes are written to |
+| `POST /audio`, `GET /audio/:hash` | import an audio file through FFmpeg, one upload at a time: up to 64 MiB, which must arrive within 120 seconds, and the server refuses audio longer than ten minutes. The decoder reads only its input pipe. GET reads a stored WAV after the server checks its content hash |
 | the WebSocket | the live sensor feed and the recorder's controls |
-| the `/export` WebSocket | starts an ffmpeg process on the server for each render |
+| the `/export` WebSocket | starts an ffmpeg process on the server for each render, at 24, 30, 60 or 120 fps for at most four hours of frames and soundtrack, with at most four frames unacknowledged. It refuses a last output frame past 2^50, counted from the program start the client declares; a begin that declares none skips that check |
 | `GET /camera.mjpg` | the colour camera, live, as an MJPEG stream; opening it starts the encode |
 | `GET /key`, and the WebSocket `{key: true}` behind it | the colour camera keyed by depth, and the depth of every colour pixel — a floor plan of the room; opening it starts both encodes |
 

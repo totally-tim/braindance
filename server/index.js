@@ -12,8 +12,9 @@ import { WebSocketServer } from 'ws';
 import { MessageParser, encodeMessage, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, TYPE_KEY, MAX_PAYLOAD_BYTES } from './protocol.js';
 import { openCapture, withCapture, forgetCapture, openCaptureCount, decimatePayload, cloudExtent, colourAfterFrames } from './capture.js';
 import { ffmpegBinary, handleExportSocket, MAX_FRAME_BYTES } from './export.js';
+import { AudioStore } from './audio.js';
 import {
-  VALID_HASH, DocumentStore, NodeLink, PROJECT_VERSION, appendMarks, checkedMarkLog, copyOnNode, downloadTake,
+  VALID_HASH, DocumentStore, NodeLink, appendMarks, checkedMarkLog, copyOnNode, downloadTake,
   downloadsInFlight, hashFile, markLogPath, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
   adoptNamedMarkLogs, removeName, removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeFileFor,
 } from './library.js';
@@ -25,7 +26,7 @@ import { gradeSpine } from '../web/grade-shader.js';
 import { moshSpine } from '../web/mosh-shader.js';
 import { Recorder } from './recorder.js';
 import { JobStore } from './jobs.js';
-import { ffmpegVersion, renderVersion } from './render-version.js';
+import { appVersion, ffmpegVersion, renderVersion } from './render-version.js';
 import { Webcam } from './webcam.js';
 import { IDLE_TICK_MS, IdleDeadline } from './idle.js';
 import { ABSENT_DELAY, RESTART_DELAYS, retryAfter } from './backoff.js';
@@ -135,7 +136,6 @@ const PROJECTS = new DocumentStore(resolve(flag('--projects', join(ROOT, 'projec
 const PRESETS = new DocumentStore(
   resolve(flag('--presets', join(ROOT, 'presets'))),
   'preset',
-  PROJECT_VERSION,
   resolve(flag('--builtin-presets', join(ROOT, 'presets-builtin'))),
 );
 // The spines every program is assembled from, named once because the install door and the
@@ -148,15 +148,13 @@ const EFFECTS = new EffectStore(
   resolve(flag('--builtin-effects', join(ROOT, 'effects-builtin'))),
   SPINES,
 );
-// Version 2 dropped `outputFps` - the rate is a property of the edit - and a version 1 document is
-// refused rather than read, because it names a rate this build would ignore.
-const DELIVERABLES = new DocumentStore(resolve(flag('--deliverables', join(CAPTURES_DIR, '..', 'deliverables'))), 'deliverable', 2);
+const DELIVERABLES = new DocumentStore(resolve(flag('--deliverables', join(CAPTURES_DIR, '..', 'deliverables'))), 'deliverable');
 // What a render would run on right now, asked when a job is claimed and when it finishes.
 const jobEnvironment = async (renderer) => {
   const ffmpeg = await ffmpegVersion(ffmpegBinary);
   return {
     record: {
-      app: await renderVersion(WEB_DIR, THREE_DIR),
+      app: await appVersion(ROOT, THREE_DIR),
       effects: Object.fromEntries(EFFECTS.list().map((e) => [e.id, e.version])),
       renderer,
       ffmpeg: ffmpeg.version,
@@ -164,7 +162,12 @@ const jobEnvironment = async (renderer) => {
     problems: ffmpeg.problem ? [{ field: 'ffmpeg', text: ffmpeg.problem }] : [],
   };
 };
-const JOBS = new JobStore(resolve(flag('--jobs', join(ROOT, 'jobs'))), { exportsDir: EXPORTS_DIR, environment: jobEnvironment });
+const JOBS = new JobStore(resolve(flag('--jobs', join(ROOT, 'jobs'))), {
+  exportsDir: EXPORTS_DIR,
+  environment: jobEnvironment,
+  takeLengths: async () => new Map((await localTakes()).takes.map((take) => [take.hash, take.durationSec])),
+});
+const AUDIO = new AudioStore(resolve(flag('--audio', join(ROOT, 'audio'))));
 const node = NODE_URL ? new NodeLink(NODE_URL, NODE_NAME) : null;
 
 // `--replay` may name a file anywhere, and the take it replays counts as here wherever it is.
@@ -1074,6 +1077,7 @@ function serveRoutes(req, res) {
       // asks every one of them rather than the ones a reviewer thought of.
       live: Boolean(r.live),
       methods: r.write?.methods ?? [],
+      contentType: r.write?.contentType ?? 'application/json',
     })),
   });
 }
@@ -1081,7 +1085,7 @@ function serveRoutes(req, res) {
 // The route sweep read the stores either side of the drive, which a handler that writes and
 // restores inside one request defeats - a monotonic count is what a restore cannot undo.
 const serveWriteCounts = (req, res) => sendJson(res, {
-  projects: PROJECTS.writes, presets: PRESETS.writes, deliverables: DELIVERABLES.writes, marks: markWriteCount(), jobs: JOBS.writes,
+  projects: PROJECTS.writes, presets: PRESETS.writes, deliverables: DELIVERABLES.writes, marks: markWriteCount(), jobs: JOBS.writes, audio: AUDIO.writes,
 });
 
 // ---- the render queue
@@ -1281,7 +1285,7 @@ async function serveLocalTakes(req, res) {
   sendJson(res, { here: HERE_NAME, ...here, storage: await remaining(CAPTURES_DIR, recordingRate()) });
 }
 
-const output = new Output({ presets: PRESETS, effects: EFFECTS, version: PROJECT_VERSION });
+const output = new Output({ presets: PRESETS, effects: EFFECTS });
 const sendOutput = (ws) => {
   for (const patch of output.messages()) ws.send(JSON.stringify({ programOut: patch }));
 };
@@ -1333,6 +1337,20 @@ const serveCameraWrite = async (req, res) => {
 // changes something, and the dispatcher puts every one through `requireMutation` in one place. The
 // table is served at `/library/routes`, so a check can enumerate rather than name.
 const ROUTES = [
+  { path: '/audio', pattern: /^\/audio$/, write: { methods: ['POST'], contentType: 'application/octet-stream', run: async (req, res) => {
+    try { sendJson(res, await AUDIO.import(req)); }
+    catch (err) { sendJson(res, { error: err.message }, 400); }
+  } } },
+  { path: '/audio/:hash', pattern: /^\/audio\/(sha256:[0-9a-f]{64})$/, read: async (req, res, [hash]) => {
+    let bytes;
+    try { bytes = await AUDIO.read(hash); } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+      sendJson(res, { error: `no audio asset ${hash}` }, 404);
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': bytes.length, 'Cache-Control': 'private, max-age=31536000, immutable' });
+    res.end(req.method === 'HEAD' ? undefined : bytes);
+  } },
   { path: '/output', pattern: /^\/output$/, read: (req, res) => sendJson(res, output.state), write: { methods: ['POST'], run: serveOutputWrite } },
   { path: '/sensor/standby', pattern: /^\/sensor\/standby$/, write: { methods: ['POST'], run: serveStandby } },
   { path: '/sensor/wake', pattern: /^\/sensor\/wake$/, write: { methods: ['POST'], run: serveWake } },
@@ -1578,7 +1596,7 @@ async function serveRoute(req, res, urlPath, query) {
     if (!reading && r.write) {
       // The one gate, applied here rather than inside ten handlers: a `write` reaches its handler
       // only through this line.
-      if (!requireMutation(req, res, r.write.methods)) return true;
+      if (!requireMutation(req, res, r.write.methods, r.write.contentType)) return true;
       await r.write.run(req, res, args, query);
       return true;
     }
@@ -1732,7 +1750,7 @@ httpServer.on('upgrade', (req, socket, head) => {
 exportWss.on('connection', (ws) => {
   console.log('[export] client connected');
   ws.on('error', (err) => console.error('[export] socket error:', err.message));
-  handleExportSocket(ws, { outDir: EXPORTS_DIR });
+  handleExportSocket(ws, { outDir: EXPORTS_DIR, audioStore: AUDIO });
 });
 
 let helloJson = null;
@@ -2568,6 +2586,7 @@ httpServer.listen(PORT, HOST, () => {
     effects: EFFECTS.dir,
     jobs: JOBS.dir,
     exports: EXPORTS_DIR,
+    audio: AUDIO.root,
   };
   console.log(`[server] ready ${JSON.stringify({ url: `http://${host}:${port}`, pid: process.pid, roots })}`);
 });

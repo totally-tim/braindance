@@ -45,8 +45,8 @@ export const VERBS = [
 // Store editors, the render queue and its workers use document revisions, job ids or leases rather
 // than these controls.
 export const MUTATION_EXEMPTIONS = [
-  '/capture/:id/marks', '/library/download/:id', '/library/delete/:id', '/library/reclaim/:id',
-  '/library/sync-marks/:id', '/library/rename/:id', '/library/reveal/:id',
+  '/audio', '/capture/:id/marks', '/library/download/:id', '/library/delete/:id',
+  '/library/reclaim/:id', '/library/sync-marks/:id', '/library/rename/:id', '/library/reveal/:id',
   '/projects/:name', '/projects/:name/rename', '/presets/:name', '/deliverables/:name',
   '/effects/:id', '/effect-refusals', '/jobs', '/jobs/claim', '/jobs/:id/finish',
   '/jobs/:id/heartbeat', '/jobs/:id/cancel', '/jobs/:id/requeue',

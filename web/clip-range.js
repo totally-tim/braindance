@@ -51,6 +51,36 @@ export function clipBoundOrThrow(value, which) {
 export let clipIn = 0;
 export let clipOut = null;
 
+// The last output frame an export may reach. Below 2^51 a frame's time rounds back to that frame
+// at every rate offered (measured, 2e5 samples per octave); above it the transport seeks one frame
+// and steps another, and past 2^53 a frame plus one is itself. 2^50 leaves one octave.
+export const LAST_EXPORT_FRAME = 2 ** 50;
+
+/** Why an export cannot reach output frame `last` at `fps`, or null. */
+export const lastFrameRefusal = (last, fps) => (last <= LAST_EXPORT_FRAME ? null
+  : `an export reaching output frame ${last} at ${fps} fps is past frame ${LAST_EXPORT_FRAME}, `
+    + 'beyond which the transport cannot count output frames one at a time');
+
+/** Whether a program time lies past the out point. The transport steps to no frame that does. */
+export const pastOutPoint = (sec, outSec) => sec > outSec + 1e-9;
+
+/**
+ * The first and last output frame a range selects in a program `duration` seconds long at `fps`:
+ * the grid and clamps the export walks, so the queue can count a render before a page draws it.
+ * The first is the in point's nearest frame, where a seek lands; the last is the last frame not
+ * past the out point, where stepping stops.
+ */
+export function rangeFrames({ in: inSec, out: outSec }, duration, fps) {
+  const last = Math.max(0, Math.floor(duration * fps));
+  const lo = Math.max(0, Number(inSec) || 0);
+  const hi = outSec === null || outSec === undefined ? duration : Math.min(duration, outSec);
+  const from = Math.min(last, Math.round(lo * fps));
+  let to = Math.min(last, Math.ceil(hi * fps));
+  // One step back is enough below four hours, and a loop never ends past 2^53, where `to - 1 === to`.
+  if (to > from && pastOutPoint(to / fps, hi)) to--;
+  return { from, to: Math.max(from, to) };
+}
+
 /**
  * The pair, written: refused if it is not a time, then held inside the program that is
  * open. `dur` is the program's length in seconds, or `null` when no take is open.

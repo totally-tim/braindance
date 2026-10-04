@@ -161,6 +161,12 @@ Drag to orbit, scroll to zoom, right-drag to pan, `H` hides the panel.
 navigation. On a canted mount,
 [level the room](docs/reference.md#levelling-a-canted-mount) first.
 
+Press **Audio** in the timeline to import a song. In the Audio panel, choose a clip, one of its
+effects and a parameter. **Depth** adds the audio signal to the parameter's value or keys. The
+spectrum shows the input and the signal after EQ, and the readouts show the base, the signal and
+the result. Drag the audio lane to move the song. Playback and video exports carry the song. A
+project holds one song and one mapping; [the reference](docs/reference.md#audio) has the rest.
+
 ### 4. Key a camera move
 
 Park the playhead, orbit to the pose you want, and press **add key** on the panel's **Camera**

@@ -207,10 +207,10 @@ refusal.
 
 **Start.** `findNode` takes the first Node of version 26 or newer on `PATH`, then in
 `/opt/homebrew/bin` and `/usr/local/bin`, because an app started from Finder has a minimal `PATH`.
-With none, a dialog names the versions it did find. The shell creates seven directories under
+With none, a dialog names the versions it did find. The shell creates eight directories under
 `app.getPath('userData')` and starts `node server/index.js --port 8480 --stop-on-stdin` with
-`--captures`, `--projects`, `--presets`, `--deliverables`, `--effects`, `--jobs` and `--exports`
-each pointing at its own. The window opens on the `url` of the `[server] ready` line. `startService`
+`--captures`, `--projects`, `--presets`, `--deliverables`, `--effects`, `--jobs`, `--exports` and
+`--audio` each pointing at its own. The window opens on the `url` of the `[server] ready` line. `startService`
 rejects a line naming another port, an exit before the line, and 30 seconds without one, and the
 refusal carries the service's last lines.
 
@@ -369,7 +369,7 @@ them, and every track here is in program seconds. Rendering is forward-only:
 - **The camera keeps its own pace when the footage slows**, which is the creative point: a
   photographer's movement is independent of what they are filming. The speed control changes the
   selected clip's output length and rescales that clip's own keys from its head, while project
-  tracks, camera keys and output cuts hold their authored program seconds.
+  tracks, camera keys, the audio clip and output cuts hold their authored program seconds.
 - **`fade` and `wake` stay in source time**, because they drive surface memory, which advances per
   source frame: how long a surface remembers is a fact about the footage.
 - **`outputFps` is the project's, not the deliverable's.** It is the denominator of the edit's own
@@ -385,10 +385,13 @@ deliverable carries the resolution, because every screen-space term is expressed
 bloom's chain is frozen at 600 whatever the buffer is, so two sizes of one shape reopen
 identically. Point sizes also use the camera's 50-degree boot lens as their reference.
 
-`PROJECT_VERSION` is 8 and presets share it. `aspect` and `outputFps` are additive and bump
+`DOCUMENT_VERSIONS` in `web/format.js` holds one version per document kind: a project is 9, a
+preset 8 and a deliverable 2. Every store, serialiser and refusal reads its kind's entry, and
+`test/document-versions.test.mjs` fails on a version literal anywhere in `server/`, `web/` or
+`bin/`. A project embeds look blocks, so a change to the look's shape bumps project and preset
+together; any other change bumps only its own kind. `aspect` and `outputFps` are additive and bump
 nothing, so an absent `aspect` means the shape of the `outputSize` beside it and an absent
-`outputFps` means 30. `web/format.js` owns the number and the refusal a document from another
-version gets. Deliverables carry their own version, 2, because a version 1 document names a rate
+`outputFps` means 30. A version 1 deliverable is refused rather than read, because it names a rate
 this build ignores: it would parse perfectly and render the wrong file.
 
 ## Clips, and what a cut costs
@@ -442,13 +445,13 @@ term added to the clip block next year is on the clip's clock by existing. That 
 clip means: its look and its place arrive with it, and its stored key times are clip-local too, so
 a saved edit survives being re-cut.
 
-**A clip's look is its own.** Its clip-scope values, its placement, the tracks that move them and
-its parked pool live on the clip; the post chain's terms, the view state, the camera and `requires`
-live on the project. `checkProject` reads each clip's block into that clip and there is no union,
-so two clips may disagree about every value. A preset applies through the same door, so its cloud
-values land on the selected clip and its post values on the project, which moves the grade every
-clip is seen through. Framing stays outside: levelling, clip planes and the crop box belong to the
-shot, and no preset, `none` included, writes them.
+**A clip's look is its own.** Its clip-scope values, its placement, the tracks that move them, the
+effects added to it and its parked pool live on the clip; the post chain's terms, the view state,
+the camera and `requires` live on the project. `checkProject` reads each clip's block into that
+clip and there is no union, so two clips may disagree about every value. A preset applies through
+the same door, so its cloud values land on the selected clip and its post values on the project,
+which moves the grade every clip is seen through. Framing stays outside: levelling, clip planes and
+the crop box belong to the shot, and no preset, `none` included, writes them.
 
 **Which clip is selected is session state and never in the document**, because a document recording
 it would make two people's saves of one edit differ over nothing. Opening a take selects its clip;
@@ -506,6 +509,28 @@ seek through the live transport to restore its source and feedback state. Cached
 prefetches a known boundary's seek window without using the source cursor left behind by the
 last live frame. Preview exceptions disable previews and report the error while the editor's
 animation loop continues. Export bypasses the preview path.
+
+## Audio is a program-time source
+
+A project holds at most one audio clip: a content hash, a `start` and a `duration` in program
+seconds, its conditioning and one mapping. It belongs to no clip, so a clip's `speed` and
+`sourceStart` never move it, and the transport's duration reaches to its end.
+
+`web/audio-source.js` turns normalized PCM into a 100 Hz control curve and answers any program
+position without transport history, so a seek, playback and an export read the same value. It
+measures stereo energy per channel, so opposite phases do not cancel. `web/audio-session.js`
+decodes and plays the soundtrack, aligns it to the transport, and stops it when the transport
+pauses or waits for footage.
+
+The mapping adds `depth × signal` to one scalar effect parameter after the page evaluates its
+value or track, and writes the sum to the runtime parameter. The document keeps the base value,
+the keys, the conditioning and the mapping, and nothing writes the signal into any of them.
+
+`server/audio.js` decodes an upload through FFmpeg with only the pipe protocol allowed, stores
+48 kHz stereo WAV by content hash, and checks the hash on every read. The export server copies
+the checked asset into the render's private directory, trims it to the exported program range
+and fills silence outside the audio clip. The export record carries the program start. The EQ
+conditions the control signal and leaves the soundtrack as imported.
 
 ## Projects, and which one is open
 

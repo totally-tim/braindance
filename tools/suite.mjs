@@ -48,6 +48,7 @@ const SELF_SPAWNING = [
   { name: 'cli-check', ports: [8401] },
   { name: 'jobs-check', ports: [8231, 8232] },
   { name: 'effect-check', ports: [8281] },
+  { name: 'audio-check', ports: [8196] },
   { name: 'library-check', ports: range(8210, 8227) },
 ];
 const ON_ONE_SERVER = [

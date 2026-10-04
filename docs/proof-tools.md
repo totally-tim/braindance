@@ -45,6 +45,7 @@ Per tool, read from the source:
 | `preview-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: a crash, or an unknown `--mutate` name |
 | `keyframe-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `DID NOT RUN`: a take under 24s, or the page stopped answering |
 | `export-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or a crash (it has no crash handler) | `DID NOT RUN`: a mutation the page never requested, a `--before-url` that is `--url` or cannot be compared |
+| `audio-check` | pass | a failed assertion, a catch, or a miss | `DID NOT FINISH`: 8196 held, no ffmpeg, a stale anchor, a crash |
 | `editor-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a take under 32s, a stale anchor |
 | `library-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `PASS WITH CLAIMS UNPROVEN`, a held port, or `DID NOT RUN`: a crash |
 | `boot-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8391 held, a crash |
@@ -184,8 +185,8 @@ stages:
 
 1. `syntax-check`, `module-check`, `cpp-check`, the unit tests, `release-gate-check` and
    `vendor-check`, side by side.
-2. The nine tools that start their own servers on ports no other tool binds — `guard`, `boot`,
-   `monitor`, `level`, `vcam`, `cli`, `jobs`, `effect` and `library` — all at once.
+2. The ten tools that start their own servers on ports no other tool binds — `guard`, `boot`,
+   `monitor`, `level`, `vcam`, `cli`, `jobs`, `effect`, `audio` and `library` — all at once.
 3. A server of its own on `--port`, with the fake grabber and its stores in a temporary
    directory, and against it, one after another, `registry`, `timeline`, `keyframe`, `export`,
    `editor`, `preview`, `effect-conformance`, `determinism`, `sensor-view` and `index`. The tools
@@ -214,7 +215,7 @@ windows on the display, and `sweep-all`, which runs mutations. A `*-check.mjs` i
 neither runs nor leaves out by name comes back DID NOT RUN, so a new tool is placed in a stage or
 named as left out.
 
-Stage 2 puts nine tools and their browsers on the machine at once. Two suites, or a suite beside
+Stage 2 puts ten tools and their browsers on the machine at once. Two suites, or a suite beside
 one of its own tools, collide on the fixed ports, so run one at a time.
 
 ## `determinism-check`
@@ -608,12 +609,68 @@ camera, requiring the smallest sprite above the 10.8-reference-pixel normalizati
 - **`export-fail-unlinks-output`** — the failure path reaches back to an output it did not write.
 - **`export-ignores-the-size-cap`** — the size door is taken out, so an export larger than the
   context's target limit starts. Fails section 10's first row alone.
+- **`export-range-is-not-held`** — a range asked for by `in` and `out` is put on the grid as asked,
+  so one outside the open range starts where the transport's first seek does not land. Fails
+  section 11's overlap and apart rows.
+- **`export-ends-on-the-nearest-frame`** — the out point rounds to its nearest frame, which the
+  transport refuses to step to when it lies past the out point. Fails section 11's off-grid row
+  alone.
 
 On a `make-sample` fixture a clean tree passes. The resolution arms draw at `pointSize` 36: that
 fixture's back wall faces the camera at one depth, so its sensor lattice lands 1.17px apart at
 960x600, and narrower sprites alias it into a beat that 1920x1200 resolves. The grain row compares
 1728x1080 with 3456x2160, because a grain cell is one reference pixel and 960x600 cannot hold it.
 A red in section 4 alone is inherited state: clear the server's working project and re-run.
+
+## `audio-check`
+
+An imported song drives one effect parameter on top of its base value, and the exported file
+carries the song's own samples at the program position the export starts at.
+
+```
+node tools/audio-check.mjs
+node tools/audio-check.mjs --queue
+```
+
+| needs | |
+| --- | --- |
+| port | 8196 free; `--port` moves it |
+| fixture | none: a 120-frame `make-sample` take and two generated tones; `--source` and `--audio` substitute a capture and a song |
+| browser | a GPU browser |
+| binaries | ffmpeg, resolved as the server resolves it |
+
+It stages `web/`, `server/` and both builtin roots in a temporary directory, runs its own server
+there, and deletes the tree on the way out, so no store resolves into the checkout. Its main tone
+is quiet for two seconds and loud after. It drives the real file chooser, the destination list,
+every conditioning control, depth, placement, undo, reload, a missing asset, a clip deleted under a
+pending audio edit, a reset pressed during an export, and removal. It renders previews and plays
+from the quiet half into the loud half on cached frames, and reads the audio readouts and spectrum
+there. It opens the saved project a second time from `braindance.local`, which the browser resolves
+to loopback and gives no secure context, as a LAN editor's plain-HTTP origin has none. Its export
+rows compare the lossless file's PCM sample for sample against the stored asset, once starting
+inside the audio clip and once before it. `--queue` adds a job through `POST /jobs` and
+`render-worker --once`, and compares that file's samples too. `--shots DIRECTORY` saves the panel
+and an MP4 outside the checkout. A run that does not finish prints `DID NOT FINISH` with its stack
+and exits 2.
+
+- **`signal-disconnected`** — the renderer stops applying the audio. Fails the rows that need
+  depth to change the frame and the result.
+- **`mux-ignores-start`** — the export trims the song from program 0. Fails the exact-sample row.
+- **`added-effect-hidden`** — an effect added at its defaults is left out of the destinations.
+- **`space-keeps-control-focus`** — Space stays with a focused slider, selector or number field.
+- **`text-field-loses-space`** — the text-field exception goes, so a space typed into the effect
+  search starts the transport.
+- **`delete-edits-target-in-place`** — deleting the target clip clears the mapping inside the
+  same object, so an audio edit waiting on its analysis puts the mapping back onto the deleted
+  clip and the project no longer reopens.
+- **`audio-hashed-in-the-page`** — the page hashes the downloaded asset with `crypto.subtle`, so
+  the plain-HTTP page cannot open the project.
+- **`reset-retains-before-refusal`** — a reset pressed during an export adds its effect to the
+  document before the edit is refused, and commits an undo step.
+- **`cached-frame-skips-audio`** — a frame shown from the preview cache skips the audio, so the
+  readouts and the spectrum stay at the last frame the renderer drew.
+- **`undo-leaves-spectrum-empty`** — the paused spectrum is never rebuilt after an undo restores
+  the earlier song.
 
 ## `editor-check`
 
@@ -1370,6 +1427,10 @@ records as failed, and heartbeat replies that arrive after their job has ended.
   worker's store readings.
 - **`preflight-reads-a-failure-as-an-empty-store`** — the status, shape and entry checks come off
   that read, leaving `?? []` where they were.
+- **`app-record-is-the-preview-version`** — a job's app build is the preview cache's digest of
+  the browser files, so a change to the export's encoder arguments or audio mux warns nobody.
+- **`queue-cannot-measure-takes`** — the queue can no longer read a take's length, so a clip
+  with no length that runs past four hours is queued instead of refused at enqueue.
 
 ## `effect-check`
 
