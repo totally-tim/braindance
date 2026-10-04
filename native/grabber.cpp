@@ -166,7 +166,8 @@ static std::timed_mutex g_writeMutex;
 static bool g_outputCut = false;
 
 // False means the pipe is gone or the run is stopping with the message unsent or cut short. A
-// write that fails once the lock is held closes the output for good.
+// write that fails once the lock is held closes the output for good. After a stop no message
+// starts, and one already under way finishes while the parent keeps reading.
 static bool write_message(int fd, uint32_t type, const void *payload, uint32_t payloadLen,
                           const std::function<void()> &whileStalled = nullptr) {
   std::unique_lock<std::timed_mutex> lock(g_writeMutex, std::defer_lock);
@@ -175,6 +176,7 @@ static bool write_message(int fd, uint32_t type, const void *payload, uint32_t p
     if (g_stop) return false;
   }
   if (g_outputCut) return false;
+  if (g_stop) return false;
   uint32_t header[3] = {MAGIC, type, payloadLen};
   if (!write_all(fd, header, sizeof(header), whileStalled)
       || (payloadLen && !write_all(fd, payload, payloadLen, whileStalled))) {
@@ -944,7 +946,9 @@ int main(int argc, char **argv) {
                  "stream a sensor record that would be cut in half\n", helloLen, sizeof(hello));
     return 1;
   }
-  if (!write_message(STDOUT_FILENO, TYPE_HELLO, hello, (uint32_t)helloLen)) return 1;
+  // A stop that came while the device opened refuses the hello and still ends through the
+  // teardown below, because a respawn races the kernel for a device that was never closed.
+  if (!write_message(STDOUT_FILENO, TYPE_HELLO, hello, (uint32_t)helloLen) && !g_stop) return 1;
   std::fprintf(stderr, "[grabber] streaming %s (fx=%.2f fy=%.2f cx=%.2f cy=%.2f, %s colour decode)\n",
                serial.c_str(), ir.fx, ir.fy, ir.cx, ir.cy, pipeline->colorDecoderName());
 
@@ -1181,7 +1185,7 @@ int main(int argc, char **argv) {
       prof.push_back(r);
     }
 
-    if (!ok) break; // consumer closed the pipe, or a stop ended a write the parent left unread
+    if (!ok) break; // consumer closed the pipe, or a stop came before the write or during it
 
     if (++frameCount % 150 == 0)
       std::fprintf(stderr, "[grabber] %llu frames (%llu colour, %llu bad depth, %llu bad colour)\n",
