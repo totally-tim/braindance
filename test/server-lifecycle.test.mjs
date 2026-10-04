@@ -17,6 +17,7 @@ import { WebSocket } from 'ws';
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const FAKE_GRABBER = join(REPO, 'tools/fake-grabber.mjs');
 const PROBE = join(REPO, 'test/capture-close-probe.mjs');
+const SCAN_PROBE = join(REPO, 'test/scan-hold-probe.mjs');
 const ROOT_NAMES = ['captures', 'projects', 'presets', 'deliverables', 'effects', 'jobs', 'exports', 'audio'];
 const WAIT_MS = 30_000;
 const noShell = process.platform === 'win32' ? 'the stand-in encoders are shell scripts' : false;
@@ -141,11 +142,14 @@ async function shoot(server) {
   return id;
 }
 
+const heldCopies = (server, id) => readdirSync(server.roots.captures).filter((file) => file.startsWith(`${id}.held-`));
+
 function assertFinished(server, id) {
   assert.ok(existsSync(join(server.roots.captures, `${id}.idx`)), `take ${id} has its index sidecar`);
   const marksDir = join(server.roots.captures, 'marks');
   const marks = existsSync(marksDir) ? readdirSync(marksDir).map((file) => readFileSync(join(marksDir, file), 'utf8')).join('\n') : '';
   assert.ok(marks.includes(`mark-${id}`), `take ${id} has its mark in the marks log`);
+  assert.deepEqual(heldCopies(server, id), [], `no copy of take ${id}'s marks is left beside it`);
 }
 
 const TRIGGERS = {
@@ -355,6 +359,36 @@ test('a stop that cannot write the take\'s marks exits 1, names the take, and st
   );
   assert.equal(server.lines.some((line) => line.includes('the grabber did not finish')), false, 'the grabber stopped');
   assert.ok(existsSync(join(server.roots.captures, `${id}.idx`)), `take ${id} has its index sidecar`);
+});
+
+// The desktop shell kills a service that has not exited STOP_GRACE_MS after its stop line, and a
+// long take's close can still be scanning then. The probe holds the scan, so the kill lands there
+// whatever the take's size, and the restart is what a user gets on the next launch.
+test('a stop killed while the take is scanned loses only the index, and the next start files the marks', { timeout: 120_000 }, async () => {
+  const name = 'killed-mid-scan';
+  const events = join(work, `${name}.events`);
+  const first = await start(name, {
+    flags: ['--stop-on-stdin', '--record', '--grabber', fakeGrabber()],
+    nodeArgs: ['--import', SCAN_PROBE],
+    env: { BRAINDANCE_PROBE_EVENTS: events },
+  });
+  const id = await shoot(first);
+  first.child.stdin.write('stop\n');
+  await eventually(() => existsSync(events) && readFileSync(events, 'utf8').includes(`${id}.knct\n`), 'the close to begin its scan');
+  first.child.kill('SIGKILL');
+  assert.deepEqual(await first.stops(), { code: null, signal: 'SIGKILL' });
+  assert.equal(existsSync(join(first.roots.captures, `${id}.idx`)), false, 'the kill landed before the index was written');
+  assert.equal(existsSync(join(first.roots.captures, 'marks')), false, 'and before any mark was filed by hash');
+  const [held] = heldCopies(first, id);
+  assert.ok(held, `a copy of the marks was held beside the take before its scan: ${readdirSync(first.roots.captures).join(' ')}`);
+
+  const second = await start(name, { flags: ['--stop-on-stdin', '--replay', sample] });
+  await second.until((all) => all.some((line) => line.startsWith(`[library] moved ${held} into the marks log of ${id}.knct`)), 'the held copy to be filed');
+  assertFinished(second, id);
+  const index = JSON.parse(readFileSync(join(second.roots.captures, `${id}.idx`), 'utf8'));
+  assert.ok(index.frames.offset.length >= 3 && index.truncated === false, `the take is whole: ${index.frames.offset.length} frames`);
+  second.child.stdin.write('stop\n');
+  assert.deepEqual(await second.stops(), { code: 0, signal: null });
 });
 
 test('without --stop-on-stdin a stop line and end of file do nothing', { timeout: 60_000 }, async () => {

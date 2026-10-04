@@ -170,26 +170,45 @@ async function mergeHeld(dir, hash, theirLog) {
 }
 
 const NAMED_LOG = '.marks.jsonl';
+const HELD_LOG = /^(.+)\.held-(\d+)\.jsonl$/;
 
 /**
- * Moves each marks log a build that filed marks by a take's name left beside that take into the
- * take's hash log, and removes it: the one reader of that naming, run once when the server starts.
- * Merged rather than appended, so a crash between the merge and the removal merges again without
- * a second copy of any mark. A log with no take beside it is left where it is.
+ * Where the recorder holds a copy of a take's marks while its close runs: beside the take, under its
+ * name and the `startedAt` its hello carries, so a copy is only ever read into the take that wrote it.
+ */
+export const heldMarksPathFor = (capturePath, startedAt) => `${capturePath.replace(/\.knct$/i, '')}.held-${startedAt}.jsonl`;
+
+/** Writes the copy of `records` the recorder holds for the take at `capturePath`. */
+export async function holdMarks(capturePath, startedAt, records) {
+  markWrites++;
+  await writeFile(heldMarksPathFor(capturePath, startedAt), records.map((rec) => `${JSON.stringify(rec)}\n`).join(''));
+}
+
+/**
+ * Moves each marks log filed by name beside a take into the take's hash log, and removes it: a log
+ * an older build wrote, or a copy the recorder held through a close that a kill cut short. Run once
+ * when the server starts. Merged rather than appended, so a crash between the merge and the removal
+ * merges again without a second copy of any mark. A log with no take beside it is left where it is.
  */
 export async function adoptNamedMarkLogs(dir, { owns = () => false } = {}) {
   const names = await directoryNames(dir, { what: 'captures directory' });
   const adopted = [];
-  for (const file of names.filter((name) => name.endsWith(NAMED_LOG))) {
-    const stem = file.slice(0, -NAMED_LOG.length);
+  for (const file of names) {
+    const held = HELD_LOG.exec(file);
+    if (!held && !file.endsWith(NAMED_LOG)) continue;
+    const stem = held ? held[1] : file.slice(0, -NAMED_LOG.length);
     const take = names.find((name) => isKnct(name) && name.slice(0, -'.knct'.length) === stem);
     if (!take) continue;
     const path = join(dir, take);
     if (owns(path)) continue;
     const identity = takeIdentity(path);
-    // A take this build cannot read keeps its log where it is, and the rest are still moved.
-    const hash = (await cachedIndex(path).catch(() => null))?.hash;
-    if (!hash) continue;
+    // A take this build cannot read keeps its log where it is, and the rest are still moved. So
+    // does a take whose hello does not say it started when the copy held beside it says, which
+    // makes the copy a log a deleted take left under this name.
+    const index = await cachedIndex(path).catch(() => null);
+    if (!index) continue;
+    if (held && (await readHelloOnce(path, index).catch(() => null))?.startedAt !== Number(held[2])) continue;
+    const { hash } = index;
     // Under the take's lock and its log's, and only while the name still holds the file hashed.
     const records = await withTakeLock([path, marksPathFor(dir, hash)], async () => {
       if (!sameTake(identity, takeIdentity(path))) return null;

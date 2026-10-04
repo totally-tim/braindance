@@ -158,10 +158,15 @@ content hash, and `takeFileFor` finds the file that holds it, so an editor open 
 fetching it through a rename, and a take given the freed name is never answered in its place. Marks
 are an append-only log filed by hash in `captures/marks/`, so a rename moves none and a new take
 under a reused name starts with none. A take being recorded has no hash: its marks stay in the
-recorder until the close scans it, and the close files them under the hash it computed. A take that
-died before its hello landed files none, because every such take hashes alike. At start,
-`adoptNamedMarkLogs` moves each log an older build filed by name beside a take into that take's hash
-log; it cannot tell a log a deleted take left under the name from the marks of the take there now.
+recorder until the close begins. While the close flushes the take's last frames, it writes a copy of
+the marks beside the take, named `<take>.held-<startedAt>.jsonl` after the take and the `startedAt`
+its hello carries. Once that write finishes, the close scans the take, files the marks under the
+hash the scan computed, and removes the copy. A process killed during the scan therefore loses only
+the index. A take that died before its hello landed files none, because every such take hashes
+alike. At start, `adoptNamedMarkLogs` moves each log filed by name beside a take into that take's
+hash log: a held copy when the take's hello carries the `startedAt` the copy names, and a log an
+older build filed as `<take>.marks.jsonl`. It cannot tell an older build's log that a deleted take
+left under the name from the marks of the take there now.
 Two renames at one name are answered by the kernel, and the loser keeps its footage. A rename links
 the new name before it unlinks the old, so a crash between the two leaves one take under two names:
 `reconcile` lists both on one entry, and `removeName` takes one away once both names are shown to
@@ -217,7 +222,9 @@ refusal carries the service's last lines.
 **Stop.** Closing the last window quits on every platform. Quit writes `stop` and a newline to the
 service's stdin, which is the stop message on Windows as well, where a signal never reaches the
 service as SIGTERM. The shell waits `STOP_GRACE_MS`, 20 seconds, which is longer than the server's
-15-second standby grace, and kills the service only after that. The app exits with 0 when the
+15-second standby grace, and kills the service only after that. A kill while a long take is being
+scanned loses only that take's index. Its marks are already in the copy beside it, and the next
+launch rebuilds the index and files them. The app exits with 0 when the
 service exited 0 and with 1 otherwise, and `[desktop] service exited` in its output carries the
 code. A service that exits while the window is open is a refusal, and the app quits.
 
