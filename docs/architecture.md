@@ -45,10 +45,15 @@ kernel. The wait reads stdin, so the grabber sees a `stop` behind a stalled fram
 applies any other command while the write waits. A write gives up when a stop is set and a whole
 interval passes with nothing moving, so a parent that stopped reading cannot hold the run. A parent
 that reads again within that interval gets the frame whole, and one that pauses longer can lose it.
-A write that gave up part-way closes the output. Both writers refuse every later message, so the
-stream the parent reads ends on a whole message or at one cut. The encoder thread's writes give up
-the same way. The grabber sets the flag that ends them before the join, on every way out of the
-loop.
+A write that gave up part-way closes the output, and both writers refuse every later message. Once
+a stop is set neither writer starts a message, and one already under way finishes while the parent
+keeps reading. The stream the parent reads ends on a whole message or at one cut. Its last colour
+message can arrive without its key. The same happens whenever a new colour frame replaces one
+before its depth arrives, and the server keys only a pair it holds. A stop that arrives while the
+device opens refuses the hello, and the run still ends through the teardown, so a respawn finds
+the device closed. A corpus run stops on its last dumped frame without writing that frame to
+stdout. The encoder thread's writes give up the same way. The grabber sets the flag that ends them
+before the join, on every way out of the loop.
 
 `--min-depth` and `--max-depth` clip on the GPU before a frame is built, so they decide what exists
 at all. The viewer's `nearClip` and `farClip` only hide points that already arrived, and the

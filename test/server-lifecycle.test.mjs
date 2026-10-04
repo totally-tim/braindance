@@ -232,8 +232,8 @@ async function exportOneFrame(server) {
 
 // A stand-in that exits before its input ends makes the server report "ffmpeg exited 0" ahead of
 // the export's end, a race a slow process start hides. So the stand-in is held to its job directly:
-// running while its input is open, named when the input closes, with nothing on PATH.
-test('control: a stand-in encoder waits for the end of its input with nothing on PATH, then writes its name', { skip: noShell, timeout: 30_000 }, async () => {
+// reading while its input is open, named when the input closes, with nothing on PATH.
+test('control: a stand-in encoder reads its input to the end with nothing on PATH, then writes its name', { skip: noShell, timeout: 30_000 }, async () => {
   const output = join(work, 'control-encoder.out');
   const encoder = spawn(join(work, 'on-path/ffmpeg'), ['-i', 'pipe:0', output], {
     env: { PATH: join(work, 'empty') }, stdio: ['pipe', 'ignore', 'pipe'],
@@ -242,9 +242,13 @@ test('control: a stand-in encoder waits for the end of its input with nothing on
   const stderr = [];
   encoder.stderr.on('data', (chunk) => stderr.push(chunk.toString('utf8')));
   const exited = new Promise((done) => encoder.once('exit', (code, signal) => done({ code, signal })));
-  encoder.stdin.write(Buffer.alloc(16));
-  await sleep(300);
+  encoder.stdin.on('error', () => {});
+  // More than a pipe or socket buffer holds, so the write completes only once the stand-in has read
+  // most of it, however late it started. One that never reads fails it with EPIPE when it exits.
+  const written = await new Promise((done) => encoder.stdin.write(Buffer.alloc(8 << 20), (err) => done(err ?? null)));
+  assert.equal(written, null, `the stand-in did not read its input: ${stderr.join('').trim()}`);
   assert.equal(encoder.exitCode, null, `the stand-in exited with its input still open: ${stderr.join('').trim()}`);
+  assert.equal(existsSync(output), false, 'the stand-in wrote its name before its input closed');
   encoder.stdin.end();
   assert.deepEqual(await exited, { code: 0, signal: null }, stderr.join('').trim());
   assert.equal(readFileSync(output, 'utf8'), 'path');
