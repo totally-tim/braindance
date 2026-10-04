@@ -5,6 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import { mkdtemp, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -41,7 +42,7 @@ async function inTempDir(run) {
   try {
     await run(dir);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   }
 }
 
@@ -175,5 +176,31 @@ test('a take that fails mid-write says its marks were lost, and nothing is left 
     assert.ok(said.some((line) => /failed mid-write/.test(line)), 'the write failure was said');
     assert.ok(said.some((line) => /could not write its marks/.test(line)), `the marks failure was said: ${said.join(' | ')}`);
     assert.equal(recorder.take, null);
+  });
+});
+
+test('closeAll waits for a take that failed mid-write until its index and marks are filed', async () => {
+  await inTempDir(async (dir) => {
+    const recorder = new Recorder({ dir });
+    recorder.open(HELLO);
+    const { path, stream } = recorder.take;
+    recorder.write(frame(0, 1024));
+    recorder.mark(0, 'failed-take-mark');
+    // The hello has to land, or the marks are refused as belonging to a take no hash tells apart.
+    for (let waited = 0; stream.writableLength > 0 && waited < 5000; waited += 5) {
+      await new Promise((done) => setTimeout(done, 5));
+    }
+    const error = console.error;
+    console.error = () => {};
+    try {
+      stream.destroy(new Error('the card was pulled'));
+      await once(stream, 'error');
+      await recorder.closeAll('server stopped');
+    } finally {
+      console.error = error;
+    }
+    assert.ok(existsSync(indexPathFor(path)), 'the failed take has its index when closeAll returns');
+    assert.ok((await markLabels(dir)).includes('failed-take-mark'), 'and its mark is filed');
+    assert.equal(recorder.ownedTakes().length, 0);
   });
 });

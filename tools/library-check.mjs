@@ -1086,8 +1086,8 @@ const MUTATIONS = {
   },
   // The move appends the named log whole, so a move a crash interrupted appends it a second time.
   'named-logs-appended-twice': { file: 'server/library.js', edits: [[
-    '      const merged = await mergeHeld(dir, hash, await readLogAt(join(dir, file)));',
-    '      const read = await readLogAt(join(dir, file));\n      await appendLines(dir, hash, read);\n      const merged = read.length;',
+    '        const merged = await mergeHeld(dir, hash, read);',
+    '        await appendLines(dir, hash, read);\n        const merged = read.length;',
   ]],
     fails: 'the interrupted-move row alone: the marks still resolve to two, which is why the log is counted',
   },

@@ -1,15 +1,17 @@
-// What a start does with the copy of a take's marks the recorder holds beside it while the close
-// runs, which a process killed mid-close leaves behind: it files the copy into the take that wrote
-// it, and into no other take given that name.
+// The copy of a take's marks the recorder keeps beside it: appended as each mark is pressed, never
+// left under a name the next take is given, and filed by a start into the take that wrote it and
+// no other, with every record intact and only once they read back from the take's marks log.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { adoptNamedMarkLogs, heldMarksPathFor, holdMarks, readMarks } from '../server/library.js';
+import { buildIndex } from '../server/capture.js';
+import { adoptNamedMarkLogs, heldMarksPathFor, holdMarks, marksPathFor, readMarkLog, readMarks, releaseFiled } from '../server/library.js';
 import { encodeMessage, TYPE_FRAME, TYPE_HELLO } from '../server/protocol.js';
+import { Recorder } from '../server/recorder.js';
 
 const STARTED = 1_791_000_000_000;
 const MARK = { id: 'm1', sourceMs: 40, label: 'held through a kill', at: 1 };
@@ -66,5 +68,123 @@ test('a held copy beside a take whose hello never landed stays where it is, and 
     assert.deepEqual(await adoptNamedMarkLogs(dir), []);
     assert.equal(existsSync(heldMarksPathFor(path, STARTED)), true);
     assert.equal(existsSync(join(dir, 'marks')), false);
+  });
+});
+
+// A marks log a writer died in the middle of appending to.
+async function tearLog(dir, hash) {
+  await mkdir(join(dir, 'marks'), { recursive: true });
+  await writeFile(marksPathFor(dir, hash), '{"id":"m0","sourceMs":10,"at":0}\n{"id":"half-writ');
+}
+
+const ids = async (dir, hash) => (await readMarkLog(dir, hash)).map((rec) => rec.id).sort();
+const DROP = { id: 'drop:2026-10-04-take1', at: 3, kind: 'drop', dropped: 7 };
+
+test('a held copy moved onto a marks log that ends mid-record keeps every one of its records', async () => {
+  await inTempDir(async (dir) => {
+    const path = await writeTake(dir, STARTED);
+    const { hash } = await buildIndex(path);
+    await tearLog(dir, hash);
+    await holdMarks(path, STARTED, [MARK, { ...MARK, id: 'm2', at: 2 }, DROP]);
+    const [adopted] = await adoptNamedMarkLogs(dir);
+    assert.equal(adopted?.records, 3);
+    assert.deepEqual(await ids(dir, hash), ['drop:2026-10-04-take1', 'm0', 'm1', 'm2']);
+    assert.equal(existsSync(heldMarksPathFor(path, STARTED)), false);
+  });
+});
+
+test('a held copy carrying only the drop record survives the same torn log', async () => {
+  await inTempDir(async (dir) => {
+    const path = await writeTake(dir, STARTED);
+    const { hash } = await buildIndex(path);
+    await tearLog(dir, hash);
+    await holdMarks(path, STARTED, [DROP]);
+    await adoptNamedMarkLogs(dir);
+    assert.deepEqual(await ids(dir, hash), ['drop:2026-10-04-take1', 'm0']);
+    assert.equal(existsSync(heldMarksPathFor(path, STARTED)), false);
+  });
+});
+
+test('a held copy that cannot be read stays where it is, and nothing is filed', async (t) => {
+  if (process.getuid?.() === 0) t.skip('root reads a file whatever its mode');
+  await inTempDir(async (dir) => {
+    const path = await writeTake(dir, STARTED);
+    await holdMarks(path, STARTED, [MARK]);
+    const copy = heldMarksPathFor(path, STARTED);
+    await chmod(copy, 0o000);
+    try {
+      assert.deepEqual(await adoptNamedMarkLogs(dir), []);
+      assert.equal(existsSync(copy), true);
+      assert.equal(existsSync(join(dir, 'marks')), false);
+    } finally {
+      await chmod(copy, 0o600).catch(() => {});
+    }
+  });
+});
+
+test('a log is removed only once every one of its records reads back from the hash log', async () => {
+  await inTempDir(async (dir) => {
+    const path = await writeTake(dir, STARTED);
+    const { hash } = await buildIndex(path);
+    await holdMarks(path, STARTED, [MARK]);
+    const copy = heldMarksPathFor(path, STARTED);
+    assert.equal(await releaseFiled(dir, hash, copy, [MARK]), false, 'nothing is filed yet');
+    assert.equal(existsSync(copy), true);
+  });
+});
+
+// The day the recorder names a take after, in local time as it reads it.
+const today = () => {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+};
+
+test('a name with a held copy beside it and no take is not given to the next take', async () => {
+  await inTempDir(async (dir) => {
+    await writeFile(join(dir, `${today()}-take1.held-123.jsonl`), `${JSON.stringify(MARK)}\n`);
+    const recorder = new Recorder({ dir });
+    recorder.open(Buffer.from(JSON.stringify({ fx: 366, fy: 366, cx: 256, cy: 212 })));
+    try {
+      assert.equal(recorder.take.id, `${today()}-take2`);
+    } finally {
+      await recorder.closeAll('test over');
+    }
+  });
+});
+
+test('a mark is copied beside its take while the take is still recording', async () => {
+  await inTempDir(async (dir) => {
+    const recorder = new Recorder({ dir });
+    recorder.open(Buffer.from(JSON.stringify({ fx: 366, fy: 366, cx: 256, cy: 212 })));
+    const { path, startedAt } = recorder.take;
+    const rec = recorder.mark(40, 'pressed mid-take');
+    try {
+      const copy = heldMarksPathFor(path, startedAt);
+      for (let waited = 0; !existsSync(copy) && waited < 5000; waited += 10) await new Promise((done) => setTimeout(done, 10));
+      assert.equal(recorder.state.recording, true, 'the take is still open');
+      assert.deepEqual(JSON.parse(await readFile(copy, 'utf8')), rec);
+    } finally {
+      await recorder.closeAll('test over');
+    }
+  });
+});
+
+test('a mark pressed as its take closes is copied beside the take once', async () => {
+  await inTempDir(async (dir) => {
+    // A file where the marks directory goes, so the close cannot file the marks and the copy stays.
+    await writeFile(join(dir, 'marks'), 'not a directory');
+    const recorder = new Recorder({ dir });
+    recorder.open(Buffer.from(JSON.stringify({ fx: 366, fy: 366, cx: 256, cy: 212 })));
+    const { path, startedAt } = recorder.take;
+    recorder.mark(40, 'pressed as the take closes');
+    const error = console.error;
+    console.error = () => {};
+    try {
+      await assert.rejects(recorder.closeAll('test over'), /could not write its marks/);
+    } finally {
+      console.error = error;
+    }
+    const lines = (await readFile(heldMarksPathFor(path, startedAt), 'utf8')).trim().split('\n');
+    assert.equal(lines.length, 1, lines.join(' | '));
   });
 });

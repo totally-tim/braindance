@@ -417,6 +417,25 @@ test('a stop killed while the take is scanned loses only the index, and the next
   assert.deepEqual(await second.stops(), { code: 0, signal: null });
 });
 
+// Each mark is copied beside the take as it is pressed, so a server killed mid-take with no stop
+// at all, as a crash or a pulled plug would, still leaves it for the next start to file.
+test('a recording server killed with no stop keeps the marks already copied, and the next start files them', { timeout: 120_000 }, async () => {
+  const name = 'killed-mid-take';
+  const first = await start(name, { flags: ['--stop-on-stdin', '--record', '--grabber', fakeGrabber()] });
+  const id = await shoot(first);
+  await eventually(() => heldCopies(first, id).length > 0, 'the mark to be copied beside the take');
+  const [held] = heldCopies(first, id);
+  first.child.kill('SIGKILL');
+  assert.deepEqual(await first.stops(), { code: null, signal: 'SIGKILL' });
+  assert.equal(existsSync(join(first.roots.captures, `${id}.idx`)), false, 'the take was never closed');
+
+  const second = await start(name, { flags: ['--stop-on-stdin', '--replay', sample] });
+  await second.until((all) => all.some((line) => line.startsWith(`[library] moved ${held} into the marks log of ${id}.knct`)), 'the held copy to be filed');
+  assertFinished(second, id);
+  second.child.stdin.write('stop\n');
+  assert.deepEqual(await second.stops(), { code: 0, signal: null });
+});
+
 test('without --stop-on-stdin a stop line and end of file do nothing', { timeout: 60_000 }, async () => {
   const server = await start('no-flag', { flags: ['--replay', sample] });
   server.child.stdin.write('stop\n');

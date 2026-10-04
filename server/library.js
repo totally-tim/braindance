@@ -58,6 +58,10 @@ async function readLogAt(path) {
   } catch {
     return [];
   }
+  return parseLog(text);
+}
+
+function parseLog(text) {
   const out = [];
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
@@ -113,11 +117,35 @@ async function withTakeLock(paths, work) {
 }
 
 async function appendLines(dir, hash, records) {
-  const lines = records.map((rec) => `${JSON.stringify(rec)}\n`).join('');
-  if (!lines) return;
-  markWrites++;
+  if (!records.length) return;
   await mkdir(join(dir, 'marks'), { recursive: true });
-  await appendFile(marksPathFor(dir, hash), lines);
+  await appendRecords(marksPathFor(dir, hash), records);
+}
+
+// A writer killed mid-append leaves the file ending inside a record, and a record appended straight
+// after that fragment joins it and is lost to every reader. A newline first restores the boundary.
+async function appendRecords(path, records) {
+  markWrites++;
+  const lines = records.map((rec) => `${JSON.stringify(rec)}\n`).join('');
+  await appendFile(path, `${await endsMidRecord(path) ? '\n' : ''}${lines}`);
+}
+
+async function endsMidRecord(path) {
+  let file;
+  try {
+    file = await open(path, 'r');
+  } catch (err) {
+    if (err.code === 'ENOENT') return false;
+    throw err;
+  }
+  try {
+    const { size } = await file.stat();
+    if (size === 0) return false;
+    const { buffer } = await file.read(Buffer.alloc(1), 0, 1, size - 1);
+    return buffer[0] !== 0x0a;
+  } finally {
+    await file.close();
+  }
 }
 
 /**
@@ -178,10 +206,33 @@ const HELD_LOG = /^(.+)\.held-(\d+)\.jsonl$/;
  */
 export const heldMarksPathFor = (capturePath, startedAt) => `${capturePath.replace(/\.knct$/i, '')}.held-${startedAt}.jsonl`;
 
-/** Writes the copy of `records` the recorder holds for the take at `capturePath`. */
+/** Appends `records` to the copy the recorder holds for the take at `capturePath`. */
 export async function holdMarks(capturePath, startedAt, records) {
-  markWrites++;
-  await writeFile(heldMarksPathFor(capturePath, startedAt), records.map((rec) => `${JSON.stringify(rec)}\n`).join(''));
+  await appendRecords(heldMarksPathFor(capturePath, startedAt), records);
+}
+
+/**
+ * Removes the log at `source` once every one of `records` reads back from the hash log of `hash`,
+ * and answers whether it did. A log whose records are not all there is kept for the next start.
+ */
+export async function releaseFiled(dir, hash, source, records) {
+  const filed = new Set((await readMarkLog(dir, hash)).map((rec) => `${rec.id}@${rec.at}`));
+  if (!records.every((rec) => filed.has(`${rec.id}@${rec.at}`))) return false;
+  await unlink(source).catch((err) => {
+    if (err.code !== 'ENOENT') throw err;
+  });
+  return true;
+}
+
+// The log a move reads from, or null when it is gone. Any other failure to read it throws, so the
+// move keeps a log it could not read rather than filing nothing and removing it.
+async function readSourceLog(path) {
+  try {
+    return parseLog(await readFile(path, 'utf8'));
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
 }
 
 /**
@@ -210,12 +261,22 @@ export async function adoptNamedMarkLogs(dir, { owns = () => false } = {}) {
     if (held && (await readHelloOnce(path, index).catch(() => null))?.startedAt !== Number(held[2])) continue;
     const { hash } = index;
     // Under the take's lock and its log's, and only while the name still holds the file hashed.
-    const records = await withTakeLock([path, marksPathFor(dir, hash)], async () => {
-      if (!sameTake(identity, takeIdentity(path))) return null;
-      const merged = await mergeHeld(dir, hash, await readLogAt(join(dir, file)));
-      await unlink(join(dir, file));
-      return merged;
-    });
+    let records;
+    try {
+      records = await withTakeLock([path, marksPathFor(dir, hash)], async () => {
+        if (!sameTake(identity, takeIdentity(path))) return null;
+        const read = await readSourceLog(join(dir, file));
+        if (read === null) return null;
+        const merged = await mergeHeld(dir, hash, read);
+        if (!await releaseFiled(dir, hash, join(dir, file), read)) {
+          throw new Error(`not every record in it reads back from the marks log of ${take}`);
+        }
+        return merged;
+      });
+    } catch (err) {
+      console.error(`[library] ${file} stays where it is: ${err.message}`);
+      continue;
+    }
     if (records !== null) adopted.push({ file, take, hash, records });
   }
   return adopted;
