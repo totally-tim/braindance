@@ -503,6 +503,41 @@ test('a stop during an export ends the encoder and removes the export\'s scratch
   assert.deepEqual(scratchIn(server.roots.exports, /\.part$/), [], 'the export\'s scratch outlived the server');
 });
 
+// The live server keeps listening while a long take closes, so an export can ask to begin after the
+// shutdown has already counted the exports it waits for.
+test('an export asked for after a stop has begun is refused, and nothing it would start outlives the server', { skip: noShell, timeout: 120_000 }, async () => {
+  const name = 'export-after-stop';
+  const events = join(work, `${name}.events`);
+  const release = join(work, `${name}.release`);
+  const server = await start(name, {
+    flags: ['--stop-on-stdin', '--record', '--grabber', fakeGrabber()],
+    nodeArgs: ['--import', SCAN_PROBE],
+    env: {
+      BRAINDANCE_PROBE_EVENTS: events, BRAINDANCE_PROBE_RELEASE: release,
+      FFMPEG: join(work, 'stubborn/ffmpeg'), BRAINDANCE_STANDIN_PIDS: join(work, 'stand-in.pids'),
+    },
+  });
+  const id = await shoot(server);
+  server.child.stdin.write('stop\n');
+  await eventually(() => existsSync(events) && readFileSync(events, 'utf8').includes(`${id}.knct\n`), 'the shutdown to reach the take\'s scan');
+  const before = standInPids().length;
+  const socket = socketTo(server);
+  await socket.opened;
+  socket.send({ begin: { name: 'after-stop', width: 2, height: 2, fps: 30, frames: 10, codec: 'h264' } });
+  const heard = [];
+  for (;;) {
+    const message = await socket.next();
+    heard.push(message);
+    if (message.ready || message.error || message.closed || message.socketError) break;
+  }
+  writeFileSync(release, '');
+  assert.deepEqual(await server.stops(), { code: 0, signal: null });
+  assert.ok(heard.some((message) => /stopping/.test(message.error ?? '')), `the export was refused: ${JSON.stringify(heard)}`);
+  assert.deepEqual(standInPids().slice(before).filter(alive), [], 'an encoder it started outlived the server');
+  assert.equal(standInPids().length, before, 'an encoder was started');
+  assert.deepEqual(scratchIn(server.roots.exports, /\.part$/), [], 'the export\'s scratch outlived the server');
+});
+
 // ---------------------------------------------------------------------------------------------
 // A replay server stops too. Process exit releases the capture, the timer and the listener whether
 // or not the shutdown did, so each is read while the capture's close is held open or at the moment

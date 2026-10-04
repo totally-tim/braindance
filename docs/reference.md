@@ -59,7 +59,8 @@ the grabber and exits 0. It exits 1 when a take does not close, a take's marks c
 the grabber does not stop, and says which on stderr. A replay server stops accepting connections,
 closes its capture and exits 0, or exits 1 when the capture does not close. Both also end a running
 audio import and every running export. The server kills the ffmpeg child and removes its scratch
-before it exits, and exits 1 when a scratch cannot be removed.
+before it exits, and exits 1 when a scratch cannot be removed. Once a shutdown begins, the server
+refuses a new audio import and a new export.
 
 ### Grabber flags
 
