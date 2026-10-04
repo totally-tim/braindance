@@ -2582,6 +2582,7 @@ httpServer.listen(PORT, HOST, () => {
     effects: EFFECTS.dir,
     jobs: JOBS.dir,
     exports: EXPORTS_DIR,
+    audio: AUDIO.root,
   };
   console.log(`[server] ready ${JSON.stringify({ url: `http://${host}:${port}`, pid: process.pid, roots })}`);
 });

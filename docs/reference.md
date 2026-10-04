@@ -52,7 +52,7 @@ message naming both.
 **A host reads one line to know the server is up.** Once the server is bound it prints
 `[server] ready ` and a JSON object on the same line: `url`, the origin with the port the system
 chose when `--port` is `0`; `pid`; and `roots`, the absolute `captures`, `projects`, `presets`,
-`deliverables`, `effects`, `jobs` and `exports` directories. The stop signals and, under
+`deliverables`, `effects`, `jobs`, `exports` and `audio` directories. The stop signals and, under
 `--stop-on-stdin`, the `stop` line and the end of stdin run one shutdown. A live server finishes
 the open take and every take a grabber restart left closing, filing their indexes and marks, stops
 the grabber and exits 0. It exits 1 when a take does not close, a take's marks cannot be written, or

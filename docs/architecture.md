@@ -202,10 +202,10 @@ refusal.
 
 **Start.** `findNode` takes the first Node of version 26 or newer on `PATH`, then in
 `/opt/homebrew/bin` and `/usr/local/bin`, because an app started from Finder has a minimal `PATH`.
-With none, a dialog names the versions it did find. The shell creates seven directories under
+With none, a dialog names the versions it did find. The shell creates eight directories under
 `app.getPath('userData')` and starts `node server/index.js --port 8480 --stop-on-stdin` with
-`--captures`, `--projects`, `--presets`, `--deliverables`, `--effects`, `--jobs` and `--exports`
-each pointing at its own. The window opens on the `url` of the `[server] ready` line. `startService`
+`--captures`, `--projects`, `--presets`, `--deliverables`, `--effects`, `--jobs`, `--exports` and
+`--audio` each pointing at its own. The window opens on the `url` of the `[server] ready` line. `startService`
 rejects a line naming another port, an exit before the line, and 30 seconds without one, and the
 refusal carries the service's last lines.
 

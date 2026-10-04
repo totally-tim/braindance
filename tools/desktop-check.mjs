@@ -255,7 +255,7 @@ try {
   ok('and the service answers on it', reply?.status === 200, `status ${reply?.status}`);
   const started = services();
   ok('exactly one service is running, on the fixed port', started.length === 1 && started[0].command.includes(`--port ${PORT} `), started.map((s) => s.pid).join(','));
-  const roots = ['captures', 'projects', 'presets', 'deliverables', 'effects', 'jobs', 'exports'];
+  const roots = ['captures', 'projects', 'presets', 'deliverables', 'effects', 'jobs', 'exports', 'audio'];
   const command = started[0]?.command ?? '';
   ok('every writable root is a directory under the profile',
     roots.every((name) => command.includes(`--${name} ${join(realpathSync(USERDATA), name)}`) || command.includes(`--${name} ${join(USERDATA, name)}`))

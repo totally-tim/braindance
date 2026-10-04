@@ -13,7 +13,7 @@ export const NODE_MAJOR = 26;
 export const STOP_GRACE_MS = 20_000;
 const READY_TIMEOUT_MS = 30_000;
 
-export const ROOT_NAMES = ['captures', 'projects', 'presets', 'deliverables', 'effects', 'jobs', 'exports'];
+export const ROOT_NAMES = ['captures', 'projects', 'presets', 'deliverables', 'effects', 'jobs', 'exports', 'audio'];
 
 export const rootsUnder = (dir) => Object.fromEntries(ROOT_NAMES.map((name) => [name, join(dir, name)]));
 
