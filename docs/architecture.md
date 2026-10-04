@@ -228,7 +228,8 @@ service's stdin, which is the stop message on Windows as well, where a signal ne
 service as SIGTERM. The shell waits `STOP_GRACE_MS`, 20 seconds, which is longer than the server's
 15-second standby grace, and kills the service only after that. The app exits with 0 when the
 service exited 0 and with 1 otherwise, and `[desktop] service exited` in its output carries the
-code. A service that exits while the window is open is a refusal, and the app quits.
+code. A service that refuses the kill keeps running after the app exits with 1, and the output names
+its pid and the refusal. A service that exits while the window is open is a refusal, and the app quits.
 
 **One instance.** The app takes `requestSingleInstanceLock`. A second launch exits with 0 and the
 first window comes back from minimized and takes focus. The fixed port is the second guard: a second

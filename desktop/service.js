@@ -99,7 +99,8 @@ export function portFree(port) {
 /**
  * Starts the service. `ready` settles with its ready line, and rejects when it exits first or
  * says nothing for `readyTimeoutMs`. `stop` writes `stop` to its stdin and kills it only when
- * `stopGraceMs` pass without an exit.
+ * `stopGraceMs` pass without an exit. A stop whose kill was refused answers `survived` with the
+ * refusal as its `error`.
  */
 export function startService({
   node, entry, cwd, roots, port = PORT, onLine = () => {},
@@ -118,7 +119,12 @@ export function startService({
       resolve(result);
     };
     child.once('exit', (code, signal) => done({ code, signal }));
-    child.once('error', (error) => done({ code: null, signal: null, error }));
+    // A refused kill emits `error` too, with the service still running. Only a spawn that failed,
+    // which leaves no pid, has ended it.
+    child.on('error', (error) => {
+      if (child.pid === undefined) done({ code: null, signal: null, error });
+      else onLine('stderr', `[desktop] service ${child.pid}: ${error.message}`);
+    });
   });
 
   let resolveReady;
@@ -165,11 +171,19 @@ export function startService({
       if (exit) return { ...exit, forced: false };
       child.stdin.write('stop\n');
       let forced = false;
+      let refused;
+      // kill() reports a refused SIGKILL (EPERM) through an `error` it emits before it returns, and
+      // the service then runs on, so the stop answers with the refusal instead of an exit.
+      const refusal = new Promise((resolve) => { refused = resolve; });
       const timer = setTimeout(() => {
         forced = true;
+        child.once('error', refused);
         child.kill('SIGKILL');
+        child.off('error', refused);
       }, stopGraceMs);
-      const result = await exited;
+      const result = await Promise.race([
+        exited, refusal.then((error) => ({ code: null, signal: null, error, survived: true })),
+      ]);
       clearTimeout(timer);
       return { ...result, forced };
     })();
