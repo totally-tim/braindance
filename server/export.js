@@ -49,6 +49,22 @@ export function ffmpegBinary({ named = FFMPEG_NAMED, searchPath = process.env.PA
   );
 }
 
+/**
+ * SIGKILLs a running child and returns the error that refused the signal, or null. Node reports a
+ * refusal (EPERM) through an `error` emitted inside `kill`; a false return with no `error` (ESRCH) is
+ * a child already gone. A child with no pid never spawned, and Node would still pass kill(2) the pid
+ * libuv never set, which can name another process or, as 0, this process's own group.
+ */
+export function killRefusal(child) {
+  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return null;
+  let refusal = null;
+  const refused = (err) => { refusal = err; };
+  child.once('error', refused);
+  child.kill('SIGKILL');
+  child.off('error', refused);
+  return refusal;
+}
+
 // How many frames may be in flight. A frame past it is refused, because each one waits in memory
 // until ffmpeg takes it and a frame can be 96 MiB.
 export const ACK_WINDOW = 4;
@@ -276,9 +292,10 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
       log(`[export] ${message}`);
       send({ error: message });
       // Gone before the scratch is removed, or a frame it writes afterwards keeps the directory. An
-      // encoder that did not take the kill may still be writing, so its scratch stays.
-      if (child && child.exitCode === null && child.signalCode === null && !child.kill('SIGKILL')) {
-        leftover = `the encoder ${child.pid} did not take SIGKILL, so its scratch ${job.temp} stays`;
+      // encoder that refused the kill may still be writing, so its scratch stays.
+      const refusal = child && killRefusal(child);
+      if (refusal) {
+        leftover = `the encoder ${child.pid} did not take SIGKILL (${refusal.message}), so its scratch ${job.temp} stays`;
         log(`[export] ${leftover}`);
       } else {
         await encoderGone;
@@ -517,7 +534,8 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
 
   ws.on('close', () => {
     if (!finished) fail(`the browser closed the export socket after ${received} of ${job?.frames ?? '?'} frames`);
-    Promise.all([beginning, ending, landing]).then(() => running.delete(stop));
+    // Kept while its encoder lives, so a later stop still reports an encoder that refused its kill.
+    Promise.all([beginning, ending, landing, encoderGone]).then(() => running.delete(stop));
   });
   ws.on('error', (err) => fail(`export socket error: ${err.message}`));
 }

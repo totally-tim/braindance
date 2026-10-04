@@ -5,7 +5,7 @@ import { link, mkdir, mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { validAudioHash, AUDIO_RATE, AUDIO_SECONDS, AUDIO_UPLOAD_BYTES, readAudioWav } from '../web/audio-source.js';
-import { ffmpegBinary } from './export.js';
+import { ffmpegBinary, killRefusal } from './export.js';
 
 const digest = (bytes) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 
@@ -134,9 +134,9 @@ export class AudioStore {
     const run = this.running;
     if (!run) return;
     run.upload?.destroy(new Error('the server stopped during the upload'));
-    const { decoder } = run;
-    if (decoder && decoder.exitCode === null && decoder.signalCode === null && !decoder.kill('SIGKILL')) {
-      throw new Error(`the decoder ${decoder.pid} did not take SIGKILL, so the import's scratch stays`);
+    const refusal = run.decoder && killRefusal(run.decoder);
+    if (refusal) {
+      throw new Error(`the decoder ${run.decoder.pid} did not take SIGKILL (${refusal.message}), so the import's scratch stays`);
     }
     await run.settled;
     if (run.leftover) throw new Error(run.leftover);
