@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, utimesSync, statSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, utimesSync, statSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { ffmpegVersion, parseFfmpegVersion, renderVersion } from '../server/render-version.js';
+import { dirname, join } from 'node:path';
+import { appVersion, ffmpegVersion, parseFfmpegVersion, renderVersion } from '../server/render-version.js';
+import { versionDifferences } from '../server/jobs.js';
 
 function tree() {
   const root = mkdtempSync(join(tmpdir(), 'render-version-'));
@@ -44,6 +45,23 @@ test('the renderer version is stable across calls and changes with any shipped f
   rewrite(join(three, 'package.json'), '{"version":"0.186.0"}\n');
   const fourth = await renderVersion(web, three);
   assert.notEqual(fourth, third, 'the three version');
+});
+
+test('a change to the audio mux changes the job record and warns, and leaves the preview version alone', async () => {
+  const { web, three } = tree();
+  const root = dirname(web);
+  const exportJs = join(root, 'server', 'export.js');
+  mkdirSync(dirname(exportJs));
+  copyFileSync(new URL('../server/export.js', import.meta.url), exportJs);
+  const was = { app: await appVersion(root, three), effects: {}, renderer: 'gpu', ffmpeg: '9.0.2' };
+  const preview = await renderVersion(web, three);
+  const shipped = readFileSync(exportJs, 'utf8');
+  const rule = '  const outputStart = Math.round(from * AUDIO_RATE);\n';
+  assert.equal(shipped.split(rule).length, 2, 'the mux computes its output start from the program position once');
+  rewrite(exportJs, shipped.replace(rule, '  const outputStart = 0;\n'));
+  const now = { ...was, app: await appVersion(root, three) };
+  assert.deepEqual(versionDifferences(was, now).map((d) => d.field), ['app'], 'the browser, renderer and ffmpeg are unchanged, and the app is not');
+  assert.equal(await renderVersion(web, three), preview, 'the preview cache keys on the browser files alone');
 });
 
 test('a copy that preserves size and mtime still changes the version', async () => {

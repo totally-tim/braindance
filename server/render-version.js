@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
@@ -13,7 +13,7 @@ const SHIPPED = /\.(js|html|json)$/;
 // key because a copy that preserves mtime cannot preserve it.
 const known = new Map();
 
-async function shippedFiles(web, three) {
+async function shippedFiles(web, three, server) {
   const files = [];
   async function walk(root, prefix = '') {
     const entries = await readdir(join(root, prefix), { withFileTypes: true });
@@ -27,15 +27,16 @@ async function shippedFiles(web, three) {
   await walk(join(three, 'build'));
   await walk(join(three, 'examples', 'jsm'));
   files.push(['package.json', join(three, 'package.json')]);
+  for (const path of server) files.push([`server/${basename(path)}`, path]);
   return files;
 }
 
 /** A renderer change cannot reuse images made by older code in the browser's cache. */
-export async function renderVersion(web, three) {
-  const files = await shippedFiles(web, three);
+export async function renderVersion(web, three, server = []) {
+  const files = await shippedFiles(web, three, server);
   const stats = await Promise.all(files.map(([, path]) => stat(path)));
   const fingerprint = files.map(([file], at) => `${file}\0${stats[at].size}\0${stats[at].mtimeMs}\0${stats[at].ctimeMs}`).join('\n');
-  const slot = `${web}\0${three}`;
+  const slot = [web, three, ...server].join('\0');
   const cached = known.get(slot);
   if (cached?.fingerprint === fingerprint) return cached.digest;
   const hash = createHash('sha256');
@@ -44,6 +45,12 @@ export async function renderVersion(web, three) {
   known.set(slot, { fingerprint, digest });
   return digest;
 }
+
+/**
+ * What a render ran: the renderer's files, and the server code that writes the export's encoder
+ * arguments and audio mux, which no browser file or ffmpeg version identifies.
+ */
+export const appVersion = (root, three) => renderVersion(join(root, 'web'), three, [join(root, 'server', 'export.js')]);
 
 /** The version token off the first line `ffmpeg -version` prints, or null. */
 export function parseFfmpegVersion(text) {

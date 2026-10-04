@@ -867,9 +867,10 @@ heartbeats of a claim end with it, and a reply that arrives after the job has fi
 is ignored.
 
 **A job records what it ran on.** At claim and again at finish it stores the app build
-(`renderVersion`), the version of each installed effect by id, the GPU renderer string and the
-ffmpeg version, as `versions.claimed` and `versions.finished`. `versions.recorded` holds what an
-earlier render of the same edit ran on: the `recorded` field of `POST /jobs`, or, on a requeue,
+(`appVersion`: the browser files, Three.js and `server/export.js`, whose encoder arguments and
+audio mux decide the file), the version of each installed effect by id, the GPU renderer string and
+the ffmpeg version, as `versions.claimed` and `versions.finished`. `versions.recorded` holds what
+an earlier render of the same edit ran on: the `recorded` field of `POST /jobs`, or, on a requeue,
 the job's own `finished` record when it was `done`. A claim whose record differs from
 `versions.recorded` adds an entry to the job's `warnings`, and so does a finish whose record
 differs from the claim's. The job renders either way, because a re-render is promised to look the

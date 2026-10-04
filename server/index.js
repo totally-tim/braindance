@@ -26,7 +26,7 @@ import { gradeSpine } from '../web/grade-shader.js';
 import { moshSpine } from '../web/mosh-shader.js';
 import { Recorder } from './recorder.js';
 import { JobStore } from './jobs.js';
-import { ffmpegVersion, renderVersion } from './render-version.js';
+import { appVersion, ffmpegVersion, renderVersion } from './render-version.js';
 import { Webcam } from './webcam.js';
 import { IDLE_TICK_MS, IdleDeadline } from './idle.js';
 import { ABSENT_DELAY, RESTART_DELAYS, retryAfter } from './backoff.js';
@@ -154,7 +154,7 @@ const jobEnvironment = async (renderer) => {
   const ffmpeg = await ffmpegVersion(ffmpegBinary);
   return {
     record: {
-      app: await renderVersion(WEB_DIR, THREE_DIR),
+      app: await appVersion(ROOT, THREE_DIR),
       effects: Object.fromEntries(EFFECTS.list().map((e) => [e.id, e.version])),
       renderer,
       ffmpeg: ffmpeg.version,

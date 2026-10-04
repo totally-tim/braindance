@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { DOCUMENT_VERSIONS } from '../web/format.js';
 import { BEAT_BUDGET, JOB_VERSION } from '../server/jobs.js';
+import { appVersion } from '../server/render-version.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -36,6 +37,10 @@ const V3D = 'ANGLE (Broadcom, V3D 7.1.10.2, OpenGL ES 3.1)';
 
 // Each names source text and must match exactly once, aimed one property at a time.
 const MUTATIONS = {
+  'app-record-is-the-preview-version': { file: 'server/index.js', edits: [[
+    '      app: await appVersion(ROOT, THREE_DIR),',
+    '      app: await renderVersion(WEB_DIR, THREE_DIR),',
+  ]] },
   'claim-ignores-renderer': { file: 'server/jobs.js', edits: [[
     'export const rendererMatches = (want, have) => want === null || want === undefined || want === have;',
     'export const rendererMatches = () => true;',
@@ -1087,6 +1092,10 @@ try {
       && Object.keys(ranOn?.effects ?? {}).length > 0 && Object.values(ranOn.effects).every((v) => typeof v === 'string'),
   'a claim records the app build, the version of each installed effect and the renderer class it will render on',
   JSON.stringify(ranOn ?? null).slice(0, 90));
+  const appRecord = await appVersion(root, join(root, 'node_modules', 'three'));
+  check(ranOn?.app === appRecord,
+    '  and the app build covers server/export.js, whose encoder arguments and audio mux no browser file names',
+    `${String(ranOn?.app).slice(0, 12)} against ${appRecord.slice(0, 12)}`);
   const marked = await post(`/jobs/${underway.id}/cancel`, {});
   check(marked.status === 200 && marked.body.state === 'running'
       && typeof marked.body.cancelRequested === 'number' && !('lease' in marked.body),

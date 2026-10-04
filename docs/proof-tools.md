@@ -1390,6 +1390,8 @@ records as failed, and heartbeat replies that arrive after their job has ended.
   worker's store readings.
 - **`preflight-reads-a-failure-as-an-empty-store`** — the status, shape and entry checks come off
   that read, leaving `?? []` where they were.
+- **`app-record-is-the-preview-version`** — a job's app build is the preview cache's digest of
+  the browser files, so a change to the export's encoder arguments or audio mux warns nobody.
 
 ## `effect-check`
 
