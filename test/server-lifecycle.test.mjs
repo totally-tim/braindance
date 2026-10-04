@@ -18,6 +18,8 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const FAKE_GRABBER = join(REPO, 'tools/fake-grabber.mjs');
 const PROBE = join(REPO, 'test/capture-close-probe.mjs');
 const SCAN_PROBE = join(REPO, 'test/scan-hold-probe.mjs');
+const KILL_PROBE = join(REPO, 'test/kill-refused-probe.mjs');
+const SETUP_PROBE = join(REPO, 'test/scratch-setup-probe.mjs');
 const ROOT_NAMES = ['captures', 'projects', 'presets', 'deliverables', 'effects', 'jobs', 'exports', 'audio'];
 const WAIT_MS = 30_000;
 const noShell = process.platform === 'win32' ? 'the stand-in encoders are shell scripts' : false;
@@ -229,6 +231,7 @@ function socketTo(server) {
   return {
     opened: new Promise((open, failed) => { ws.once('open', open); ws.once('error', failed); }),
     send: (message) => ws.send(Buffer.isBuffer(message) ? message : JSON.stringify(message)),
+    close: () => ws.close(),
     async next(ms = 20_000) {
       const end = Date.now() + ms;
       while (!queue.length) {
@@ -484,6 +487,92 @@ test('an export asked for after a stop has begun is refused, and nothing it woul
   assert.deepEqual(standInPids().slice(before).filter(alive), [], 'an encoder it started outlived the server');
   assert.equal(standInPids().length, before, 'an encoder was started');
   assert.deepEqual(scratchIn(server.roots.exports, /\.part$/), [], 'the export\'s scratch outlived the server');
+});
+
+// A child that does not take its kill may still be writing its scratch, so the stop leaves the
+// scratch, names the child and exits 1. The probe refuses the kill the way an EPERM does.
+test('a stop whose decoder does not take its kill exits 1, names the decoder and leaves the import\'s scratch', { skip: noShell, timeout: 60_000 }, async () => {
+  const pids = join(work, 'stand-in.pids');
+  const before = standInPids().length;
+  const server = await start('decoder-refuses-kill', {
+    flags: ['--stop-on-stdin', '--replay', sample],
+    nodeArgs: ['--import', KILL_PROBE],
+    env: { FFMPEG: join(work, 'stubborn/ffmpeg'), BRAINDANCE_STANDIN_PIDS: pids },
+  });
+  const upload = fetch(`${server.url}/audio`, {
+    method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: Buffer.alloc(4096, 1),
+  }).then((res) => res.status, (err) => err.message);
+  await eventually(() => standInPids().length > before, 'the decoder to start');
+  const decoder = standInPids().at(-1);
+  try {
+    server.child.stdin.write('stop\n');
+    assert.deepEqual(await server.stops(), { code: 1, signal: null });
+    assert.ok(server.lines.includes(`[audio] decoder ${decoder}: kill EPERM`), 'the refused kill was not reported');
+    assert.ok(server.lines.includes(`[server] shutdown: the audio import did not finish: the decoder ${decoder} did not take SIGKILL, so the import's scratch stays`),
+      `the shutdown did not name the decoder; the last of the log:\n${server.lines.slice(-8).join('\n')}`);
+    assert.equal(alive(decoder), true, 'the probe let the kill through');
+    assert.equal(scratchIn(server.roots.audio, /^\.import-/).length, 1, 'the scratch was removed while the decoder ran');
+  } finally {
+    if (alive(decoder)) process.kill(decoder, 'SIGKILL');
+  }
+  await upload;
+});
+
+test('a stop whose encoder does not take its kill exits 1, names the encoder and leaves the export\'s scratch', { skip: noShell, timeout: 60_000 }, async () => {
+  const pids = join(work, 'stand-in.pids');
+  const before = standInPids().length;
+  const server = await start('encoder-refuses-kill', {
+    flags: ['--stop-on-stdin', '--replay', sample],
+    nodeArgs: ['--import', KILL_PROBE],
+    env: { FFMPEG: join(work, 'stubborn/ffmpeg'), BRAINDANCE_STANDIN_PIDS: pids },
+  });
+  const socket = socketTo(server);
+  await socket.opened;
+  socket.send({ begin: { name: 'unkillable', width: 2, height: 2, fps: 30, frames: 10, codec: 'h264' } });
+  const ready = await socket.next();
+  assert.ok(ready.ready, `the export began: ${JSON.stringify(ready)}`);
+  await eventually(() => standInPids().length > before, 'the encoder to start');
+  const encoder = standInPids().at(-1);
+  try {
+    server.child.stdin.write('stop\n');
+    assert.deepEqual(await server.stops(), { code: 1, signal: null });
+    const scratch = scratchIn(server.roots.exports, /\.part$/);
+    assert.equal(scratch.length, 1, 'the scratch was removed while the encoder ran');
+    assert.ok(server.lines.includes(`[server] shutdown: an export did not finish: the encoder ${encoder} did not take SIGKILL, so its scratch ${join(server.roots.exports, scratch[0])} stays`),
+      `the shutdown did not name the encoder; the last of the log:\n${server.lines.slice(-8).join('\n')}`);
+    assert.equal(alive(encoder), true, 'the probe let the kill through');
+  } finally {
+    if (alive(encoder)) process.kill(encoder, 'SIGKILL');
+  }
+});
+
+// The socket closes while the export creates its scratch, so the close removes a scratch that is not
+// there yet and the export removes it once it exists. That second removal fails, and the stop that
+// was waiting for the export has to report it. The stop has begun before the probe lets the scratch
+// be created, or the export finishes first and no stop is waiting for it.
+test('a scratch an export could not remove after its socket closed during setup fails the stop that waited for it', { timeout: 60_000 }, async () => {
+  const name = 'setup-removal-fails';
+  const events = join(work, `${name}.events`);
+  const release = join(work, `${name}.release`);
+  const server = await start(name, {
+    flags: ['--stop-on-stdin', '--replay', sample],
+    nodeArgs: ['--import', SETUP_PROBE],
+    env: { BRAINDANCE_PROBE_EVENTS: events, BRAINDANCE_PROBE_RELEASE: release, FFMPEG: join(work, 'stubborn/ffmpeg') },
+  });
+  const socket = socketTo(server);
+  await socket.opened;
+  socket.send({ begin: { name: 'mid-setup', width: 2, height: 2, fps: 30, frames: 10, codec: 'h264' } });
+  await eventually(() => existsSync(events) && readFileSync(events, 'utf8').includes('mkdir-held '), 'the export to create its scratch');
+  socket.close();
+  await server.until((all) => all.includes('[export] the browser closed the export socket after 0 of 10 frames'), 'the close to fail the export');
+  server.child.stdin.write('stop\n');
+  await eventually(() => refused(Number(new URL(server.url).port)), 'the stop to begin');
+  writeFileSync(release, '');
+  assert.deepEqual(await server.stops(), { code: 1, signal: null });
+  const scratch = join(server.roots.exports, scratchIn(server.roots.exports, /\.part$/)[0] ?? 'none.part');
+  assert.ok(existsSync(scratch), 'the probe let the removal through');
+  assert.ok(server.lines.includes(`[server] shutdown: an export did not finish: the scratch ${scratch} was not removed: EACCES: permission denied, rm '${scratch}'`),
+    `the shutdown did not name the scratch; the last of the log:\n${server.lines.slice(-8).join('\n')}`);
 });
 
 // ---------------------------------------------------------------------------------------------

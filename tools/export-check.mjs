@@ -392,8 +392,8 @@ const MUTATIONS = {
     ],
     // The regression: a failed run removes the final directory rather than its own scratch.
     [
-      '        await rm(job.temp, { recursive: true, force: true }).catch((err) => {',
-      '        await rm(job.outputDir, { recursive: true, force: true }).catch((err) => {',
+      '        if (job) await removeScratch(job.temp);',
+      '        if (job) await removeScratch(job.outputDir);',
     ],
   ] },
 };

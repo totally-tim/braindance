@@ -263,22 +263,28 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
   };
 
+  // Removes this run's scratch, keeping a failure for the stop to report.
+  const removeScratch = (temp) => rm(temp, { recursive: true, force: true }).catch((err) => {
+    leftover = `the scratch ${temp} was not removed: ${err.message}`;
+    log(`[export] ${leftover}`);
+  });
+
   const fail = (message) => {
     if (finished) return ending;
     finished = true;
     ending = (async () => {
       log(`[export] ${message}`);
       send({ error: message });
-      // Gone before the scratch is removed, or a frame it writes afterwards keeps the directory.
-      if (child && child.exitCode === null) child.kill('SIGKILL');
-      await encoderGone;
-      // Only the files in this run's own scratch directory. Reaching for `job.output` here deleted
-      // the previous good export of the same name, because the name defaults to the take's id.
-      if (job) {
-        await rm(job.temp, { recursive: true, force: true }).catch((err) => {
-          leftover = `the scratch ${job.temp} was not removed: ${err.message}`;
-          log(`[export] ${leftover}`);
-        });
+      // Gone before the scratch is removed, or a frame it writes afterwards keeps the directory. An
+      // encoder that did not take the kill may still be writing, so its scratch stays.
+      if (child && child.exitCode === null && child.signalCode === null && !child.kill('SIGKILL')) {
+        leftover = `the encoder ${child.pid} did not take SIGKILL, so its scratch ${job.temp} stays`;
+        log(`[export] ${leftover}`);
+      } else {
+        await encoderGone;
+        // Only the files in this run's own scratch directory. Reaching for `job.output` here deleted
+        // the previous good export of the same name, because the name defaults to the take's id.
+        if (job) await removeScratch(job.temp);
       }
       ws.close();
     })();
@@ -340,7 +346,7 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
     // The directory the target is in rather than the scratch directory - one level deeper for a
     // sequence, because the image2 muxer opens each frame by name and creates nothing.
     await mkdir(dirname(target), { recursive: true });
-    if (finished) { await rm(temp, { recursive: true, force: true }); return; }
+    if (finished) { await removeScratch(temp); return; }
     let audio = null;
     if (audioClip) {
       const wav = await audioStore.read(audioClip.hash);
@@ -349,15 +355,17 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
       if (Math.abs(duration - audioClip.duration) > 0.5 / AUDIO_RATE) throw new Error('audio duration does not match its asset');
       const audioPath = join(temp, 'audio-input.wav');
       await writeFile(audioPath, wav, { flag: 'wx' });
-      if (finished) { await rm(temp, { recursive: true, force: true }); return; }
+      if (finished) { await removeScratch(temp); return; }
       audio = { path: audioPath, filter: audioFilter(audioClip, msg.programStart, frames, fps) };
     }
     const args = ffmpegArgs({ width, height, fps, codec, into: target, audio });
     log(`[export] ${ffmpeg} ${args.join(' ')}`);
     child = spawn(ffmpeg, args, { stdio: ['pipe', 'ignore', 'pipe'] });
+    // Not on `error`: a kill that fails emits it too, with the encoder still running. A spawn that
+    // fails emits `close` and never `exit`.
     encoderGone = new Promise((done) => {
       child.once('exit', done);
-      child.once('error', done);
+      child.once('close', done);
     });
     child.stderr.on('data', (chunk) => stderr.push(chunk.toString('utf8')));
     child.on('error', (err) => fail(`ffmpeg could not start: ${err.message}`));

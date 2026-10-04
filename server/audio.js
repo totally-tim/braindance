@@ -83,7 +83,11 @@ export class AudioStore {
         let error = '';
         const timeout = setTimeout(() => { child.kill('SIGKILL'); }, 60000);
         child.stderr.on('data', (chunk) => { error = (error + chunk).slice(-2000); });
-        child.on('error', reject);
+        // A kill that fails emits `error` too, with the decoder still running and writing the scratch.
+        child.on('error', (err) => {
+          if (child.pid === undefined) reject(err);
+          else console.error(`[audio] decoder ${child.pid}: ${err.message}`);
+        });
         child.on('close', (code) => {
           clearTimeout(timeout);
           if (code === 0) resolve();
@@ -122,14 +126,18 @@ export class AudioStore {
 
   /**
    * Refuses every later import and ends the running one: its upload, or its decoder with SIGKILL.
-   * Resolves once the import has removed its scratch, and rejects when it could not.
+   * Resolves once the import has removed its scratch, and rejects when it could not, or when the
+   * decoder did not take the kill and its scratch stays.
    */
   async stop() {
     this.stopped = true;
     const run = this.running;
     if (!run) return;
     run.upload?.destroy(new Error('the server stopped during the upload'));
-    run.decoder?.kill('SIGKILL');
+    const { decoder } = run;
+    if (decoder && decoder.exitCode === null && decoder.signalCode === null && !decoder.kill('SIGKILL')) {
+      throw new Error(`the decoder ${decoder.pid} did not take SIGKILL, so the import's scratch stays`);
+    }
     await run.settled;
     if (run.leftover) throw new Error(run.leftover);
   }

@@ -106,7 +106,10 @@ one and any a restart left closing (`closeAll`), whichever of the two fails, and
 two failed. A replay server has its own shutdown behind the same triggers: it closes the retained
 capture and the listener, then exits. Both shutdowns also end a running audio import and every
 running export. `AudioStore.stop` and `stopExports` kill the ffmpeg child, wait for it to exit and
-remove its scratch before the process exits. From the moment either is called, the server refuses
+remove its scratch before the process exits. A child that does not take the kill may still be
+writing, so its scratch stays and the stop fails naming the child. A removal that fails also fails
+the stop that waits for that export, including the removal an export makes when its socket closed
+while it was still creating the scratch. From the moment either is called, the server refuses
 a new audio import, a new export socket and an export's begin, including on a connection it
 accepted earlier. Neither wait has a deadline of its own; under the desktop shell, `STOP_GRACE_MS`
 bounds the whole stop. After the bind the server prints `[server] ready` with its origin and roots,
