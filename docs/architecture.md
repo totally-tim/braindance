@@ -104,8 +104,17 @@ unavailability with 503. SIGINT, SIGTERM and, under `--stop-on-stdin`, a `stop` 
 stdin run one shutdown. It waits for grabber teardown and for every take the recorder owns, the open
 one and any a restart left closing (`closeAll`), whichever of the two fails, and says which of the
 two failed. A replay server has its own shutdown behind the same triggers: it closes the retained
-capture and the listener, then exits. After the bind the server prints `[server] ready` with its
-origin and roots, which is how a host learns a port it did not choose.
+capture and the listener, then exits. Both shutdowns also end a running audio import and every
+running export. `AudioStore.stop` and `stopExports` kill the ffmpeg child, wait for it to exit and
+remove its scratch before the process exits. A child that does not take the kill may still be
+writing, so its scratch stays and the stop fails naming the child. That includes an encoder that
+refused the kill when its socket closed before the stop. A removal that fails also fails the stop
+that waits for that export, including the removal an export makes when its socket closed while it
+was still creating the scratch. From the moment either is called, the server refuses a new audio
+import, a new export socket and an export's begin, including on a connection it accepted earlier.
+Neither wait has a deadline of its own; under the desktop shell, `STOP_GRACE_MS` bounds the whole
+stop. After the bind the server prints `[server] ready` with its origin and roots, which is how a
+host learns a port it did not choose.
 
 `server/output.js` owns output state for the server process. Preset reads and patches are
 serialized in arrival order. The record page writes mode and size through HTTP and parameter

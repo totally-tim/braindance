@@ -11,7 +11,7 @@ import { basename, dirname, join, normalize, extname, sep, resolve } from 'node:
 import { WebSocketServer } from 'ws';
 import { MessageParser, encodeMessage, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, TYPE_KEY, MAX_PAYLOAD_BYTES } from './protocol.js';
 import { openCapture, withCapture, forgetCapture, openCaptureCount, decimatePayload, cloudExtent, colourAfterFrames } from './capture.js';
-import { ffmpegBinary, handleExportSocket, MAX_FRAME_BYTES } from './export.js';
+import { ffmpegBinary, handleExportSocket, MAX_FRAME_BYTES, stopExports } from './export.js';
 import { AudioStore } from './audio.js';
 import {
   VALID_HASH, DocumentStore, NodeLink, appendMarks, checkedMarkLog, copyOnNode, downloadTake,
@@ -2111,6 +2111,16 @@ setInterval(() => {
   console.log(`[server] ${fps} fps  ${mbs} MB/s  dropped=${closed.dropped}  clients=${wss.clients.size}`);
 }, 5000);
 
+// Named rather than dumped: an operator reading this over ssh needs to know which part of the way
+// out failed, and the parts fail with messages that look alike in a log. Answers how many failed.
+function reportUnfinished(parts) {
+  const failed = parts.filter(([, result]) => result.status === 'rejected');
+  for (const [what, result] of failed) {
+    console.error(`[server] shutdown: ${what} did not finish: ${result.reason?.message ?? result.reason}`);
+  }
+  return failed.length;
+}
+
 // Every way a shutdown is asked for, shared by both modes: both signals, and the host's stdin
 // under `--stop-on-stdin`.
 function armStop(shutdown) {
@@ -2409,17 +2419,18 @@ function startLive() {
     // grabber has to stop for, and a rejection escaping this listener is an unhandled one that can
     // end the process before the shutdown grace has asked a stubborn grabber to die, which leaves
     // the sensor claimed by a process nobody owns.
-    const [grabber, take] = await Promise.allSettled([
+    // The audio decoder and the export encoders are ended here too, because a child left running
+    // outlives this process and the scratch it was writing outlives both.
+    const [grabber, take, audio, exports] = await Promise.allSettled([
       stopGrabber({ holdProcessOpen: true, grace: STANDBY_GRACE_MS }),
       recorder.closeAll('server stopped'),
+      AUDIO.stop(),
+      stopExports(),
     ]);
-    // Named rather than dumped: an operator reading this over ssh needs to know which half of the
-    // way out failed, and the two halves fail with messages that look alike in a log.
-    const failed = [['the take', take], ['the grabber', grabber]].filter(([, r]) => r.status === 'rejected');
-    for (const [what, r] of failed) {
-      console.error(`[server] shutdown: ${what} did not finish: ${r.reason?.message ?? r.reason}`);
-    }
-    process.exit(failed.length ? 1 : 0);
+    const unfinished = reportUnfinished([
+      ['the take', take], ['the grabber', grabber], ['the audio import', audio], ['an export', exports],
+    ]);
+    process.exit(unfinished ? 1 : 0);
   };
   armStop(shutdown);
 }
@@ -2435,6 +2446,8 @@ async function startReplay() {
     stopped = true;
     clearTimeout(timer);
     httpServer.close();
+    // A decoder or encoder left running outlives this process, and its scratch outlives both.
+    const children = Promise.allSettled([AUDIO.stop(), stopExports()]);
     let failed = false;
     try {
       await capture?.close();
@@ -2442,7 +2455,9 @@ async function startReplay() {
       failed = true;
       console.error(`[server] shutdown: the capture did not close: ${err.message}`);
     }
-    process.exit(failed ? 1 : 0);
+    const [audio, exports] = await children;
+    const unfinished = reportUnfinished([['the audio import', audio], ['an export', exports]]);
+    process.exit(failed || unfinished ? 1 : 0);
   });
   try {
     capture = await openCapture(REPLAY);
