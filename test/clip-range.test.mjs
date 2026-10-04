@@ -3,10 +3,12 @@
 // transport, the export and the two markers all read.
 
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import * as clip from '../web/clip-range.js';
 
 const { clipBoundOrThrow, writeClipRange } = clip;
+const { pastOutPoint, rangeFrames } = clip;
 
 const reset = () => writeClipRange({ in: 0, out: null }, null);
 
@@ -120,4 +122,29 @@ test('a marker drag previews what its own release will commit', () => {
   writeClipRange({ in: Math.max(0, Math.min(9, clip.clipOut ?? dur)) }, dur);
   assert.equal(clip.clipIn, 9);
   assert.equal(clip.clipOut, 20);
+});
+
+test('a range ends on the last frame the transport steps to', () => {
+  assert.deepEqual(rangeFrames({ in: 0, out: 0.99 }, 10, 30), { from: 0, to: 29 }, '0.99 s at 30 fps stops before 1.0 s');
+  assert.deepEqual(rangeFrames({ in: 0, out: 1 }, 10, 30), { from: 0, to: 30 }, 'an out point on the grid is its own frame');
+  assert.deepEqual(rangeFrames({ in: 0.98, out: null }, 9.43, 30), { from: 29, to: 282 }, 'the in point rounds to where a seek lands');
+  for (const fps of [24, 30, 60, 120]) {
+    const last = Math.floor(100 * fps);
+    for (let i = 0; i <= 2000; i++) {
+      const out = i * 0.0499;
+      const { from, to } = rangeFrames({ in: 0, out }, 100, fps);
+      assert.ok(from <= to && to <= last);
+      assert.ok(!pastOutPoint(to / fps, out), `${fps} fps, out ${out}: frame ${to} is past the out point`);
+      assert.ok(to === last || pastOutPoint((to + 1) / fps, out), `${fps} fps, out ${out}: frame ${to + 1} is not past it either`);
+    }
+  }
+});
+
+test('a range past 2^53 frames is counted at once, not stepped back forever', () => {
+  // In a child, because a loop that never ends cannot be timed out from inside it.
+  const probe = `import { rangeFrames } from ${JSON.stringify(new URL('../web/clip-range.js', import.meta.url).href)};
+    console.log(JSON.stringify(rangeFrames({ in: 0, out: null }, 600_967_367_215_625, 30)));`;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', probe], { timeout: 5_000, encoding: 'utf8' });
+  assert.equal(child.signal, null, 'rangeFrames returned rather than being killed at the timeout');
+  assert.equal(JSON.parse(child.stdout).from, 0, child.stderr);
 });

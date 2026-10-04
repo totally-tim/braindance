@@ -74,7 +74,7 @@ const MUTATIONS = {
 
   'export-form-nothing-claims': {
     file: 'web/format.js',
-    edits: [['export const PROJECT_VERSION = 8;', 'export const PROJECT_VERSION = 8;\nexport const { major, minor } = { major: 1, minor: 0 };']],
+    edits: [['export const DOCUMENT_VERSIONS = Object.freeze({ project: 9, preset: 8, deliverable: 2 });', 'export const DOCUMENT_VERSIONS = Object.freeze({ project: 9, preset: 8, deliverable: 2 });\nexport const { major, minor } = { major: 1, minor: 0 };']],
   },
 
   'a-barrel-re-export': {

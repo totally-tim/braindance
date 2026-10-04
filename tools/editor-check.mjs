@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { CLIP_CEILING, PROJECT_VERSION } from '../web/format.js';
+import { CLIP_CEILING, DOCUMENT_VERSIONS } from '../web/format.js';
 // The server's own validator, imported rather than re-stated: `validateExport` is what both the
 // socket's `begin` and `POST /jobs` call, so a list of codec names retyped here would be a third
 // copy that can drift from both.
@@ -1274,8 +1274,8 @@ const MUTATIONS = {
   'effect-rack-reset-forgets-effect': {
     file: 'web/main.js',
     edits: [[
-      "  button.addEventListener('click', () => {\n    retainEffectFor(name);\n    params.set(name, resetTarget(name));",
-      "  button.addEventListener('click', () => {\n    params.set(name, resetTarget(name));",
+      "    retainEffectFor(name);\n    params.set(name, resetTarget(name));",
+      "    params.set(name, resetTarget(name));",
     ]],
   },
 
@@ -2193,9 +2193,8 @@ const MUTATIONS = {
   'space-unbound': {
     file: 'web/main.js',
     edits: [[
-      '      if (timeline.playing || timeline.pendingPlay) pauseTransport();\n'
-      + '      else timeline.play().catch(showTimelineError);\n      return;',
-      '      return;',
+      '  if (e.repeat) return;\n  ui.play.click();',
+      '  if (e.repeat) return;',
     ]],
   },
 
@@ -2536,6 +2535,12 @@ const DRIVER_RULES = [
     what: 'a control in the effect rack sidebar',
     by: 'section 1 opens the effect rack, searches, adds every effect, and removes one',
     match: (row) => inGroup(row, '#effectRackPanel'),
+  },
+  {
+    key: 'audio',
+    what: 'an audio import, conditioning, or mapping control',
+    by: 'audio-check drives the file chooser, every conditioning setting, mapping, depth, placement, removal, and undo',
+    match: (row) => inGroup(row, '#audioGroup') || row.id === 'tAddAudio',
   },
   {
     key: 'paneltabs',
@@ -3152,8 +3157,8 @@ try {
   await page.waitForTimeout(50);
   const halationAdded = await page.evaluate(`(() => {
     const row = document.getElementById('halation.amount')?.closest('.row, .checkrow');
-    let stored = [];
-    try { stored = JSON.parse(localStorage.getItem('kinect.rackedEffects') ?? '[]'); } catch {}
+    const doc = globalThis.__kinect.library.serialiseProjectBody();
+    const stored = [...new Set([...(doc.look.effects ?? []), ...doc.clips.flatMap((clip) => clip.effects ?? [])])];
     return {
       hidden: row?.hidden ?? null,
       stored,
@@ -3201,8 +3206,8 @@ try {
     const k = globalThis.__kinect;
     const row = document.getElementById('halation.amount')?.closest('.row, .checkrow');
     const spec = k.params.spec('halation.amount');
-    let stored = [];
-    try { stored = JSON.parse(localStorage.getItem('kinect.rackedEffects') ?? '[]'); } catch {}
+    const doc = globalThis.__kinect.library.serialiseProjectBody();
+    const stored = [...new Set([...(doc.look.effects ?? []), ...doc.clips.flatMap((clip) => clip.effects ?? [])])];
     return {
       atDefault: k.params.get('halation.amount') === k.params.normalise('halation.amount', spec.default),
       keyed: k.keyframes.names().includes('halation.amount'),
@@ -3236,6 +3241,17 @@ try {
     `value=${undoRemoval.value}, keyed=${undoRemoval.keyed}, hidden=${undoRemoval.hidden}`);
 
   await page.evaluate('__kinect.keyframes.setTracks({})');
+  // The undo put the rack entry back with the value. A preset leaves the value with no entry, and
+  // then the reset alone has to keep the effect.
+  await page.evaluate(`(() => {
+    const k = globalThis.__kinect;
+    const body = k.library.serialiseProjectBody();
+    const drop = (block) => { if (block.effects) block.effects = block.effects.filter((id) => id !== 'halation'); };
+    drop(body.look);
+    body.clips.forEach(drop);
+    k.library.restoreProject(body);
+  })()`);
+  await settle();
   if (undoRemoval.hidden === true) {
     await page.evaluate(`document.querySelector('button[aria-label="halation.amount reset to default"]').click()`);
   } else {
@@ -3246,8 +3262,8 @@ try {
     const k = globalThis.__kinect;
     const row = document.getElementById('halation.amount')?.closest('.row, .checkrow');
     const spec = k.params.spec('halation.amount');
-    let stored = [];
-    try { stored = JSON.parse(localStorage.getItem('kinect.rackedEffects') ?? '[]'); } catch {}
+    const doc = globalThis.__kinect.library.serialiseProjectBody();
+    const stored = [...new Set([...(doc.look.effects ?? []), ...doc.clips.flatMap((clip) => clip.effects ?? [])])];
     return {
       atDefault: k.params.get('halation.amount') === k.params.normalise('halation.amount', spec.default),
       hidden: row?.hidden ?? null,
@@ -3286,8 +3302,8 @@ try {
   }
   const rackComplete = await page.evaluate(`(() => {
     const k = globalThis.__kinect;
-    let stored = [];
-    try { stored = JSON.parse(localStorage.getItem('kinect.rackedEffects') ?? '[]'); } catch {}
+    const doc = globalThis.__kinect.library.serialiseProjectBody();
+    const stored = [...new Set([...(doc.look.effects ?? []), ...doc.clips.flatMap((clip) => clip.effects ?? [])])];
     const unavailable = k.effectIds().filter((id) => k.effectParamNames(id).every((name) => {
       const row = document.getElementById(name)?.closest('.row, .checkrow');
       return !row || row.hidden;
@@ -3315,8 +3331,8 @@ try {
   if (headRemoveCount === 1) await headRemove.click();
   await settle();
   const headRemoved = await page.evaluate(`(() => {
-    let stored = [];
-    try { stored = JSON.parse(localStorage.getItem('kinect.rackedEffects') ?? '[]'); } catch {}
+    const doc = globalThis.__kinect.library.serialiseProjectBody();
+    const stored = [...new Set([...(doc.look.effects ?? []), ...doc.clips.flatMap((clip) => clip.effects ?? [])])];
     const row = document.getElementById('halation.amount')?.closest('.row, .checkrow');
     return { stored, hidden: row?.hidden ?? null };
   })()`);
@@ -3375,7 +3391,7 @@ try {
       // menu from a button that merely shares the nav row with one.
       groups: ['#appBar', '#panel', '#panelTabs', '#lookPresetGroup', '#cameraGroup', '#navRow',
         '#recordGroup', '#recLookGroup', '#sensorGroup', '#monitorGroup',
-        '#programOutGroup', '#presetPick', '#projectDialog', '#exportDialog', '#obsDialog',
+        '#programOutGroup', '#audioGroup', '#presetPick', '#projectDialog', '#exportDialog', '#obsDialog',
         '#renameDialog',
         '#effectRackPanel', '#panelDock', '.appmenu']
         .filter((g) => el.closest(g)),
@@ -3443,7 +3459,7 @@ try {
     'the strip is among what was swept', `${sweep.filter((r) => r.inTbar).map((r) => r.id).filter(Boolean).slice(0, 6).join(', ')}...`);
 
   // The census racks every installed effect so its generated controls exist for the sweep. That
-  // is local panel state, not project state, and leaving it behind changes every later claim about
+  // is explicit document state, and leaving it behind changes every later claim about
   // a fresh inspector. Remove through the real controls so the cleanup also proves that an idle
   // effect needs no destructive confirmation.
   let rackRemoves = 0;
@@ -3452,8 +3468,8 @@ try {
     rackRemoves++;
   }
   const rackClean = await page.evaluate(`(() => {
-    let stored = [];
-    try { stored = JSON.parse(localStorage.getItem('kinect.rackedEffects') ?? '[]'); } catch {}
+    const doc = globalThis.__kinect.library.serialiseProjectBody();
+    const stored = [...new Set([...(doc.look.effects ?? []), ...doc.clips.flatMap((clip) => clip.effects ?? [])])];
     return {
       stored,
       visible: globalThis.__kinect.effectIds().filter((id) =>
@@ -7172,7 +7188,7 @@ try {
       'export writes a named file the browser actually downloaded', download.suggestedFilename());
     const expected = { ...known, bloom: onlyOnScreen };
     const wrong = Object.entries(expected).filter(([n, v]) => exported.values?.[n] !== v);
-    check(exported.version === PROJECT_VERSION && wrong.length === 0,
+    check(exported.version === DOCUMENT_VERSIONS.preset && wrong.length === 0,
       'and what it wrote is the look on screen rather than the document the picker names',
       wrong.length ? wrong.map(([n, v]) => `${n} ${exported.values?.[n]} not ${v}`).join(' ') : `version ${exported.version}, bloom ${exported.values.bloom}`);
 
@@ -7419,7 +7435,7 @@ try {
     }
 
     const bad = join(TMP, `${NAME_BAD}.braindance-preset.json`);
-    writeFileSync(bad, `${JSON.stringify({ version: PROJECT_VERSION, values: { bloom: 'loud' } }, null, 2)}\n`);
+    writeFileSync(bad, `${JSON.stringify({ version: DOCUMENT_VERSIONS.preset, values: { bloom: 'loud' } }, null, 2)}\n`);
     await importFile(bad);
     await page.waitForFunction("document.getElementById('tNote').textContent.includes('bloom')", null, { timeout: 15000 })
       .catch(() => {});
@@ -7441,7 +7457,7 @@ try {
     // creates `__proto__` as an own enumerable property where `p.x.__proto__ = v` invokes the
     // setter and creates nothing, so this shape has to be sent as source rather than built in JS.
     const proto = join(TMP, `${NAME_PROTO}.braindance-preset.json`);
-    writeFileSync(proto, `{ "version": ${PROJECT_VERSION}, "values": { "__proto__": { "polluted": true }, "bloom": 1 } }\n`);
+    writeFileSync(proto, `{ "version": ${DOCUMENT_VERSIONS.preset}, "values": { "__proto__": { "polluted": true }, "bloom": 1 } }\n`);
     const parsedHasOwn = Object.keys(JSON.parse(readFileSync(proto, 'utf8')).values).includes('__proto__');
     check(parsedHasOwn, 'the probe really contains __proto__ as an own key, or the row below tests nothing');
     await importFile(proto);
@@ -7463,9 +7479,9 @@ try {
       return (await text('#tNote')) ?? '';
     };
 
-    const noValues = await refuse(NAME_NO_VALUES, `{ "version": ${PROJECT_VERSION} }`);
-    const emptyValues = await refuse(NAME_EMPTY_VALUES, `{ "version": ${PROJECT_VERSION}, "values": {} }`);
-    const listValues = await refuse(NAME_LIST_VALUES, `{ "version": ${PROJECT_VERSION}, "values": [1, 2, 3] }`);
+    const noValues = await refuse(NAME_NO_VALUES, `{ "version": ${DOCUMENT_VERSIONS.preset} }`);
+    const emptyValues = await refuse(NAME_EMPTY_VALUES, `{ "version": ${DOCUMENT_VERSIONS.preset}, "values": {} }`);
+    const listValues = await refuse(NAME_LIST_VALUES, `{ "version": ${DOCUMENT_VERSIONS.preset}, "values": [1, 2, 3] }`);
     const distinct = new Set([noValues, emptyValues, listValues]).size === 3;
     check(distinct
       && /no values object/.test(noValues)
@@ -7479,7 +7495,7 @@ try {
     const missingThree = readings.slice(2);
     const partReadings = await refuse(NAME_PART_READINGS,
       JSON.stringify({
-        version: PROJECT_VERSION,
+        version: DOCUMENT_VERSIONS.preset,
         values: { bloom: 0.8, ...Object.fromEntries(namedTwo.map((n) => [n, 1])) },
       }));
     check(missingThree.every((n) => partReadings.includes(n))
@@ -7490,7 +7506,7 @@ try {
       `"${partReadings}" against ${namedTwo.join(', ')} named and ${missingThree.join(', ')} missing`);
 
     const strayKey = await refuse(NAME_STRAY_KEY,
-      JSON.stringify({ version: PROJECT_VERSION, mode: 4, values: { bloom: 0.6 } }));
+      JSON.stringify({ version: DOCUMENT_VERSIONS.preset, mode: 4, values: { bloom: 0.6 } }));
     check(/mode/.test(strayKey) && /preset/.test(strayKey),
       'a document carrying a key beside version and values is refused by name, so a field an older version had is answered rather than ignored',
       `"${strayKey}"`);
@@ -7512,7 +7528,7 @@ try {
       body: JSON.stringify({
         name: NAME_EDITED,
         rev: `sha256:${'ab'.repeat(32)}`,
-        body: { version: PROJECT_VERSION, values: { pointSize: 'as big as it goes' } },
+        body: { version: DOCUMENT_VERSIONS.preset, values: { pointSize: 'as big as it goes' } },
       }),
     }));
     await page.click('#tPreset');
@@ -12520,7 +12536,7 @@ try {
     const preset = await page.evaluate(`(() => {
       const k = globalThis.__kinect;
       const body = {
-        version: k.library.PROJECT_VERSION,
+        version: k.library.DOCUMENT_VERSIONS.preset,
         values: { pointSize: 33.3, opacity: 0.44, bloom: 0.75, crush: 0.05 },
       };
       const before = k.library.serialiseProjectBody();
@@ -12563,6 +12579,7 @@ try {
       await page.locator('#tPreset').click();
       await page.waitForFunction("document.getElementById('tPresetList').hidden === false");
       await page.locator(`#tPresetList .pickeroption[data-name=${JSON.stringify(name)}]`).click();
+      await page.waitForFunction(() => !globalThis.__kinect.library.presetGestureRunning());
       await settle();
     };
     await page.evaluate(`(() => {
@@ -12640,7 +12657,7 @@ try {
         k.library.applyStoredPreset({
           name: 'framing-is-not-a-look',
           rev: null,
-          body: { version: k.library.PROJECT_VERSION, values: { left: -3.75 } },
+          body: { version: k.library.DOCUMENT_VERSIONS.preset, values: { left: -3.75 } },
         });
       } catch (error) {
         message = error.message;
@@ -12704,7 +12721,7 @@ try {
       await route.continue();
     };
     writeFileSync(importTargetPath, `${JSON.stringify({
-      version: PROJECT_VERSION,
+      version: DOCUMENT_VERSIONS.preset,
       values: { pointSize: 46.7 },
     }, null, 2)}\n`);
     await page.route(`**/presets/${importTargetName}*`, holdImport);

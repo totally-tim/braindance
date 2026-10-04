@@ -8,11 +8,11 @@ import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DocumentStore, ABSENT_REV } from '../server/library.js';
-import { documentNameRefusal, MAX_DOCUMENT_NAME_BYTES } from '../web/format.js';
+import { DOCUMENT_VERSIONS, documentNameRefusal, MAX_DOCUMENT_NAME_BYTES } from '../web/format.js';
 
 const store = async (opts = {}) => {
   const root = await mkdtemp(join(tmpdir(), 'braindance-store-'));
-  return new DocumentStore(join(root, 'projects'), 'project', 7, opts.builtin ? join(root, 'shipped') : null);
+  return new DocumentStore(join(root, 'projects'), 'project', opts.builtin ? join(root, 'shipped') : null);
 };
 
 const refused = async (run) => {
@@ -211,7 +211,7 @@ test('a rename moves the file, and a taken destination is refused before it does
 test('a shipped document forks under the revision it was read at, and is never moved', async () => {
   const s = await store({ builtin: true });
   await mkdir(s.builtinDir, { recursive: true });
-  await writeFile(join(s.builtinDir, 'Look.json'), `${JSON.stringify({ version: 7, clips: [] }, null, 2)}\n`);
+  await writeFile(join(s.builtinDir, 'Look.json'), `${JSON.stringify({ version: DOCUMENT_VERSIONS.project, clips: [] }, null, 2)}\n`);
   const shipped = await s.read('Look');
   assert.equal(shipped.builtin, true);
   // A shipped document is not moved, because the copy this build ships is not the store's to move.
@@ -232,7 +232,7 @@ test('a shipped document forks under the revision it was read at, and is never m
 test('two tabs forking one shipped document: exactly one fork lands', async () => {
   const s = await store({ builtin: true });
   await mkdir(s.builtinDir, { recursive: true });
-  await writeFile(join(s.builtinDir, 'Look.json'), `${JSON.stringify({ version: 7, clips: [] }, null, 2)}\n`);
+  await writeFile(join(s.builtinDir, 'Look.json'), `${JSON.stringify({ version: DOCUMENT_VERSIONS.project, clips: [] }, null, 2)}\n`);
   const shipped = await s.read('Look');
   // Both read the shipped revision, because that is what a read of this name returns while no fork
   // exists. The first fork makes the second one's revision the shipped one that is no longer there.

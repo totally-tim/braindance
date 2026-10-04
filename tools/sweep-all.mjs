@@ -30,7 +30,7 @@ const BROWSER_ARGS = {
 };
 // These mutate in memory or in a private temp copy and bind no port, so concurrent runs cannot
 // see each other. Every other tool stages its mutation where a second run would read it.
-const CONCURRENT = new Set(['syntax', 'module', 'cpp', 'hd-encoder', 'release-gate']);
+const CONCURRENT = new Set(['syntax', 'module', 'cpp', 'hd-encoder', 'grabber-stdin', 'release-gate']);
 
 const TOOLS = flag('--tools')?.split(',').filter(Boolean) ?? Object.keys(BROWSER_ARGS);
 const argsFor = (tool) => BROWSER_ARGS[tool] ?? [];

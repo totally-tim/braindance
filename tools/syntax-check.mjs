@@ -168,11 +168,11 @@ if (mutateAt !== -1 && !MUTATIONS[mutation]) {
 
 // A floor per directory rather than a total, so a tree that stopped being walked says so
 // instead of being covered by another that grew. A tripwire against zero, not a manifest.
-const FLOORS = { bin: 2, server: 5, test: 10, tools: 12, web: 18 };
+const FLOORS = { bin: 2, desktop: 4, server: 5, test: 10, tools: 12, web: 18 };
 
 // `PARSES` is what `node --check` can be handed and have its answer mean anything; `SHIPPED`
 // is wider, because what is asked of `tools/` is about the file being ours, not about parsing.
-const PARSES = /\.(js|mjs)$/;
+const PARSES = /\.(c|m)?js$/;
 const SHIPPED = /\.(js|mjs|sh)$/;
 
 const check = (file) => {
@@ -213,9 +213,10 @@ try {
 
 // Symlinked directories are skipped rather than walked: in a worktree the heavy shared trees
 // are symlinked back to the main checkout, and following one parses somebody else's library.
+// So is `node_modules`, which `desktop/` holds a real one of.
 function walk(dir, matches, out = []) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isSymbolicLink()) continue;
+    if (entry.isSymbolicLink() || entry.name === 'node_modules') continue;
     const p = join(dir, entry.name);
     if (entry.isDirectory()) walk(p, matches, out);
     else if (matches.test(entry.name)) out.push(p);

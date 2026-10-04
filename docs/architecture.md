@@ -35,6 +35,26 @@ always with its zeroes. The colour count explains a stale-looking image, and the
 are frames libfreenect2 marked failed itself, which separates a failing GPU readback from a
 degraded USB link.
 
+The grabber reads one command per line from stdin: `low-light`, `hd-color`, `key` and `stop`.
+End-of-file on stdin stops it as `stop` does, so a grabber whose parent is gone ends through the
+same teardown. Only a read of zero bytes is end-of-file. Stdin is non-blocking, and a pipe with
+nothing in it yet is not a closed one.
+
+Stdout is non-blocking too, so a write to a full pipe waits in a 100 ms poll rather than in the
+kernel. The wait reads stdin, so the grabber sees a `stop` behind a stalled frame at once and
+applies any other command while the write waits. A write gives up when a stop is set and a whole
+interval passes with nothing moving, so a parent that stopped reading cannot hold the run. A parent
+that reads again within that interval gets the frame whole, and one that pauses longer can lose it.
+A write that gave up part-way closes the output, and both writers refuse every later message. Once
+a stop is set neither writer starts a message, and one already under way finishes while the parent
+keeps reading. The stream the parent reads ends on a whole message or at one cut. Its last colour
+message can arrive without its key. The same happens whenever a new colour frame replaces one
+before its depth arrives, and the server keys only a pair it holds. A stop that arrives while the
+device opens refuses the hello, and the run still ends through the teardown, so a respawn finds
+the device closed. A corpus run stops on its last dumped frame without writing that frame to
+stdout. The encoder thread's writes give up the same way. The grabber sets the flag that ends them
+before the join, on every way out of the loop.
+
 `--min-depth` and `--max-depth` clip on the GPU before a frame is built, so they decide what exists
 at all. The viewer's `nearClip` and `farClip` only hide points that already arrived, and the
 recorder's preview range drives that pair, never the grabber's.
@@ -80,8 +100,21 @@ and nothing is running to turn it on, and `applyCamera` re-derives that refusal 
 changes, so a request made servable by switching colour on is not refused on the reason it was
 refused before. A key page attached while there is no colour to key is a socket waiting for a reason
 rather than demand. MJPEG holds transient outages for up to 45 seconds and refuses permanent
-unavailability with 503. SIGINT and SIGTERM wait for grabber teardown and recorder close whichever of
-the two fails, and say which of the two failed.
+unavailability with 503. SIGINT, SIGTERM and, under `--stop-on-stdin`, a `stop` line or the end of
+stdin run one shutdown. It waits for grabber teardown and for every take the recorder owns, the open
+one and any a restart left closing (`closeAll`), whichever of the two fails, and says which of the
+two failed. A replay server has its own shutdown behind the same triggers: it closes the retained
+capture and the listener, then exits. Both shutdowns also end a running audio import and every
+running export. `AudioStore.stop` and `stopExports` kill the ffmpeg child, wait for it to exit and
+remove its scratch before the process exits. A child that does not take the kill may still be
+writing, so its scratch stays and the stop fails naming the child. That includes an encoder that
+refused the kill when its socket closed before the stop. A removal that fails also fails the stop
+that waits for that export, including the removal an export makes when its socket closed while it
+was still creating the scratch. From the moment either is called, the server refuses a new audio
+import, a new export socket and an export's begin, including on a connection it accepted earlier.
+Neither wait has a deadline of its own; under the desktop shell, `STOP_GRACE_MS` bounds the whole
+stop. After the bind the server prints `[server] ready` with its origin and roots, which is how a
+host learns a port it did not choose.
 
 `server/output.js` owns output state for the server process. Preset reads and patches are
 serialized in arrival order. The record page writes mode and size through HTTP and parameter
@@ -153,8 +186,73 @@ for as long as the clip moves under its fetch, and either lands where it was ask
 
 **The render queue** produces video from finished edits. A job is a self-contained project body
 plus the captures it names and an output spec, claimed by a worker pinned to the renderer class it
-draws with, because bit-exactness does not survive a change of GPU. `tools/render-worker.mjs`
-brings a page up on `/edit?take=`, which opens no document, so that page writes nothing.
+draws with, because a different GPU draws a different picture. A re-render is promised to look the
+same. The job records the app build, the installed effects' versions, the GPU renderer and the
+ffmpeg version at claim and at finish, and a render whose record differs from the one before it
+runs anyway, with the difference written into the job and its sidecar. A worker's heartbeat is
+also how a cancel reaches it, and a worker whose heartbeats keep failing stops rendering.
+`tools/render-worker.mjs` brings a page up on `/edit?take=`, which opens no
+document, so that page writes nothing.
+
+## The desktop shell
+
+`desktop/` is an Electron app. It runs the service as a child process and shows the service's pages
+in one window. The editor in the window is the page a browser gets, and nothing in `server/` or
+`web/` reads whether a shell is there.
+
+| file | what it owns |
+| --- | --- |
+| `desktop/main.js` | the window, the quit sequence, the bridge handlers, and every refusal |
+| `desktop/service.js` | the service child: which Node runs it, its flags, its ready line, its stop |
+| `desktop/origin.js` | which URLs and which IPC senders belong to the window |
+| `desktop/reveal.js` | which paths the bridge may show in the OS file manager |
+| `desktop/preload.cjs` | the four calls the page may make, in CommonJS because a sandboxed preload cannot be a module |
+
+**The origin is fixed.** The service listens on port 8480 and no other. Browser storage belongs to
+an origin and an origin includes the port, so a port chosen per launch would give the editor an
+empty preview cache and default panels every time. The shell refuses a held port with a dialog that
+names it. `portFree` asks first, and a service that exits before its ready line gets the same
+refusal.
+
+**Start.** `findNode` takes the first Node of version 26 or newer on `PATH`, then in
+`/opt/homebrew/bin` and `/usr/local/bin`, because an app started from Finder has a minimal `PATH`.
+With none, a dialog names the versions it did find. The shell creates eight directories under
+`app.getPath('userData')` and starts `node server/index.js --port 8480 --stop-on-stdin` with
+`--captures`, `--projects`, `--presets`, `--deliverables`, `--effects`, `--jobs`, `--exports` and
+`--audio` each pointing at its own. The window opens on the `url` of the `[server] ready` line. `startService`
+rejects a line naming another port, an exit before the line, and 30 seconds without one, and the
+refusal carries the service's last lines.
+
+**Stop.** Closing the last window quits on every platform. Quit writes `stop` and a newline to the
+service's stdin, which is the stop message on Windows as well, where a signal never reaches the
+service as SIGTERM. The shell waits `STOP_GRACE_MS`, 20 seconds, which is longer than the server's
+15-second standby grace, and kills the service only after that. The app exits with 0 when the
+service exited 0 and with 1 otherwise, and `[desktop] service exited` in its output carries the
+code. A service that refuses the kill keeps running after the app exits with 1, and the output names
+its pid and the refusal. A service that exits while the window is open is a refusal, and the app quits.
+
+**One instance.** The app takes `requestSingleInstanceLock`. A second launch exits with 0 and the
+first window comes back from minimized and takes focus. The fixed port is the second guard: a second
+service would find 8480 held.
+
+**The window.** It is sandboxed, context-isolated and without Node integration. `guard` compares
+origins and not URLs, so every path on the service is allowed and another host name for the same
+service is not. It runs on `will-frame-navigate` and `will-redirect`, so a subframe and a redirect
+are held to the same rule. A refused main-frame navigation to a web link goes to the OS browser, and
+so does every `window.open`, which makes the app one window.
+
+**The bridge.** `window.desktop` holds `chooseDirectory`, `openProjectFile`,
+`chooseExportDestination` and `revealPath`. Each is an `ipcMain.handle` that `senderTrusted` lets
+through only from the top frame of the window while it shows the service's origin.
+`chooseExportDestination` takes a file name. `revealPath` takes an absolute path and passes it to the
+OS file manager only when `revealable` allows it. `revealable` allows a path that one of the three
+dialogs returned in this session, and a path that exists and has a real path inside one of the seven
+data folders. A path from a dialog is shown as given, and a chosen folder does not allow its
+contents. For any other path, including a `..` climb, a link that leads out of a data folder and a
+path that does not exist, the bridge refuses with one message. It shows the real path that it
+checked. The check and the reveal are two steps, so a process that writes inside a data folder could
+swap a folder for a link between them and send the reveal elsewhere. The reveal opens a file manager
+window and reads nothing.
 
 ## The effect store
 
@@ -281,7 +379,7 @@ them, and every track here is in program seconds. Rendering is forward-only:
 - **The camera keeps its own pace when the footage slows**, which is the creative point: a
   photographer's movement is independent of what they are filming. The speed control changes the
   selected clip's output length and rescales that clip's own keys from its head, while project
-  tracks, camera keys and output cuts hold their authored program seconds.
+  tracks, camera keys, the audio clip and output cuts hold their authored program seconds.
 - **`fade` and `wake` stay in source time**, because they drive surface memory, which advances per
   source frame: how long a surface remembers is a fact about the footage.
 - **`outputFps` is the project's, not the deliverable's.** It is the denominator of the edit's own
@@ -297,10 +395,13 @@ deliverable carries the resolution, because every screen-space term is expressed
 bloom's chain is frozen at 600 whatever the buffer is, so two sizes of one shape reopen
 identically. Point sizes also use the camera's 50-degree boot lens as their reference.
 
-`PROJECT_VERSION` is 8 and presets share it. `aspect` and `outputFps` are additive and bump
+`DOCUMENT_VERSIONS` in `web/format.js` holds one version per document kind: a project is 9, a
+preset 8 and a deliverable 2. Every store, serialiser and refusal reads its kind's entry, and
+`test/document-versions.test.mjs` fails on a version literal anywhere in `server/`, `web/` or
+`bin/`. A project embeds look blocks, so a change to the look's shape bumps project and preset
+together; any other change bumps only its own kind. `aspect` and `outputFps` are additive and bump
 nothing, so an absent `aspect` means the shape of the `outputSize` beside it and an absent
-`outputFps` means 30. `web/format.js` owns the number and the refusal a document from another
-version gets. Deliverables carry their own version, 2, because a version 1 document names a rate
+`outputFps` means 30. A version 1 deliverable is refused rather than read, because it names a rate
 this build ignores: it would parse perfectly and render the wrong file.
 
 ## Clips, and what a cut costs
@@ -354,13 +455,13 @@ term added to the clip block next year is on the clip's clock by existing. That 
 clip means: its look and its place arrive with it, and its stored key times are clip-local too, so
 a saved edit survives being re-cut.
 
-**A clip's look is its own.** Its clip-scope values, its placement, the tracks that move them and
-its parked pool live on the clip; the post chain's terms, the view state, the camera and `requires`
-live on the project. `checkProject` reads each clip's block into that clip and there is no union,
-so two clips may disagree about every value. A preset applies through the same door, so its cloud
-values land on the selected clip and its post values on the project, which moves the grade every
-clip is seen through. Framing stays outside: levelling, clip planes and the crop box belong to the
-shot, and no preset, `none` included, writes them.
+**A clip's look is its own.** Its clip-scope values, its placement, the tracks that move them, the
+effects added to it and its parked pool live on the clip; the post chain's terms, the view state,
+the camera and `requires` live on the project. `checkProject` reads each clip's block into that
+clip and there is no union, so two clips may disagree about every value. A preset applies through
+the same door, so its cloud values land on the selected clip and its post values on the project,
+which moves the grade every clip is seen through. Framing stays outside: levelling, clip planes and
+the crop box belong to the shot, and no preset, `none` included, writes them.
 
 **Which clip is selected is session state and never in the document**, because a document recording
 it would make two people's saves of one edit differ over nothing. Opening a take selects its clip;
@@ -418,6 +519,28 @@ seek through the live transport to restore its source and feedback state. Cached
 prefetches a known boundary's seek window without using the source cursor left behind by the
 last live frame. Preview exceptions disable previews and report the error while the editor's
 animation loop continues. Export bypasses the preview path.
+
+## Audio is a program-time source
+
+A project holds at most one audio clip: a content hash, a `start` and a `duration` in program
+seconds, its conditioning and one mapping. It belongs to no clip, so a clip's `speed` and
+`sourceStart` never move it, and the transport's duration reaches to its end.
+
+`web/audio-source.js` turns normalized PCM into a 100 Hz control curve and answers any program
+position without transport history, so a seek, playback and an export read the same value. It
+measures stereo energy per channel, so opposite phases do not cancel. `web/audio-session.js`
+decodes and plays the soundtrack, aligns it to the transport, and stops it when the transport
+pauses or waits for footage.
+
+The mapping adds `depth × signal` to one scalar effect parameter after the page evaluates its
+value or track, and writes the sum to the runtime parameter. The document keeps the base value,
+the keys, the conditioning and the mapping, and nothing writes the signal into any of them.
+
+`server/audio.js` decodes an upload through FFmpeg with only the pipe protocol allowed, stores
+48 kHz stereo WAV by content hash, and checks the hash on every read. The export server copies
+the checked asset into the render's private directory, trims it to the exported program range
+and fills silence outside the audio clip. The export record carries the program start. The EQ
+conditions the control signal and leaves the soundtrack as imported.
 
 ## Projects, and which one is open
 

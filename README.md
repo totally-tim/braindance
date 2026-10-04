@@ -19,7 +19,7 @@ commitment. Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 - **A Kinect v2.** Without one you can still replay a capture and work on the browser side.
 - **Node 26 or newer.**
 - **macOS on Apple Silicon, or Debian / Raspberry Pi OS** for a capture node.
-- **ffmpeg** for video out, expected at `/opt/homebrew/bin/ffmpeg`. Set `FFMPEG=` to override.
+- **ffmpeg** for video out, on your `PATH`. Set `FFMPEG=` to the program to use another.
 
 
 ## Linux Specific step you might need before install
@@ -56,6 +56,19 @@ npm run replay            # replay captures/sample.knct, no sensor needed
 
 No capture ships with the repo. Record one, or build a synthetic one with
 `npm run fixtures`.
+
+### The desktop app
+
+```bash
+npm ci
+npm ci --prefix desktop
+npm start --prefix desktop
+```
+
+The first start downloads Electron. One window opens on the menu, served from
+`http://127.0.0.1:8480`. Port 8480 has to be free, and the app refuses to start without it. Closing the window quits the app and finishes the take
+being recorded. The library, projects, presets, effects and exports live in the app's data folder,
+`~/Library/Application Support/Braindance` on macOS. It needs Node 26 or newer on the machine.
 
 ## Using it
 
@@ -147,6 +160,12 @@ Drag to orbit, scroll to zoom, right-drag to pan, `H` hides the panel.
 [The controls reference](docs/reference.md#viewer-and-timeline-controls) has the timeline's
 navigation. On a canted mount,
 [level the room](docs/reference.md#levelling-a-canted-mount) first.
+
+Press **Audio** in the timeline to import a song. In the Audio panel, choose a clip, one of its
+effects and a parameter. **Depth** adds the audio signal to the parameter's value or keys. The
+spectrum shows the input and the signal after EQ, and the readouts show the base, the signal and
+the result. Drag the audio lane to move the song. Playback and video exports carry the song. A
+project holds one song and one mapping; [the reference](docs/reference.md#audio) has the rest.
 
 ### 4. Key a camera move
 
@@ -296,7 +315,9 @@ npm run build:native
 `build:native` picks the `macos` preset (OpenCL) or the `linux` preset (OpenGL, for the Pi)
 from the platform and ends by running the grabber it just built. The GL packages on the Debian
 line are required: without them libfreenect2 builds a CPU-only library, and the build refuses
-that. `node tools/build-native.mjs --help` lists the overrides.
+that. `node tools/build-native.mjs --help` lists the overrides. `npm run build:native -- --stage DIR`
+also writes a copy of the grabber and its libraries that runs from wherever `DIR` is moved to; Linux
+needs `patchelf` for it.
 
 ## Going deeper
 

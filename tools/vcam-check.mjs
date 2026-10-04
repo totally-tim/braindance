@@ -1278,7 +1278,7 @@ try {
         Math.abs(moved[0] - 1.5) < 1e-3 && Math.abs(moved[2] - 2.5) < 1e-3, moved.map((v) => v.toFixed(3)).join(', '));
 
       await page.evaluate(() => __kinect.applyProgramOut({ preset: {
-        version: __kinect.library.PROJECT_VERSION, requires: [], values: { exposure: 1.8 },
+        version: __kinect.library.DOCUMENT_VERSIONS.preset, requires: [], values: { exposure: 1.8 },
       } }));
       ok('a source applies a preset through the stored-preset door',
         await page.evaluate('__kinect.params.get("exposure")') === 1.8);

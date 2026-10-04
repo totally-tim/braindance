@@ -67,7 +67,9 @@ fi
 
 run() { # $1=label  $2=grabber  $3=threads
   # A fixed wall-clock window, so every arm gets the same sensor time rather than the same log lines.
-  LIBFREENECT2_REG_THREADS=$3 "$2" --profile > /dev/null 2> "$OUT/$1.txt" &
+  # The grabber stops when its stdin closes, and a background job in a script reads /dev/null, so
+  # a pipe from sleep keeps stdin open through the window and the grace period below.
+  LIBFREENECT2_REG_THREADS=$3 "$2" --profile < <(sleep "$((WINDOW + 30))") > /dev/null 2> "$OUT/$1.txt" &
   local pid=$!
   sleep "$WINDOW"
   kill -INT "$pid" 2>/dev/null || true

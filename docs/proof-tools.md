@@ -29,7 +29,7 @@ total is the tool's `PASS` and `FAIL` rows. A row never decides a verdict.
 
 The tools disagree about what a caught mutation exits. Four exit **0** on a catch and 1 on a miss
 — `registry-check`, `vendor-check`, `registration-check` and `release-gate-check` — so anything
-gating on "non-zero means caught" reads a genuine miss by these four as a catch. Thirteen exit 1 on
+gating on "non-zero means caught" reads a genuine miss by these four as a catch. Fourteen exit 1 on
 a catch *and* 1 on a miss, so the code carries no information and only the printed sentence
 separates them. Seven carry no miss branch at all and exit on the failure count, so a mutation they
 fail to catch exits 0 and reads as a clean pass.
@@ -45,6 +45,7 @@ Per tool, read from the source:
 | `preview-check` | pass, or a **catch** | a failed assertion, or a miss | `DID NOT RUN`: a crash, or an unknown `--mutate` name |
 | `keyframe-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `DID NOT RUN`: a take under 24s, or the page stopped answering |
 | `export-check` | pass, or a missed mutation | a failed assertion, a stale anchor, or a crash (it has no crash handler) | `DID NOT RUN`: a mutation the page never requested, a `--before-url` that is `--url` or cannot be compared |
+| `audio-check` | pass | a failed assertion, a catch, or a miss | `DID NOT FINISH`: 8196 held, no ffmpeg, a stale anchor, a crash |
 | `editor-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a take under 32s, a stale anchor |
 | `library-check` | pass, or a missed mutation | a failed assertion, or a stale anchor | `PASS WITH CLAIMS UNPROVEN`, a held port, or `DID NOT RUN`: a crash |
 | `boot-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8391 held, a crash |
@@ -53,12 +54,14 @@ Per tool, read from the source:
 | `level-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8377 held, no GPU browser |
 | `vcam-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`, or section 6 unproven without an IPv4 |
 | `guard-check` | pass | a failed assertion, a catch, or a miss | `PASS, with claims untested here`: no non-internal IPv4; `DID NOT RUN`: a crash |
+| `desktop-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: 8480 held, no Electron binary, no Playwright, a crash |
 | `jobs-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a port held, a crash |
 | `effect-check` | pass | a failed assertion, a catch, or a miss | `UNTESTED`, or `DID NOT RUN` |
 | `effect-conformance-check` | pass | a failed assertion, a catch, or a miss | `UNTESTED`, or `DID NOT RUN` |
 | `module-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a stale anchor |
 | `syntax-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor |
 | `cpp-check` | pass, or a missed mutation | a failed assertion | `DID NOT RUN`: a stale anchor, no compiler or headers |
+| `grabber-stdin-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: a stale anchor, no compiler or TurboJPEG, a grabber that will not build |
 | `decoder-check` | pass, or a missed mutation | a failed assertion, a catch, or a probe that will not build or run | `DID NOT RUN`: no compiler, no built library or grabber, a stale anchor, a failed rebuild, or a mutated rebuild that changed nothing |
 | `grabber-args-check` | pass | a failed assertion, a catch, or a miss | `DID NOT RUN`: no `vendor/prefix`, build-native failed, a mutation the binary did not change, a stale anchor |
 | `vendor-check` | pass, or a **catch** | a failed assertion, a miss, or a stale anchor | `PASS on the source, with the artifact untested` |
@@ -155,8 +158,8 @@ which take hours and a GPU browser; all but `library` need a server at `SWEEP_UR
 `fixture-1g`).
 
 `--jobs` above 1 runs mutations side by side, and the sweep refuses it unless every named tool is
-one of `syntax`, `module`, `cpp`, `hd-encoder` and `release-gate`: those apply a mutation in memory
-or in a private temp copy and bind no port. Every other tool stages its mutation where a second
+one of `syntax`, `module`, `cpp`, `hd-encoder`, `grabber-stdin` and `release-gate`: those apply a
+mutation in memory or in a private temp copy and bind no port. Every other tool stages its mutation where a second
 run would read it.
 
 ## `suite`
@@ -182,8 +185,8 @@ stages:
 
 1. `syntax-check`, `module-check`, `cpp-check`, the unit tests, `release-gate-check` and
    `vendor-check`, side by side.
-2. The nine tools that start their own servers on ports no other tool binds — `guard`, `boot`,
-   `monitor`, `level`, `vcam`, `cli`, `jobs`, `effect` and `library` — all at once.
+2. The ten tools that start their own servers on ports no other tool binds — `guard`, `boot`,
+   `monitor`, `level`, `vcam`, `cli`, `jobs`, `effect`, `audio` and `library` — all at once.
 3. A server of its own on `--port`, with the fake grabber and its stores in a temporary
    directory, and against it, one after another, `registry`, `timeline`, `keyframe`, `export`,
    `editor`, `preview`, `effect-conformance`, `determinism`, `sensor-view` and `index`. The tools
@@ -206,12 +209,13 @@ they are.
 Stage 2 lasts as long as `library-check`, and `editor-check` and `preview-check` are most of stage
 3.
 
-It leaves out `hd-encoder-check`, `decoder-check` and `registration-check`, which need a native
-build, a built library or a corpus, and `sweep-all`, which runs mutations. A `*-check.mjs` it
+It leaves out `hd-encoder-check` and `grabber-stdin-check`, which compile native code, `decoder-check`
+and `registration-check`, which need a built library or a corpus, `desktop-check`, which opens Electron
+windows on the display, and `sweep-all`, which runs mutations. A `*-check.mjs` it
 neither runs nor leaves out by name comes back DID NOT RUN, so a new tool is placed in a stage or
 named as left out.
 
-Stage 2 puts nine tools and their browsers on the machine at once. Two suites, or a suite beside
+Stage 2 puts ten tools and their browsers on the machine at once. Two suites, or a suite beside
 one of its own tools, collide on the fixed ports, so run one at a time.
 
 ## `determinism-check`
@@ -605,12 +609,68 @@ camera, requiring the smallest sprite above the 10.8-reference-pixel normalizati
 - **`export-fail-unlinks-output`** — the failure path reaches back to an output it did not write.
 - **`export-ignores-the-size-cap`** — the size door is taken out, so an export larger than the
   context's target limit starts. Fails section 10's first row alone.
+- **`export-range-is-not-held`** — a range asked for by `in` and `out` is put on the grid as asked,
+  so one outside the open range starts where the transport's first seek does not land. Fails
+  section 11's overlap and apart rows.
+- **`export-ends-on-the-nearest-frame`** — the out point rounds to its nearest frame, which the
+  transport refuses to step to when it lies past the out point. Fails section 11's off-grid row
+  alone.
 
 On a `make-sample` fixture a clean tree passes. The resolution arms draw at `pointSize` 36: that
 fixture's back wall faces the camera at one depth, so its sensor lattice lands 1.17px apart at
 960x600, and narrower sprites alias it into a beat that 1920x1200 resolves. The grain row compares
 1728x1080 with 3456x2160, because a grain cell is one reference pixel and 960x600 cannot hold it.
 A red in section 4 alone is inherited state: clear the server's working project and re-run.
+
+## `audio-check`
+
+An imported song drives one effect parameter on top of its base value, and the exported file
+carries the song's own samples at the program position the export starts at.
+
+```
+node tools/audio-check.mjs
+node tools/audio-check.mjs --queue
+```
+
+| needs | |
+| --- | --- |
+| port | 8196 free; `--port` moves it |
+| fixture | none: a 120-frame `make-sample` take and two generated tones; `--source` and `--audio` substitute a capture and a song |
+| browser | a GPU browser |
+| binaries | ffmpeg, resolved as the server resolves it |
+
+It stages `web/`, `server/` and both builtin roots in a temporary directory, runs its own server
+there, and deletes the tree on the way out, so no store resolves into the checkout. Its main tone
+is quiet for two seconds and loud after. It drives the real file chooser, the destination list,
+every conditioning control, depth, placement, undo, reload, a missing asset, a clip deleted under a
+pending audio edit, a reset pressed during an export, and removal. It renders previews and plays
+from the quiet half into the loud half on cached frames, and reads the audio readouts and spectrum
+there. It opens the saved project a second time from `braindance.local`, which the browser resolves
+to loopback and gives no secure context, as a LAN editor's plain-HTTP origin has none. Its export
+rows compare the lossless file's PCM sample for sample against the stored asset, once starting
+inside the audio clip and once before it. `--queue` adds a job through `POST /jobs` and
+`render-worker --once`, and compares that file's samples too. `--shots DIRECTORY` saves the panel
+and an MP4 outside the checkout. A run that does not finish prints `DID NOT FINISH` with its stack
+and exits 2.
+
+- **`signal-disconnected`** — the renderer stops applying the audio. Fails the rows that need
+  depth to change the frame and the result.
+- **`mux-ignores-start`** — the export trims the song from program 0. Fails the exact-sample row.
+- **`added-effect-hidden`** — an effect added at its defaults is left out of the destinations.
+- **`space-keeps-control-focus`** — Space stays with a focused slider, selector or number field.
+- **`text-field-loses-space`** — the text-field exception goes, so a space typed into the effect
+  search starts the transport.
+- **`delete-edits-target-in-place`** — deleting the target clip clears the mapping inside the
+  same object, so an audio edit waiting on its analysis puts the mapping back onto the deleted
+  clip and the project no longer reopens.
+- **`audio-hashed-in-the-page`** — the page hashes the downloaded asset with `crypto.subtle`, so
+  the plain-HTTP page cannot open the project.
+- **`reset-retains-before-refusal`** — a reset pressed during an export adds its effect to the
+  document before the edit is refused, and commits an undo step.
+- **`cached-frame-skips-audio`** — a frame shown from the preview cache skips the audio, so the
+  readouts and the spectrum stay at the last frame the renderer drew.
+- **`undo-leaves-spectrum-empty`** — the paused spectrum is never rebuilt after an undo restores
+  the earlier song.
 
 ## `editor-check`
 
@@ -709,6 +769,19 @@ line in a recorder, the confirm's Delete removes the file. Every driven control 
 `dead-<key>` mutation that leaves it rendered and inert and reddens that key's row, and the sweep
 requires the drivers and the `dead-` mutations to name the same controls. A dialog's buttons are
 reached through the control that opens the dialog, so a dead opener reddens their rows as well.
+
+After each press the sweep shuts every dialog and waits up to five seconds for the viewer's `close`
+event before it repaints. Chromium delivers that event a frame after `close()`, and the page's
+repaint re-opens a viewer it still holds, so without the wait the late event releases the viewer the
+next row opened (`frame undefined -> undefined` on the mark row). When the event never comes, the
+repaint goes ahead and a last row, which requires the page to be shut and idle after every press,
+names the press that left it open.
+
+In the viewer section, pressing a mark waits up to five seconds for the viewer to draw. A press that
+draws nothing fails the mark row with the frame the viewer stayed on, and the run goes on to the
+sections after it. A lost page ends the run as `DID NOT RUN`. `dead-mark` leaves the marks
+drawn with an empty seek, so it reddens every row that presses or reads a mark, the sweep's `mark`
+row among them.
 
 181 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
 
@@ -909,7 +982,130 @@ is NOT CAUGHT even though it exits 1.
 The early-return row is the part of the grabber's failed corpus write that runs without a sensor:
 an encoder left running when its scope ends is joined. The write itself happens after the device
 starts, so the grabber's exit 1 on a short write needs a sensor and a filesystem that fills during
-the dump, and no tool here reaches it.
+the dump, and no tool here reaches it. `grabber-stdin-check` reaches the exit 1 for a corpus file
+that will not open.
+
+## `grabber-stdin-check`
+
+What `stop` and end-of-file on stdin do to the grabber. No sensor, no libfreenect2 build and no
+port. It runs in three parts.
+
+The reader part extracts `applyLowLight` and `pollCommands` out of `native/grabber.cpp`, compiles
+them with the stubs in `test/fixtures/grabber-stdin.cpp`, and feeds them a real non-blocking pipe on
+descriptor 0.
+
+The writer part extracts the output writer, `write_message` and what it calls, and compiles it with
+`test/fixtures/grabber-write.cpp`. The fixture runs the frame loop's thread and the encoder's on a
+pipe the parent leaves unread. The frame writer stalls in a 512 KiB message, a stop reaches it
+through the stdin its stalled wait reads, and the encoder's message starts while the frame writer
+waits or after it returned. Each step waits for the one before it to have happened, so no outcome
+depends on a sleep. The tool compiles the writer with the fixture's `ContendedMutex` in place of
+`std::timed_mutex`. It records which writer holds it and counts the encoder's attempts that found
+the frame writer holding it, so the stop goes in only once the encoder is waiting on the lock. The tool reads the stream through
+`MessageParser` from `server/protocol.js`. In the built grabber a stop and a cut usually come
+together, and either rule alone then refuses the next message. The fixture also separates them: a
+stop with nothing cut, and a cut with no stop. The cut with no stop comes from a file whose size
+limit refuses the rest of a frame and is then lifted.
+
+The stream part builds the whole of `native/grabber.cpp` against `test/fixtures/fake-freenect2.cpp`,
+which defines the libfreenect2 symbols the grabber calls behind the real headers, and runs the
+result as a child. The fake device delivers synthetic frames from a thread, paced by
+`FAKE_DEPTH_MS`, `FAKE_COLOUR_EVERY`, `FAKE_MAX_FRAMES` and `FAKE_REGISTER_MS`. `FAKE_OPEN_MS`
+delays the device open, so a signal can arrive before the hello. The tool does not
+read the child's stdout until a row says to, so the first frame fills the pipe and the capture loop
+waits in a write when the stop arrives. A stop has 4000 ms. The tool kills a child still running at
+the bound, and its row fails.
+
+It proves the stop path through the real capture loop, the output waits, the encoder thread and the
+teardown, and that a message cut short ends the output. The fake sensor counts the frames the
+grabber takes and the frames it gives back and prints both when its device closes, so every
+teardown row asserts they match. That counts the grabber's own releases. The USB link,
+libfreenect2's own stop and close, and the server as the parent need a sensor and are not in it.
+
+```
+node tools/grabber-stdin-check.mjs
+```
+
+| needs | |
+| --- | --- |
+| toolchain | a C++ compiler for the reader and writer parts; the stream part adds TurboJPEG's headers and library. Without them it exits 2 |
+| fixture | none: each row writes into the pipe and closes it itself |
+
+The rows that hold the pipe open are the control for the rows that close it. A reader that took -1
+with `EAGAIN` for end-of-file would stop on a pipe with nothing in it, and the open-pipe rows would
+fail. Each stream row that stops a stalled grabber has a row ahead of it showing the grabber stalled:
+no new frame for 450 ms, where depth arrives every 10 ms. The writer rows are:
+
+- two writers and no stop: the encoder waited on the lock, and both messages arrive whole, each
+  carrying only its own bytes. This is the control for a writer that refuses too much;
+- a second message waiting on the lock behind a frame the stop cuts short, and one that starts after
+  the frame gave up with the lock free and the pipe read empty: the frame writer reports its
+  message abandoned, the second write is refused, the parent's stream is the cut frame and ends
+  there, and the shipped parser holds it as one unfinished message;
+- a stop with nothing cut: the frame written before the stop is whole, and a message that starts
+  after the stop on a free lock, with the parent reading, is refused. This is the encoder's key
+  after its colour finished;
+- a cut with no stop: the output refuses the rest of a frame and then takes bytes again, and the
+  next message is still refused.
+
+The stream rows are:
+
+- a stop line, and end-of-file, with the first frame stuck in an unread pipe;
+- a stop line with the encoder thread holding the write lock on a full pipe while the frame loop
+  waits for it;
+- a command written while a write is stalled is applied at once and does not stop the run, the
+  stalled frame completes, and the stream stays whole. This is the control for a fix that stops on
+  any stdin activity;
+- a stop line to a parent that is still reading, which paces its reads so a write is nearly always
+  waiting: the stream ends on a message boundary. This is the control for a fix that gives a frame
+  up the moment a stop is set;
+- a SIGTERM while the device opens: nothing is written, not even the hello, and the run ends
+  through its teardown with exit 0;
+- a stop line, and end-of-file, already waiting when the first frame arrives: nothing follows the
+  hello, and the one depth frame the loop took is given back;
+- two exits that no stop requested, each with the encoder stalled in a write: the sensor goes quiet
+  and the loop leaves on its ten-second frame timeout, and a corpus file will not open.
+
+Exit 2 means it did not finish; a mutation with zero failed assertions is NOT CAUGHT even though it
+exits 1. Each mutation runs the part it names: reader, writer or stream.
+
+- **`eof-never-stops`** — end-of-file is compared with a value `read` never returns, and the
+  closed-pipe rows fail.
+- **`would-block-stops`** — -1 is read as end-of-file, and the open-pipe rows fail.
+- **`eof-drops-the-commands-it-arrives-with`** — the reader returns on end-of-file before it parses
+  what it read, and the same-pass row fails.
+- **`stop-line-ignored`** — the `stop` line stops matching, and the stop rows fail while the
+  end-of-file rows stay green.
+- **`stop-matches-a-prefix`** — any line that begins `stop` stops the run, and the near-miss row
+  fails.
+- **`cut-message-leaves-the-output-open`** — a write that gave up part-way no longer closes the
+  output to the next writer, and the cut rows find its bytes after the cut, where the parser
+  desyncs.
+- **`cut-message-does-not-close-the-output`** — the write that gave up leaves nothing for a later
+  write to refuse, and the same rows fail.
+- **`new-message-after-stop`** — a writer that finds the lock free after a stop starts its message,
+  and the stopped rows find it after the frame.
+- **`queued-encoder-never-waits`** — the fixture starts the encoder only once the frame writer has
+  returned, and the queued row finds that the encoder never found the frame writer holding the
+  lock. Its other queued rows still pass.
+- **`stalled-write-never-gives-up`** — a write on a full pipe keeps waiting after the stop is read,
+  and every stalled-stop row hangs.
+- **`stalled-write-ignores-stdin`** — nothing reads stdin while a write waits, and the stalled-stop
+  rows hang and the command row sees its command unread.
+- **`frame-lock-ignores-stdin`** — the loop waiting for the write lock never reads stdin, and the
+  row where the encoder holds the lock hangs.
+- **`stdout-left-blocking`** — stdout stays blocking, so a write sits in the kernel, and the
+  stalled-stop rows hang.
+- **`early-stop-keeps-the-depth-frame`** — the loop leaves on a stop without giving back the depth
+  frame it took, and the rows with a stop already waiting find a frame taken and not returned.
+- **`stop-before-the-hello-skips-teardown`** — a hello refused on a stop returns 1, and the
+  SIGTERM row finds no teardown and exit 1.
+- **`stalled-write-gives-up-at-once`** — a write gives up as soon as a stop is set, and the
+  reading-parent row and the whole-stream row after the command row end on a cut frame.
+- **`teardown-leaves-the-encoder-writing`** — the flag that ends an encoder's stalled write is not
+  set before the join, and the frame-timeout row hangs.
+- **`corpus-failure-leaves-the-encoder-writing`** — the same flag is not set before the early
+  return that destroys the encoder, and the corpus row hangs.
 
 ## `vcam-check`
 
@@ -1059,10 +1255,92 @@ exits 2, because a crash counted as a failed assertion reads under `--mutate` as
 - **`origin-allows-null`** — the literal string `null`, which a `file://` page and a sandboxed
   iframe both send, is treated as same-origin.
 
+## `desktop-check`
+
+The desktop shell shows the service's own origin and no other, answers the bridge only for its own
+window, reveals only a path the user chose or one inside its data folders, starts nothing for a
+second launch, refuses a held port by name, and ends its service and then its own process when its
+last window closes.
+
+```
+node tools/desktop-check.mjs
+```
+
+| needs | |
+| --- | --- |
+| port | 8480 free: the shell has no other, and the tool exits 2 naming what answers. The close launch takes a debugging port from Chromium |
+| install | `npm ci` at the root for Playwright, and `npm ci --prefix desktop` for Electron |
+| display | the windows open on the desktop; no GPU browser |
+| binaries | Node 26 on `PATH`, `lsof`, `ps` |
+
+It stages `desktop/` under `.desktop-check/` and runs the staged copy against the real
+`server/index.js` on a scratch profile, so a mutation never touches the checkout and no real library
+is written. Two kinds of launch carry the rows.
+
+The attached run goes through Playwright's Electron support and holds the window, navigation and
+bridge rows. They read the window's origin and web preferences, send the page to another host name,
+another site and a file, call `window.open`, and call the four bridge functions with `dialog` and
+`shell` stubbed in the main process, so no native dialog opens and nothing reaches the OS browser or
+the file manager. Each refusal has a positive twin: a path of the service is allowed, and the bridge
+answers the service page. A page that is not the service asks the bridge too. The reveal rows write
+real files, because the bridge reveals only what exists. They ask for the three paths the dialogs
+return and for a file in a data folder, and expect the bridge to show each. They ask for a file
+outside every data folder, a system file, a `..` climb out of a data folder, a directory link and a
+file link that lead out of one, and a path that does not exist, and expect the bridge to refuse
+each. The stub for `showItemInFolder` records what the bridge handed it, and each refusal row reads
+both the refusal and that the record did not grow. The same file is refused before the dialog
+returns it and shown after. The second launch is a plain Electron process on the same profile, run
+while the first window is minimized.
+
+The attached run ends by closing its windows and claims nothing about exit, because Playwright holds
+an exiting Electron open while its debugger is attached. The close rows run on a separate plain
+Electron launch on its own profile, started with `--remote-debugging-port=0`. The tool closes the
+window over Chromium's debugging endpoint, as a click on its close box would, and waits on two
+deadlines. The service has `STOP_GRACE_MS` to exit, and its rows read the `service exited` line of
+the app, the process table and the port. The Electron process has `APP_EXIT_MS`, 180 seconds, to end
+once its service has, and its rows read that process's own exit event: it must end without a kill by
+the tool, and with code 0. A kill after the wait is the failure the row reports, beside the load
+average at that moment. Chromium's teardown after `app.exit` runs from seconds to minutes on a
+loaded machine, so a failure of these rows under load is a rerun on a quiet machine.
+
+The two dialogs a person reads are not driven: the Node 26 refusal is held by the unit tests of
+`findNode`, and both refusals share `refuse` in `desktop/main.js`. A launch from Finder, whose
+`PATH` is minimal, is unproven here, because the tool runs from a shell that has Node on `PATH`.
+
+A run that stops before its verdict prints `DID NOT RUN` with the count so far and exits 2.
+
+- **`navigation-allows-any-origin`** — every page is the window's own. The rows for another host
+  name and another site redden. The same-origin twin stays green, and so does the file row, because
+  Chromium refuses a `file:` URL from an http page whatever the shell says.
+- **`popups-open-in-the-app`** — `window.open` opens a window of its own. The row counting windows
+  reddens. The row for the OS browser stays green, because the handler still hands the link over.
+- **`sandbox-off`** — the renderer is not sandboxed. The sandbox row reddens.
+- **`bridge-skips-the-sender-check`** — the bridge answers any sender. The row that asks from a page
+  that is not the service reddens, with the row for the dialog it must not open.
+- **`reveal-any-absolute-path`** — the bridge reveals any absolute path. The two rows for a file
+  nobody chose redden, and so do the rows for a system file, a `..` climb, the two links and a path
+  that does not exist. The rows for a path a dialog returned and a path in a data folder stay green.
+- **`reveal-skips-realpath`** — the path is judged as written. The rows for the directory link, the
+  file link and the missing path redden. The climb row stays green, because resolving the path
+  already removes a `..`.
+- **`picks-are-not-recorded`** — a path a dialog returned is forgotten at once. The row for the three
+  paths and the row for the file refused before its dialog redden. The data folder row stays green.
+- **`close-kills-the-service`** — Quit kills the service in place of writing `stop`. The service's
+  exit code and the app's exit code redden.
+- **`app-exit-is-skipped`** — Quit stops the service and never calls `app.exit`. The two rows that
+  read the Electron process itself redden, for the missing exit and for the missing code 0. The rows
+  for the service and the port stay green, because the service ends before the app fails to.
+- **`second-launch-takes-no-lock`** — a second launch is not handed over. The rows where it exits and
+  where the first window returns redden. The one-service row stays green, because the held port
+  refuses the second start as well.
+- **`busy-port-is-not-checked`** — the held-port probe is gone. The service starts and dies on the
+  port, so the rows for the named refusal and for no service output redden.
+
 ## `jobs-check`
 
-The queue only hands a job to a machine that can reproduce it, and a job carries enough to be
-reproduced at all.
+The queue only hands a job to a machine that can reproduce it, a job carries enough to be
+reproduced at all, a cancel reaches a queued job and a render under way, a worker whose queue stops
+answering gives its claim up, and a render records what it ran on.
 
 ```
 node tools/jobs-check.mjs
@@ -1081,6 +1359,14 @@ copy of `server/`, not the repo's, and it reads its renderer class out of the br
 render in. Some mutations are queue semantics and take `--no-render`; others need the render
 block, so reading every mutation run as `--no-render` is wrong.
 
+The budget section runs the worker twice behind the forwarding proxy, once with every heartbeat
+answered 500 and once with every heartbeat left unanswered, so only the worker's own timeout ends
+it. Each starts failing when the export's scratch directory appears, and `--beat 200` turns the
+seven failures into about a second and a half, which the render has to outlast.
+`test/render-worker.test.mjs` drives the same `runQueue` with a scripted queue and a scripted
+browser and needs no port: the budget in both timings, a cancel, a lost lease, a report the queue
+records as failed, and heartbeat replies that arrive after their job has ended.
+
 - **`claim-ignores-renderer`** — `rendererMatches` returns true for every pairing, so a job pinned
   to one renderer class is handed to any worker.
 - **`claim-hides-blocked`** — a claim with nothing to hand out returns an empty blocked list and a
@@ -1089,7 +1375,8 @@ block, so reading every mutation run as `--no-render` is wrong.
   rule, so a take id reaches the queue.
 - **`envelope-takes-the-callers-captures`** — the footage a job renders comes from the caller's
   list instead of being derived from the clips.
-- **`worker-reads-any-job-version`** — the worker's gate on the job envelope's version goes.
+- **`store-reads-any-job-version`** — the store hands out a job file of another version instead of
+  listing it as refused.
 - **`worker-preflights-only-the-first-capture`** — the worker asks its library about the first
   hash a job names instead of every one.
 - **`attestation-passes-on-a-mismatch`** — the worker stops comparing what the page opened against
@@ -1107,6 +1394,15 @@ block, so reading every mutation run as `--no-render` is wrong.
   reclaims one whose worker is gone.
 - **`heartbeat-ignores-lease`** — the heartbeat's lease comparison goes, so another claim's beat
   renews the job.
+- **`cancel-queued-does-nothing`** — a cancel of a queued job answers 200 and leaves it queued.
+- **`claim-skips-environment`** — a claim records no app build, effect versions or renderer class.
+- **`finish-skips-sidecar`** — a done render's sidecar is never amended with the version record.
+- **`finish-records-done-over-a-failed-sidecar`** — a done report whose artifact cannot take the
+  record is kept as done instead of stored as failed.
+- **`worker-ignores-cancel`** — the heartbeat decision stops reading a cancel request, so a cancelled
+  render runs to its end.
+- **`worker-ignores-budget`** — the worker acts on every verdict but the seventh failed heartbeat, so
+  a render whose queue went away runs to its end and reports done.
 - **`heartbeat-stops-on-first-error`** — the worker stops beating on the first failed beat instead
   of reporting a missed one.
 - **`static-serves-nothing`** — the static route throws after its `stat`, so the worker's page
@@ -1131,6 +1427,10 @@ block, so reading every mutation run as `--no-render` is wrong.
   worker's store readings.
 - **`preflight-reads-a-failure-as-an-empty-store`** — the status, shape and entry checks come off
   that read, leaving `?? []` where they were.
+- **`app-record-is-the-preview-version`** — a job's app build is the preview cache's digest of
+  the browser files, so a change to the export's encoder arguments or audio mux warns nobody.
+- **`queue-cannot-measure-takes`** — the queue can no longer read a take's length, so a clip
+  with no length that runs past four hours is queued instead of refused at enqueue.
 
 ## `effect-check`
 
@@ -1573,7 +1873,9 @@ gets one line on stderr and is not refused.
 ## The supply-chain gate
 
 `release-gate-check` proves this repo's gate is armed: that `.npmrc` names a minimum release age,
-and that the npm doing the installing actually refuses on it.
+and that the npm doing the installing actually refuses on it. It asks twice, once for the root and
+once for `desktop/`, because npm reads the `.npmrc` beside the nearest `package.json` and no other,
+so the root's gate does not protect `desktop/`'s installs.
 
 ```
 node tools/release-gate-check.mjs
@@ -1599,6 +1901,9 @@ directory with no `.npmrc` to prove the cutoff came from the file under test.
 - **`wrong-unit`** — `min-release-age=2d`, a value npm cannot parse.
 - **`no-gate`** — an `.npmrc` naming no gate.
 - **`absent`** — no `.npmrc` at all, so a contributor cloning the tree inherits nothing.
+- **`desktop-ungated`** — an `.npmrc` naming no gate under `desktop/` alone, with the root's gate
+  untouched. Only the `desktop/` rows redden.
+- **`desktop-absent`** — no `.npmrc` under `desktop/` alone.
 
 ## Command line and standby
 

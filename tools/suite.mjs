@@ -48,6 +48,7 @@ const SELF_SPAWNING = [
   { name: 'cli-check', ports: [8401] },
   { name: 'jobs-check', ports: [8231, 8232] },
   { name: 'effect-check', ports: [8281] },
+  { name: 'audio-check', ports: [8196] },
   { name: 'library-check', ports: range(8210, 8227) },
 ];
 const ON_ONE_SERVER = [
@@ -65,7 +66,9 @@ const ON_ONE_SERVER = [
 // A check tool this file neither runs nor leaves out by name is reported as not run, so a new tool
 // is asked about by existing.
 const LEFT_OUT = {
+  'desktop-check': 'opens Electron windows on the display, and needs `npm ci --prefix desktop`',
   'hd-encoder-check': 'compiles and runs native code against TurboJPEG',
+  'grabber-stdin-check': 'builds the grabber against a fake sensor and runs it',
   'decoder-check': 'needs vendor/prefix and the built grabber',
   'registration-check': 'needs a corpus from grabber --dump-corpus',
 };

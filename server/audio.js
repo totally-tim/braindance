@@ -1,0 +1,144 @@
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { createReadStream, constants } from 'node:fs';
+import { link, mkdir, mkdtemp, open, readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { pipeline } from 'node:stream/promises';
+import { validAudioHash, AUDIO_RATE, AUDIO_SECONDS, AUDIO_UPLOAD_BYTES, readAudioWav } from '../web/audio-source.js';
+import { ffmpegBinary, killRefusal } from './export.js';
+
+const digest = (bytes) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+
+// How long an upload's body has to arrive. 64 MiB crosses a LAN in seconds.
+export const AUDIO_UPLOAD_MS = 120_000;
+
+export class AudioStore {
+  constructor(root, { uploadMs = AUDIO_UPLOAD_MS } = {}) {
+    this.root = root;
+    this.uploadMs = uploadMs;
+    this.importing = false;
+    this.writes = 0;
+    this.stopped = false;
+    // The running import's upload while it arrives and its decoder while it runs, which `stop` ends.
+    this.running = null;
+  }
+
+  async read(hash) {
+    if (!validAudioHash(hash)) throw new Error('invalid audio content hash');
+    const file = await open(join(this.root, `${hash.slice(7)}.wav`), constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const stat = await file.stat();
+      if (!stat.isFile() || stat.size > AUDIO_SECONDS * AUDIO_RATE * 4 + 4096) throw new Error('audio asset is not a bounded WAV file');
+      const bytes = await file.readFile();
+      if (digest(bytes) !== hash) throw new Error('audio asset content does not match its hash');
+      return bytes;
+    } finally { await file.close(); }
+  }
+
+  async import(stream) {
+    if (this.stopped) throw new Error('the server is stopping, so it imports no audio');
+    if (this.importing) throw new Error('another audio import is running');
+    this.importing = true;
+    let settle;
+    const run = { upload: stream, decoder: null, leftover: null, settled: new Promise((done) => { settle = done; }) };
+    this.running = run;
+    let scratch = null;
+    let deadline = null;
+    try {
+      await mkdir(this.root, { recursive: true });
+      scratch = await mkdtemp(join(this.root, '.import-'));
+      // The body is read whole before anything is written, so the deadline times the upload and
+      // never the disk: a write awaited inside this loop stops the request being read.
+      deadline = setTimeout(() => {
+        stream.destroy(new Error(`audio upload took longer than ${this.uploadMs / 1000} seconds`));
+      }, this.uploadMs);
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of stream) {
+        size += chunk.length;
+        if (size > AUDIO_UPLOAD_BYTES) throw new Error(`audio import exceeds ${AUDIO_UPLOAD_BYTES} bytes`);
+        chunks.push(chunk);
+      }
+      clearTimeout(deadline);
+      run.upload = null;
+      if (!size) throw new Error('audio file is empty');
+      const input = join(scratch, 'input');
+      const file = await open(input, 'wx');
+      try {
+        await file.writeFile(chunks);
+      } finally { await file.close(); }
+      const output = join(scratch, 'audio.wav');
+      await new Promise((resolve, reject) => {
+        // With no await between this and the spawn, a stop either finds the decoder or prevents it.
+        if (this.stopped) {
+          reject(new Error('the server stopped before the audio was decoded'));
+          return;
+        }
+        const child = spawn(ffmpegBinary(), [
+          '-hide_banner', '-nostdin', '-loglevel', 'error', '-protocol_whitelist', 'pipe', '-i', 'pipe:0',
+          '-map', '0:a:0', '-vn', '-t', String(AUDIO_SECONDS + 0.01), '-ac', '2', '-ar', String(AUDIO_RATE),
+          '-c:a', 'pcm_s16le', '-map_metadata', '-1', '-fflags', '+bitexact', '-flags:a', '+bitexact', output,
+        ], { stdio: ['pipe', 'ignore', 'pipe'] });
+        run.decoder = child;
+        let error = '';
+        const timeout = setTimeout(() => { child.kill('SIGKILL'); }, 60000);
+        child.stderr.on('data', (chunk) => { error = (error + chunk).slice(-2000); });
+        // A kill that fails emits `error` too, with the decoder still running and writing the scratch.
+        child.on('error', (err) => {
+          if (child.pid === undefined) reject(err);
+          else console.error(`[audio] decoder ${child.pid}: ${err.message}`);
+        });
+        child.on('close', (code) => {
+          clearTimeout(timeout);
+          if (code === 0) resolve();
+          else reject(new Error(`audio could not be decoded: ${error.trim() || 'decoder stopped or timed out'}`));
+        });
+        pipeline(createReadStream(input), child.stdin).catch(() => { /* Decoder refusal is reported on close. */ });
+      });
+      const bytes = await readFile(output);
+      const { duration } = readAudioWav(bytes);
+      const hash = digest(bytes);
+      try {
+        // Publish the complete file atomically; a failed write must not occupy its content hash.
+        await link(output, join(this.root, `${hash.slice(7)}.wav`));
+        this.writes++;
+      } catch (err) {
+        if (err.code !== 'EEXIST') throw err;
+        await this.read(hash);
+      }
+      return { hash, duration };
+    } finally {
+      clearTimeout(deadline);
+      // A failed removal is logged rather than thrown: it must neither hide the import's own error
+      // nor keep the slot taken.
+      try {
+        if (scratch) await rm(scratch, { recursive: true, force: true });
+      } catch (err) {
+        run.leftover = `import scratch ${scratch} was not removed: ${err.message}`;
+        console.error(`[audio] ${run.leftover}`);
+      } finally {
+        this.importing = false;
+        this.running = null;
+        settle();
+      }
+    }
+  }
+
+  /**
+   * Refuses every later import and ends the running one: its upload, or its decoder with SIGKILL.
+   * Resolves once the import has removed its scratch, and rejects when it could not, or when the
+   * decoder did not take the kill and its scratch stays.
+   */
+  async stop() {
+    this.stopped = true;
+    const run = this.running;
+    if (!run) return;
+    run.upload?.destroy(new Error('the server stopped during the upload'));
+    const refusal = run.decoder && killRefusal(run.decoder);
+    if (refusal) {
+      throw new Error(`the decoder ${run.decoder.pid} did not take SIGKILL (${refusal.message}), so the import's scratch stays`);
+    }
+    await run.settled;
+    if (run.leftover) throw new Error(run.leftover);
+  }
+}

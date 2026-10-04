@@ -139,6 +139,15 @@ A preview canvas can report `hidden` while an inline display style keeps it visi
 live renderer. Read actual page visibility after pause and resize, and compare its bounds with
 the live stage; `preview-check` falsifies both readings.
 
+## End every process a check starts
+
+A test that starts a child ends it in its own `t.after`: a stop, a kill when the stop has not
+ended it within a bound, and an assertion that the process is gone. That hook does not run when
+the test process itself is killed, so the child also exits when its stdin closes. A stub that
+ignores the stop line keeps that exit, or a killed parent leaves it running with parent pid 1.
+`test/desktop-stub.mjs` holds the rule. Three tests in `test/desktop-service.test.mjs` check it, each
+with the stub running: a test that fails an assertion, a test that times out, and a killed parent.
+
 ## Re-run the baseline in the failure's conditions
 
 Before believing a proof tool caught your change, run the unmodified tree in the conditions the

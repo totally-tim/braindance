@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import WebSocket from 'ws';
 import { VERBS, MUTATION_EXEMPTIONS } from '../bin/verbs.js';
-import { PROJECT_VERSION } from '../web/format.js';
+import { DOCUMENT_VERSIONS } from '../web/format.js';
 
 const MUTATIONS = {
   'partial-preset-retains-old-look': { file: 'web/main.js', edits: [[
@@ -24,8 +24,8 @@ const MUTATIONS = {
   // `all` rather than `allSettled`: the recorder's rejection wins the race, so the process is gone
   // before the grace period ends and the grabber that ignored SIGTERM is left holding the sensor.
   'shutdown-abandons-a-stubborn-grabber': { file: 'server/index.js', edits: [[
-    '    const [grabber, take] = await Promise.allSettled([',
-    '    const [grabber, take] = await Promise.all([',
+    '    const [grabber, take, audio, exports] = await Promise.allSettled([',
+    '    const [grabber, take, audio, exports] = await Promise.all([',
   ]] },
   'idle-ignores-the-recorder': { file: 'server/index.js', edits: [[
     '      && !recordingStarts && !recorder.armed && !recorder.take;', ';',
@@ -232,7 +232,7 @@ async function main() {
     check((await cli('record', 'mark')).code === 0, 'CLI marks a take');
     check((await cli('record', 'stop')).code === 0, 'CLI stops and reads state');
 
-    const preset = { version: PROJECT_VERSION, requires: [], values: { exposure: 1.7 } };
+    const preset = { version: DOCUMENT_VERSIONS.preset, requires: [], values: { exposure: 1.7 } };
     for (const [name, body] of Object.entries({ cli: preset, old: { ...preset, version: -1 }, missing: { ...preset, requires: [{ id: 'absent-effect' }] } })) {
       writeFileSync(join(WORK, 'presets', `${name}.json`), JSON.stringify(body));
     }
@@ -245,7 +245,7 @@ async function main() {
     await until(() => fresh.messages.filter((msg) => msg.programOut).length >= 3);
     check(JSON.stringify(fresh.messages.filter((msg) => msg.programOut).slice(0, 3).map((msg) => Object.keys(msg.programOut)))
       === JSON.stringify([['mode', 'size'], ['preset'], ['params']]), 'connect restores output in three ordered messages');
-    for (const [name, status, text] of [['unknown', 404, 'no preset named unknown'], ['old', 409, String(PROJECT_VERSION)], ['missing', 409, 'absent-effect']]) {
+    for (const [name, status, text] of [['unknown', 404, 'no preset named unknown'], ['old', 409, String(DOCUMENT_VERSIONS.preset)], ['missing', 409, 'absent-effect']]) {
       const result = await json('/output', { preset: name });
       // The refusal is the store's sentence rather than the filesystem's, and it carries no path:
       // this text is what an operator reads on the record page.

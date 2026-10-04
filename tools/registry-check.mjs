@@ -1726,6 +1726,10 @@ const GOLDEN_ABSENT = new Set([
   'datamosh.drift', 'datamosh.speed', 'datamosh.cycleRefresh',
   'camLens',
   'transform',
+  // The audio panel's inputs.
+  'audioFile', 'audioStart', 'audioDepth',
+  'audio-low', 'audio-mid', 'audio-high', 'audio-gain',
+  'audio-floor', 'audio-ceiling', 'audio-attack', 'audio-release',
 ]);
 const absentBefore = (name, before) => GOLDEN_ABSENT.has(name) && before === undefined;
 

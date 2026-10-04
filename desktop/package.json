@@ -1,0 +1,17 @@
+{
+  "name": "braindance-desktop",
+  "productName": "Braindance",
+  "version": "0.1.0",
+  "description": "The desktop shell for Braindance: one window on the local service.",
+  "private": true,
+  "author": "Tim Kraus <tim@timkraus.eu>",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "44.5.1"
+  }
+}

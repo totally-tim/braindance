@@ -1,27 +1,34 @@
 // The render queue: jobs on disk, claimed by workers, one at a time. A job is a project body, the
 // captures its clips are cut on named by content hash, and output settings, so it is
-// self-contained. It is pinned to the renderer class that ran it, because bit-exactness does not
-// survive a different GPU and a project names its footage by hash so that a re-render reproduces
-// the original.
+// self-contained. It is pinned to the renderer class that ran it, because a different GPU draws a
+// different picture, and a project names its footage by hash so that a re-render is cut from the
+// same frames. The job records what it ran on, and a render that finds a different build, effect,
+// GPU or encoder still renders and says so: the promise is a picture that looks the same.
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { constants } from 'node:fs';
+import { lstat, mkdir, open, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { validateExport } from './export.js';
 import { listJsonNames } from './library.js';
-import { effectIdsIn, requiresEntryRefusal, requiresListRefusal } from '../web/format.js';
+import { CLIP_CEILING, effectIdsIn, requiresEntryRefusal, requiresListRefusal } from '../web/format.js';
+import { clipAffordedSec } from '../web/clip-plan.js';
+import { rangeFrames } from '../web/clip-range.js';
 
-// 2 since a job carries one hash per clip where it used to carry a single capture. The worker
-// refuses an envelope from another version rather than reading a field that is not there.
-export const JOB_VERSION = 2;
+// The store refuses a job file of another version, naming both, and ships no conversion: a file it
+// reads is a file whose every field this build wrote.
+export const JOB_VERSION = 3;
 
 const VALID_JOB_ID = /^job-[0-9a-f]{16}$/;
 
 /** What a capture may be named by. An id is a filename; only the hash names the bytes. */
 const CONTENT_HASH = /^sha256:[0-9a-f]{64}$/;
 
-export const STATES = ['queued', 'running', 'done', 'failed'];
+export const STATES = ['queued', 'running', 'done', 'failed', 'cancelled'];
 
-const isTerminal = (state) => state === 'done' || state === 'failed';
+const isTerminal = (state) => state === 'done' || state === 'failed' || state === 'cancelled';
+
+// What a worker may report. `cancelled` answers a cancel request.
+const OUTCOMES = ['done', 'failed', 'cancelled'];
 
 // Whether a worker of class `have` may run a job pinned to `want`. Exact strings, because the
 // failure guarded against is two rasterisers that nearly agree.
@@ -34,11 +41,152 @@ const validRenderer = (v) => typeof v === 'string' && v.length > 0 && v.length <
 // What expires is the silence rather than the job, because a render may run for hours.
 export const STALE_MS = 120_000;
 
+// How many heartbeats in a row a worker lets fail before it stops rendering. At the worker's 15s
+// beat that is 105s, inside STALE_MS, so the worker gives the claim up before a requeue can put a
+// second machine on the same render.
+export const BEAT_BUDGET = 7;
+
+/**
+ * What a worker does with one heartbeat's outcome. `answer` is `{ status, body }` for a reply and
+ * `{ error }` for a request that got none. `missed` is the failures in a row before this one.
+ * Returns `{ missed, verdict, reason }`:
+ *   continue  keep rendering; `reason` says why when the beat failed
+ *   lost      the queue says this claim is no longer the worker's: stop, report nothing
+ *   cancel    the job was cancelled: stop, report `cancelled`
+ *   abandon   `budget` failures in a row: stop, report `failed`
+ * Pure, because the worker script launches a browser on import and a test cannot drive it.
+ */
+export function beatVerdict(missed, answer, budget = BEAT_BUDGET) {
+  if (answer.status === 409) {
+    return { missed, verdict: 'lost', reason: `heartbeat refused: ${answer.body?.error ?? 'lease lost'}` };
+  }
+  if (answer.status === 200) {
+    if (typeof answer.body?.cancelRequested === 'number') {
+      return { missed: 0, verdict: 'cancel', reason: 'a cancel was requested for this job' };
+    }
+    return { missed: 0, verdict: 'continue', reason: null };
+  }
+  const why = answer.error ?? `the queue answered ${answer.status}`;
+  if (missed + 1 >= budget) {
+    return { missed: missed + 1, verdict: 'abandon', reason: `${budget} heartbeats failed in a row, the last because ${why}` };
+  }
+  return { missed: missed + 1, verdict: 'continue', reason: why };
+}
+
+const isMap = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * A sentence for what is wrong with a version record, or null. A record is what a render ran on:
+ * the app build, each installed effect's version by id, the GPU renderer string and the ffmpeg
+ * version, which is null when ffmpeg could not report one.
+ */
+export function environmentRefusal(what, env) {
+  if (!isMap(env)) return `${what} is a record of { app, effects, renderer, ffmpeg }, got ${JSON.stringify(env)}`;
+  if (typeof env.app !== 'string' || env.app === '') return `${what} names its app build as a non-empty string`;
+  if (typeof env.renderer !== 'string' || env.renderer === '') return `${what} names its GPU renderer as a non-empty string`;
+  if (env.ffmpeg !== null && typeof env.ffmpeg !== 'string') return `${what} names its ffmpeg version as a string or null`;
+  if (!isMap(env.effects) || !Object.values(env.effects).every((v) => typeof v === 'string')) {
+    return `${what} lists its effects as { id: version } with a string version for each`;
+  }
+  return null;
+}
+
+const shortHash = (hash) => String(hash).slice(0, 12);
+
+/**
+ * How `now` differs from `was`, as warnings. Effects are compared only for the ids the job
+ * requires: an effect it never draws cannot change its picture, and a warning for every install on
+ * the machine would teach whoever reads them to skip the lot. ffmpeg is compared only when both
+ * records could read it, because an unreadable one is already a warning of its own.
+ */
+export function versionDifferences(was, now, effectIds = []) {
+  if (!was) return [];
+  const out = [];
+  const differ = (field, before, after, text) => {
+    if (before !== after) out.push({ field, was: before, now: after, text });
+  };
+  differ('app', was.app, now.app, `the app build changed from ${shortHash(was.app)} to ${shortHash(now.app)}`);
+  differ('renderer', was.renderer, now.renderer, `the GPU renderer changed from ${JSON.stringify(was.renderer)} to ${JSON.stringify(now.renderer)}`);
+  if (typeof was.ffmpeg === 'string' && typeof now.ffmpeg === 'string') {
+    differ('ffmpeg', was.ffmpeg, now.ffmpeg, `ffmpeg changed from ${was.ffmpeg} to ${now.ffmpeg}`);
+  }
+  const versionOf = (env, id) => (Object.hasOwn(env.effects, id) ? env.effects[id] : null);
+  for (const id of effectIds) {
+    const before = versionOf(was, id);
+    const after = versionOf(now, id);
+    differ(`effects.${id}`, before, after,
+      `effect ${id} changed from ${before ?? 'not installed'} to ${after ?? 'not installed'}`);
+  }
+  return out;
+}
+
+const warn = (at, items) => items.map((item) => ({ at, ...item }));
+
+const requiredIds = (job) => (job.requires ?? []).map((e) => e.id);
+
+// A cancel the queue has taken and the worker has not yet answered.
+const cancelAsked = (job) => typeof job.cancelRequested === 'number';
+
+/**
+ * How long a project's program runs, as the page counts it: the last clip end or audio end. Null
+ * when a clip's timing is not numbers, or its length rests on a take `takeLengths` does not list,
+ * so the count falls to the export socket, which refuses the same ceiling. The library is listed
+ * once, and only for a clip that runs to the end of its take.
+ */
+async function programSeconds(project, takeLengths) {
+  let end = 0;
+  let lengths = null;
+  for (const clip of Array.isArray(project.clips) ? project.clips : []) {
+    const { start, length, speed, sourceStart } = clip ?? {};
+    if (![start, speed, sourceStart].every(Number.isFinite)) return null;
+    let runs = length;
+    if (runs === null) {
+      lengths ??= await takeLengths();
+      const source = lengths.get(clip.take?.hash);
+      if (!Number.isFinite(source)) return null;
+      runs = clipAffordedSec({ speed, sourceStart }, source);
+    }
+    if (!Number.isFinite(runs)) return null;
+    end = Math.max(end, start + runs);
+  }
+  const { audio } = project;
+  if (Number.isFinite(audio?.start) && Number.isFinite(audio?.duration)) end = Math.max(end, audio.start + audio.duration);
+  return end;
+}
+
+// A deliverable range the frame count can be read from: an `in` and an `out` that are times, or absent.
+const countableRange = (d) => d === null
+  || (isMap(d) && (d.in === undefined || Number.isFinite(d.in)) && (d.out === undefined || d.out === null || Number.isFinite(d.out)));
+
+// Why the file is no use to this build, said once for every reader of it.
+const versionRefusal = (id, version) => (
+  `job ${id} is envelope version ${JSON.stringify(version)} and this build reads version ${JOB_VERSION}: `
+  + 'this repo ships no conversion, so the file is refused rather than read on a guess about which fields it holds'
+);
+
 export class JobStore {
-  constructor(dir, { now = Date.now, staleMs = STALE_MS } = {}) {
+  /**
+   * `exportsDir` is the root a finished job's sidecar must sit inside. `environment(renderer)`
+   * answers `{ record, problems }`: the version record of what a render would run on right now,
+   * and a `{ field, text }` for each part of it that could not be read. It is asked only when a
+   * job is claimed or finished, so an idle queue probes nothing. `tempSuffix()` names the scratch
+   * file a sidecar is written through; a test fixes it to plant something at that name.
+   * `takeLengths()` answers a Map from each take this machine has to its length in seconds, so
+   * enqueue can count the frames a job selects.
+   */
+  constructor(dir, {
+    exportsDir, environment, now = Date.now, staleMs = STALE_MS,
+    tempSuffix = () => randomBytes(8).toString('hex'), takeLengths = async () => new Map(),
+  }) {
+    if (typeof exportsDir !== 'string' || exportsDir === '') throw new Error('a job store is built with the exports directory its sidecars live in');
+    if (typeof environment !== 'function') throw new Error('a job store is built with the function that reads the environment a render runs on');
     this.dir = dir;
+    this.exportsDir = exportsDir;
+    this.environment = environment;
     this.now = now;
     this.staleMs = staleMs;
+    this.tempSuffix = tempSuffix;
+    this.takeLengths = takeLengths;
     // Every state transition goes through here, one at a time: `claim` and `finish` both have
     // an `await` between the decision and the write, so without this two workers claim one job.
     this.gate = Promise.resolve();
@@ -62,21 +210,35 @@ export class JobStore {
     return `job-${h.slice(0, 16)}`;
   }
 
-  async list() {
+  // The jobs this build can read, and a reason for each file it cannot. A file of another version
+  // is neither handed to a worker nor hidden: `refused` is what `GET /jobs` shows beside the queue.
+  async scan() {
     // Absent really is empty, but only absent: swallowing every failure parked the worker on an
     // unreadable directory and let `enqueue` write a duplicate into it.
     const files = await listJsonNames(this.dir, { what: 'job queue directory' });
-    const out = [];
+    const jobs = [];
+    const refused = [];
     for (const file of files) {
+      const id = file.replace(/\.json$/, '');
       try {
-        out.push(JSON.parse(await readFile(join(this.dir, file), 'utf8')));
-      } catch { /* a job record this build cannot read is not a reason to hide the rest */ }
+        const job = JSON.parse(await readFile(join(this.dir, file), 'utf8'));
+        if (job?.version === JOB_VERSION) jobs.push(job);
+        else refused.push({ id, version: job?.version ?? null, reason: versionRefusal(id, job?.version) });
+      } catch (err) {
+        refused.push({ id, version: null, reason: `job ${id} is not readable as a job record: ${err.message}` });
+      }
     }
-    return out;
+    return { jobs, refused };
+  }
+
+  async list() {
+    return (await this.scan()).jobs;
   }
 
   async read(id) {
-    return JSON.parse(await readFile(this.pathFor(id), 'utf8'));
+    const job = JSON.parse(await readFile(this.pathFor(id), 'utf8'));
+    if (job.version !== JOB_VERSION) throw new Error(versionRefusal(id, job.version));
+    return job;
   }
 
   // Written aside and renamed, or a crash leaves a file describing a job nobody enqueued.
@@ -91,7 +253,7 @@ export class JobStore {
   }
 
   /** Enqueue a render. A capture named by anything but content hash is refused. */
-  async enqueue({ project, deliverable = null, captures, renderer = null, output, width, height, fps, codec = 'h264', suppressEffects = [] }) {
+  async enqueue({ project, deliverable = null, captures, renderer = null, output, width, height, fps, codec = 'h264', suppressEffects = [], recorded = null }) {
     // The document *body*, never the store's `{ name, rev, body }` envelope.
     if (!project || typeof project !== 'object' || Array.isArray(project)) {
       throw new Error('a job needs a project document body');
@@ -132,6 +294,12 @@ export class JobStore {
         : `a job's project has ${takeless.length} clip(s) naming no content hash to be cut on, at `
           + `position ${takeless.join(', ')}: a clip with nothing to draw is one the page refuses `
           + 'once the browser is already open, and the queue can say it before that costs anything');
+    }
+    if (clipList.length > CLIP_CEILING) {
+      throw new Error(
+        `a job's project holds ${clipList.length} clips and this build composites ${CLIP_CEILING}: `
+        + 'the page refuses the project on open, so the queue refuses it before a worker loads it',
+      );
     }
     const short = (hash) => `${String(hash).slice(0, 22)}…`;
     if (captures.length !== cut.length || captures.some((hash, at) => hash !== cut[at])) {
@@ -194,7 +362,19 @@ export class JobStore {
         + 'an id is lowercase letters and digits, the prefix an effect\'s parameters carry',
       );
     }
-    const { width: w, height: h, fps: f } = validateExport({ name: output, width, height, fps, codec });
+    // What an earlier render of this edit ran on, which is `versions.finished` in its sidecar.
+    // The claim compares against it, so a re-render built from a sidecar warns where it differs.
+    if (recorded !== null) {
+      const refusal = environmentRefusal('a job\'s recorded versions', recorded);
+      if (refusal) throw new Error(refusal);
+    }
+    // The frames the job selects, counted the way the page will, so a render past the ceiling is
+    // refused here rather than after a worker has loaded it.
+    const program = countableRange(deliverable) ? await programSeconds(project, this.takeLengths) : null;
+    const range = program === null ? null : rangeFrames(deliverable ?? { in: 0, out: null }, program, Number(fps));
+    const frames = range === null ? null : range.to - range.from + 1;
+    const programStart = range === null ? null : range.from / Number(fps);
+    const { width: w, height: h, fps: f } = validateExport({ name: output, width, height, fps, codec, frames, programStart });
     return this.serialise(async () => {
       const live = await this.list();
       // Two jobs writing one file is one job's work thrown away. A finished job's name is free
@@ -226,6 +406,9 @@ export class JobStore {
         error: null,
         attempts: 0,
         lease: null,
+        cancelRequested: null,
+        versions: { recorded, claimed: null, finished: null },
+        warnings: [],
       };
       // The salt is the collision counter rather than random, keeping the id a
       // function of the record.
@@ -262,6 +445,12 @@ export class JobStore {
       // strip it and keep every other field a forger would need.
       job.lease = randomBytes(16).toString('hex');
       job.renderer = renderer;
+      const { record, problems } = await this.environment(renderer);
+      job.versions.claimed = record;
+      job.warnings.push(
+        ...warn('claim', problems),
+        ...warn('claim', versionDifferences(job.versions.recorded, record, requiredIds(job))),
+      );
       await this.#put(job);
       return { job, blocked: [], queued: all.length };
     });
@@ -271,7 +460,7 @@ export class JobStore {
   // stops two reports both passing the terminal-state guard.
   finish(id, { state, error = null, output = null, frames = null, lease = null }) {
     return this.serialise(async () => {
-      if (state !== 'done' && state !== 'failed') throw new Error(`a job finishes done or failed, not ${state}`);
+      if (!OUTCOMES.includes(state)) throw new Error(`a job finishes done, failed or cancelled, not ${state}`);
       if (output !== null && typeof output !== 'string') throw new Error('a job\'s output is a string or nothing');
       const job = await this.read(id);
       if (isTerminal(job.state)) {
@@ -288,6 +477,9 @@ export class JobStore {
       if (lease !== job.lease) {
         throw new Error(`job ${id} is held by another claim, so this report is not the one running it`);
       }
+      if (state === 'cancelled' && !cancelAsked(job)) {
+        throw new Error(`job ${id} was not asked to cancel, so there is no cancellation for this worker to report`);
+      }
       job.state = state;
       job.error = error;
       job.finished = this.now();
@@ -295,6 +487,114 @@ export class JobStore {
       // Kept apart from `output` so the output *name* stays the base name a retry can ask for.
       if (typeof output === 'string' && output.length > 0) job.artifactPath = output;
       if (Number.isFinite(frames)) job.frames = frames;
+      const { record, problems } = await this.environment(job.renderer);
+      job.versions.finished = record;
+      job.warnings.push(
+        ...warn('finish', problems),
+        ...warn('finish', versionDifferences(job.versions.claimed, record, requiredIds(job))),
+      );
+      // A render is done when the queue holds its record and the sidecar beside the artifact does
+      // too. Anything less is a failed job that says why, and the artifact stays where it is.
+      if (state === 'done') {
+        try {
+          await this.#amendSidecar(job);
+        } catch (err) {
+          job.state = 'failed';
+          job.error = `the render reported done but its artifact ${JSON.stringify(job.artifactPath)} `
+            + `could not take the version record, so it is not recorded as done: ${err.message}`;
+        }
+      }
+      return this.#put(job);
+    });
+  }
+
+  // The export wrote `<artifact>.job.json` beside the render. It gains the version record and the
+  // warnings, written aside and renamed like every other write here. The artifact path is a lease
+  // holder's word, so every path touched is held to the exports root by where the filesystem puts
+  // it rather than how it is spelled, and none of them may be a symlink: a link under the
+  // artifact would carry this read and write somewhere else. Throws, saying why, when it cannot.
+  async #amendSidecar(job) {
+    if (typeof job.artifactPath !== 'string' || job.artifactPath === '') {
+      throw new Error('the report names no artifact path');
+    }
+    const artifact = resolve(job.artifactPath);
+    const folder = dirname(artifact);
+    const realRoot = await realpath(this.exportsDir);
+    const realFolder = await realpath(folder);
+    const inside = relative(realRoot, realFolder);
+    if (inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+      throw new Error(`its directory resolves to ${realFolder}, outside the exports directory ${realRoot}`);
+    }
+    if (inside !== relative(resolve(this.exportsDir), folder)) {
+      throw new Error(`its directory ${folder} is reached through a symlink`);
+    }
+    const real = join(realFolder, basename(artifact));
+    const sidecar = `${real}.job.json`;
+    let checked;
+    for (const [what, path] of [['artifact', real], ['sidecar', sidecar]]) {
+      const info = await lstat(path, { bigint: true }).catch((err) => { throw new Error(`the ${what} cannot be read: ${err.message}`); });
+      if (info.isSymbolicLink()) throw new Error(`the ${what} ${path} is a symlink`);
+      if (what === 'sidecar') {
+        if (!info.isFile()) throw new Error(`the sidecar ${path} is not a regular file`);
+        checked = info;
+      }
+    }
+    // `O_NOFOLLOW` refuses a link swapped in after the checks where the platform has the flag. The
+    // open file's device and inode must also be the checked ones, which covers Windows and a
+    // regular file swapped in. A directory swapped above `folder` is not caught: Node cannot open
+    // relative to a descriptor.
+    const reading = await open(sidecar, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    let text;
+    try {
+      const opened = await reading.stat({ bigint: true });
+      if (opened.dev !== checked.dev || opened.ino !== checked.ino) {
+        throw new Error(`the sidecar ${sidecar} was replaced between the check and the open`);
+      }
+      text = await reading.readFile('utf8');
+    } finally {
+      await reading.close();
+    }
+    let record;
+    try {
+      record = JSON.parse(text);
+    } catch (err) {
+      throw new Error(`the sidecar ${sidecar} is not JSON: ${err.message}`);
+    }
+    if (!isMap(record)) throw new Error(`the sidecar ${sidecar} is not a JSON object`);
+    const amended = { ...record, versions: job.versions, warnings: job.warnings };
+    // `wx` fails on anything already at the name, a link included, so the write cannot be
+    // steered onto another file by planting one. Only what this call created is removed.
+    const scratch = `${sidecar}.${this.tempSuffix()}.tmp`;
+    const out = await open(scratch, 'wx');
+    try {
+      await out.writeFile(`${JSON.stringify(amended, null, 2)}\n`);
+      await out.close();
+      await rename(scratch, sidecar);
+    } catch (err) {
+      await out.close().catch(() => {});
+      await unlink(scratch).catch(() => {});
+      throw err;
+    }
+  }
+
+  // Ask for a job to stop. A queued job is cancelled where it stands. A running job is marked,
+  // and its worker sees the mark on its next heartbeat, stops, and reports `cancelled`; one whose
+  // worker has gone quiet has nobody to see the mark, so it is cancelled directly.
+  cancel(id) {
+    return this.serialise(async () => {
+      const job = await this.read(id);
+      if (job.state === 'cancelled') return job;
+      if (isTerminal(job.state)) throw new Error(`job ${id} is already ${job.state}, so there is nothing left to cancel`);
+      if (job.state === 'running' && this.#quietFor(job) < this.staleMs) {
+        if (!cancelAsked(job)) {
+          job.cancelRequested = this.now();
+          await this.#put(job);
+        }
+        return job;
+      }
+      job.state = 'cancelled';
+      job.finished = this.now();
+      job.lease = null;
       return this.#put(job);
     });
   }
@@ -306,7 +606,7 @@ export class JobStore {
       // A running job is refused unless it has gone quiet: refusing every one of them left a
       // worker killed mid-render holding its job and its output name forever.
       if (job.state === 'running') {
-        const quietFor = this.now() - (job.heartbeat ?? job.claimed ?? 0);
+        const quietFor = this.#quietFor(job);
         if (quietFor < this.staleMs) {
           throw new Error(
             `job ${id} is running on ${job.worker ?? 'a worker'} and was heard from ${Math.round(quietFor / 1000)}s ago, `
@@ -320,6 +620,14 @@ export class JobStore {
       if (holder) {
         throw new Error(`output ${JSON.stringify(job.output)} is already reserved by ${holder.id} (${holder.state}), so this retry would collide`);
       }
+      // A render that finished is what the next one is compared against. One that never did has
+      // nothing to say about the picture, so the earlier record stands.
+      job.versions = {
+        recorded: job.state === 'done' ? job.versions.finished : job.versions.recorded,
+        claimed: null,
+        finished: null,
+      };
+      job.warnings = [];
       job.state = 'queued';
       job.claimed = null;
       job.finished = null;
@@ -328,8 +636,13 @@ export class JobStore {
       job.lease = null;
       job.heartbeat = null;
       job.artifactPath = null;
+      job.cancelRequested = null;
       return this.#put(job);
     });
+  }
+
+  #quietFor(job) {
+    return this.now() - (job.heartbeat ?? job.claimed ?? 0);
   }
 
   // A claim saying it is still there, held to the same lease `finish` is.
