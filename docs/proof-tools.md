@@ -942,10 +942,13 @@ The writer part extracts the output writer, `write_message` and what it calls, a
 pipe the parent leaves unread. The frame writer stalls in a 512 KiB message, a stop reaches it
 through the stdin its stalled wait reads, and the encoder's message starts while the frame writer
 waits or after it returned. Each step waits for the one before it to have happened, so no outcome
-depends on a sleep. The tool reads the stream through `MessageParser` from `server/protocol.js`. In
-the built grabber a stop and a cut usually come together, and either rule alone then refuses the
-next message. The fixture also separates them: a stop with nothing cut, and a cut with no stop. The
-cut with no stop comes from a file whose size limit refuses the rest of a frame and is then lifted.
+depends on a sleep. The tool compiles the writer with the fixture's `ContendedMutex` in place of
+`std::timed_mutex`. It forwards every call and counts the lock attempts that found the lock held,
+so the stop goes in only once the encoder is waiting on the lock. The tool reads the stream through
+`MessageParser` from `server/protocol.js`. In the built grabber a stop and a cut usually come
+together, and either rule alone then refuses the next message. The fixture also separates them: a
+stop with nothing cut, and a cut with no stop. The cut with no stop comes from a file whose size
+limit refuses the rest of a frame and is then lifted.
 
 The stream part builds the whole of `native/grabber.cpp` against `test/fixtures/fake-freenect2.cpp`,
 which defines the libfreenect2 symbols the grabber calls behind the real headers, and runs the
@@ -976,12 +979,12 @@ with `EAGAIN` for end-of-file would stop on a pipe with nothing in it, and the o
 fail. Each stream row that stops a stalled grabber has a row ahead of it showing the grabber stalled:
 no new frame for 450 ms, where depth arrives every 10 ms. The writer rows are:
 
-- two writers and no stop: both messages arrive whole, each carrying only its own bytes. This is
-  the control for a writer that refuses too much;
-- a second message waiting behind a frame the stop cuts short, and one that starts after the frame
-  gave up with the pipe read empty: the frame writer reports its message abandoned, the second
-  write is refused, the parent's stream is the cut frame and ends there, and the shipped parser
-  holds it as one unfinished message;
+- two writers and no stop: the encoder waited on the lock, and both messages arrive whole, each
+  carrying only its own bytes. This is the control for a writer that refuses too much;
+- a second message waiting on the lock behind a frame the stop cuts short, and one that starts after
+  the frame gave up with the lock free and the pipe read empty: the frame writer reports its
+  message abandoned, the second write is refused, the parent's stream is the cut frame and ends
+  there, and the shipped parser holds it as one unfinished message;
 - a stop with nothing cut: the frame written before the stop is whole, and a message that starts
   after the stop on a free lock, with the parent reading, is refused. This is the encoder's key
   after its colour finished;
@@ -1025,6 +1028,9 @@ exits 1. Each mutation runs the part it names: reader, writer or stream.
   write to refuse, and the same rows fail.
 - **`new-message-after-stop`** — a writer that finds the lock free after a stop starts its message,
   and the stopped rows find it after the frame.
+- **`queued-encoder-never-waits`** — the fixture starts the encoder only once the frame writer has
+  returned, and the queued row finds that no lock attempt found the lock held. Its other queued rows
+  still pass.
 - **`stalled-write-never-gives-up`** — a write on a full pipe keeps waiting after the stop is read,
   and every stalled-stop row hangs.
 - **`stalled-write-ignores-stdin`** — nothing reads stdin while a write waits, and the stalled-stop

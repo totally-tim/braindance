@@ -79,6 +79,13 @@ const MUTATIONS = {
     edits: [[CUT_CHECK + STOP_CHECK, CUT_CHECK]],
     fails: 'the stopped rows: a message that finds the lock free after the stop is written',
   },
+  'queued-encoder-never-waits': {
+    section: 'writer',
+    file: 'test/fixtures/grabber-write.cpp',
+    edits: [['      startEncoder();\n      waitForContention();\n      if (::write(in[1], "stop\\n", 5) != 5) return 2;\n      frameWriter.join();\n',
+      '      if (::write(in[1], "stop\\n", 5) != 5) return 2;\n      frameWriter.join();\n      startEncoder();\n']],
+    fails: 'the queued contention row: the encoder starts once the frame writer has returned, so it never waits on the lock',
+  },
   'stalled-write-never-gives-up': {
     section: 'stream',
     file: 'native/grabber.cpp',
@@ -213,21 +220,25 @@ const shipped = (stream) => {
 // Five interleavings of the frame loop's writer and the encoder's: no stop; a stop that cuts the frame
 // short with the encoder waiting, or arriving after; a stop with nothing cut; a cut with no stop. The
 // last two each leave one rule alone to refuse the encoder's message.
-const writer = (source, scratch) => {
+const writer = (source, fixture, scratch) => {
   const start = source.indexOf('// How long a write waits on a full pipe');
   const end = source.indexOf('static uint64_t now_ms()', start);
   if (start < 0 || end < 0) fail('write_message extraction anchors moved');
-  writeFileSync(join(scratch, 'write-under-test.h'), source.slice(start, end));
+  // The fixture's ContendedMutex is std::timed_mutex plus a count of the attempts that found it held.
+  const extracted = source.slice(start, end);
+  if (extracted.split('std::timed_mutex').length !== 3) fail('the write lock no longer appears twice as std::timed_mutex');
+  writeFileSync(join(scratch, 'write-under-test.h'), extracted.replaceAll('std::timed_mutex', 'ContendedMutex'));
+  writeFileSync(join(scratch, 'grabber-write.cpp'), fixture);
   const binary = join(scratch, 'writer');
   const build = spawnSync(cxx, ['-std=c++11', '-O1', '-pthread', `-I${scratch}`,
-    join(REPO, 'test/fixtures/grabber-write.cpp'), '-o', binary], { encoding: 'utf8' });
+    join(scratch, 'grabber-write.cpp'), '-o', binary], { encoding: 'utf8' });
   if (build.status !== 0) fail(`a C++ compiler is required: ${build.error?.message ?? build.stderr}`);
   const play = (scenario) => {
     const file = join(scratch, `writer-${scenario}.bin`);
     const run = spawnSync(binary, [scenario, file], { encoding: 'utf8', timeout: 30000 });
-    const said = /^frame=(-?\d+) colour=(-?\d+) stopped=([01]) bytes=\d+$/m.exec(run.stdout ?? '');
+    const said = /^frame=(-?\d+) colour=(-?\d+) stopped=([01]) contended=(\d+) bytes=\d+$/m.exec(run.stdout ?? '');
     if (!said || run.error || run.signal || run.status !== 0) fail(run.error?.message ?? `the ${scenario} run did not finish (${run.status}, ${run.signal}) ${run.stderr}`);
-    return { frame: said[1] === '1', colour: said[2] === '1', stopped: said[3] === '1', stream: readFileSync(file) };
+    return { frame: said[1] === '1', colour: said[2] === '1', stopped: said[3] === '1', contended: Number(said[4]), stream: readFileSync(file) };
   };
   const endsAtTheCut = (scenario, stream) => {
     const seen = shipped(stream);
@@ -242,9 +253,10 @@ const writer = (source, scratch) => {
 
   console.log('\ntwo writers and no stop');
   {
-    const { frame, colour, stream } = play('free');
+    const { frame, colour, contended, stream } = play('free');
     const seen = shipped(stream);
     const [a, b] = seen.messages;
+    row(contended > 0, 'free: the encoder\'s message waited on the lock behind the frame', `contended=${contended}`);
     row(frame && colour, 'free: both messages are written', `frame=${frame} colour=${colour}`);
     row(!seen.error && seen.buffered === 0 && seen.messages.length === 2
       && a.type === FRAME && a.payload.length === PAYLOAD && filled(a.payload, 0x11)
@@ -258,7 +270,9 @@ const writer = (source, scratch) => {
     ['late', 'a second message that starts after the stop cut the frame short, with the pipe read empty'],
   ]) {
     console.log(`\n${what}`);
-    const { frame, colour, stream } = play(scenario);
+    const { frame, colour, contended, stream } = play(scenario);
+    if (scenario === 'queued') row(contended > 0, 'queued: the second message waited on the lock behind the frame', `contended=${contended}`);
+    else row(contended === 0, 'late: the second message found the lock free', `contended=${contended}`);
     row(!frame, `${scenario}: the frame the stop cuts short is abandoned`, `frame=${frame}`);
     row(!colour, `${scenario}: the second message is refused`, `colour=${colour}`);
     endsAtTheCut(scenario, stream);
@@ -521,15 +535,18 @@ const stream = async (binary, scratch) => {
 
 const main = async () => {
   if (MUTATE && !MUTATIONS[MUTATE]) fail(`unknown mutation ${MUTATE} - have ${Object.keys(MUTATIONS).join(', ')}`);
-  let source = readFileSync(join(REPO, 'native/grabber.cpp'), 'utf8');
+  const sources = Object.fromEntries(['native/grabber.cpp', 'test/fixtures/grabber-write.cpp']
+    .map((file) => [file, readFileSync(join(REPO, file), 'utf8')]));
   if (MUTATE) for (const [from, to] of MUTATIONS[MUTATE].edits) {
-    if (source.split(from).length !== 2) fail(`mutation anchor does not match once: ${from}`);
-    source = source.replace(from, to);
+    const { file } = MUTATIONS[MUTATE];
+    if (sources[file].split(from).length !== 2) fail(`mutation anchor does not match once in ${file}: ${from}`);
+    sources[file] = sources[file].replace(from, to);
   }
+  const source = sources['native/grabber.cpp'];
   const scratch = mkdtempSync(join(tmpdir(), 'grabber-stdin-'));
   try {
     if (sections.includes('reader')) { console.log('the reader, against a real pipe'); reader(source, scratch); }
-    if (sections.includes('writer')) writer(source, scratch);
+    if (sections.includes('writer')) writer(source, sources['test/fixtures/grabber-write.cpp'], scratch);
     if (sections.includes('stream')) await stream(buildGrabber(source, scratch), scratch);
   } finally {
     for (const run of runs) run.child.kill('SIGKILL');

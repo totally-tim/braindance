@@ -1,15 +1,17 @@
 // The shipped stdout writer under a scripted interleaving of the capture loop and the encoder
-// thread. Each step waits for the one before it to have happened, so no outcome rests on a sleep.
+// thread. Each step waits for the one before it to have happened, so no outcome depends on a sleep.
+// The tool compiles the writer with ContendedMutex in place of std::timed_mutex, so the fixture
+// can see a lock attempt that found the lock held.
 //
 //   grabber-write <scenario> <out-file>
 //
 // The frame writer sends a 512 KiB message of 0x11 on a real non-blocking pipe the parent leaves
 // unread, and stalls in it. The encoder's message is 512 KiB of 0x22. Then:
-//   free     no stop. The encoder's message waits behind the frame and both finish once the parent
-//            reads.
-//   queued   the encoder's message is waiting when the parent writes `stop` to the frame writer's
-//            stdin, which its stalled wait reads. The parent reads again once the frame writer has
-//            returned.
+//   free     no stop. The encoder's message waits on the lock behind the frame, and both finish once
+//            the parent reads.
+//   queued   the encoder's message is waiting on the lock when the parent writes `stop` to the frame
+//            writer's stdin, which its stalled wait reads. The parent reads again once the frame
+//            writer has returned.
 //   late     as queued, with the encoder's message starting after the frame writer has returned and
 //            the parent has read the pipe empty, so any header it wrote would arrive.
 //   stopped  no cut. The parent reads the frame whole, the run is then stopped as the frame loop's
@@ -18,7 +20,8 @@
 //   cut      no stop. The output is a file that takes 64 KiB and refuses the rest, and takes bytes
 //            again before the encoder's message starts.
 // What the parent read goes to <out-file>, which is the output itself under `cut`. Stdout says what
-// each writer returned and whether the stop was set when the encoder's message started.
+// each writer returned, whether the stop was set when the encoder's message started, and how many
+// lock attempts found the lock held.
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -43,6 +46,24 @@
 static const uint32_t MAGIC = 0x4B4E4354;
 static std::atomic<bool> g_stop{false};
 
+// The writer's lock: std::timed_mutex, and a count of the lock attempts that found it held.
+static std::atomic<int> g_contended{0};
+class ContendedMutex {
+ public:
+  void lock() { m_.lock(); }
+  bool try_lock() { return m_.try_lock(); }
+  void unlock() { m_.unlock(); }
+  template <class Rep, class Period>
+  bool try_lock_for(const std::chrono::duration<Rep, Period> &timeout) {
+    if (m_.try_lock()) return true;
+    g_contended++;
+    return m_.try_lock_for(timeout);
+  }
+
+ private:
+  std::timed_mutex m_;
+};
+
 #include "write-under-test.h"
 
 static const size_t PAYLOAD = 512 * 1024;
@@ -51,8 +72,9 @@ static const rlim_t CUT_AT = 64 * 1024;
 
 static void sleepMs(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
 
-static void waitFor(const std::atomic<bool> &flag) {
-  while (!flag) sleepMs(1);
+// Until a writer has found the lock held, or 5 s: a writer that never waits is the tool's to report.
+static void waitForContention() {
+  for (int waited = 0; g_contended == 0 && waited < 5000; waited++) sleepMs(1);
 }
 
 // Bytes waiting in the pipe, unchanged for 100 ms: the frame writer is stuck in its message.
@@ -99,7 +121,7 @@ int main(int argc, char **argv) {
 
   const std::vector<uint8_t> frame(PAYLOAD, 0x11), colour(PAYLOAD, 0x22);
   std::atomic<int> frameResult{-1}, colourResult{-1};
-  std::atomic<bool> frameDone{false}, colourStarting{false}, colourDone{false}, stoppedAtColour{false};
+  std::atomic<bool> frameDone{false}, colourDone{false}, stoppedAtColour{false};
 
   std::thread frameWriter([&] {
     frameResult = write_message(outFd, TYPE_FRAME, frame.data(), (uint32_t)frame.size(), readCommands);
@@ -110,7 +132,6 @@ int main(int argc, char **argv) {
   auto startEncoder = [&] {
     encoder = std::thread([&] {
       stoppedAtColour = g_stop.load();
-      colourStarting = true;
       colourResult = write_message(outFd, TYPE_COLOR, colour.data(), (uint32_t)colour.size());
       colourDone = true;
     });
@@ -136,13 +157,13 @@ int main(int argc, char **argv) {
     waitStalled(out[0]);
     if (scenario == "free") {
       startEncoder();
-      waitFor(colourStarting);
+      waitForContention();
       drainUntil(colourDone);
       frameWriter.join();
       encoder.join();
     } else if (scenario == "queued") {
       startEncoder();
-      waitFor(colourStarting);
+      waitForContention();
       if (::write(in[1], "stop\n", 5) != 5) return 2;
       frameWriter.join();
       drainUntil(colourDone);
@@ -174,7 +195,7 @@ int main(int argc, char **argv) {
     if (!file || std::fwrite(read.data(), 1, read.size(), file) != read.size()) return 2;
     std::fclose(file);
   }
-  std::printf("frame=%d colour=%d stopped=%d bytes=%zu\n", (int)frameResult, (int)colourResult,
-              (int)stoppedAtColour, bytes);
+  std::printf("frame=%d colour=%d stopped=%d contended=%d bytes=%zu\n", (int)frameResult,
+              (int)colourResult, (int)stoppedAtColour, (int)g_contended, bytes);
   return 0;
 }
