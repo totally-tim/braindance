@@ -7,6 +7,8 @@
 // FAKE_MAX_FRAMES   depth frames to deliver before the sensor goes quiet (default: no limit).
 // FAKE_REGISTER_MS  how long Registration::apply takes (default 0), so a test can order the
 //                   grabber's frame write after its encoder thread's.
+// FAKE_OPEN_MS      how long opening the device takes (default 0), after it says so on stderr, so a
+//                   test can stop the grabber before its hello.
 #include <libfreenect2/libfreenect2.hpp>
 #include <libfreenect2/frame_listener_impl.h>
 #include <libfreenect2/registration.h>
@@ -196,6 +198,8 @@ Freenect2::~Freenect2() {}
 int Freenect2::enumerateDevices() { return 1; }
 std::string Freenect2::getDefaultDeviceSerialNumber() { return "fake-0001"; }
 Freenect2Device *Freenect2::openDevice(const std::string &, const PacketPipeline *) {
+  std::fprintf(stderr, "[fake] opening the device\n");
+  std::this_thread::sleep_for(std::chrono::milliseconds(envMs("FAKE_OPEN_MS", 0)));
   return new FakeDevice;
 }
 

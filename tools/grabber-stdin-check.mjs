@@ -3,7 +3,8 @@
 // libfreenect2 build and no port.
 //   reader: the shipped `pollCommands`, compiled and fed a real non-blocking pipe.
 //   writer: the shipped `write_message`, compiled with the frame loop's thread and the encoder's on a
-//           pipe the parent leaves unread, and its output read back through the shipped parser.
+//           pipe the parent leaves unread or a file that refuses bytes for a while, and its output
+//           read back through the shipped parser.
 //   stream: the shipped grabber, `main` and all, linked against test/fixtures/fake-freenect2.cpp in
 //           place of a sensor and run as a child with its stdout left unread, because a parent that
 //           stopped reading is the case a stop has to survive.
@@ -25,8 +26,10 @@ const EOF_BRANCH = '  if (n == 0) {\n    std::fprintf(stderr, "[grabber] stdin c
 const STOP_BRANCH = '    if (line == "stop") {\n';
 const RETURN_ON_TIMEOUT = '      if (g_stop) return false;\n    } else if (fds[0].revents) {\n';
 const CUT_CHECK = '  if (g_outputCut) return false;\n';
+const STOP_CHECK = '  if (g_stop) return false;\n';
 const CUT_SET = '    g_outputCut = true;\n';
 const STOP_RELEASE = '    if (g_stop) {\n      depthListener.release(depthFrames);\n      break;\n    }\n';
+const HELLO_ON_STOP = '(uint32_t)helloLen) && !g_stop) return 1;\n';
 const MUTATIONS = {
   'eof-never-stops': {
     section: 'reader',
@@ -61,14 +64,20 @@ const MUTATIONS = {
   'cut-message-leaves-the-output-open': {
     section: 'writer',
     file: 'native/grabber.cpp',
-    edits: [[CUT_CHECK, '']],
-    fails: 'the queued and late rows: a write after the cut message is accepted, and its bytes follow the cut',
+    edits: [[CUT_CHECK + STOP_CHECK, STOP_CHECK]],
+    fails: 'the cut rows: with no stop set, a write after the cut message is accepted, and its bytes follow the cut',
   },
   'cut-message-does-not-close-the-output': {
     section: 'writer',
     file: 'native/grabber.cpp',
     edits: [[CUT_SET, '']],
-    fails: 'the queued and late rows: the write that gave up leaves nothing for a later write to refuse',
+    fails: 'the cut rows: the write that gave up leaves nothing for a later write to refuse',
+  },
+  'new-message-after-stop': {
+    section: 'writer',
+    file: 'native/grabber.cpp',
+    edits: [[CUT_CHECK + STOP_CHECK, CUT_CHECK]],
+    fails: 'the stopped rows: a message that finds the lock free after the stop is written',
   },
   'stalled-write-never-gives-up': {
     section: 'stream',
@@ -94,17 +103,17 @@ const MUTATIONS = {
     edits: [['  ::fcntl(STDOUT_FILENO, F_SETFL, ::fcntl(STDOUT_FILENO, F_GETFL) | O_NONBLOCK);\n', '']],
     fails: 'the stalled-stop rows: a blocking write never comes back to ask',
   },
-  'frame-written-after-stop': {
-    section: 'stream',
-    file: 'native/grabber.cpp',
-    edits: [[STOP_RELEASE, '']],
-    fails: 'the stop-before-the-first-frame rows: a frame is written after the stop was read',
-  },
   'early-stop-keeps-the-depth-frame': {
     section: 'stream',
     file: 'native/grabber.cpp',
     edits: [[STOP_RELEASE, '    if (g_stop) break;\n']],
     fails: 'the stop-before-the-first-frame rows: the depth frame taken before the stop was read is never returned',
+  },
+  'stop-before-the-hello-skips-teardown': {
+    section: 'stream',
+    file: 'native/grabber.cpp',
+    edits: [[HELLO_ON_STOP, '(uint32_t)helloLen)) return 1;\n']],
+    fails: 'the stop-before-the-hello row: the refused hello returns 1 past the device\'s stop and close',
   },
   'stalled-write-gives-up-at-once': {
     section: 'stream',
@@ -201,9 +210,9 @@ const shipped = (stream) => {
   return { messages, error, buffered: parser.buf.length };
 };
 
-// Three interleavings of the frame loop's writer and the encoder's on a pipe nobody reads: no stop; a
-// stop with the encoder queued behind the frame; a stop with the encoder arriving after the frame gave
-// up. The last takes the lock without failing a try, so the stop check in the lock wait never sees it.
+// Five interleavings of the frame loop's writer and the encoder's: no stop; a stop that cuts the frame
+// short with the encoder waiting, or arriving after; a stop with nothing cut; a cut with no stop. The
+// last two each leave one rule alone to refuse the encoder's message.
 const writer = (source, scratch) => {
   const start = source.indexOf('// How long a write waits on a full pipe');
   const end = source.indexOf('static uint64_t now_ms()', start);
@@ -216,9 +225,19 @@ const writer = (source, scratch) => {
   const play = (scenario) => {
     const file = join(scratch, `writer-${scenario}.bin`);
     const run = spawnSync(binary, [scenario, file], { encoding: 'utf8', timeout: 30000 });
-    const said = /^frame=(-?\d+) colour=(-?\d+) bytes=\d+$/m.exec(run.stdout ?? '');
+    const said = /^frame=(-?\d+) colour=(-?\d+) stopped=([01]) bytes=\d+$/m.exec(run.stdout ?? '');
     if (!said || run.error || run.signal || run.status !== 0) fail(run.error?.message ?? `the ${scenario} run did not finish (${run.status}, ${run.signal}) ${run.stderr}`);
-    return { frame: said[1] === '1', colour: said[2] === '1', stream: readFileSync(file) };
+    return { frame: said[1] === '1', colour: said[2] === '1', stopped: said[3] === '1', stream: readFileSync(file) };
+  };
+  const endsAtTheCut = (scenario, stream) => {
+    const seen = shipped(stream);
+    row(stream.length > HEADER_BYTES && stream.length < HEADER_BYTES + PAYLOAD
+      && stream.readUInt32LE(0) === MAGIC && stream.readUInt32LE(4) === FRAME && stream.readUInt32LE(8) === PAYLOAD
+      && filled(stream.subarray(HEADER_BYTES), 0x11),
+    `${scenario}: what the parent reads is the cut frame and ends there`, `${stream.length} bytes, ${stream.includes(0x22) ? 'with' : 'without'} the second writer's bytes`);
+    row(!seen.error && seen.messages.length === 0 && seen.buffered === stream.length,
+      `${scenario}: the shipped parser holds it as one unfinished message and meets no second header`,
+      JSON.stringify({ error: seen.error, buffered: seen.buffered, messages: seen.messages.map((m) => m.type) }));
   };
 
   console.log('\ntwo writers and no stop');
@@ -236,20 +255,35 @@ const writer = (source, scratch) => {
 
   for (const [scenario, what] of [
     ['queued', 'a second message queued behind a frame the stop cuts short'],
-    ['late', 'a second message that reaches the lock after the frame gave up'],
+    ['late', 'a second message that starts after the stop cut the frame short, with the pipe read empty'],
   ]) {
     console.log(`\n${what}`);
     const { frame, colour, stream } = play(scenario);
-    const seen = shipped(stream);
     row(!frame, `${scenario}: the frame the stop cuts short is abandoned`, `frame=${frame}`);
     row(!colour, `${scenario}: the second message is refused`, `colour=${colour}`);
-    row(stream.length > HEADER_BYTES && stream.length < HEADER_BYTES + PAYLOAD
-      && stream.readUInt32LE(0) === MAGIC && stream.readUInt32LE(4) === FRAME && stream.readUInt32LE(8) === PAYLOAD
-      && filled(stream.subarray(HEADER_BYTES), 0x11),
-    `${scenario}: what the parent reads is the cut frame and ends there`, `${stream.length} bytes, ${stream.includes(0x22) ? 'with' : 'without'} the second writer's bytes`);
-    row(!seen.error && seen.messages.length === 0 && seen.buffered === stream.length,
-      `${scenario}: the shipped parser holds it as one unfinished message and meets no second header`,
-      JSON.stringify({ error: seen.error, buffered: seen.buffered, messages: seen.messages.map((m) => m.type) }));
+    endsAtTheCut(scenario, stream);
+  }
+
+  console.log('\na second message that starts after a stop, with nothing cut and the parent reading');
+  {
+    const { frame, colour, stopped, stream } = play('stopped');
+    const seen = shipped(stream);
+    row(frame, 'stopped: the frame written before the stop is whole', `frame=${frame}`);
+    row(stopped, 'stopped: the stop is set when the second message starts', `stopped=${stopped}`);
+    row(!colour, 'stopped: the second message is refused', `colour=${colour}`);
+    row(!seen.error && seen.buffered === 0 && seen.messages.length === 1
+      && seen.messages[0].type === FRAME && seen.messages[0].payload.length === PAYLOAD && filled(seen.messages[0].payload, 0x11),
+    'stopped: the shipped parser reads the one frame and nothing after it',
+    JSON.stringify({ error: seen.error, buffered: seen.buffered, messages: seen.messages.map((m) => m.type) }));
+  }
+
+  console.log('\na second message after a frame the output refused part-way, with no stop');
+  {
+    const { frame, colour, stopped, stream } = play('cut');
+    row(!frame, 'cut: the frame the file refused part-way is abandoned', `frame=${frame}`);
+    row(!stopped, 'cut: no stop is set when the second message starts', `stopped=${stopped}`);
+    row(!colour, 'cut: the second message is refused, though the file takes bytes again', `colour=${colour}`);
+    endsAtTheCut('cut', stream);
   }
 };
 
@@ -333,10 +367,12 @@ const stream = async (binary, scratch) => {
     if (!finished) { run.child.kill('SIGKILL'); await run.exited; }
     return !finished;
   };
-  // The request, then up to BOUND_MS for the run to end. A run still going is killed, so a
-  // grabber that hangs costs the bound and not the check.
+  // The request - a stop line, end-of-file or a signal - then up to BOUND_MS for the run to end. A
+  // run still going is killed, so a grabber that hangs costs the bound and not the check.
   const request = async (run, how) => {
-    if (how === 'stop') run.child.stdin.write('stop\n'); else run.child.stdin.end();
+    if (how === 'stop') run.child.stdin.write('stop\n');
+    else if (how === 'eof') run.child.stdin.end();
+    else run.child.kill(how);
     const hung = await whenDone(run, BOUND_MS);
     // The exit event can come before the last of the child's stderr has been read.
     await Promise.race([run.errEnded, sleep(1000)]);
@@ -420,6 +456,18 @@ const stream = async (binary, scratch) => {
     const out = await collect(run);
     row(out.whole && out.types[0] === HELLO, `${name}: the stream it leaves ends on a message boundary, so no frame is cut short`,
       JSON.stringify({ ...out, types: out.types.length }));
+  }
+
+  console.log('\na signal while the device opens, before the hello');
+  {
+    const run = launch(ARGS, { FAKE_OPEN_MS: '600' });
+    const name = 'a signal before the hello';
+    row(await waitFor(() => /\[fake\] opening the device/.test(run.err), 3000), `${name}: the grabber is opening the device`, tail(run));
+    const { hung } = await request(run, 'SIGTERM');
+    ends(name, run, hung);
+    clean(name, run, hung);
+    const out = await collect(run);
+    row(out.types.length === 0 && out.rest === 0, `${name}: nothing is written, not even the hello`, JSON.stringify(out));
   }
 
   console.log('\na stop or an end-of-file already waiting when the first frame arrives');

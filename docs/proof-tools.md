@@ -939,17 +939,19 @@ descriptor 0.
 
 The writer part extracts the output writer, `write_message` and what it calls, and compiles it with
 `test/fixtures/grabber-write.cpp`. The fixture runs the frame loop's thread and the encoder's on a
-pipe the parent leaves unread. The frame writer stalls in a 512 KiB message, the stop reaches it
-through the stdin its stalled wait reads, and the encoder's message arrives while the frame writer
-waits or after it gave up. The parent reads again once the frame writer has returned, and the tool
-reads the stream through `MessageParser` from `server/protocol.js`. The sensor's timing decides
-which thread reaches the lock first. A stop through the built grabber lets a queued encoder give up
-on its own failed lock attempt, so the writer part scripts the order.
+pipe the parent leaves unread. The frame writer stalls in a 512 KiB message, a stop reaches it
+through the stdin its stalled wait reads, and the encoder's message starts while the frame writer
+waits or after it returned. Each step waits for the one before it to have happened, so no outcome
+depends on a sleep. The tool reads the stream through `MessageParser` from `server/protocol.js`. In
+the built grabber a stop and a cut usually come together, and either rule alone then refuses the
+next message. The fixture also separates them: a stop with nothing cut, and a cut with no stop. The
+cut with no stop comes from a file whose size limit refuses the rest of a frame and is then lifted.
 
 The stream part builds the whole of `native/grabber.cpp` against `test/fixtures/fake-freenect2.cpp`,
 which defines the libfreenect2 symbols the grabber calls behind the real headers, and runs the
 result as a child. The fake device delivers synthetic frames from a thread, paced by
-`FAKE_DEPTH_MS`, `FAKE_COLOUR_EVERY`, `FAKE_MAX_FRAMES` and `FAKE_REGISTER_MS`. The tool does not
+`FAKE_DEPTH_MS`, `FAKE_COLOUR_EVERY`, `FAKE_MAX_FRAMES` and `FAKE_REGISTER_MS`. `FAKE_OPEN_MS`
+delays the device open, so a signal can arrive before the hello. The tool does not
 read the child's stdout until a row says to, so the first frame fills the pipe and the capture loop
 waits in a write when the stop arrives. A stop has 4000 ms. The tool kills a child still running at
 the bound, and its row fails.
@@ -976,10 +978,15 @@ no new frame for 450 ms, where depth arrives every 10 ms. The writer rows are:
 
 - two writers and no stop: both messages arrive whole, each carrying only its own bytes. This is
   the control for a writer that refuses too much;
-- a second message queued behind a frame the stop cuts short, and one that reaches the lock after
-  the frame gave up: the frame writer reports its message abandoned, the second write is refused,
-  the parent's stream is the cut frame and ends there, and the shipped parser holds it as one
-  unfinished message.
+- a second message waiting behind a frame the stop cuts short, and one that starts after the frame
+  gave up with the pipe read empty: the frame writer reports its message abandoned, the second
+  write is refused, the parent's stream is the cut frame and ends there, and the shipped parser
+  holds it as one unfinished message;
+- a stop with nothing cut: the frame written before the stop is whole, and a message that starts
+  after the stop on a free lock, with the parent reading, is refused. This is the encoder's key
+  after its colour finished;
+- a cut with no stop: the output refuses the rest of a frame and then takes bytes again, and the
+  next message is still refused.
 
 The stream rows are:
 
@@ -992,6 +999,8 @@ The stream rows are:
 - a stop line to a parent that is still reading, which paces its reads so a write is nearly always
   waiting: the stream ends on a message boundary. This is the control for a fix that gives a frame
   up the moment a stop is set;
+- a SIGTERM while the device opens: nothing is written, not even the hello, and the run ends
+  through its teardown with exit 0;
 - a stop line, and end-of-file, already waiting when the first frame arrives: nothing follows the
   hello, and the one depth frame the loop took is given back;
 - two exits that no stop requested, each with the encoder stalled in a write: the sensor goes quiet
@@ -1010,9 +1019,12 @@ exits 1. Each mutation runs the part it names: reader, writer or stream.
 - **`stop-matches-a-prefix`** — any line that begins `stop` stops the run, and the near-miss row
   fails.
 - **`cut-message-leaves-the-output-open`** — a write that gave up part-way no longer closes the
-  output to the next writer, and the queued and late rows find its bytes after the cut.
+  output to the next writer, and the cut rows find its bytes after the cut, where the parser
+  desyncs.
 - **`cut-message-does-not-close-the-output`** — the write that gave up leaves nothing for a later
   write to refuse, and the same rows fail.
+- **`new-message-after-stop`** — a writer that finds the lock free after a stop starts its message,
+  and the stopped rows find it after the frame.
 - **`stalled-write-never-gives-up`** — a write on a full pipe keeps waiting after the stop is read,
   and every stalled-stop row hangs.
 - **`stalled-write-ignores-stdin`** — nothing reads stdin while a write waits, and the stalled-stop
@@ -1021,10 +1033,10 @@ exits 1. Each mutation runs the part it names: reader, writer or stream.
   row where the encoder holds the lock hangs.
 - **`stdout-left-blocking`** — stdout stays blocking, so a write sits in the kernel, and the
   stalled-stop rows hang.
-- **`frame-written-after-stop`** — the loop writes the frame in hand after it reads a stop, and the
-  rows with a stop already waiting find bytes after the hello.
 - **`early-stop-keeps-the-depth-frame`** — the loop leaves on a stop without giving back the depth
   frame it took, and the rows with a stop already waiting find a frame taken and not returned.
+- **`stop-before-the-hello-skips-teardown`** — a hello refused on a stop returns 1, and the
+  SIGTERM row finds no teardown and exit 1.
 - **`stalled-write-gives-up-at-once`** — a write gives up as soon as a stop is set, and the
   reading-parent row and the whole-stream row after the command row end on a cut frame.
 - **`teardown-leaves-the-encoder-writing`** — the flag that ends an encoder's stalled write is not
