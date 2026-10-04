@@ -50,12 +50,38 @@ before(() => {
     chmodSync(file, 0o755);
   }
   mkdirSync(join(work, 'empty'));
+  // A decoder or encoder still working when the stop arrives: it writes its pid and never exits on
+  // its own, so whether it outlives the server says whether the server ended it. A real ffmpeg that
+  // loses its parent ends when its stdin closes, which hides the question. A minute bounds an orphan.
+  const stubborn = join(work, 'stubborn.mjs');
+  writeFileSync(stubborn, [
+    "import { appendFileSync } from 'node:fs';",
+    'appendFileSync(process.env.BRAINDANCE_STANDIN_PIDS, `${process.pid}\n`);',
+    'setTimeout(() => process.exit(3), 60_000);',
+    '',
+  ].join('\n'));
+  mkdirSync(join(work, 'stubborn'));
+  writeFileSync(join(work, 'stubborn/ffmpeg'), `#!/bin/sh\nexec "${process.execPath}" "${stubborn}" "$@"\n`);
+  chmodSync(join(work, 'stubborn/ffmpeg'), 0o755);
 }, { timeout: 120_000 });
 
 after(() => {
   for (const child of children) child.kill('SIGKILL');
+  for (const pid of standInPids()) if (alive(pid)) process.kill(pid, 'SIGKILL');
   rmSync(work, { recursive: true, force: true });
 });
+
+const standInPids = () => (existsSync(join(work, 'stand-in.pids'))
+  ? readFileSync(join(work, 'stand-in.pids'), 'utf8').split('\n').filter(Boolean).map(Number) : []);
+
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
@@ -374,6 +400,54 @@ test('a line that is not stop is ignored and said so', { timeout: 60_000 }, asyn
   assert.equal(server.child.exitCode, null);
   server.child.stdin.write('stop\r\n');
   assert.deepEqual((await server.stops()).code, 0, 'and a stop with a Windows line ending still stops');
+});
+
+// ---------------------------------------------------------------------------------------------
+// A stop that arrives while the server is decoding an upload or encoding an export ends that child
+// and removes its scratch before the process exits.
+
+const scratchIn = (dir, pattern) => (existsSync(dir) ? readdirSync(dir).filter((file) => pattern.test(file)) : []);
+
+test('a stop during an audio decode ends the decoder and removes the import\'s scratch before the server exits', { skip: noShell, timeout: 60_000 }, async () => {
+  const pids = join(work, 'stand-in.pids');
+  const before = standInPids().length;
+  const server = await start('stop-mid-decode', {
+    flags: ['--stop-on-stdin', '--replay', sample],
+    env: { FFMPEG: join(work, 'stubborn/ffmpeg'), BRAINDANCE_STANDIN_PIDS: pids },
+  });
+  const upload = fetch(`${server.url}/audio`, {
+    method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: Buffer.alloc(4096, 1),
+  }).then((res) => res.status, (err) => err.message);
+  await eventually(() => standInPids().length > before, 'the decoder to start');
+  const decoder = standInPids().at(-1);
+  assert.equal(scratchIn(server.roots.audio, /^\.import-/).length, 1, 'the import has its scratch while the decoder runs');
+  server.child.stdin.write('stop\n');
+  assert.deepEqual(await server.stops(), { code: 0, signal: null });
+  assert.equal(alive(decoder), false, `the decoder ${decoder} outlived the server`);
+  assert.deepEqual(scratchIn(server.roots.audio, /^\.import-/), [], 'the import\'s scratch outlived the server');
+  await upload;
+});
+
+test('a stop during an export ends the encoder and removes the export\'s scratch before the server exits', { skip: noShell, timeout: 60_000 }, async () => {
+  const pids = join(work, 'stand-in.pids');
+  const before = standInPids().length;
+  const server = await start('stop-mid-export', {
+    flags: ['--stop-on-stdin', '--replay', sample],
+    env: { FFMPEG: join(work, 'stubborn/ffmpeg'), BRAINDANCE_STANDIN_PIDS: pids },
+  });
+  const socket = socketTo(server);
+  await socket.opened;
+  socket.send({ begin: { name: 'cut-short', width: 2, height: 2, fps: 30, frames: 10, codec: 'h264' } });
+  const ready = await socket.next();
+  assert.ok(ready.ready, `the export began: ${JSON.stringify(ready)}`);
+  socket.send(Buffer.alloc(2 * 2 * 4));
+  await eventually(() => standInPids().length > before, 'the encoder to start');
+  const encoder = standInPids().at(-1);
+  assert.equal(scratchIn(server.roots.exports, /\.part$/).length, 1, 'the export has its scratch while the encoder runs');
+  server.child.stdin.write('stop\n');
+  assert.deepEqual(await server.stops(), { code: 0, signal: null });
+  assert.equal(alive(encoder), false, `the encoder ${encoder} outlived the server`);
+  assert.deepEqual(scratchIn(server.roots.exports, /\.part$/), [], 'the export\'s scratch outlived the server');
 });
 
 // ---------------------------------------------------------------------------------------------

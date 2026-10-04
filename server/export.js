@@ -211,12 +211,33 @@ function ffmpegArgs({ width, height, fps, codec, into, audio = null }) {
   ];
 }
 
+// The stop of every export socket still open or still cleaning up, for a shutdown to run.
+const running = new Set();
+
+/**
+ * Fails every running export, and resolves once each encoder has exited and each scratch is
+ * removed or has become an export. Rejects naming a scratch that could not be removed.
+ */
+export async function stopExports() {
+  const results = await Promise.allSettled([...running].map((stop) => stop()));
+  const failed = results.filter((result) => result.status === 'rejected');
+  if (failed.length) throw new Error(failed.map((result) => result.reason.message).join('; '));
+}
+
 // One export, from the begin message to the file. Everything is validated against what the
 // browser said it would send: ffmpeg's rawvideo demuxer reads a short frame as the head of
 // the next one and produces a file that plays and scrolls diagonally.
 export function handleExportSocket(ws, { outDir, audioStore = null, log = console.log }) {
   let job = null;
   let child = null;
+  // Settled once the encoder has exited, or failed to start.
+  let encoderGone = Promise.resolve();
+  // The work a stop waits for: a begin creating the scratch, a failure removing it, a finish
+  // renaming it into the export.
+  let beginning = Promise.resolve();
+  let ending = Promise.resolve();
+  let landing = Promise.resolve();
+  let leftover = null;
   let received = 0;
   let acked = 0;
   let bytes = 0;
@@ -231,17 +252,35 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
   };
 
-  const fail = async (message) => {
-    if (finished) return;
+  const fail = (message) => {
+    if (finished) return ending;
     finished = true;
-    log(`[export] ${message}`);
-    send({ error: message });
-    if (child && child.exitCode === null) child.kill('SIGKILL');
-    // Only the files in this run's own scratch directory. Reaching for `job.output` here deleted
-    // the previous good export of the same name, because the name defaults to the take's id.
-    if (job) await rm(job.temp, { recursive: true, force: true }).catch(() => {});
-    ws.close();
+    ending = (async () => {
+      log(`[export] ${message}`);
+      send({ error: message });
+      // Gone before the scratch is removed, or a frame it writes afterwards keeps the directory.
+      if (child && child.exitCode === null) child.kill('SIGKILL');
+      await encoderGone;
+      // Only the files in this run's own scratch directory. Reaching for `job.output` here deleted
+      // the previous good export of the same name, because the name defaults to the take's id.
+      if (job) {
+        await rm(job.temp, { recursive: true, force: true }).catch((err) => {
+          leftover = `the scratch ${job.temp} was not removed: ${err.message}`;
+          log(`[export] ${leftover}`);
+        });
+      }
+      ws.close();
+    })();
+    return ending;
   };
+
+  const stop = async () => {
+    await beginning;
+    await fail('the server stopped during the export');
+    await landing;
+    if (leftover) throw new Error(leftover);
+  };
+  running.add(stop);
 
   const begin = async (msg) => {
     const { width, height, fps, frames, maxFrames, codec } = validateExport({
@@ -304,6 +343,10 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
     const args = ffmpegArgs({ width, height, fps, codec, into: target, audio });
     log(`[export] ${ffmpeg} ${args.join(' ')}`);
     child = spawn(ffmpeg, args, { stdio: ['pipe', 'ignore', 'pipe'] });
+    encoderGone = new Promise((done) => {
+      child.once('exit', done);
+      child.once('error', done);
+    });
     child.stderr.on('data', (chunk) => stderr.push(chunk.toString('utf8')));
     child.on('error', (err) => fail(`ffmpeg could not start: ${err.message}`));
     child.stdin.on('error', () => { /* reported through the exit code instead */ });
@@ -313,7 +356,7 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
         fail(`ffmpeg exited ${code ?? signal}${stderr.length ? `: ${stderr.join('').trim()}` : ''}`);
         return;
       }
-      finish().catch((err) => fail(String(err.message ?? err)));
+      landing = finish().catch((err) => fail(String(err.message ?? err)));
     });
 
     // `frameExt` travels to the page because `href` names a directory for a sequence, which the
@@ -399,6 +442,8 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
     // so the video and its record land together with no window in which one exists alone.
     const sidecar = join(job.temp, `${job.name}.${spec.ext}.job.json`);
     await writeFile(sidecar, `${JSON.stringify(record, null, 2)}\n`);
+    // A stop that failed the export while the record was written owns the scratch now.
+    if (finished) return;
     // Past this line nothing may remove the scratch, because the next statement turns it
     // into the output.
     finished = true;
@@ -438,7 +483,9 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
       const msg = JSON.parse(data.toString('utf8'));
       if (msg.begin) {
         if (job) throw new Error('this socket already has an export running');
-        await begin(msg.begin);
+        const begun = begin(msg.begin);
+        beginning = begun.catch(() => {});
+        await begun;
       } else if (msg.end) {
         await end();
       } else {
@@ -449,8 +496,8 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
   });
 
   ws.on('close', () => {
-    if (finished) return;
-    fail(`the browser closed the export socket after ${received} of ${job?.frames ?? '?'} frames`);
+    if (!finished) fail(`the browser closed the export socket after ${received} of ${job?.frames ?? '?'} frames`);
+    Promise.all([beginning, ending, landing]).then(() => running.delete(stop));
   });
   ws.on('error', (err) => fail(`export socket error: ${err.message}`));
 }
