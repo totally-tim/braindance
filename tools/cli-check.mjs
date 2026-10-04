@@ -24,8 +24,8 @@ const MUTATIONS = {
   // `all` rather than `allSettled`: the recorder's rejection wins the race, so the process is gone
   // before the grace period ends and the grabber that ignored SIGTERM is left holding the sensor.
   'shutdown-abandons-a-stubborn-grabber': { file: 'server/index.js', edits: [[
-    '    const [grabber, take] = await Promise.allSettled([',
-    '    const [grabber, take] = await Promise.all([',
+    '    const [grabber, take, audio, exports] = await Promise.allSettled([',
+    '    const [grabber, take, audio, exports] = await Promise.all([',
   ]] },
   'idle-ignores-the-recorder': { file: 'server/index.js', edits: [[
     '      && !recordingStarts && !recorder.armed && !recorder.take;', ';',
