@@ -713,6 +713,12 @@ line in a recorder, the confirm's Delete removes the file. Every driven control 
 requires the drivers and the `dead-` mutations to name the same controls. A dialog's buttons are
 reached through the control that opens the dialog, so a dead opener reddens their rows as well.
 
+After each press the sweep shuts every dialog and waits for the viewer's `close` event before it
+repaints. Chromium delivers that event a frame after `close()`, and the page's repaint re-opens a
+viewer it still holds, so without the wait the late event releases the viewer the next row opened
+(`frame undefined -> undefined` on the mark row). A last row requires the page to be shut and idle
+after every press.
+
 181 controls, listed by `node tools/library-check.mjs --mutate __enumerate__`.
 
 **Known reds.** Three rows are flaky under machine contention. Two are

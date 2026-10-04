@@ -7567,10 +7567,21 @@ async function runChecks() {
     const tileSel = (id, rest) => `.tile[data-id="${id}"] ${rest}`;
     const dialogOpen = (id) => page.evaluate((d) => document.getElementById(d).open, id);
     // Back to a page with nothing open and every take shown, whatever the last driver left.
+    // `close()` fires its event a frame later, and a repaint in that gap re-opens the viewer the
+    // page still holds, which the late event then releases under the next row. So the repaint
+    // waits for the event, whether this closed the viewer or the driver did.
     const settle = async () => {
       try {
-        await page.evaluate(() => {
+        await page.evaluate(async () => {
           for (const d of document.querySelectorAll('dialog[open]')) d.close();
+          if (globalThis.__library.viewer.state()) {
+            // Added after the page's own listener, so the page has released the viewer when this runs.
+            const released = new Promise((done) => {
+              document.getElementById('viewer').addEventListener('close', done, { once: true });
+            });
+            // Past the bound the repaint goes ahead and the quiet row names the press.
+            await Promise.race([released, new Promise((done) => { setTimeout(done, 5000); })]);
+          }
           document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
           globalThis.__library.filter('all');
         });
@@ -7809,6 +7820,7 @@ async function runChecks() {
       'and every driven control has a `dead-` mutation leaving it inert, so each row below is one a dead control can redden',
       `${Object.keys(DRIVERS).length} driven, ${Object.keys(DEAD_CONTROLS).length} with a dead- mutation`);
 
+    const leftOpen = [];
     for (const [key, driver] of Object.entries(DRIVERS)) {
       let result;
       try {
@@ -7818,7 +7830,13 @@ async function runChecks() {
       }
       check(result.ok, `pressing ${key} ${driver.does}`, result.detail);
       await settle();
+      const quiet = await page.evaluate(() => globalThis.__library.viewer.state() === null
+        && ![...document.querySelectorAll('dialog')].some((d) => d.open)).catch(() => false);
+      if (!quiet) leftOpen.push(key);
     }
+    check(leftOpen.length === 0,
+      'and the page is shut and idle after every press, so no row reads a viewer that a late close event is about to release',
+      leftOpen.length ? `still open after ${leftOpen.join(' ')}` : `${Object.keys(DRIVERS).length} presses, each left nothing open`);
     await page.close();
     for (const p of servers.filter((sv) => sv.port === MAC_PORT + 17 || sv.port === MAC_PORT + 18)) p.child.kill('SIGKILL');
   }
