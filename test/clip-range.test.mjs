@@ -3,6 +3,7 @@
 // transport, the export and the two markers all read.
 
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import * as clip from '../web/clip-range.js';
 
@@ -137,4 +138,13 @@ test('a range ends on the last frame the transport steps to', () => {
       assert.ok(to === last || pastOutPoint((to + 1) / fps, out), `${fps} fps, out ${out}: frame ${to + 1} is not past it either`);
     }
   }
+});
+
+test('a range past 2^53 frames is counted at once, not stepped back forever', () => {
+  // In a child, because a loop that never ends cannot be timed out from inside it.
+  const probe = `import { rangeFrames } from ${JSON.stringify(new URL('../web/clip-range.js', import.meta.url).href)};
+    console.log(JSON.stringify(rangeFrames({ in: 0, out: null }, 600_967_367_215_625, 30)));`;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', probe], { timeout: 5_000, encoding: 'utf8' });
+  assert.equal(child.signal, null, 'rangeFrames returned rather than being killed at the timeout');
+  assert.equal(JSON.parse(child.stdout).from, 0, child.stderr);
 });

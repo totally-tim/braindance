@@ -131,7 +131,7 @@ const MUTATIONS = {
   // lies past the out point.
   'export-ends-on-the-nearest-frame': {
     file: 'web/clip-range.js',
-    edits: [['  while (to > from && pastOutPoint(to / fps, hi)) to--;\n', '  to = Math.min(last, Math.round(hi * fps));\n']],
+    edits: [['  if (to > from && pastOutPoint(to / fps, hi)) to--;\n', '  to = Math.min(last, Math.round(hi * fps));\n']],
     fails: 'the off-grid row of section 11 alone',
   },
   // The container kept and the stream swapped, so only what is inside the .mov moves.

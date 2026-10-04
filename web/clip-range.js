@@ -66,7 +66,8 @@ export function rangeFrames({ in: inSec, out: outSec }, duration, fps) {
   const hi = outSec === null || outSec === undefined ? duration : Math.min(duration, outSec);
   const from = Math.min(last, Math.round(lo * fps));
   let to = Math.min(last, Math.ceil(hi * fps));
-  while (to > from && pastOutPoint(to / fps, hi)) to--;
+  // One step back is enough below four hours, and a loop never ends past 2^53, where `to - 1 === to`.
+  if (to > from && pastOutPoint(to / fps, hi)) to--;
   return { from, to: Math.max(from, to) };
 }
 

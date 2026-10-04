@@ -1,6 +1,7 @@
 // The render queue's store, driven in process: cancellation, the heartbeat decision, the version
 // record and the refusal of a job file this build did not write. No server and no browser.
 import { test, mock } from 'node:test';
+import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { constants } from 'node:fs';
 import fsp, { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
@@ -718,4 +719,29 @@ test('enqueue lists the library once, and refuses more clips than the page compo
   } finally {
     await h.cleanup();
   }
+});
+
+test('a program far past four hours is refused at enqueue, not counted forever', () => {
+  // A program end where a count stepped back one frame at a time never stops at 30 fps: past
+  // 2^53 frames, one less is the same number. Run in a child, because a loop that never ends
+  // cannot be timed out from inside it.
+  const end = 600_967_367_215_625;
+  const job = {
+    project: { ...PROJECT, clips: [{ take: { hash: HASH }, start: end - 1, length: 1, speed: 1, sourceStart: 0 }] },
+    captures: [HASH], output: 'far', width: 64, height: 36, fps: 30,
+  };
+  const probe = `
+    import { mkdtemp, rm } from 'node:fs/promises';
+    import { tmpdir } from 'node:os';
+    import { join } from 'node:path';
+    import { JobStore } from ${JSON.stringify(new URL('../server/jobs.js', import.meta.url).href)};
+    const dir = await mkdtemp(join(tmpdir(), 'braindance-jobs-'));
+    const store = new JobStore(join(dir, 'jobs'), { exportsDir: dir, environment: async () => ({ record: {}, problems: [] }) });
+    try {
+      await store.enqueue(${JSON.stringify(job)});
+      console.log('queued');
+    } catch (err) { console.log(err.message); } finally { await rm(dir, { recursive: true, force: true }); }`;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', probe], { timeout: 10_000, encoding: 'utf8' });
+  assert.equal(child.signal, null, 'enqueue answered rather than being killed at the timeout');
+  assert.match(child.stdout, /past the 14400-second ceiling/, child.stderr);
 });
