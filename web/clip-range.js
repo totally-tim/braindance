@@ -51,6 +51,16 @@ export function clipBoundOrThrow(value, which) {
 export let clipIn = 0;
 export let clipOut = null;
 
+// The last output frame an export may reach. Below 2^51 a frame's time rounds back to that frame
+// at every rate offered (measured, 2e5 samples per octave); above it the transport seeks one frame
+// and steps another, and past 2^53 a frame plus one is itself. 2^50 leaves one octave.
+export const LAST_EXPORT_FRAME = 2 ** 50;
+
+/** Why an export cannot reach output frame `last` at `fps`, or null. */
+export const lastFrameRefusal = (last, fps) => (last <= LAST_EXPORT_FRAME ? null
+  : `an export reaching output frame ${last} at ${fps} fps is past frame ${LAST_EXPORT_FRAME}, `
+    + 'beyond which the transport cannot count output frames one at a time');
+
 /** Whether a program time lies past the out point. The transport steps to no frame that does. */
 export const pastOutPoint = (sec, outSec) => sec > outSec + 1e-9;
 

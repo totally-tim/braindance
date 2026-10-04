@@ -745,3 +745,17 @@ test('a program far past four hours is refused at enqueue, not counted forever',
   assert.equal(child.signal, null, 'enqueue answered rather than being killed at the timeout');
   assert.match(child.stdout, /past the 14400-second ceiling/, child.stderr);
 });
+
+test('a short render late in a long program is refused where its frames cannot be counted one at a time', async () => {
+  const h = await harness();
+  // A project's last second exported at 120 fps starts at output frame 35,999,999,999,999,880.
+  const project = { ...PROJECT, clips: [{ take: { hash: HASH }, start: 299_999_999_999_999, length: 1, speed: 1, sourceStart: 0 }] };
+  try {
+    await assert.rejects(h.enqueue({ project, fps: 120, deliverable: { in: 299_999_999_999_999, out: 300_000_000_000_000 } }),
+      /at 120 fps is past frame 1125899906842624/);
+    assert.ok(await h.enqueue({ project: { ...project, clips: [{ ...project.clips[0], start: 9_999 }] }, fps: 120, deliverable: { in: 9_999, out: 10_000 } }),
+      'the same second early in the program is queued');
+  } finally {
+    await h.cleanup();
+  }
+});

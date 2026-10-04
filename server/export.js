@@ -10,6 +10,7 @@ import { delimiter, dirname, join, resolve } from 'node:path';
 import { AUDIO_RATE, checkAudioClip, readAudioWav } from '../web/audio-source.js';
 import { DOCUMENT_VERSIONS, versionRefusal } from '../web/format.js';
 import { OUTPUT_RATES } from '../web/export-sizes.js';
+import { lastFrameRefusal } from '../web/clip-range.js';
 
 // The encoder `FFMPEG` names, read once at import. Unset, `ffmpeg` is looked up on PATH at each
 // export, so one installed after the server started is found without a restart.
@@ -107,7 +108,7 @@ for (const [name, spec] of Object.entries(CODECS)) {
 }
 
 // Exported so the queue can validate a job before it is claimed.
-export function validateExport({ name, width, height, fps, frames = null, codec }) {
+export function validateExport({ name, width, height, fps, frames = null, codec, programStart = null }) {
   if (!VALID_NAME.test(String(name ?? ''))) {
     throw new Error(`bad output name ${JSON.stringify(name)}: it names a file in the exports directory, so it is letters, digits, dot, dash and underscore`);
   }
@@ -140,6 +141,10 @@ export function validateExport({ name, width, height, fps, frames = null, codec 
   }
   // An export that declares no count stops at the ceiling instead.
   const maxFrames = frames !== null ? Math.trunc(frames) : MAX_EXPORT_SECONDS * f;
+  if (programStart !== null) {
+    const refusal = lastFrameRefusal(Math.round(Number(programStart) * f) + maxFrames - 1, f);
+    if (refusal) throw new Error(refusal);
+  }
   return { width: w, height: h, fps: f, frames: frames !== null ? Math.trunc(frames) : null, maxFrames, codec };
 }
 
@@ -241,7 +246,7 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
   const begin = async (msg) => {
     const { width, height, fps, frames, maxFrames, codec } = validateExport({
       name: msg.name, width: msg.width, height: msg.height, fps: msg.fps,
-      frames: msg.frames, codec: msg.codec ?? 'h264',
+      frames: msg.frames, codec: msg.codec ?? 'h264', programStart: msg.programStart ?? null,
     });
     if (msg.project != null && msg.project.version !== DOCUMENT_VERSIONS.project) {
       throw new Error(versionRefusal('project', msg.project.version));

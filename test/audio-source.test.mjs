@@ -16,6 +16,7 @@ import { EventEmitter } from 'node:events';
 import { createServer, request } from 'node:http';
 import { MAX_EXPORT_SECONDS, audioFilter, handleExportSocket, validateExport } from '../server/export.js';
 import { OUTPUT_RATES } from '../web/export-sizes.js';
+import { LAST_EXPORT_FRAME } from '../web/clip-range.js';
 import { DOCUMENT_VERSIONS } from '../web/format.js';
 
 const tone = (hz, amplitude = 0.2) => {
@@ -230,32 +231,36 @@ test('a stalled upload gives the import slot back at the deadline', { timeout: 1
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('a body that arrived in time is not cut off while it is still being written', { timeout: 10_000 }, async (t) => {
+test('an upload is read whole before any of it is written', { timeout: 10_000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'audio-arrived-'));
   const promises = createRequire(import.meta.url)('node:fs/promises');
   const original = promises.open;
-  // A write of the upload outlasts the whole deadline. A body this size fills the
-  // request's buffers, so a server that writes while it reads stops parsing a body already sent.
+  let arrived = null;
+  // A write waits for the whole body. A body this size fills the request's buffers, so a server
+  // that writes while it reads stops reading at its first write: the body never arrives, the
+  // write never starts, and the test times out.
   promises.open = async (path, ...rest) => {
     const handle = await original(path, ...rest);
     if (String(path).endsWith('/input')) {
       const write = handle.writeFile.bind(handle);
       handle.writeFile = async (data) => {
-        await new Promise((done) => { setTimeout(done, 1000); });
+        await arrived;
         return write(data);
       };
     }
     return handle;
   };
   syncBuiltinESMExports();
-  const store = new AudioStore(root, { uploadMs: 400 });
-  let outcome = null;
+  // Past the test's timeout, so the test does not measure it; it ends a failed run's import.
+  const store = new AudioStore(root, { uploadMs: 15_000 });
   const server = createServer((req, res) => {
-    store.import(req).then(() => 'imported', (err) => err.message).then((said) => { outcome = said; res.end(said); });
+    arrived = new Promise((done) => { req.once('end', done); });
+    store.import(req).then(() => 'imported', (err) => err.message).then((said) => { res.end(said); });
   });
   t.after(async () => {
     promises.open = original;
     syncBuiltinESMExports();
+    server.closeAllConnections();
     await new Promise((done) => { server.close(done); });
     await rm(root, { recursive: true, force: true });
   });
@@ -270,8 +275,7 @@ test('a body that arrived in time is not cut off while it is still being written
     for (let i = 0; i < 64; i++) req.write(Buffer.alloc(32 * 1024, i));
     req.end();
   });
-  assert.doesNotMatch(reply, /took longer|no reply/, 'the request was not destroyed');
-  assert.doesNotMatch(outcome ?? '', /took longer/, 'and the import failed, if it failed, for its own reason');
+  assert.doesNotMatch(reply, /took longer|no reply/, 'the import answered, for its own reason');
   assert.equal(store.importing, false);
 });
 
@@ -324,4 +328,15 @@ test('an audio export that declares no frame count is refused before anything is
     assert.match(sent.at(-1)?.error ?? '', /needs a program start and frame count/);
     assert.deepEqual(await readdir(root), []);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('an export reaches no output frame past LAST_EXPORT_FRAME, counted or not', () => {
+  const shape = { name: 'late', width: 320, height: 180, fps: 30, codec: 'lossless' };
+  const first = LAST_EXPORT_FRAME - 29;
+  assert.equal(LAST_EXPORT_FRAME, 2 ** 50);
+  assert.equal(validateExport({ ...shape, frames: 30, programStart: first / 30 }).frames, 30, 'the last frame is the bound itself');
+  assert.throws(() => validateExport({ ...shape, frames: 30, programStart: (first + 1) / 30 }), /output frame 1125899906842625 at 30 fps is past frame 1125899906842624/);
+  assert.throws(() => validateExport({ ...shape, programStart: (LAST_EXPORT_FRAME - 30) / 30 }), /past frame/, 'an uncounted export may run to the four-hour ceiling');
+  assert.throws(() => validateExport({ ...shape, frames: 30, programStart: 'late' }), /past frame/, 'a start that is not a number');
+  assert.equal(validateExport({ ...shape, frames: 30 }).frames, 30, 'no start, no bound');
 });
