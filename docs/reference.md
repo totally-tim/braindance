@@ -450,8 +450,10 @@ term is expressed against 1080p. A project stores the shape as the reduced integ
 
 Project settings offers 24, 30, 60 and 120 frames a second, and the export server accepts no other
 rate. An export runs for at most four hours, and an export that declares no frame count stops there.
-An export reaches no output frame past `LAST_EXPORT_FRAME` (2^50), counted from the program's
-start at the export's rate.
+The export server refuses an export whose last output frame is past `LAST_EXPORT_FRAME` (2^50),
+counted at the export's rate from the `programStart` the client declares. It trusts that start,
+and it skips the check for a begin that declares none. The editor declares one with every export,
+queued renders included, and the render queue checks a job against the frames it counts itself.
 
 | Shape | Sizes |
 | --- | --- |

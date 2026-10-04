@@ -236,6 +236,7 @@ test('an upload is read whole before any of it is written', { timeout: 10_000 },
   const promises = createRequire(import.meta.url)('node:fs/promises');
   const original = promises.open;
   let arrived = null;
+  let written = 0;
   // A write waits for the whole body. A body this size fills the request's buffers, so a server
   // that writes while it reads stops reading at its first write: the body never arrives, the
   // write never starts, and the test times out.
@@ -245,6 +246,7 @@ test('an upload is read whole before any of it is written', { timeout: 10_000 },
       const write = handle.writeFile.bind(handle);
       handle.writeFile = async (data) => {
         await arrived;
+        written += [data].flat().reduce((n, chunk) => n + chunk.length, 0);
         return write(data);
       };
     }
@@ -276,6 +278,7 @@ test('an upload is read whole before any of it is written', { timeout: 10_000 },
     req.end();
   });
   assert.doesNotMatch(reply, /took longer|no reply/, 'the import answered, for its own reason');
+  assert.equal(written, 64 * 32 * 1024, 'and the whole body reached the file the decoder reads');
   assert.equal(store.importing, false);
 });
 
