@@ -9,6 +9,7 @@ import { mkdir, readdir, writeFile, stat, rm, rename } from 'node:fs/promises';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { AUDIO_RATE, checkAudioClip, readAudioWav } from '../web/audio-source.js';
 import { DOCUMENT_VERSIONS, versionRefusal } from '../web/format.js';
+import { OUTPUT_RATES } from '../web/export-sizes.js';
 
 // The encoder `FFMPEG` names, read once at import. Unset, `ffmpeg` is looked up on PATH at each
 // export, so one installed after the server started is found without a restart.
@@ -47,9 +48,12 @@ export function ffmpegBinary({ named = FFMPEG_NAMED, searchPath = process.env.PA
   );
 }
 
-// How many frames may be in flight. A courtesy the client extends rather than something this
-// server enforces - nothing below counts unacked frames.
-const ACK_WINDOW = 4;
+// How many frames may be in flight. A frame past it is refused, because each one waits in memory
+// until ffmpeg takes it and a frame can be 96 MiB.
+export const ACK_WINDOW = 4;
+
+// The longest export, which bounds the soundtrack the mux writes as well as the frames.
+export const MAX_EXPORT_SECONDS = 4 * 3600;
 
 // 4K RGBA is 33MB, so the ceiling sits above the largest frame anything will ask for.
 export const MAX_FRAME_BYTES = 96 * 1024 * 1024;
@@ -120,16 +124,23 @@ export function validateExport({ name, width, height, fps, frames = null, codec 
   if (spec.evenDimensions && (w % 2 || h % 2)) {
     throw new Error(`${codec} needs even dimensions, got ${w}x${h}`);
   }
-  if (!Number.isFinite(f) || f <= 0) throw new Error(`bad output rate ${fps}`);
+  if (!OUTPUT_RATES.includes(f)) {
+    throw new Error(`bad output rate ${fps}: an export runs at ${OUTPUT_RATES.join(', ')} frames per second`);
+  }
   if (frames !== null) {
     const fc = Math.trunc(frames);
     if (!Number.isInteger(fc) || fc <= 0) throw new Error(`an export of ${frames} frames has nothing to encode`);
+    if (fc / f > MAX_EXPORT_SECONDS) {
+      throw new Error(`an export of ${fc} frames at ${f} fps runs ${Math.ceil(fc / f)} seconds, past the ${MAX_EXPORT_SECONDS}-second ceiling`);
+    }
   }
   const frameBytes = w * h * 4;
   if (frameBytes > MAX_FRAME_BYTES) {
     throw new Error(`a ${w}x${h} frame is ${frameBytes} bytes, past the ${MAX_FRAME_BYTES} ceiling`);
   }
-  return { width: w, height: h, fps: f, frames: frames !== null ? Math.trunc(frames) : null, codec };
+  // An export that declares no count stops at the ceiling instead.
+  const maxFrames = frames !== null ? Math.trunc(frames) : MAX_EXPORT_SECONDS * f;
+  return { width: w, height: h, fps: f, frames: frames !== null ? Math.trunc(frames) : null, maxFrames, codec };
 }
 
 // Distinguishes one export's scratch from another's; `-fflags +bitexact` keeps it out of the bytes.
@@ -202,6 +213,7 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
   let job = null;
   let child = null;
   let received = 0;
+  let acked = 0;
   let bytes = 0;
   let ended = false;
   let finished = false;
@@ -227,7 +239,7 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
   };
 
   const begin = async (msg) => {
-    const { width, height, fps, frames, codec } = validateExport({
+    const { width, height, fps, frames, maxFrames, codec } = validateExport({
       name: msg.name, width: msg.width, height: msg.height, fps: msg.fps,
       frames: msg.frames, codec: msg.codec ?? 'h264',
     });
@@ -251,27 +263,30 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
     // Assigned before the first await, because `job` is what says an export is already running:
     // two begins in one tick both found it null and the second overwrote the first's record.
     job = {
-      width, height, fps, frames, codec, frameBytes, output, outputDir, temp, scratchArtifact, href, name: msg.name, began: Date.now(),
+      width, height, fps, frames, maxFrames, codec, frameBytes, output, outputDir, temp, scratchArtifact, href, name: msg.name, began: Date.now(),
       project: msg.project ?? null,
       programStart: msg.programStart ?? null,
       captures: Array.isArray(msg.captures) ? msg.captures.slice() : null,
       renderer: msg.renderer ?? null,
     };
 
-    // Before anything is created, so a machine with no encoder refuses with nothing to clean up.
+    // Before anything is created, so a refused export or a machine with no encoder leaves nothing
+    // to clean up. An audio export needs its frame count, which is what bounds the soundtrack.
+    const audioClip = checkAudioClip(msg.project?.audio);
+    if (audioClip) {
+      if (codec === 'pngseq') throw new Error('PNG sequences cannot carry audio; select MP4 or MOV');
+      if (!audioStore) throw new Error('this server has no audio store');
+      if (!Number.isFinite(msg.programStart) || msg.programStart < 0 || msg.programStart > 86400
+        || frames === null) throw new Error('audio export needs a program start and frame count');
+    }
     const ffmpeg = ffmpegBinary();
 
     // The directory the target is in rather than the scratch directory - one level deeper for a
     // sequence, because the image2 muxer opens each frame by name and creates nothing.
     await mkdir(dirname(target), { recursive: true });
     if (finished) { await rm(temp, { recursive: true, force: true }); return; }
-    const audioClip = checkAudioClip(msg.project?.audio);
     let audio = null;
     if (audioClip) {
-      if (codec === 'pngseq') throw new Error('PNG sequences cannot carry audio; select MP4 or MOV');
-      if (!audioStore) throw new Error('this server has no audio store');
-      if (!Number.isFinite(msg.programStart) || msg.programStart < 0 || msg.programStart > 86400
-        || frames === null) throw new Error('audio export needs a program start and frame count');
       const wav = await audioStore.read(audioClip.hash);
       if (finished) return;
       const { duration } = readAudioWav(wav);
@@ -310,10 +325,13 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
         + `${job.width}x${job.height} RGBA frame is`,
       );
     }
-    // Only when a count was declared: `frames` is optional, and a bare `received >= job.frames`
-    // coerces null to zero and refuses the first frame of a legal open-ended export.
-    if (job.frames !== null && received >= job.frames) {
-      throw new Error(`more frames arrived than the ${job.frames} this export declared`);
+    if (received >= job.maxFrames) {
+      throw new Error(job.frames !== null
+        ? `more frames arrived than the ${job.frames} this export declared`
+        : `an export with no declared count stops at ${job.maxFrames} frames, the ${MAX_EXPORT_SECONDS}-second ceiling`);
+    }
+    if (received - acked >= ACK_WINDOW) {
+      throw new Error(`frame ${received} arrived with ${received - acked} unacknowledged, past the window of ${ACK_WINDOW}`);
     }
     received++;
     bytes += data.length;
@@ -332,6 +350,7 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
       }
       const ok = child.stdin.write(data, (err) => (err ? reject(err) : null));
       const done = () => {
+        acked = n;
         send({ ack: n });
         resolve();
       };

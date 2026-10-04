@@ -25,7 +25,7 @@ import {
 } from './fly.js';
 import { verticalFovForFocalLength, focalLengthForVerticalFov } from './lens.js';
 import {
-  EXPORT_SIZES, DEFAULT_EXPORT_SIZE, reduceAspect, exportAspects, sizesForAspect,
+  EXPORT_SIZES, DEFAULT_EXPORT_SIZE, OUTPUT_RATES, reduceAspect, exportAspects, sizesForAspect,
 } from './export-sizes.js';
 import {
   INSET, TOP_CENTRE, PLAN_STRIDE, FRUSTUM_LEN, planScale, planPoint, planWorld, projectThrough,
@@ -342,9 +342,6 @@ const sizeForShape = new Map();
 
 // Where the letterboxed stage sits. Written by `resize`, read by the overlay.
 const stageBox = { left: 0, top: 0 };
-
-/** The rates the output can be, and the only list of them. */
-const OUTPUT_RATES = [24, 30, 60, 120];
 
 /** The default shape, taken off the default size so there is still one list. */
 const defaultAspect = () => reduceAspect(...DEFAULT_EXPORT_SIZE.split('x').map(Number));

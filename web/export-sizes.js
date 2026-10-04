@@ -138,4 +138,7 @@ function sizesForAspect(aspect) {
   return group ? group.sizes.map(([sw, sh]) => [sw, sh]) : [];
 }
 
-export { EXPORT_SIZES, DEFAULT_EXPORT_SIZE, reduceAspect, exportAspects, sizesForAspect };
+/** The frame rates an output can be: the editor offers these and the export door accepts no other. */
+const OUTPUT_RATES = Object.freeze([24, 30, 60, 120]);
+
+export { EXPORT_SIZES, DEFAULT_EXPORT_SIZE, OUTPUT_RATES, reduceAspect, exportAspects, sizesForAspect };

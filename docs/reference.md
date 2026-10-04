@@ -447,7 +447,8 @@ the project's shape. Two sizes of one shape are the same picture, because every 
 term is expressed against 1080p. A project stores the shape as the reduced integer pair, so
 "1.90:1 DCI" is `[256, 135]`, which is exact where 1.8963 is 0.2% off.
 
-Project settings offers 24, 30, 60 and 120 frames a second.
+Project settings offers 24, 30, 60 and 120 frames a second, and the export server accepts no other
+rate. An export runs for at most four hours, and an export that declares no frame count stops there.
 
 | Shape | Sizes |
 | --- | --- |

@@ -12,7 +12,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { EventEmitter } from 'node:events';
-import { audioFilter, handleExportSocket } from '../server/export.js';
+import { MAX_EXPORT_SECONDS, audioFilter, handleExportSocket, validateExport } from '../server/export.js';
+import { OUTPUT_RATES } from '../web/export-sizes.js';
 import { DOCUMENT_VERSIONS } from '../web/format.js';
 
 const tone = (hz, amplitude = 0.2) => {
@@ -204,6 +205,33 @@ test('an export refuses a project of another version before reading its audio', 
     } })), false);
     assert.equal(reads, 0);
     assert.match(sent.at(-1)?.error ?? '', new RegExp(`this project is version ${DOCUMENT_VERSIONS.project - 1}`));
+    assert.deepEqual(await readdir(root), []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('an export runs at a rate the editor offers, for at most four hours', () => {
+  const shape = { name: 'limits', width: 320, height: 180, codec: 'lossless' };
+  for (const fps of OUTPUT_RATES) assert.equal(validateExport({ ...shape, fps, frames: 1 }).fps, fps);
+  for (const fps of [0.0001, 1, 25, 240, 1e9]) assert.throws(() => validateExport({ ...shape, fps, frames: 1 }), /bad output rate/, String(fps));
+  assert.equal(validateExport({ ...shape, fps: 30, frames: MAX_EXPORT_SECONDS * 30 }).maxFrames, MAX_EXPORT_SECONDS * 30);
+  assert.throws(() => validateExport({ ...shape, fps: 30, frames: MAX_EXPORT_SECONDS * 30 + 1 }), /past the 14400-second ceiling/);
+  assert.equal(validateExport({ ...shape, fps: 24 }).maxFrames, MAX_EXPORT_SECONDS * 24, 'an export with no count stops at the ceiling');
+});
+
+test('an audio export that declares no frame count is refused before anything is read or spawned', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'audio-uncounted-'));
+  let reads = 0;
+  const sent = [];
+  const ws = new EventEmitter();
+  Object.assign(ws, { OPEN: 1, readyState: 1, send(text) { sent.push(JSON.parse(text)); }, close() {} });
+  handleExportSocket(ws, { outDir: root, log() {}, audioStore: { async read() { reads++; throw new Error('read'); } } });
+  try {
+    await ws.listeners('message')[0](Buffer.from(JSON.stringify({ begin: {
+      name: 'uncounted', width: 320, height: 180, fps: 30, codec: 'lossless',
+      programStart: 0, project: { version: DOCUMENT_VERSIONS.project, audio: clip() },
+    } })), false);
+    assert.equal(reads, 0);
+    assert.match(sent.at(-1)?.error ?? '', /needs a program start and frame count/);
     assert.deepEqual(await readdir(root), []);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
