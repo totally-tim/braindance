@@ -3362,11 +3362,17 @@ async function runChecks() {
       'and the picture on the stage is a different frame, not a readout that moved on its own',
       `${vFirst.signature} then ${vLast.signature}, means ${vFirst.mean.toFixed(2)} and ${vLast.mean.toFixed(2)}`);
     await page.evaluate('globalThis.__library.viewer.clickMark(0)');
-    await page.evaluate(`globalThis.__library.viewer.drawn(${drawsBefore + 4})`);
+    // The viewer's own five-second bound running out is a press that drew nothing, and the row
+    // below names it. Any other throw is a lost page and ends the run.
+    const redrew = await page.evaluate(`globalThis.__library.viewer.drawn(${drawsBefore + 4})`)
+      .then(() => true, (err) => {
+        if (!/the viewer never drew \d+ frames/.test(err.message)) throw err;
+        return false;
+      });
     const atMark = await page.evaluate('globalThis.__library.viewer.state()');
-    check(atMark.index !== atEnd.index && atMark.marks.length === 4,
+    check(redrew && atMark.index !== atEnd.index && atMark.marks.length === 4,
       'a mark on the viewer\'s bar is a control rather than a decoration: pressing one seeks to it',
-      `${atEnd.index} -> ${atMark.index}, ${atMark.marks.length} marks`);
+      `${atEnd.index} -> ${atMark.index}, ${atMark.marks.length} marks${redrew ? '' : ', and no frame was drawn after the press'}`);
     const drawsAtMark = await page.evaluate('globalThis.__library.viewer.draws()');
     await page.evaluate('globalThis.__library.viewer.key("ArrowDown")');
     await page.evaluate(`globalThis.__library.viewer.drawn(${drawsAtMark + 1})`);
