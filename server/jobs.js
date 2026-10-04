@@ -10,7 +10,7 @@ import { lstat, mkdir, open, readFile, realpath, rename, unlink, writeFile } fro
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { validateExport } from './export.js';
 import { listJsonNames } from './library.js';
-import { effectIdsIn, requiresEntryRefusal, requiresListRefusal } from '../web/format.js';
+import { CLIP_CEILING, effectIdsIn, requiresEntryRefusal, requiresListRefusal } from '../web/format.js';
 import { clipAffordedSec } from '../web/clip-plan.js';
 import { rangeFrames } from '../web/clip-range.js';
 
@@ -129,17 +129,20 @@ const cancelAsked = (job) => typeof job.cancelRequested === 'number';
 
 /**
  * How long a project's program runs, as the page counts it: the last clip end or audio end. Null
- * when a clip's timing is not numbers, or its length rests on a take `takeSeconds` cannot measure,
- * so the count falls to the export socket, which refuses the same ceiling.
+ * when a clip's timing is not numbers, or its length rests on a take `takeLengths` does not list,
+ * so the count falls to the export socket, which refuses the same ceiling. The library is listed
+ * once, and only for a clip that runs to the end of its take.
  */
-async function programSeconds(project, takeSeconds) {
+async function programSeconds(project, takeLengths) {
   let end = 0;
+  let lengths = null;
   for (const clip of Array.isArray(project.clips) ? project.clips : []) {
     const { start, length, speed, sourceStart } = clip ?? {};
     if (![start, speed, sourceStart].every(Number.isFinite)) return null;
     let runs = length;
     if (runs === null) {
-      const source = await takeSeconds(clip.take?.hash);
+      lengths ??= await takeLengths();
+      const source = lengths.get(clip.take?.hash);
       if (!Number.isFinite(source)) return null;
       runs = clipAffordedSec({ speed, sourceStart }, source);
     }
@@ -168,12 +171,12 @@ export class JobStore {
    * and a `{ field, text }` for each part of it that could not be read. It is asked only when a
    * job is claimed or finished, so an idle queue probes nothing. `tempSuffix()` names the scratch
    * file a sidecar is written through; a test fixes it to plant something at that name.
-   * `takeSeconds(hash)` answers a take's length in seconds, or null for a take this machine has not
-   * got, so enqueue can count the frames a job selects.
+   * `takeLengths()` answers a Map from each take this machine has to its length in seconds, so
+   * enqueue can count the frames a job selects.
    */
   constructor(dir, {
     exportsDir, environment, now = Date.now, staleMs = STALE_MS,
-    tempSuffix = () => randomBytes(8).toString('hex'), takeSeconds = async () => null,
+    tempSuffix = () => randomBytes(8).toString('hex'), takeLengths = async () => new Map(),
   }) {
     if (typeof exportsDir !== 'string' || exportsDir === '') throw new Error('a job store is built with the exports directory its sidecars live in');
     if (typeof environment !== 'function') throw new Error('a job store is built with the function that reads the environment a render runs on');
@@ -183,7 +186,7 @@ export class JobStore {
     this.now = now;
     this.staleMs = staleMs;
     this.tempSuffix = tempSuffix;
-    this.takeSeconds = takeSeconds;
+    this.takeLengths = takeLengths;
     // Every state transition goes through here, one at a time: `claim` and `finish` both have
     // an `await` between the decision and the write, so without this two workers claim one job.
     this.gate = Promise.resolve();
@@ -292,6 +295,12 @@ export class JobStore {
           + `position ${takeless.join(', ')}: a clip with nothing to draw is one the page refuses `
           + 'once the browser is already open, and the queue can say it before that costs anything');
     }
+    if (clipList.length > CLIP_CEILING) {
+      throw new Error(
+        `a job's project holds ${clipList.length} clips and this build composites ${CLIP_CEILING}: `
+        + 'the page refuses the project on open, so the queue refuses it before a worker loads it',
+      );
+    }
     const short = (hash) => `${String(hash).slice(0, 22)}…`;
     if (captures.length !== cut.length || captures.some((hash, at) => hash !== cut[at])) {
       throw new Error(
@@ -361,7 +370,7 @@ export class JobStore {
     }
     // The frames the job selects, counted the way the page will, so a render past the ceiling is
     // refused here rather than after a worker has loaded it.
-    const program = countableRange(deliverable) ? await programSeconds(project, this.takeSeconds) : null;
+    const program = countableRange(deliverable) ? await programSeconds(project, this.takeLengths) : null;
     const range = program === null ? null : rangeFrames(deliverable ?? { in: 0, out: null }, program, Number(fps));
     const frames = range === null ? null : range.to - range.from + 1;
     const { width: w, height: h, fps: f } = validateExport({ name: output, width, height, fps, codec, frames });

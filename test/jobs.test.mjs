@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import {
   BEAT_BUDGET, JOB_VERSION, JobStore, beatVerdict, environmentRefusal, versionDifferences,
 } from '../server/jobs.js';
+import { CLIP_CEILING } from '../web/format.js';
 
 const METAL = 'ANGLE Metal / Apple M2 Max';
 const V3D = 'ANGLE (Broadcom, V3D 7.1.10.2, OpenGL ES 3.1)';
@@ -681,8 +682,8 @@ test('a job file of another version is listed as refused with a reason and is ne
 });
 
 test('enqueue counts the frames a job selects and refuses a render past four hours', async () => {
-  const takes = { [HASH]: 10 };
-  const h = await harness({ takeSeconds: async (hash) => takes[hash] ?? null });
+  const takes = new Map([[HASH, 10]]);
+  const h = await harness({ takeLengths: async () => takes });
   const clip = (over = {}) => ({ take: { hash: HASH }, start: 0, length: 1, speed: 1, sourceStart: 0, ...over });
   const project = (clips, extra = {}) => ({ ...PROJECT, clips, ...extra });
   try {
@@ -690,13 +691,30 @@ test('enqueue counts the frames a job selects and refuses a render past four hou
       /600001 frames at 30 fps runs 20001 seconds, past the 14400-second ceiling/, 'the whole program of a clip placed at 19,999 s');
     assert.ok(await h.enqueue({ project: project([clip({ start: 19_999 })]), deliverable: { in: 19_940, out: 20_000 } }),
       'the same program, with a deliverable selecting its last minute');
-    takes[HASH] = 5 * 3600;
+    takes.set(HASH, 5 * 3600);
     await assert.rejects(h.enqueue({ project: project([clip({ length: null })]) }), /past the 14400-second ceiling/,
       'a clip with no length runs to the end of its five-hour take');
     await assert.rejects(h.enqueue({ project: project([clip()], { audio: { start: 15_000, duration: 1 } }) }), /past the 14400-second ceiling/,
       'a song placed past four hours lengthens the program');
-    delete takes[HASH];
+    takes.delete(HASH);
     assert.ok(await h.enqueue({ project: project([clip({ length: null })]) }), 'a take this machine has not got leaves the count to the export socket');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('enqueue lists the library once, and refuses more clips than the page composites', async () => {
+  let listings = 0;
+  const h = await harness({ takeLengths: async () => { listings++; return new Map([[HASH, 10]]); } });
+  const job = (n) => ({
+    project: { ...PROJECT, clips: Array.from({ length: n }, (_, i) => ({ take: { hash: HASH }, start: i, length: null, speed: 1, sourceStart: 0 })) },
+    captures: Array(n).fill(HASH),
+  });
+  try {
+    assert.ok(await h.enqueue(job(CLIP_CEILING)));
+    assert.equal(listings, 1, `${CLIP_CEILING} clips running to the end of one take list the library once`);
+    await assert.rejects(h.enqueue(job(CLIP_CEILING + 1)), new RegExp(`holds ${CLIP_CEILING + 1} clips and this build composites ${CLIP_CEILING}`));
+    assert.equal(listings, 1, 'and a project past the ceiling is refused before the library is listed');
   } finally {
     await h.cleanup();
   }

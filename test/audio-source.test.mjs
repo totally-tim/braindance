@@ -234,22 +234,21 @@ test('a body that arrived in time is not cut off while it is still being written
   const root = await mkdtemp(join(tmpdir(), 'audio-arrived-'));
   const promises = createRequire(import.meta.url)('node:fs/promises');
   const original = promises.open;
-  // The first write of the upload outlasts the whole deadline, while the rest of the body waits
-  // in the request, already arrived.
+  // A write of the upload outlasts the whole deadline. A body this size fills the
+  // request's buffers, so a server that writes while it reads stops parsing a body already sent.
   promises.open = async (path, ...rest) => {
     const handle = await original(path, ...rest);
     if (String(path).endsWith('/input')) {
       const write = handle.writeFile.bind(handle);
-      let first = true;
       handle.writeFile = async (data) => {
-        if (first) { first = false; await new Promise((done) => { setTimeout(done, 300); }); }
+        await new Promise((done) => { setTimeout(done, 1000); });
         return write(data);
       };
     }
     return handle;
   };
   syncBuiltinESMExports();
-  const store = new AudioStore(root, { uploadMs: 100 });
+  const store = new AudioStore(root, { uploadMs: 400 });
   let outcome = null;
   const server = createServer((req, res) => {
     store.import(req).then(() => 'imported', (err) => err.message).then((said) => { outcome = said; res.end(said); });
@@ -261,7 +260,6 @@ test('a body that arrived in time is not cut off while it is still being written
     await rm(root, { recursive: true, force: true });
   });
   await new Promise((done) => { server.listen(0, '127.0.0.1', done); });
-  // Three chunks, so two are still unread in the request when the deadline comes.
   const reply = await new Promise((done) => {
     const req = request({ host: '127.0.0.1', port: server.address().port, method: 'POST', path: '/' }, (res) => {
       let text = '';
@@ -269,7 +267,7 @@ test('a body that arrived in time is not cut off while it is still being written
       res.on('end', () => done(text));
     });
     req.on('error', (err) => done(`no reply: ${err.message}`));
-    for (const part of ['not audio, ', 'and all of it ', 'here']) req.write(part);
+    for (let i = 0; i < 64; i++) req.write(Buffer.alloc(32 * 1024, i));
     req.end();
   });
   assert.doesNotMatch(reply, /took longer|no reply/, 'the request was not destroyed');

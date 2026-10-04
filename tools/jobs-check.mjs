@@ -38,8 +38,8 @@ const V3D = 'ANGLE (Broadcom, V3D 7.1.10.2, OpenGL ES 3.1)';
 // Each names source text and must match exactly once, aimed one property at a time.
 const MUTATIONS = {
   'queue-cannot-measure-takes': { file: 'server/index.js', edits: [[
-    '  takeSeconds: async (hash) => (await localTakes()).takes.find((take) => take.hash === hash)?.durationSec ?? null,',
-    '  takeSeconds: async () => null,',
+    '  takeLengths: async () => new Map((await localTakes()).takes.map((take) => [take.hash, take.durationSec])),',
+    '  takeLengths: async () => new Map(),',
   ]] },
   'app-record-is-the-preview-version': { file: 'server/index.js', edits: [[
     '      app: await appVersion(ROOT, THREE_DIR),',

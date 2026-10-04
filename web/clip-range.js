@@ -51,17 +51,23 @@ export function clipBoundOrThrow(value, which) {
 export let clipIn = 0;
 export let clipOut = null;
 
+/** Whether a program time lies past the out point. The transport steps to no frame that does. */
+export const pastOutPoint = (sec, outSec) => sec > outSec + 1e-9;
+
 /**
  * The first and last output frame a range selects in a program `duration` seconds long at `fps`:
  * the grid and clamps the export walks, so the queue can count a render before a page draws it.
+ * The first is the in point's nearest frame, where a seek lands; the last is the last frame not
+ * past the out point, where stepping stops.
  */
 export function rangeFrames({ in: inSec, out: outSec }, duration, fps) {
   const last = Math.max(0, Math.floor(duration * fps));
   const lo = Math.max(0, Number(inSec) || 0);
   const hi = outSec === null || outSec === undefined ? duration : Math.min(duration, outSec);
-  const frameAt = (sec) => Math.max(0, Math.min(last, Math.round(Math.max(lo, Math.min(hi, sec)) * fps)));
-  const from = frameAt(lo);
-  return { from, to: Math.max(from, frameAt(hi)) };
+  const from = Math.min(last, Math.round(lo * fps));
+  let to = Math.min(last, Math.ceil(hi * fps));
+  while (to > from && pastOutPoint(to / fps, hi)) to--;
+  return { from, to: Math.max(from, to) };
 }
 
 /**

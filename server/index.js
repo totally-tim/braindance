@@ -165,7 +165,7 @@ const jobEnvironment = async (renderer) => {
 const JOBS = new JobStore(resolve(flag('--jobs', join(ROOT, 'jobs'))), {
   exportsDir: EXPORTS_DIR,
   environment: jobEnvironment,
-  takeSeconds: async (hash) => (await localTakes()).takes.find((take) => take.hash === hash)?.durationSec ?? null,
+  takeLengths: async () => new Map((await localTakes()).takes.map((take) => [take.hash, take.durationSec])),
 });
 const AUDIO = new AudioStore(resolve(flag('--audio', join(ROOT, 'audio'))));
 const node = NODE_URL ? new NodeLink(NODE_URL, NODE_NAME) : null;

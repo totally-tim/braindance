@@ -32,7 +32,7 @@ import {
 } from './plan-geometry.js';
 import { pickDepth, sensorPoint } from './depth-pick.js';
 import { ZOOM_PER_NOTCH, rulerTickSeconds, tickLabel, makeViewWindow } from './view-window.js';
-import { clipIn, clipOut, clipBoundOrThrow, rangeFrames, writeClipRange } from './clip-range.js';
+import { clipIn, clipOut, clipBoundOrThrow, pastOutPoint, rangeFrames, writeClipRange } from './clip-range.js';
 import {
   RATE_MIN, RATE_MAX, clipAffordedSec, clipProgramSecAt, clipSourceSecAt, frameAtOrBefore,
   frameLoadByTake, framesBackFor, headFramesFor, headTrim, integerMidpoint, rescaleClipKeys,
@@ -5418,7 +5418,7 @@ class TimelineTransport {
     const next = this.frame + 1;
     if (next > this.lastFrame) return false;
     const t = next / this.outputFps;
-    if (t > this.clipOutSec + 1e-9) return false;
+    if (pastOutPoint(t, this.clipOutSec)) return false;
     const navigating = this.playing && !exporting && !PREVIEW_RENDERER;
     if (navigating) {
       advanceNavigation(t);
@@ -5974,7 +5974,11 @@ async function exportClip(options = {}) {
     timeline.outputFps = fps;
     const inSec = options.in !== undefined ? options.in : d.in;
     const outSec = options.out !== undefined ? options.out : d.out;
-    const { from: inFrame, to: outFrame } = rangeFrames({ in: inSec, out: outSec }, timeline.duration, fps);
+    // Held inside the open range, because the transport seeks and steps nowhere else.
+    const held = (sec) => Math.max(timeline.clipInSec, Math.min(timeline.clipOutSec, sec));
+    const { from: inFrame, to: outFrame } = rangeFrames(
+      { in: held(Number(inSec) || 0), out: held(outSec ?? timeline.duration) }, timeline.duration, fps,
+    );
     const from = Math.max(inFrame, Math.min(outFrame, Math.trunc(options.from ?? inFrame)));
     const to = Math.max(inFrame, Math.min(outFrame, Math.trunc(options.to ?? outFrame)));
     if (to < from) throw new Error(`an export of frames ${from}..${to} has nothing in it`);

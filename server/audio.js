@@ -9,7 +9,7 @@ import { ffmpegBinary } from './export.js';
 
 const digest = (bytes) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 
-// How long one upload may hold the single import slot. 64 MiB crosses a LAN in seconds.
+// How long an upload's body has to arrive. 64 MiB crosses a LAN in seconds.
 export const AUDIO_UPLOAD_MS = 120_000;
 
 export class AudioStore {
@@ -36,26 +36,29 @@ export class AudioStore {
     if (this.importing) throw new Error('another audio import is running');
     this.importing = true;
     let scratch = null;
-    // The deadline is on arrival: a request whose whole body has come in is left to finish
-    // writing it, however long the disk takes.
-    const deadline = setTimeout(() => {
-      if (!stream.complete) stream.destroy(new Error(`audio upload took longer than ${this.uploadMs / 1000} seconds`));
-    }, this.uploadMs);
+    let deadline = null;
     try {
       await mkdir(this.root, { recursive: true });
       scratch = await mkdtemp(join(this.root, '.import-'));
-      const input = join(scratch, 'input');
-      const file = await open(input, 'wx');
+      // The body is read whole before anything is written, so the deadline times the upload and
+      // never the disk: a write awaited inside this loop stops the request being read.
+      deadline = setTimeout(() => {
+        stream.destroy(new Error(`audio upload took longer than ${this.uploadMs / 1000} seconds`));
+      }, this.uploadMs);
+      const chunks = [];
       let size = 0;
-      try {
-        for await (const chunk of stream) {
-          size += chunk.length;
-          if (size > AUDIO_UPLOAD_BYTES) throw new Error(`audio import exceeds ${AUDIO_UPLOAD_BYTES} bytes`);
-          await file.writeFile(chunk);
-        }
-      } finally { await file.close(); }
+      for await (const chunk of stream) {
+        size += chunk.length;
+        if (size > AUDIO_UPLOAD_BYTES) throw new Error(`audio import exceeds ${AUDIO_UPLOAD_BYTES} bytes`);
+        chunks.push(chunk);
+      }
       clearTimeout(deadline);
       if (!size) throw new Error('audio file is empty');
+      const input = join(scratch, 'input');
+      const file = await open(input, 'wx');
+      try {
+        await file.writeFile(chunks);
+      } finally { await file.close(); }
       const output = join(scratch, 'audio.wav');
       await new Promise((resolve, reject) => {
         const child = spawn(ffmpegBinary(), [

@@ -609,6 +609,12 @@ camera, requiring the smallest sprite above the 10.8-reference-pixel normalizati
 - **`export-fail-unlinks-output`** — the failure path reaches back to an output it did not write.
 - **`export-ignores-the-size-cap`** — the size door is taken out, so an export larger than the
   context's target limit starts. Fails section 10's first row alone.
+- **`export-range-is-not-held`** — a range asked for by `in` and `out` is put on the grid as asked,
+  so one outside the open range starts where the transport's first seek does not land. Fails
+  section 11's overlap and apart rows.
+- **`export-ends-on-the-nearest-frame`** — the out point rounds to its nearest frame, which the
+  transport refuses to step to when it lies past the out point. Fails section 11's off-grid row
+  alone.
 
 On a `make-sample` fixture a clean tree passes. The resolution arms draw at `pointSize` 36: that
 fixture's back wall faces the camera at one depth, so its sensor lattice lands 1.17px apart at

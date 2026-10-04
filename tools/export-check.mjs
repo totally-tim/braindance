@@ -119,6 +119,21 @@ const MUTATIONS = {
       '  for (const bar of []) {\n    if (!bar) continue;\n']],
     fails: 'section 9: the bar and the chip stop following the render they report',
   },
+  // An asked range is put on the grid as asked, so one outside the open range starts on a frame
+  // the transport's first seek will not land on.
+  'export-range-is-not-held': {
+    file: 'web/main.js',
+    edits: [['    const held = (sec) => Math.max(timeline.clipInSec, Math.min(timeline.clipOutSec, sec));',
+      '    const held = (sec) => sec;']],
+    fails: 'the overlap and apart rows of section 11; the off-grid row stays green',
+  },
+  // The out point rounds to its nearest frame, which the transport refuses to step to when it
+  // lies past the out point.
+  'export-ends-on-the-nearest-frame': {
+    file: 'web/clip-range.js',
+    edits: [['  while (to > from && pastOutPoint(to / fps, hi)) to--;\n', '  to = Math.min(last, Math.round(hi * fps));\n']],
+    fails: 'the off-grid row of section 11 alone',
+  },
   // The container kept and the stream swapped, so only what is inside the .mov moves.
   'prores-writes-h264': { file: 'server/export.js', edits: [[
     "    args: ['-c:v', 'prores_ks', '-profile:v', '3', '-pix_fmt', 'yuv422p10le'],",
@@ -2385,6 +2400,40 @@ console.log('\n[10] an export larger than this browser renders is refused at the
   } finally {
     await capped.close();
   }
+}
+
+console.log('\n[11] an export walks the frames its range selects, inside the range the transport plays');
+// The first frame is where a seek to the in point lands and the last is where stepping stops, and
+// a range asked for by `in` and `out` is held inside the open one, because the transport neither
+// seeks nor steps outside it.
+const ranged = await onFreshPage('the export range run', (page) => page.evaluate(`(async () => {
+  const k = globalThis.__kinect;
+  const [a, b] = k.outputSize().aspect;
+  const shot = { width: a * 4, height: b * 4, fps: ${EXPORT_FPS}, codec: 'lossless' };
+  const run = async (range, options) => {
+    k.editor.setClipRange(range[0], range[1]);
+    await k.timeline.settled();
+    try {
+      return (await k.export.run({ ...shot, ...options })).frames;
+    } catch (err) { return String(err.message ?? err); }
+  };
+  const frames = {
+    offGrid: await run([0, 0.99], { name: 'check-range-off-grid' }),
+    overlap: await run([2, 3], { name: 'check-range-overlap', in: 2.5, out: 4 }),
+    apart: await run([2, 3], { name: 'check-range-apart', in: 0, out: 1 }),
+  };
+  k.editor.setClipRange(0, null);
+  return frames;
+})()`));
+if (ranged.ok) {
+  const { offGrid, overlap, apart } = ranged.value;
+  check(offGrid === 30, `an out point of 0.99 s at ${EXPORT_FPS} fps exports frames 0 to 29, the last the transport steps to`,
+    `${offGrid}`);
+  check(overlap === 16, 'an asked range of 2.5 to 4 s over an open range of 2 to 3 s exports their overlap, frames 75 to 90',
+    `${overlap}`);
+  check(apart === 1, 'and an asked range of 0 to 1 s, wholly before it, exports the open range\'s first frame', `${apart}`);
+} else {
+  check(false, 'the export range run', ranged.error);
 }
 
 check(pageErrors.length === 0, 'no page errors', pageErrors.slice(0, 3).join(' | '));
