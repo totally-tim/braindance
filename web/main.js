@@ -32,7 +32,9 @@ import {
 } from './plan-geometry.js';
 import { pickDepth, sensorPoint } from './depth-pick.js';
 import { ZOOM_PER_NOTCH, rulerTickSeconds, tickLabel, makeViewWindow } from './view-window.js';
-import { clipIn, clipOut, clipBoundOrThrow, pastOutPoint, rangeFrames, writeClipRange } from './clip-range.js';
+import {
+  clipIn, clipOut, clipBoundOrThrow, lastFrameRefusal, pastOutPoint, rangeFrames, writeClipRange,
+} from './clip-range.js';
 import {
   RATE_MIN, RATE_MAX, clipAffordedSec, clipProgramSecAt, clipSourceSecAt, frameAtOrBefore,
   frameLoadByTake, framesBackFor, headFramesFor, headTrim, integerMidpoint, rescaleClipKeys,
@@ -5982,6 +5984,8 @@ async function exportClip(options = {}) {
     const from = Math.max(inFrame, Math.min(outFrame, Math.trunc(options.from ?? inFrame)));
     const to = Math.max(inFrame, Math.min(outFrame, Math.trunc(options.to ?? outFrame)));
     if (to < from) throw new Error(`an export of frames ${from}..${to} has nothing in it`);
+    const refusal = lastFrameRefusal(to, fps);
+    if (refusal) throw new Error(refusal);
 
     // Composition comes from the camera track, so the export sees what the program camera does.
     setViewCamera(programCamera);

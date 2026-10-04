@@ -373,7 +373,8 @@ export class JobStore {
     const program = countableRange(deliverable) ? await programSeconds(project, this.takeLengths) : null;
     const range = program === null ? null : rangeFrames(deliverable ?? { in: 0, out: null }, program, Number(fps));
     const frames = range === null ? null : range.to - range.from + 1;
-    const { width: w, height: h, fps: f } = validateExport({ name: output, width, height, fps, codec, frames });
+    const programStart = range === null ? null : range.from / Number(fps);
+    const { width: w, height: h, fps: f } = validateExport({ name: output, width, height, fps, codec, frames, programStart });
     return this.serialise(async () => {
       const live = await this.list();
       // Two jobs writing one file is one job's work thrown away. A finished job's name is free

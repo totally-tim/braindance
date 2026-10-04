@@ -5,7 +5,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -72,6 +72,22 @@ test('an export that declares no frame count is refused at the four-hour ceiling
       if (n === ceiling - 1) assert.equal(said.last?.error, undefined, `the ${ceiling} frames four hours holds are taken`);
     }
     assert.match(said.last?.error ?? '', new RegExp(`stops at ${ceiling} frames, the ${MAX_EXPORT_SECONDS}-second ceiling`));
+  } finally {
+    ws.emit('close');
+  }
+});
+
+test('a begin whose last frame is past LAST_EXPORT_FRAME is refused before anything is created', { skip }, async () => {
+  const { handleExportSocket } = discards;
+  const { ws, said, message } = socket(handleExportSocket);
+  // A project's last second at 120 fps, 300 trillion seconds in, starts near output frame 3.6e16, past 2^53.
+  try {
+    await message(Buffer.from(JSON.stringify({ begin: {
+      name: 'late', width: 64, height: 36, fps: 120, frames: 121, codec: 'lossless', programStart: 299_999_999_999_999,
+    } })), false);
+    assert.match(said.last?.error ?? JSON.stringify(said.last), /at 120 fps is past frame 1125899906842624/);
+    const outDir = join(work, 'exports');
+    assert.deepEqual(existsSync(outDir) ? readdirSync(outDir).filter((f) => f.startsWith('late')) : [], []);
   } finally {
     ws.emit('close');
   }

@@ -453,6 +453,10 @@ term is expressed against 1080p. A project stores the shape as the reduced integ
 
 Project settings offers 24, 30, 60 and 120 frames a second, and the export server accepts no other
 rate. An export runs for at most four hours, and an export that declares no frame count stops there.
+The export server refuses an export whose last output frame is past `LAST_EXPORT_FRAME` (2^50),
+counted at the export's rate from the `programStart` the client declares. It trusts that start,
+and it skips the check for a begin that declares none. The editor declares one with every export,
+queued renders included, and the render queue checks a job against the frames it counts itself.
 
 | Shape | Sizes |
 | --- | --- |
@@ -781,17 +785,17 @@ in order, that `project.requires` claims exactly the effect namespaces the value
 with no repeats, that `suppressEffects` is a list of effect ids, and that the output name, size,
 rate and codec pass the same validator the export dialog uses. It refuses a project of more clips
 than `CLIP_CEILING`, as the page does on open. It counts the frames the deliverable selects, as the
-page will, and refuses a render longer than four hours. A clip that runs to the end of its take
-reads the take's length from one listing of the library per enqueue; a library that cannot be listed
-refuses the enqueue with that error. A clip whose timing is not numbers, or whose length rests on a
-take this library has not got, leaves the count to the export socket, which refuses the same
-ceiling. It also refuses an output name a queued or running job already holds, and a `recorded` that
-is not a version record. It does **not** check the project's version number beyond its presence, and
-it stores `deliverable` exactly as given. So a project from another build and a malformed
-deliverable both enqueue cleanly: the page refuses a project version it does not read, and
-`applyDeliverable` refuses a deliverable that is not version 2 or whose `outputSize` is another
-shape. The worker applies a deliverable only when it is truthy, so a `false` or `null` one renders
-the whole clip.
+page will, and refuses a render longer than four hours or reaching past `LAST_EXPORT_FRAME`. A clip
+that runs to the end of its take reads the take's length from one listing of the library per
+enqueue; a library that cannot be listed refuses the enqueue with that error. A clip whose timing is
+not numbers, or whose length rests on a take this library has not got, leaves the count to the
+export socket, which refuses the same ceiling. It also refuses an output name a queued or running
+job already holds, and a `recorded` that is not a version record. It does **not** check the
+project's version number beyond its presence, and it stores `deliverable` exactly as given. So a
+project from another build and a malformed deliverable both enqueue cleanly: the page refuses a
+project version it does not read, and `applyDeliverable` refuses a deliverable that is not version 2
+or whose `outputSize` is another shape. The worker applies a deliverable only when it is truthy, so
+a `false` or `null` one renders the whole clip.
 
 | Field | Required | What it is |
 | --- | --- | --- |
