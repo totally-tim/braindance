@@ -264,3 +264,28 @@ test('a stop after a failed take\'s filing has already failed files its marks on
     }
   });
 });
+
+test('a stop whose close could not file its marks leaves them for the next stop, which files them once the cause has cleared', async () => {
+  await inTempDir(async (dir) => {
+    const recorder = new Recorder({ dir });
+    recorder.open(HELLO);
+    const { path, startedAt } = recorder.take;
+    // Both places the marks can go fail: a directory where the copy goes, a file where the log goes.
+    const copy = heldMarksPathFor(path, startedAt);
+    await mkdir(copy);
+    await blockMarks(dir);
+    recorder.mark(0, 'close-unfiled-mark');
+    const error = console.error;
+    console.error = () => {};
+    try {
+      await assert.rejects(recorder.stop(), /could not write its marks/);
+      await rmdir(copy);
+      await unlink(join(dir, 'marks'));
+      await recorder.closeAll('server stopped');
+    } finally {
+      console.error = error;
+    }
+    assert.ok((await markLabels(dir)).includes('close-unfiled-mark'), 'the next stop filed the mark');
+    assert.ok(existsSync(indexPathFor(path)));
+  });
+});

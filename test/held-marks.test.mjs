@@ -7,10 +7,10 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
-import fsp, { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import fsp, { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
-import { hostname, tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import os, { tmpdir } from 'node:os';
+import { basename, join, sep } from 'node:path';
 import { buildIndex } from '../server/capture.js';
 import {
   adoptNamedMarkLogs, heldMarksPathFor, holdMarks, marksPathFor, readMarkLog, readMarks, releaseFiled, renameTake,
@@ -199,7 +199,7 @@ test('a mark pressed as its take closes is copied beside the take once', async (
 });
 
 // A copy named as another process on this host or another host would name it.
-const HOST = hostname().replace(/[^A-Za-z0-9-]/g, '-');
+const HOST = /\.held-1\.([^.]+)\./.exec(heldMarksPathFor('t.knct', 1))[1];
 const copyBy = (path, host, pid) => `${path.replace(/\.knct$/, '')}.held-${STARTED}.${host}.${pid}.jsonl`;
 
 test('a copy whose writer is alive on this host, or on another host, is left to its writer', async () => {
@@ -235,7 +235,7 @@ test('a take is not renamed onto a name a copy of marks is held under', async ()
     const path = await writeTake(dir, STARTED);
     const { hash } = await buildIndex(path);
     await writeFile(copyBy(join(dir, 'other.knct'), HOST, 99999), `${JSON.stringify(MARK)}\n`);
-    await assert.rejects(renameTake(dir, '2026-10-04-take1', 'other', { hash }), /holds marks under that name/);
+    await assert.rejects(renameTake(dir, '2026-10-04-take1', 'other', { hash }), /holds marks under one of those names/);
     assert.equal(existsSync(path), true);
   });
 });
@@ -293,5 +293,109 @@ test('a close keeps the copy when its marks do not read back from the marks log'
       console.error = error;
     }
     assert.equal(existsSync(heldMarksPathFor(path, startedAt)), true);
+  });
+});
+
+test('a mark and its deletion in the same millisecond both survive a merge, and the mark stays deleted', async () => {
+  await inTempDir(async (dir) => {
+    const path = await writeTake(dir, STARTED);
+    const { hash } = await buildIndex(path);
+    await holdMarks(path, STARTED, [MARK, { ...MARK, deleted: true }]);
+    const error = console.error;
+    console.error = () => {};
+    try {
+      await adoptNamedMarkLogs(dir);
+    } finally {
+      console.error = error;
+    }
+    assert.equal((await readMarkLog(dir, hash)).length, 2, 'both records were filed');
+    assert.deepEqual(await readMarks(dir, hash), [], 'and the mark reads as deleted');
+  });
+});
+
+test('a copy is kept until a deletion reads back, not only the mark it shares a millisecond with', async () => {
+  await inTempDir(async (dir) => {
+    const path = await writeTake(dir, STARTED);
+    const { hash } = await buildIndex(path);
+    await mkdir(join(dir, 'marks'));
+    await writeFile(marksPathFor(dir, hash), `${JSON.stringify(MARK)}\n`);
+    await holdMarks(path, STARTED, [MARK, { ...MARK, deleted: true }]);
+    const copy = heldMarksPathFor(path, STARTED);
+    assert.equal(await releaseFiled(dir, hash, copy, [MARK, { ...MARK, deleted: true }]), false);
+    assert.equal(existsSync(copy), true);
+  });
+});
+
+// The name a server on host `host` gives a copy, from a library module loaded as that host.
+async function heldNameOn(host) {
+  const { hostname } = os;
+  os.hostname = () => host;
+  syncBuiltinESMExports();
+  try {
+    const library = await import(`../server/library.js?host=${encodeURIComponent(host)}`);
+    return basename(library.heldMarksPathFor(join(tmpdir(), '2026-10-04-take1.knct'), STARTED));
+  } finally {
+    os.hostname = hostname;
+    syncBuiltinESMExports();
+  }
+}
+
+test('two hosts whose names differ only in punctuation name their copies apart', async () => {
+  assert.notEqual(await heldNameOn('capture.local'), await heldNameOn('capture-local'));
+});
+
+test('a long host name gives a copy a name as short as any other', async () => {
+  const long = await heldNameOn('h'.repeat(220));
+  assert.equal(long.length, (await heldNameOn('capture')).length);
+  assert.ok(long.length < 255, `${long.length} bytes`);
+});
+
+test('a take whose own copy of marks waits under its name is not renamed away from it', async () => {
+  await inTempDir(async (dir) => {
+    const path = await writeTake(dir, STARTED);
+    const { hash } = await buildIndex(path);
+    await holdMarks(path, STARTED, [MARK]);
+    await assert.rejects(renameTake(dir, '2026-10-04-take1', 'keeper', { hash }), /holds marks under one of those names/);
+    assert.equal(existsSync(path), true);
+  });
+});
+
+test('a take is not renamed onto another spelling of a name a copy of marks is held under', async () => {
+  await inTempDir(async (dir) => {
+    const path = await writeTake(dir, STARTED);
+    const { hash } = await buildIndex(path);
+    await writeFile(copyBy(join(dir, 'other.knct'), HOST, 99999), `${JSON.stringify(MARK)}\n`);
+    await assert.rejects(renameTake(dir, '2026-10-04-take1', 'OTHER', { hash }), /holds marks under one of those names/);
+  });
+});
+
+test('a close that files its marks again after an append wrote and then failed files each record once', async () => {
+  await inTempDir(async (dir) => {
+    const recorder = new Recorder({ dir });
+    recorder.open(Buffer.from(JSON.stringify({ fx: 366, fy: 366, cx: 256, cy: 212 })));
+    recorder.mark(40, 'filed once');
+    const { appendFile } = fsp;
+    let failNext = true;
+    fsp.appendFile = async (path, ...rest) => {
+      await appendFile(path, ...rest);
+      if (failNext && String(path).includes(`${sep}marks${sep}`)) {
+        failNext = false;
+        throw new Error('the descriptor closed after the write');
+      }
+    };
+    syncBuiltinESMExports();
+    const error = console.error;
+    console.error = () => {};
+    try {
+      await assert.rejects(recorder.stop(), /could not write its marks/);
+      await recorder.closeAll('server stopped');
+    } finally {
+      fsp.appendFile = appendFile;
+      syncBuiltinESMExports();
+      console.error = error;
+    }
+    const logs = await readdir(join(dir, 'marks'));
+    const lines = (await Promise.all(logs.map((log) => readFile(join(dir, 'marks', log), 'utf8')))).join('').trim().split('\n');
+    assert.equal(lines.filter((line) => line.includes('filed once')).length, 1, lines.join(' | '));
   });
 });

@@ -8,7 +8,7 @@ import { once } from 'node:events';
 import { basename, join } from 'node:path';
 import { encodeMessage, TYPE_HELLO, TYPE_COLOR } from './protocol.js';
 import { buildIndex, cachedIndex, forgetCapture } from './capture.js';
-import { appendMarks, heldMarksPathFor, holdMarks, releaseFiled, remaining, MIN_TAKE_SEC, durationLabel, sameTake, takeIdentity } from './library.js';
+import { heldMarksPathFor, holdMarks, mergeMarkLog, releaseFiled, remaining, MIN_TAKE_SEC, durationLabel, sameTake, takeIdentity } from './library.js';
 
 // `2026-07-31-take3`. Synchronous, because opening a take must finish in the same turn as the
 // hello or the frames behind it find no file. A copy of marks held beside a name keeps that name
@@ -120,7 +120,9 @@ async function flushMarks(dir, take, index) {
     return;
   }
   try {
-    await appendMarks(dir, index.hash, records);
+    // Merged rather than appended, so filing again after an append that wrote and then failed adds
+    // nothing.
+    await mergeMarkLog(dir, index.hash, records);
   } catch (err) {
     throw new Error(`take ${take.id}: could not write its marks: ${err.message}`
       + (take.held ? ` - ${basename(take.held)} holds them for the next start to file` : ''));
@@ -408,6 +410,7 @@ export class Recorder {
     // landed, and the scan is what gives the marks a hash to be filed under.
     let index;
     let marksError = null;
+    let filed = false;
     try {
       await holding;
       settle(take);
@@ -421,12 +424,14 @@ export class Recorder {
       });
       // Held until the take is reported closed: its index is on disk and the library lists it,
       // whatever became of its marks.
-      await flushMarks(this.dir, take, index).catch((err) => { marksError = err; });
+      await flushMarks(this.dir, take, index).then(() => { filed = true; }, (err) => { marksError = err; });
     } finally {
       // In a `finally`, or an index build that threw leaves this process claiming a file it had
       // stopped working on, with the library refusing to open or remove it until a restart. This
       // take and no other: a shared slot cleared here handed a later take's guard away mid-close.
       this.closing.delete(take);
+      // Marks this close could not file wait, as a failed take's do, for the next stop to file.
+      if (!filed && take.records?.length) this.unfiled.add(take);
     }
     console.log(
       `[recorder] take ${take.id} closed (${reason}): ${index.frames.offset.length} frames, `

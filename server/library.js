@@ -192,12 +192,13 @@ export async function mergeMarkLog(dir, hash, theirLog, { present = null } = {})
 
 // `mergeMarkLog` once it holds the log's lock.
 async function mergeHeld(dir, hash, theirLog) {
-  const known = new Set((await readMarkLog(dir, hash)).map((r) => `${r.id}@${r.at}`));
-  // `known` grows as records are taken, because a log can carry one record twice: an append that
-  // wrote its bytes and then failed is tried again.
+  // Whole records rather than `id@at`: a mark and its deletion can share a millisecond, and
+  // `resolveMarks` lets the later of them win. `known` grows as records are taken, because a log
+  // can carry one record twice: an append that wrote its bytes and then failed is tried again.
+  const known = new Set((await readMarkLog(dir, hash)).map((rec) => JSON.stringify(rec)));
   const fresh = [];
   for (const rec of theirLog) {
-    const key = `${rec.id}@${rec.at}`;
+    const key = JSON.stringify(rec);
     if (known.has(key)) continue;
     known.add(key);
     fresh.push(rec);
@@ -208,7 +209,8 @@ async function mergeHeld(dir, hash, theirLog) {
 
 const NAMED_LOG = '.marks.jsonl';
 const HELD_LOG = /^(.+)\.held-(\d+)\.([A-Za-z0-9-]+)\.(\d+)\.jsonl$/;
-const HOST = hostname().replace(/[^A-Za-z0-9-]/g, '-');
+// A digest of the exact name, so no two host names share one and a long one keeps the file name short.
+const HOST = createHash('sha256').update(hostname()).digest('hex').slice(0, 12);
 
 /**
  * Where the recorder holds a copy of a take's marks while it records: beside the take, under its
@@ -241,8 +243,8 @@ export async function holdMarks(capturePath, startedAt, records) {
  * and answers whether it did. A log whose records are not all there is kept for the next start.
  */
 export async function releaseFiled(dir, hash, source, records) {
-  const filed = new Set((await readMarkLog(dir, hash)).map((rec) => `${rec.id}@${rec.at}`));
-  if (!records.every((rec) => filed.has(`${rec.id}@${rec.at}`))) return false;
+  const filed = new Set((await readMarkLog(dir, hash)).map((rec) => JSON.stringify(rec)));
+  if (!records.every((rec) => filed.has(JSON.stringify(rec)))) return false;
   await unlink(source).catch((err) => {
     if (err.code !== 'ENOENT') throw err;
   });
@@ -1092,10 +1094,11 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
         if (err.code !== 'ENOENT') throw err;
       }
     }
-    // The name a copy of marks is held under is taken too, or a start could read the copy into
-    // the take renamed onto it.
-    const held = (await directoryNames(dir)).find((name) => HELD_LOG.exec(name)?.[1] === to);
-    if (held) throw new Error(`${to} is taken: ${held} holds marks under that name`);
+    // A copy of marks held under either name stays put: a start would read it into the take renamed
+    // onto it, and would never find the take renamed away from it. Folded, as the volume here folds.
+    const names = [id, to].map((name) => name.toLowerCase());
+    const held = (await directoryNames(dir)).find((name) => names.includes(HELD_LOG.exec(name)?.[1].toLowerCase()));
+    if (held) throw new Error(`${id} cannot be renamed to ${to}: ${held} holds marks under one of those names`);
 
     // Linked then unlinked, never renamed: the `stat` loop above is check-then-act and `rename(2)`
     // replaces silently, where `link(2)` fails EEXIST atomically. The window it admits is a take
