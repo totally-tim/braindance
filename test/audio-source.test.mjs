@@ -4,13 +4,14 @@ import {
   AUDIO_RATE, AUDIO_SECONDS, AUDIO_UPLOAD_BYTES, analyseAudio, checkAudioClip, defaultConditioning,
   audioSpectrum, modulatedValue, readAudioWav, signalAt,
 } from '../web/audio-source.js';
-import { AudioStore } from '../server/audio.js';
+import { AUDIO_UPLOAD_MS, AudioStore } from '../server/audio.js';
 import { requireMutation } from '../server/http-guard.js';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readdir, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Readable } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { EventEmitter } from 'node:events';
 import { MAX_EXPORT_SECONDS, audioFilter, handleExportSocket, validateExport } from '../server/export.js';
 import { OUTPUT_RATES } from '../web/export-sizes.js';
@@ -207,6 +208,48 @@ test('an export refuses a project of another version before reading its audio', 
     assert.match(sent.at(-1)?.error ?? '', new RegExp(`this project is version ${DOCUMENT_VERSIONS.project - 1}`));
     assert.deepEqual(await readdir(root), []);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a stalled upload gives the import slot back at the deadline', { timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'audio-stall-'));
+  try {
+    assert.equal(new AudioStore(root).uploadMs, AUDIO_UPLOAD_MS);
+    assert.equal(AUDIO_UPLOAD_MS, 120_000);
+    const store = new AudioStore(root, { uploadMs: 200 });
+    const stalled = new PassThrough();
+    stalled.write(Buffer.alloc(1024));
+    const began = Date.now();
+    const pending = store.import(stalled).then(() => 'imported', (err) => err.message);
+    await new Promise((done) => { setTimeout(done, 50); });
+    assert.equal(store.importing, true, 'the slot is held while the upload is inside its deadline');
+    assert.match(await pending, /took longer than 0.2 seconds/);
+    assert.ok(Date.now() - began >= 190, 'and released at the deadline, not before');
+    assert.equal(store.importing, false);
+    await assert.rejects(store.import(Readable.from([])), /empty/, 'the next import gets the slot');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a scratch folder that cannot be removed neither hides the import error nor keeps the slot', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'audio-rm-'));
+  const promises = createRequire(import.meta.url)('node:fs/promises');
+  const original = promises.rm;
+  promises.rm = async (path, options) => {
+    if (String(path).includes('.import-')) throw Object.assign(new Error('EPERM: operation not permitted, rmdir'), { code: 'EPERM' });
+    return original(path, options);
+  };
+  syncBuiltinESMExports();
+  const logged = t.mock.method(console, 'error', () => {});
+  try {
+    const store = new AudioStore(root);
+    await assert.rejects(store.import(Readable.from([])), /audio file is empty/);
+    assert.equal(store.importing, false);
+    await assert.rejects(store.import(Readable.from([])), /audio file is empty/, 'a second import is not refused as already running');
+    assert.match(String(logged.mock.calls[0]?.arguments[0]), /was not removed: EPERM/);
+  } finally {
+    promises.rm = original;
+    syncBuiltinESMExports();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('an export runs at a rate the editor offers, for at most four hours', () => {

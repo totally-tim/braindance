@@ -9,8 +9,16 @@ import { ffmpegBinary } from './export.js';
 
 const digest = (bytes) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 
+// How long one upload may hold the single import slot. 64 MiB crosses a LAN in seconds.
+export const AUDIO_UPLOAD_MS = 120_000;
+
 export class AudioStore {
-  constructor(root) { this.root = root; this.importing = false; this.writes = 0; }
+  constructor(root, { uploadMs = AUDIO_UPLOAD_MS } = {}) {
+    this.root = root;
+    this.uploadMs = uploadMs;
+    this.importing = false;
+    this.writes = 0;
+  }
 
   async read(hash) {
     if (!validAudioHash(hash)) throw new Error('invalid audio content hash');
@@ -28,6 +36,9 @@ export class AudioStore {
     if (this.importing) throw new Error('another audio import is running');
     this.importing = true;
     let scratch = null;
+    const deadline = setTimeout(() => {
+      stream.destroy(new Error(`audio upload took longer than ${this.uploadMs / 1000} seconds`));
+    }, this.uploadMs);
     try {
       await mkdir(this.root, { recursive: true });
       scratch = await mkdtemp(join(this.root, '.import-'));
@@ -41,6 +52,7 @@ export class AudioStore {
           await file.writeFile(chunk);
         }
       } finally { await file.close(); }
+      clearTimeout(deadline);
       if (!size) throw new Error('audio file is empty');
       const output = join(scratch, 'audio.wav');
       await new Promise((resolve, reject) => {
@@ -73,8 +85,16 @@ export class AudioStore {
       }
       return { hash, duration };
     } finally {
-      if (scratch) await rm(scratch, { recursive: true, force: true });
-      this.importing = false;
+      clearTimeout(deadline);
+      // A failed removal is logged rather than thrown: it must neither hide the import's own error
+      // nor keep the slot taken.
+      try {
+        if (scratch) await rm(scratch, { recursive: true, force: true });
+      } catch (err) {
+        console.error(`[audio] import scratch ${scratch} was not removed: ${err.message}`);
+      } finally {
+        this.importing = false;
+      }
     }
   }
 }

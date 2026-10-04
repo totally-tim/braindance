@@ -47,7 +47,7 @@ Everything, to everyone who can route to the port:
 | `POST /library/rename/:id` | rename a take; the content hash does not move, so projects still resolve |
 | `PUT` and `DELETE` on `/projects/:name`, `/presets/:name`, `/deliverables/:name` | overwrite or delete saved work |
 | `POST /jobs` | queue renders without limit on the disk the takes are written to |
-| `POST /audio`, `GET /audio/:hash` | import an audio file through FFmpeg, one upload at a time, up to 64 MiB in and ten minutes decoded; the decoder reads only its input pipe. GET reads a stored WAV after the server checks its content hash |
+| `POST /audio`, `GET /audio/:hash` | import an audio file through FFmpeg, one upload at a time: up to 64 MiB, which must arrive within 120 seconds, and the server refuses audio longer than ten minutes. The decoder reads only its input pipe. GET reads a stored WAV after the server checks its content hash |
 | the WebSocket | the live sensor feed and the recorder's controls |
 | the `/export` WebSocket | starts an ffmpeg process on the server for each render, at 24, 30, 60 or 120 fps for at most four hours of frames and soundtrack, with at most four frames unacknowledged |
 | `GET /camera.mjpg` | the colour camera, live, as an MJPEG stream; opening it starts the encode |

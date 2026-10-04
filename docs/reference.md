@@ -391,10 +391,11 @@ through a longer lens. Existing shots at other lenses change appearance.
 
 ## Audio
 
-**Audio** in the timeline imports one file, up to 64 MiB and ten minutes long. FFmpeg converts it
-to 48 kHz stereo PCM, and the project names the result by its SHA-256 hash. `--audio DIR` chooses
-where the assets live. A project moved to another machine needs its audio asset as well as its
-takes, and the page refuses a project whose asset is missing or changed before opening it.
+**Audio** in the timeline imports one file of up to 64 MiB. The upload must arrive within two
+minutes, and the server refuses a song longer than ten minutes. FFmpeg converts it to 48 kHz stereo
+PCM, and the project names the result by its SHA-256 hash. `--audio DIR` chooses where the assets
+live. A project moved to another machine needs its audio asset as well as its takes, and the page
+refuses a project whose asset is missing or changed before opening it.
 
 Choose **Clip**, **Effect**, then **Parameter**. The effects offered are those added to that
 clip, those with changed values or keys, and the one the mapping already drives; post effects
