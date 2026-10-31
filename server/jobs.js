@@ -6,7 +6,7 @@
 // GPU or encoder still renders and says so: the promise is a picture that looks the same.
 import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { validateExport } from './export.js';
 import { listJsonNames } from './library.js';
@@ -197,7 +197,10 @@ export class JobStore {
       return run;
     };
     this.writes = 0;
+    this.#scanCache = new Map();
   }
+
+  #scanCache;
 
   pathFor(id) {
     if (!VALID_JOB_ID.test(id)) throw new Error(`unusable job id ${JSON.stringify(id)}`);
@@ -216,17 +219,34 @@ export class JobStore {
     // Absent really is empty, but only absent: swallowing every failure parked the worker on an
     // unreadable directory and let `enqueue` write a duplicate into it.
     const files = await listJsonNames(this.dir, { what: 'job queue directory' });
+    const present = new Set();
     const jobs = [];
     const refused = [];
     for (const file of files) {
       const id = file.replace(/\.json$/, '');
+      const full = join(this.dir, file);
+      present.add(full);
       try {
-        const job = JSON.parse(await readFile(join(this.dir, file), 'utf8'));
+        const st = await stat(full, { bigint: true });
+        const stamp = `${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
+        const hit = this.#scanCache.get(full);
+        let parsed;
+        if (hit && hit.stamp === stamp) {
+          parsed = hit.job;
+        } else {
+          parsed = JSON.parse(await readFile(full, 'utf8'));
+          this.#scanCache.set(full, { stamp, job: parsed });
+        }
+        const job = structuredClone(parsed);
         if (job?.version === JOB_VERSION) jobs.push(job);
         else refused.push({ id, version: job?.version ?? null, reason: versionRefusal(id, job?.version) });
       } catch (err) {
+        this.#scanCache.delete(full);
         refused.push({ id, version: null, reason: `job ${id} is not readable as a job record: ${err.message}` });
       }
+    }
+    for (const cachedPath of this.#scanCache.keys()) {
+      if (!present.has(cachedPath)) this.#scanCache.delete(cachedPath);
     }
     return { jobs, refused };
   }
@@ -249,6 +269,7 @@ export class JobStore {
     const text = `${JSON.stringify(job, null, 2)}\n`;
     await writeFile(`${path}.tmp`, text);
     await rename(`${path}.tmp`, path);
+    this.#scanCache.delete(path);
     return job;
   }
 
@@ -658,10 +679,22 @@ export class JobStore {
     });
   }
 
-  async remove(id) {
-    const path = this.pathFor(id);
-    this.writes++;
-    await unlink(path);
-    return { removed: id };
+  remove(id) {
+    return this.serialise(async () => {
+      const path = this.pathFor(id);
+      const job = await this.read(id).catch((err) => {
+        if (err?.code === 'ENOENT') throw err;
+        return null;
+      });
+      if (job && job.state === 'running' && this.#quietFor(job) < this.staleMs) {
+        throw new Error(
+          `job ${id} is running on ${job.worker ?? 'a worker'} and cannot be removed while its lease is active`,
+        );
+      }
+      this.writes++;
+      await unlink(path);
+      this.#scanCache.delete(path);
+      return { removed: id };
+    });
   }
 }

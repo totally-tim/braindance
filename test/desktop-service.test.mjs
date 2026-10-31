@@ -9,7 +9,7 @@ import { createServer } from 'node:net';
 import { ChildProcess, spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { dirname, delimiter, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { externalUrl, sameOrigin, senderTrusted } from '../desktop/origin.js';
 import { revealable, within } from '../desktop/reveal.js';
@@ -358,4 +358,15 @@ test('a service that ignores the stop line ends when its parent is killed', asyn
   probe.child.kill('SIGKILL');
   await probe.exited;
   assert.ok(await until(() => !alive(pid), REAP_MS), `the service (pid ${pid}) outlived its killed parent`);
+});
+
+test('a service started with a minimal Finder PATH receives fallback directories and its Node directory on PATH', async (t) => {
+  const minimal = '/usr/bin:/bin:/usr/sbin:/sbin';
+  const service = run(t, 'well-behaved', { env: { ...process.env, PATH: minimal, STUB_MODE: 'well-behaved' } });
+  const info = await service.ready;
+  const entries = (info.path ?? '').split(delimiter);
+  assert.ok(entries.includes('/opt/homebrew/bin'), `expected /opt/homebrew/bin in child PATH: ${info.path}`);
+  assert.ok(entries.includes('/usr/local/bin'), `expected /usr/local/bin in child PATH: ${info.path}`);
+  assert.ok(entries.includes(dirname(process.execPath)), `expected ${dirname(process.execPath)} in child PATH: ${info.path}`);
+  await service.stop();
 });

@@ -7602,16 +7602,30 @@ try {
     otherFootage.clips[0].take = { id: 'some-other-take', hash: foreignHash };
     await putDoc(OTHER, otherFootage);
 
+    const longPresetError = 'the presets directory is not there on the mounted volume and the user '
+      + 'documents root cannot be opened until the volume returns and its permissions are restored '
+      + 'for the active workspace session (/Volumes/studio-archive/braindance/presets/documents)';
     await page.route('**/presets', (route) => route.fulfill({
-      status: 500, contentType: 'application/json', body: '{"error":"the presets directory is not there"}',
+      status: 500, contentType: 'application/json', body: JSON.stringify({ error: longPresetError }),
     }));
     await reopen();
-    const brokenNote = await page.evaluate("document.getElementById('tNote').textContent");
+    const brokenNoteBox = await page.evaluate(`(() => {
+      const el = document.getElementById('tNote');
+      return {
+        text: el.textContent,
+        title: el.title,
+        clientWidth: el.clientWidth,
+        scrollWidth: el.scrollWidth,
+      };
+    })()`);
     await page.unroute('**/presets');
-    check(/library unavailable/.test(brokenNote) && /presets/.test(brokenNote),
+    check(/library unavailable/.test(brokenNoteBox.text) && /presets/.test(brokenNoteBox.text),
       'a presets list that refuses is reported by name rather than swallowed, so a page that came '
       + 'up missing half of what it needs says which half',
-      `note "${brokenNote.slice(0, 100)}"`);
+      `note "${brokenNoteBox.text.slice(0, 100)}"`);
+    check(brokenNoteBox.scrollWidth > brokenNoteBox.clientWidth + 1 && brokenNoteBox.title === brokenNoteBox.text,
+      'the whole of a long refusal is reachable off the note\'s title',
+      `scrollWidth=${brokenNoteBox.scrollWidth} clientWidth=${brokenNoteBox.clientWidth} titleLen=${brokenNoteBox.title.length}`);
     await reopen();
 
     // The saved-project picker left with the timeline information bar and the recovery chip left

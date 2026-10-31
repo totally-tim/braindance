@@ -241,10 +241,16 @@ for (const [name, floor] of Object.entries(FLOORS)) {
 // Every tool in `tools/` has to be named in CLAUDE.md, asked of the directory rather than of a
 // list, and matched on basename because the file names tools both as a path and bare.
 const DOC = join(ROOT, 'CLAUDE.md');
+const AGENTS = join(ROOT, 'AGENTS.md');
 if (!existsSync(DOC)) {
   fail('CLAUDE.md is missing, so the claim that every tool is documented cannot be tested');
 } else {
   const doc = readFileSync(DOC, 'utf8');
+  if (!existsSync(AGENTS)) {
+    fail('AGENTS.md is missing, so agents reading AGENTS.md do not share CLAUDE.md\'s rules');
+  } else if (readFileSync(AGENTS, 'utf8') !== doc) {
+    fail('AGENTS.md and CLAUDE.md disagree - keep AGENTS.md linked or identical to CLAUDE.md');
+  }
   const shipped = readdirSync(join(ROOT, 'tools'))
     .filter((f) => SHIPPED.test(f))
     .sort();

@@ -1,5 +1,7 @@
 import { AUDIO_RATE, analyseAudio, audioSpectrum, readAudioWav, signalAt } from './audio-source.js';
 
+const MAX_CURVES = 128;
+
 export function createAudioSession({ changed = () => {}, failed = () => {} } = {}) {
   const curves = new Map();
   let decoded = null;
@@ -10,6 +12,13 @@ export function createAudioSession({ changed = () => {}, failed = () => {} } = {
   let inspection = null;
   let inspectionFailure = null;
   const key = (clip) => JSON.stringify([clip.hash, clip.duration, clip.conditioning]);
+  const curveFor = (k) => {
+    const held = curves.get(k);
+    if (held === undefined) return undefined;
+    curves.delete(k);
+    curves.set(k, held);
+    return held;
+  };
   const stop = () => {
     if (playing) { playing.node.stop(); playing.node.disconnect(); playing = null; }
   };
@@ -28,16 +37,24 @@ export function createAudioSession({ changed = () => {}, failed = () => {} } = {
     return pcm;
   };
   const prepare = async (clip) => {
-    if (!clip) return;
+    if (!clip) {
+      stop();
+      decoded = null;
+      buffer = null;
+      spectrum = null;
+      return;
+    }
     inspectionFailure = null;
     const pcm = await pcmFor(clip);
-    if (curves.has(key(clip))) return;
+    const k = key(clip);
+    if (curveFor(k) !== undefined) return;
     // Let the import status paint before the bounded offline analysis.
     await new Promise((resolve) => setTimeout(resolve, 0));
-    curves.set(key(clip), analyseAudio(pcm, clip.conditioning));
+    while (curves.size >= MAX_CURVES) curves.delete(curves.keys().next().value);
+    curves.set(k, analyseAudio(pcm, clip.conditioning));
   };
-  const ready = (clip) => !clip || curves.has(key(clip));
-  const value = (clip, t) => clip ? signalAt(curves.get(key(clip)), t - clip.start) : 0;
+  const ready = (clip) => !clip || curveFor(key(clip)) !== undefined;
+  const value = (clip, t) => clip ? signalAt(curveFor(key(clip)), t - clip.start) : 0;
   const inspect = (clip, t) => {
     if (!clip) return [];
     if (decoded?.hash !== clip.hash) {

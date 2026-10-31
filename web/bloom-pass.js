@@ -122,7 +122,11 @@ export class BloomPass extends Pass {
 
     this.targets = [];
     for (let i = 0; i < BLOOM_LEVELS; i++) {
-      const target = new THREE.WebGLRenderTarget(1, 1, { type });
+      const target = new THREE.WebGLRenderTarget(1, 1, {
+        type,
+        depthBuffer: false,
+        stencilBuffer: false,
+      });
       target.texture.name = `bloom.${i}`;
       target.texture.generateMipmaps = false;
       this.targets.push(target);

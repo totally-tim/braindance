@@ -69,8 +69,9 @@ async function flushMarks(dir, take, index) {
   // The drop count goes into the marks log because it is the one sidecar neither derived from the
   // take's bytes nor thrown away with them, and a count held in memory is gone at the next restart.
   // Only when frames were dropped: a take that lost nothing gains no sidecar it did not have.
-  const drop = take.dropped > 0
-    ? [{ id: `drop:${take.id}`, at: Date.now(), kind: 'drop', dropped: take.dropped }]
+  const dropExtras = take.droppedColour > 0 ? { droppedColour: take.droppedColour } : {};
+  const drop = (take.dropped > 0 || take.droppedColour > 0)
+    ? [{ id: `drop:${take.id}`, at: Date.now(), kind: 'drop', dropped: take.dropped, ...dropExtras }]
     : [];
   if (!take.pendingMarks.length && !drop.length) return;
   if (!index.hello) {
@@ -209,10 +210,14 @@ export class Recorder {
         // Into *this* take's log, even though it ended badly: nulling the take without
         // flushing left them for the next take, at a source time meaningless there.
         settle(failed);
-        cachedIndex(failed.path).then(
+        this.closing.add(failed);
+        failed.closed = cachedIndex(failed.path).then(
           (index) => flushMarks(this.dir, failed, index),
-          (err) => console.error(`[recorder] take ${failed.id}: its marks have no hash to be filed under: ${err.message}`),
-        ).catch((err) => console.error(`[recorder] ${err.message}`));
+          (indexErr) => console.error(`[recorder] take ${failed.id}: its marks have no hash to be filed under: ${indexErr.message}`),
+        ).catch((marksErr) => console.error(`[recorder] ${marksErr.message}`)).finally(() => {
+          this.closing.delete(failed);
+          this.onChange(this.state);
+        });
         this.onChange(this.state);
       }
     });
@@ -299,9 +304,12 @@ export class Recorder {
    * after every one has finished.
    */
   async closeAll(reason) {
+    const wasArmed = this.armed;
+    this.armed = false;
     // `close` runs first and moves the open take into `closing`, so a Set holds its close once.
     const closes = new Set([this.close(reason), ...[...this.closing].map((take) => take.closed)]);
     const failed = (await Promise.allSettled(closes)).find((result) => result.status === 'rejected');
+    if (wasArmed) this.onChange(this.state);
     if (failed) throw failed.reason;
   }
 

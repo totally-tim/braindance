@@ -5,9 +5,9 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { accessSync, constants, statSync } from 'node:fs';
-import { mkdir, readdir, writeFile, stat, rm, rename } from 'node:fs/promises';
+import { mkdir, readdir, writeFile, stat, rm, rename, link } from 'node:fs/promises';
 import { delimiter, dirname, join, resolve } from 'node:path';
-import { AUDIO_RATE, checkAudioClip, readAudioWav } from '../web/audio-source.js';
+import { AUDIO_RATE, checkAudioClip, readAudioWavHeader } from '../web/audio-source.js';
 import { DOCUMENT_VERSIONS, versionRefusal } from '../web/format.js';
 import { OUTPUT_RATES } from '../web/export-sizes.js';
 import { lastFrameRefusal } from '../web/clip-range.js';
@@ -35,7 +35,7 @@ function findOnPath(directories) {
  * The encoder to spawn: the one `FFMPEG` names, else the first `ffmpeg` on PATH. Throws a sentence
  * naming both places when there is neither, because a host's PATH is usually shorter than a shell's.
  */
-export function ffmpegBinary({ named = FFMPEG_NAMED, searchPath = process.env.PATH } = {}) {
+export function ffmpegBinary({ named = FFMPEG_NAMED, searchPath = process.env.PATH, purpose = 'export' } = {}) {
   if (named) return named;
   // A PATH with entries keeps its empty ones, which a shell reads as the current directory; a PATH
   // with none is refused.
@@ -44,7 +44,7 @@ export function ffmpegBinary({ named = FFMPEG_NAMED, searchPath = process.env.PA
   if (found) return found;
   const searched = directories.map((directory) => directory || '.');
   throw new Error(
-    `no ffmpeg to export with: the FFMPEG environment variable is not set, and ${FFMPEG_FILE} is not in `
+    `no ffmpeg to ${purpose} with: the FFMPEG environment variable is not set, and ${FFMPEG_FILE} is not in `
     + `${searched.length ? `any PATH directory (${searched.join(', ')})` : 'PATH, which is empty'}`,
   );
 }
@@ -272,7 +272,7 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
   let finished = false;
   const frameHashes = [];
   const streamHash = createHash('sha256');
-  const stderr = [];
+  let stderrTail = '';
   let queue = Promise.resolve();
 
   const send = (msg) => {
@@ -280,10 +280,13 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
   };
 
   // Removes this run's scratch, keeping a failure for the stop to report.
-  const removeScratch = (temp) => rm(temp, { recursive: true, force: true }).catch((err) => {
-    leftover = `the scratch ${temp} was not removed: ${err.message}`;
-    log(`[export] ${leftover}`);
-  });
+  const removeScratch = (temp) => {
+    if (!temp) return Promise.resolve();
+    return rm(temp, { recursive: true, force: true }).catch((err) => {
+      leftover = `the scratch ${temp} was not removed: ${err.message}`;
+      log(`[export] ${leftover}`);
+    });
+  };
 
   const fail = (message) => {
     if (finished) return ending;
@@ -367,11 +370,20 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
     let audio = null;
     if (audioClip) {
       const wav = await audioStore.read(audioClip.hash);
-      if (finished) return;
-      const { duration } = readAudioWav(wav);
+      if (finished) { await removeScratch(temp); return; }
+      const { duration } = readAudioWavHeader(wav);
       if (Math.abs(duration - audioClip.duration) > 0.5 / AUDIO_RATE) throw new Error('audio duration does not match its asset');
       const audioPath = join(temp, 'audio-input.wav');
-      await writeFile(audioPath, wav, { flag: 'wx' });
+      const storedPath = typeof audioStore.pathFor === 'function' ? audioStore.pathFor(audioClip.hash) : null;
+      if (storedPath) {
+        try {
+          await link(storedPath, audioPath);
+        } catch {
+          await writeFile(audioPath, wav, { flag: 'wx' });
+        }
+      } else {
+        await writeFile(audioPath, wav, { flag: 'wx' });
+      }
       if (finished) { await removeScratch(temp); return; }
       audio = { path: audioPath, filter: audioFilter(audioClip, msg.programStart, frames, fps) };
     }
@@ -384,13 +396,14 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
       child.once('exit', done);
       child.once('close', done);
     });
-    child.stderr.on('data', (chunk) => stderr.push(chunk.toString('utf8')));
+    child.stderr.on('data', (chunk) => { stderrTail = (stderrTail + chunk.toString('utf8')).slice(-4096); });
     child.on('error', (err) => fail(`ffmpeg could not start: ${err.message}`));
     child.stdin.on('error', () => { /* reported through the exit code instead */ });
     child.on('exit', (code, signal) => {
       if (finished) return;
       if (!ended || code !== 0) {
-        fail(`ffmpeg exited ${code ?? signal}${stderr.length ? `: ${stderr.join('').trim()}` : ''}`);
+        const detail = stderrTail.trim();
+        fail(`ffmpeg exited ${code ?? signal}${detail ? `: ${detail}` : ''}`);
         return;
       }
       landing = finish().catch((err) => fail(String(err.message ?? err)));
@@ -402,7 +415,8 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
   };
 
   const frame = (data) => {
-    if (!job) throw new Error('a frame arrived before the export was described');
+    if (finished) return;
+    if (!job || !child) throw new Error('a frame arrived before the export was described');
     if (ended) throw new Error('a frame arrived after the export ended');
     if (data.length !== job.frameBytes) {
       throw new Error(
@@ -445,7 +459,9 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
   };
 
   const end = async () => {
-    if (!job) throw new Error('an export ended before it was described');
+    if (finished) return;
+    if (!job || !child) throw new Error('an export ended before it was described');
+    if (ended) return;
     // Same reading as the frame guard: an export that declared no count cannot have sent
     // the wrong number.
     if (job.frames !== null && received !== job.frames) {
@@ -453,7 +469,7 @@ export function handleExportSocket(ws, { outDir, audioStore = null, log = consol
     }
     ended = true;
     await queue;
-    child.stdin.end();
+    if (!finished) child.stdin.end();
   };
 
   const finish = async () => {

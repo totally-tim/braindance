@@ -69,6 +69,11 @@ export class KeyStream {
     this.demand.settle();
   }
 
+  reset(ws) {
+    const c = this.clients.get(ws);
+    if (c) c.lastColourTs = null;
+  }
+
   /** One type 4 payload off the wire, paired with the colour frame the webcam is holding. */
   offer(payload) {
     this.#reap();

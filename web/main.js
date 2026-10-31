@@ -447,6 +447,7 @@ function setDeliverableSize(text) {
     buildResolutionMenu(ui.exportSize, `${w}x${h}`);
     ui.exportSize.value = `${w}x${h}`;
   }
+  if (!adoptingDeliverable) showAdoptedDeliverable('');
   paintDeliverable();
   return true;
 }
@@ -462,6 +463,7 @@ function setViewCamera(cam) {
 }
 
 let stageResizes = 0;
+let resizedTimelineHeight = 0;
 
 // The transport, or null until a take is open.
 let timeline = null;
@@ -487,6 +489,7 @@ const pauseTransport = () => {
 
 function resize() {
   stageResizes++;
+  resizedTimelineHeight = timelineEl.offsetHeight;
   const wasBuffer = renderer.getDrawingBufferSize(new THREE.Vector2());
   const availW = innerWidth;
   const appBarHeight = document.getElementById('appBar')?.offsetHeight ?? 0;
@@ -591,17 +594,22 @@ const moshBoundOf = (packages) => packages.flatMap((pkg) => Object.entries(pkg.m
   .filter(([, p]) => EFFECT_BOUNDED_TABLES.includes(p.bind?.on) && p.bind.bounds)
   .map(([short, p]) => ({ name: `${pkg.id}.${short}`, uniform: p.bind.uniform })))[0] ?? null;
 
+/** The term toggling periodic refresh of the mosh pass's memory, by both its names, or null. */
+const moshCyclesOf = (packages) => packages.flatMap((pkg) => Object.entries(pkg.manifest.params ?? {})
+  .filter(([, p]) => EFFECT_BOUNDED_TABLES.includes(p.bind?.on) && p.bind.cycles)
+  .map(([short, p]) => ({ name: `${pkg.id}.${short}`, uniform: p.bind.uniform })))[0] ?? null;
+
 let MOSH_MASTERS = [];
 let MOSH_BOUND = null;
+let MOSH_CYCLES = null;
 
 /** Whether the mosh pass is doing anything at a program position, and for how long it remembers. */
 const moshLiveAt = (programSec) => MOSH_MASTERS.some((name) => valueAtProgram(name, programSec) !== 0);
-// Zero when cycling is disabled: moshRefreshes treats 0 as "refresh every frame", so the preroll
-// walk finds a keyframe immediately and returns 0. The render loop guards with moshCycles, so it
-// does not actually refresh - but the preroll correctly reports no memory to replay.
+// Infinity when cycling is disabled: no periodic refresh fires, so pre-roll walks back to the
+// frame where the mosh switched on rather than treating every frame as a fresh keyframe.
 const moshPeriodAt = (programSec) => {
   if (!MOSH_BOUND) return 0;
-  if (!valueAtProgram('datamosh.cycleRefresh', programSec)) return 0;
+  if (MOSH_CYCLES && !valueAtProgram(MOSH_CYCLES.name, programSec)) return Infinity;
   return valueAtProgram(MOSH_BOUND.name, programSec);
 };
 
@@ -1657,6 +1665,7 @@ function adoptEffectPackages(packages, programs, held = { project: {}, clips: []
   PASS_GATES = passGatesOf(packages);
   MOSH_MASTERS = moshMastersOf(packages);
   MOSH_BOUND = moshBoundOf(packages);
+  MOSH_CYCLES = moshCyclesOf(packages);
   BYPASSED = [...BYPASSED_CORE, ...MOSH_MASTERS];
   BYPASS_ZERO = Object.fromEntries(BYPASSED.map((name) => [name, 0]));
   BYPASSED_SET = new Set(BYPASSED);
@@ -1776,7 +1785,9 @@ async function reloadEffects() {
   const sameProgram = programs.cloud.vertexShader === heldPrograms.cloud.vertexShader
     && programs.cloud.fragmentShader === heldPrograms.cloud.fragmentShader
     && programs.grade.vertexShader === heldPrograms.grade.vertexShader
-    && programs.grade.fragmentShader === heldPrograms.grade.fragmentShader;
+    && programs.grade.fragmentShader === heldPrograms.grade.fragmentShader
+    && programs.mosh.vertexShader === heldPrograms.mosh.vertexShader
+    && programs.mosh.fragmentShader === heldPrograms.mosh.fragmentShader;
 
   let failure = null;
   try {
@@ -1813,6 +1824,7 @@ async function reloadEffects() {
     );
   }
   refusedEffectSignature = null;
+  if (history.baseline !== null) history.baseline = history.snapshot();
   return fetched.map((p) => ({ id: p.id, version: p.manifest.version, rev: p.rev }));
 }
 
@@ -1969,6 +1981,7 @@ function applyPreset(preset) {
 
 // The export settings. Separate from the project, so one edit can spawn several.
 let activeDeliverable = null;
+let adoptingDeliverable = false;
 
 function ensureActiveDeliverable() {
   if (activeDeliverable) return;
@@ -2012,14 +2025,19 @@ function applyDeliverable(deliverable) {
   }
   dropRateGesture();
   setActiveDeliverable(deliverable);
-  setClipInOut({ in: deliverable.in, out: deliverable.out });
-  setDeliverableSize(deliverable.outputSize);
-  // The output name travels with the deliverable, so two cannot write over each other.
-  if (ui.exportName) ui.exportName.value = deliverable.name ?? '';
-  timingChanged();
-  paintDeliverable();
-  paintExportFormats();
-  paintExportName();
+  adoptingDeliverable = true;
+  try {
+    setClipInOut({ in: deliverable.in, out: deliverable.out });
+    setDeliverableSize(deliverable.outputSize);
+    // The output name travels with the deliverable, so two cannot write over each other.
+    if (ui.exportName) ui.exportName.value = deliverable.name ?? '';
+    timingChanged();
+    paintDeliverable();
+    paintExportFormats();
+    paintExportName();
+  } finally {
+    adoptingDeliverable = false;
+  }
 }
 
 /** A trim, then told to the deliverable, the readout beside it, and the transport. */
@@ -2029,6 +2047,7 @@ function setClipInOut(values) {
   ensureActiveDeliverable();
   activeDeliverable.in = clipIn;
   activeDeliverable.out = clipOut;
+  if (!adoptingDeliverable) showAdoptedDeliverable('');
   paintDeliverable();
   if (timeline) {
     // Compared on the output grid, because that is the only place the playhead can be.
@@ -2599,20 +2618,21 @@ async function changeAudio(patch, imported = null) {
 
 async function importAudio(file) {
   if (refuseEdit('importing audio')) return;
+  if (!selectedClip) throw new Error('add a clip before importing audio');
   const generation = documentGeneration;
   const edit = ++audioEditGeneration;
   const prior = audioClip;
   pauseTransport();
-  const targetClip = selectedClip.id;
+  const targetClip = (selectedClipRow() ?? selectedClip).id;
   const response = await fetch('/audio', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file });
   const result = await response.json();
   if (!response.ok || result.error) throw new Error(result.error ?? 'audio import failed');
   if (edit !== audioEditGeneration || generation !== documentGeneration || prior !== audioClip) return;
-  const first = audioTargets().find((entry) => entry.clip === targetClip);
+  const first = audioTargets().find((entry) => entry.clip === targetClip) ?? audioTargets()[0];
   await changeAudio(null, {
     kind: 'audio-file', ...result, name: file.name.slice(0, 255), start: 0,
     conditioning: defaultConditioning(),
-    target: first ? { clip: targetClip, param: first.param, depth: (first.max - first.min) / 2 } : null,
+    target: first ? { clip: first.clip, param: first.param, depth: (first.max - first.min) / 2 } : null,
   });
 }
 
@@ -3507,18 +3527,26 @@ const history = {
 
   undo() {
     if (refuseEdit('an undo')) return false;
-    const previous = this.stack.pop();
+    const previous = this.stack.at(-1);
     if (previous === undefined) return false;
+    const parsed = JSON.parse(previous);
     // The accumulators walk forward one output frame at a time and cannot be walked back.
     const gen = takeTransport();
     const resume = timeline ? timeline.playing : false;
     if (resume) timeline.pause();
     this.restoring = true;
     try {
-      restoreProject(JSON.parse(previous));
+      restoreProject(parsed);
+      this.stack.pop();
       this.baseline = previous;
     } finally {
       this.restoring = false;
+    }
+    if (openedProjectName !== null && !projectDiverged) {
+      writeOpenProject(parsed).catch((err) => {
+        if (err.stale) stopWritingProject(err);
+        else say(`this undo could not be written to ${openedProjectName}: ${err.message}`);
+      });
     }
     // The playhead deliberately does not move. Undo is about what the clip is.
     if (resume) {
@@ -3555,7 +3583,12 @@ function setStatus() {
     statusEl.replaceChildren(note);
     if (appStatusEl) appStatusEl.textContent = sensorState;
   } else {
-    statusEl.replaceChildren();
+    if (!EDITING && sensorLabel) {
+      const rate = fps > 0 ? ` · ${fps.toFixed(0)} fps in` : '';
+      statusEl.textContent = `${sensorLabel}${rate}`;
+    } else {
+      statusEl.replaceChildren();
+    }
     if (appStatusEl) appStatusEl.textContent = '';
   }
 }
@@ -3856,7 +3889,9 @@ function paintProgramOutReadout() {
 /** The operator's two controls, and the URLs to paste into OBS. Not wired on a source. */
 if (!PROGRAM_OUT && progModeEl) {
   progModeEl.addEventListener('change', () => {
-    writeOutput({ mode: progModeEl.value });
+    writeOutput(progModeEl.value === 'mirror'
+      ? { mode: 'mirror', view: cameraPose(freeCamera) }
+      : { mode: progModeEl.value });
   });
   progSizeEl.addEventListener('change', () => {
     const m = /^\s*([1-9][0-9]*)\s*x\s*([1-9][0-9]*)\s*$/.exec(progSizeEl.value);
@@ -3993,7 +4028,8 @@ function connect() {
 
   ws.onclose = () => {
     if (streamDetached) return;
-    sensorLabel = 'disconnected — retrying';
+    sensorState = 'disconnected — retrying';
+    fps = 0;
     setStatus();
     setTimeout(connect, 1000);
   };
@@ -4450,6 +4486,10 @@ function renderProgramFrame(t) {
   chromeStale = true;
   evaluating = true;
   try {
+    // Every track, look and camera alike, through the registry rather than onto the uniforms.
+    evaluateTracks(t);
+    applyAudio(t);
+
     for (const clip of clips) {
       const showing = clipShowingAt(clip, t);
       if (showing === 'off') {
@@ -4494,10 +4534,6 @@ function renderProgramFrame(t) {
     grade.uniforms.time.value = t;
     mosh.uniforms.time.value = t;
 
-    // Every track, look and camera alike, through the registry rather than onto the uniforms.
-    evaluateTracks(t);
-    applyAudio(t);
-
     // Source history stays valid while the camera is still. A changed camera is
     // a new projection.
     if (renderedCameraChanged()) {
@@ -4511,12 +4547,12 @@ function renderProgramFrame(t) {
     // states the pass cannot be asked about - a cleared history, and a pass that was switched
     // off while the frames it would have remembered went by.
     const moshPeriod = MOSH_BOUND ? mosh.uniforms[MOSH_BOUND.uniform].value : 0;
-    const moshCycles = mosh.uniforms.moshCycleRefresh?.value ?? 1;
+    const moshCycles = MOSH_CYCLES ? mosh.uniforms[MOSH_CYCLES.uniform].value : 1;
     mosh.uniforms.moshIFrame.value = (moshFresh || !moshWasLive
       || (moshCycles && moshRefreshes(lastProgramTime, lastMoshPeriod, t, moshPeriod))) ? 1 : 0;
     moshFresh = false;
     moshWasLive = mosh.enabled;
-    lastMoshPeriod = moshPeriod;
+    lastMoshPeriod = moshCycles ? moshPeriod : Infinity;
 
     const dt = Math.max(0, t - lastProgramTime);
     lastProgramTime = t;
@@ -4797,7 +4833,13 @@ class IndexedTake {
   }
 
   /** One decoded frame, or undefined where the cache does not hold it. */
-  frame(k) { return this.cache.get(k); }
+  frame(k) {
+    const hit = this.cache.get(k);
+    if (!hit) return undefined;
+    this.cache.delete(k);
+    this.cache.set(k, hit);
+    return hit;
+  }
 
   resident(a, b) {
     for (let k = Math.max(0, a); k <= Math.min(this.count - 1, b); k++) {
@@ -4831,7 +4873,12 @@ class IndexedTake {
     }
     const runs = [];
     for (let k = from; k <= to; k++) {
-      if (this.cache.has(k)) continue;
+      const hit = this.cache.get(k);
+      if (hit) {
+        this.cache.delete(k);
+        this.cache.set(k, hit);
+        continue;
+      }
       const last = runs[runs.length - 1];
       if (last && last[1] === k - 1 && last[1] - last[0] + 1 < RUN_FRAMES) last[1] = k;
       else runs.push([k, k]);
@@ -5043,13 +5090,19 @@ class TimelineTransport {
   get clipInSec() { return Math.max(0, Number(clipIn) || 0); }
   get clipOutSec() { return clipOut === null ? this.duration : Math.min(this.duration, clipOut); }
 
+  /** Clip range on the output grid, shared by playback, preview and export. */
+  get inOutFrames() {
+    return rangeFrames({ in: this.clipInSec, out: this.clipOutSec }, this.duration, this.outputFps);
+  }
+
   /** Program seconds onto the output grid, bounded by the take and by nothing else. */
   frameOf(programSec) {
     return Math.max(0, Math.min(this.lastFrame, Math.round(programSec * this.outputFps)));
   }
 
   frameAt(programSec) {
-    return this.frameOf(Math.max(this.clipInSec, Math.min(this.clipOutSec, programSec)));
+    const { from, to } = this.inOutFrames;
+    return Math.max(from, Math.min(to, this.frameOf(programSec)));
   }
 
   /** Everything that produces an image runs alone, in the order it was asked for. */
@@ -5140,16 +5193,33 @@ class TimelineTransport {
    */
   spansOver(startFrame, targetFrame) {
     const spans = [];
+    if (targetFrame < startFrame) return spans;
+    const fps = this.outputFps;
+    const ceiling = Math.max(1, this.lastFrame);
     for (const clip of clips) {
+      const warmSec = clip.warmFrames(fps, ceiling) / fps;
+      const lo = Math.max(startFrame, Math.floor((clip.start - warmSec - CLIP_EDGE) * fps) - 1);
+      const endBound = Math.max(clip.start, clip.end);
+      const hi = Number.isFinite(endBound)
+        ? Math.min(targetFrame, Math.ceil((endBound + CLIP_EDGE) * fps) + 1)
+        : targetFrame;
       let first = null;
-      let last = null;
-      for (let k = startFrame; k <= targetFrame; k++) {
-        const t = k / this.outputFps;
-        if (clipShowingAt(clip, t) === 'off') continue;
-        if (first === null) first = t;
-        last = t;
+      for (let k = lo; k <= hi; k++) {
+        const t = k / fps;
+        if (clipShowingAt(clip, t) !== 'off') {
+          first = t;
+          break;
+        }
       }
       if (first === null) continue;
+      let last = first;
+      for (let k = hi; k >= lo; k--) {
+        const t = k / fps;
+        if (clipShowingAt(clip, t) !== 'off') {
+          last = t;
+          break;
+        }
+      }
       spans.push({
         clip,
         take: clip.source.take ?? clip.source,
@@ -5497,7 +5567,7 @@ class TimelineTransport {
       rendered++;
     }
     if (rendered > 0) this.paint();
-    else if (this.frame >= this.lastFrame || this.programSec >= this.clipOutSec - 1e-9) {
+    else if (this.frame >= this.inOutFrames.to) {
       if (this.looping) this.seek(this.clipInSec).catch(showTimelineError);
       else this.pause();
     }
@@ -5613,11 +5683,12 @@ class TimelineTransport {
     const gen = this.playGen;
     this.pendingPlay = true;
     try {
-      await audioSession.arm(audioClip);
+      if (audioClip) await audioSession.arm(audioClip);
       // A draft is not what playback would have produced, so it cannot seed the afterimage.
       if (this.drafted) await this.seek(this.programSec);
       // Keep playback inside the clip's in/out points.
-      if (this.programSec < this.clipInSec || this.programSec > this.clipOutSec) {
+      const { from: inFrame, to: outFrame } = this.inOutFrames;
+      if (this.frame < inFrame || (this.frame >= outFrame && outFrame > inFrame)) {
         await this.seek(this.clipInSec);
       }
       const warming = previews?.warm(this.frame + 1);
@@ -5716,6 +5787,10 @@ class ExportSink {
     if (this.failure) throw this.failure;
     this.socket.send(JSON.stringify({ end: true }));
     return this.done.promise;
+  }
+
+  close() {
+    if (this.socket.readyState < WebSocket.CLOSING) this.socket.close();
   }
 }
 
@@ -5971,6 +6046,7 @@ async function exportClip(options = {}) {
   exporting = true;
   paintGizmo();
   pauseTransport();
+  let sink = null;
   try {
     // The rate first, because every position below is named on the output rate's grid.
     timeline.outputFps = fps;
@@ -6016,7 +6092,7 @@ async function exportClip(options = {}) {
         options.onProgress?.(n, total);
       },
     });
-    const sink = new ExportSink({
+    sink = new ExportSink({
       name: options.name ?? exportBaseName(),
       width,
       height,
@@ -6032,6 +6108,7 @@ async function exportClip(options = {}) {
     await run.run(sink);
     return await sink.finish();
   } finally {
+    if (sink && !sink.finished) sink.close();
     exporting = false;
     exportProgress = null;
     paintExportProgress();
@@ -6176,7 +6253,7 @@ audioPanel = createAudioPanel({
   getClip: () => audioClip,
   targets: audioTargets,
   owners: () => [...clips.map((clip) => ({ id: clip.id, label: `${clip.id} · ${clip.take?.id ?? 'clip'}` })), { id: null, label: 'Project' }],
-  selectedOwner: () => selectedClip.id,
+  selectedOwner: () => (selectedClipRow() ?? selectedClip)?.id ?? null,
   change: changeAudio,
   importFile: importAudio,
   remove: removeAudio,
@@ -6389,6 +6466,7 @@ function setExportCodec(codec) {
   }
   ensureActiveDeliverable();
   activeDeliverable.codec = codec;
+  if (!adoptingDeliverable) showAdoptedDeliverable('');
   paintDeliverable();
   paintExportFormats();
 }
@@ -6505,7 +6583,7 @@ function paintTimeline(t) {
   ui.program.textContent = timecode(program);
   ui.source.textContent = EDITING && clipRow === null
     ? '\u2014' : timecode(sourceSecOfProgram(program));
-  if (!ui.exportName.placeholder) ui.exportName.placeholder = t.clip.source.id;
+  ui.exportName.placeholder = (selectedClipRow() ?? t.clip).source.id;
   paintStripPositions();
   paintDeliverable();
   paintLanes();
@@ -6630,7 +6708,7 @@ const programAtPointer = (e) => view.timeAt(e.clientX);
 let scrubbing = false;
 
 ui.bed.addEventListener('pointerdown', (e) => {
-  if (!timeline) return;
+  if (e.button !== 0 || !timeline || exporting) return;
   if (selectedMark) { selectedMark = null; paintMarks(); }
   ui.bed.setPointerCapture(e.pointerId);
   scrubbing = true;
@@ -6713,6 +6791,7 @@ let gripDrag = null;
 let gripFrame = 0;
 
 ui.grip.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
   ui.grip.setPointerCapture(e.pointerId);
   ui.grip.classList.add('dragging');
   gripDrag = {
@@ -6831,7 +6910,7 @@ for (const surface of [ui.beds, ui.mini]) {
 let miniDrag = null;
 
 ui.mini.addEventListener('pointerdown', (e) => {
-  if (!timeline) return;
+  if (e.button !== 0 || !timeline) return;
   const rect = ui.mini.getBoundingClientRect();
   if (rect.width <= 0) return;
   const at = (e.clientX - rect.left) / rect.width;
@@ -6865,7 +6944,8 @@ const HANDLE_DRAG_SLOP = 4;
 for (const handle of [ui.in, ui.out]) {
   const side = handle === ui.in ? 'in' : 'out';
   handle.addEventListener('pointerdown', (e) => {
-    if (!timeline) return;
+    if (e.button !== 0 || !timeline) return;
+    if (refuseEdit('setting the trim')) { e.stopPropagation(); return; }
     handle.setPointerCapture(e.pointerId);
     handleDrag = { side, from: e.clientX, moved: false };
     // `#tIn` and `#tOut` are siblings of `#tBed` rather than children, so this takes nothing off
@@ -6908,7 +6988,7 @@ for (const handle of [ui.in, ui.out]) {
 }
 
 ui.play.addEventListener('click', () => {
-  if (!timeline) return;
+  if (!timeline || exporting) return;
   // `pauseTransport` rather than `timeline.pause()`, so the pause takes the transport with it.
   if (timeline.playing || timeline.pendingPlay) pauseTransport();
   else timeline.play().catch(showTimelineError);
@@ -6916,7 +6996,7 @@ ui.play.addEventListener('click', () => {
 
 /** Parks the playhead somewhere, stopping first. Seeks clamp into the clip range. */
 function goTo(sec) {
-  if (!timeline) return;
+  if (!timeline || exporting) return;
   pauseTransport();
   timeline.seek(Math.max(0, Math.min(sec, timeline.duration))).catch(showTimelineError);
 }
@@ -6978,6 +7058,7 @@ const SHORTCUTS = 'space play/pause · arrows step a frame, with shift a second 
 // Space belongs to the transport even when a control still holds focus, except where it types.
 addEventListener('keydown', (e) => {
   if (e.code !== 'Space' || e.metaKey || e.ctrlKey || e.altKey || !EDITING || !timeline) return;
+  if (document.querySelector('dialog[open]')) return;
   if (takesText(e.target) && e.target.type !== 'number') return;
   e.preventDefault();
   e.stopImmediatePropagation();
@@ -6991,13 +7072,14 @@ addEventListener('keydown', (e) => {
   // with `shiftKey` already false.
   changeFlyKeys(() => { flyShift = e.shiftKey; });
   if (controlKeeps(e.target, e.key)) return;
+  if (document.querySelector('dialog[open]')) return;
   if (e.defaultPrevented) return;
 
-  if (e.key === 'h' || e.key === 'H') {
+  if ((e.key === 'h' || e.key === 'H') && !e.metaKey && !e.ctrlKey && !e.altKey) {
     setPanelCollapsed(!document.body.classList.contains('panelcollapsed'));
     return;
   }
-  if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
     e.preventDefault();
     history.undo();
     return;
@@ -7035,7 +7117,7 @@ addEventListener('keydown', (e) => {
     e.preventDefault();
     if (!clipGestureLive()) { say('select a clip before moving or turning it'); return; }
     // One key for both handle sets: off, move, turn, off.
-    setGizmoMode(gizmoMode === 'translate' ? 'rotate' : 'translate');
+    setGizmoMode(gizmoMode === null ? 'translate' : 'rotate');
     return;
   }
   if (e.code === 'KeyX' && e.altKey && !e.metaKey && !e.ctrlKey) {
@@ -7048,6 +7130,7 @@ addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey || e.altKey) && !composed) return;
 
   const step = (frames) => {
+    if (exporting) return;
     pauseTransport();
     timeline.seek(Math.max(0, Math.min((timeline.frame + frames) / timeline.outputFps, timeline.duration)))
       .catch(showTimelineError);
@@ -7610,8 +7693,10 @@ function rebuildLanes() {
 
   laneStackHeight = rows.reduce((n, r) => n + r.height + 1, 0);
   applyLaneHeight();
-  resize();
-  placeChrome();
+  if (timelineEl.offsetHeight !== resizedTimelineHeight) {
+    resize();
+    placeChrome();
+  }
 }
 
 /** The same lanes, moved rather than rebuilt. */
@@ -7692,6 +7777,8 @@ function placeClipBox(box, clip) {
   box.hidden = to < -5 || from > 105;
 }
 
+let suppressAudioClick = false;
+
 function beginAudioDrag(e) {
   if (e.button !== 0 || !audioClip || refuseEdit('moving audio')) return;
   e.preventDefault();
@@ -7699,11 +7786,17 @@ function beginAudioDrag(e) {
   const box = e.currentTarget;
   const held = audioClip;
   const generation = documentGeneration;
-  const from = view.timeAt(e.clientX);
+  const width = Math.max(1, ui.bed.getBoundingClientRect().width);
+  const spanSec = view.spanSec;
+  const startX = e.clientX;
   let start = held.start;
+  let moved = false;
   box.setPointerCapture(e.pointerId);
   const move = (event) => {
-    start = Math.max(0, Math.min(86400, held.start + view.timeAt(event.clientX) - from));
+    if (!moved && Math.abs(event.clientX - startX) <= HANDLE_DRAG_SLOP) return;
+    moved = true;
+    const deltaSec = ((event.clientX - startX) / width) * spanSec;
+    start = Math.max(0, Math.min(86400, held.start + deltaSec));
     start = Math.round(start * timeline.outputFps) / timeline.outputFps;
     placeClipBox(box, { start, end: start + held.duration });
   };
@@ -7712,7 +7805,11 @@ function beginAudioDrag(e) {
     box.removeEventListener('pointerup', finish);
     box.removeEventListener('pointercancel', finish);
     if (box.hasPointerCapture(event.pointerId)) box.releasePointerCapture(event.pointerId);
-    if (event.type === 'pointerup' && held === audioClip && generation === documentGeneration && start !== held.start) {
+    if (moved) {
+      suppressAudioClick = true;
+      setTimeout(() => { suppressAudioClick = false; }, 0);
+    }
+    if (event.type === 'pointerup' && moved && held === audioClip && generation === documentGeneration && start !== held.start) {
       changeAudio({ start }).catch(showTimelineError);
     } else if (held === audioClip) {
       placeClipBox(box, { start: held.start, end: held.start + held.duration });
@@ -7738,7 +7835,10 @@ function drawLane(lane, row) {
     graph.append(svg('polyline', { points: points.join(' '), fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2 }));
     box.append(graph, label);
     placeClipBox(box, { start: audioClip.start, end: audioClip.start + audioClip.duration });
-    box.addEventListener('click', () => audioPanel.open());
+    box.addEventListener('click', () => {
+      if (suppressAudioClick) { suppressAudioClick = false; return; }
+      audioPanel.open();
+    });
     box.addEventListener('pointerdown', beginAudioDrag);
     lane.append(box);
     return;
@@ -7986,6 +8086,7 @@ function paintMarks() {
     let dragging = false;
     let dragStartX = 0;
     el.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
       e.stopPropagation();
       // Select this mark, clear keyframe selection.
       selectedMark = mark;
@@ -8009,8 +8110,10 @@ function paintMarks() {
     });
     el.addEventListener('pointerup', (e) => {
       if (!el.hasPointerCapture(e.pointerId)) return;
+      const wasDragging = dragging;
+      dragging = false;
       el.releasePointerCapture(e.pointerId);
-      if (dragging) {
+      if (wasDragging) {
         const programSec = Math.max(0, Math.min(view.duration, view.timeAt(e.clientX)));
         const sourceSec = markSourceSecOfProgram(programSec);
         const newSourceMs = Math.round(sourceSec * 1000);
@@ -8056,17 +8159,28 @@ async function loadMarks(hash) {
   return adoptMarks(hash, Array.isArray(marks) ? marks : []);
 }
 
+const markWriteQueues = new Map();
+
 /** Writes mark records and returns the complete log the server accepted. */
-async function writeMarks(hash, records) {
-  const res = await fetch(`/capture/${encodeURIComponent(hash)}/marks`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ marks: records }),
+function writeMarks(hash, records) {
+  const run = async () => {
+    const res = await fetch(`/capture/${encodeURIComponent(hash)}/marks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ marks: records }),
+    });
+    if (!res.ok) throw new Error(`mark write failed (${res.status})`);
+    const body = await res.json();
+    if (!Array.isArray(body?.marks)) throw new Error('mark write returned no mark list');
+    return body.marks;
+  };
+  const next = (markWriteQueues.get(hash) ?? Promise.resolve()).then(run, run);
+  const settled = next.catch(() => {});
+  markWriteQueues.set(hash, settled);
+  settled.finally(() => {
+    if (markWriteQueues.get(hash) === settled) markWriteQueues.delete(hash);
   });
-  if (!res.ok) throw new Error(`mark write failed (${res.status})`);
-  const body = await res.json();
-  if (!Array.isArray(body?.marks)) throw new Error('mark write returned no mark list');
-  return body.marks;
+  return next;
 }
 
 /** Adopts a mark response only while its take is still selected. */
@@ -8787,6 +8901,7 @@ async function refreshDeliverables() {
     ui.deliverable.replaceChildren(new Option('—', ''));
     for (const doc of list) ui.deliverable.appendChild(new Option(doc.name, doc.name));
     if (list.some((d) => d.name === current)) ui.deliverable.value = current;
+    else if (current) showAdoptedDeliverable('');
   }
   return list;
 }
@@ -8812,6 +8927,7 @@ const laneProgramAt = (clientX) => view.timeAt(clientX);
 
 // Known gap: an undo between this pointerdown and its pointerup rebuilds every track.
 ui.beds.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
   if (e.target.closest('.taudio')) return;
   const box = e.target.closest('.tclip');
   if (box && timeline) {
@@ -8832,7 +8948,9 @@ ui.beds.addEventListener('pointerdown', (e) => {
       gen,
       wasPlaying,
       program: timeline.programSec,
-      grabbedAt: laneProgramAt(e.clientX) - (side === 'tail' ? clip.end : clip.start),
+      startX: e.clientX,
+      width: Math.max(1, ui.bed.getBoundingClientRect().width),
+      start: clip.start,
       // The out-point, held for the length of a head trim so the far end does not walk.
       end: clip.end,
       duration: timeline.duration,
@@ -8881,7 +8999,8 @@ ui.beds.addEventListener('pointerdown', (e) => {
 
 ui.beds.addEventListener('pointermove', (e) => {
   if (clipDrag) {
-    const at = laneProgramAt(e.clientX) - clipDrag.grabbedAt;
+    const deltaSec = ((e.clientX - clipDrag.startX) / clipDrag.width) * view.spanSec;
+    const at = (clipDrag.side === 'tail' ? clipDrag.end : clipDrag.start) + deltaSec;
     const clip = clipDrag.clip;
     if (clipDrag.side === 'tail') clip.trim = Math.max(MIN_CLIP_SEC, at - clip.start);
     else if (clipDrag.side === 'head') headTrimTo(clip, at, clipDrag.end);
@@ -9497,16 +9616,37 @@ function cameraKeys() {
 
 /** The sampled camera path, in world space. Empty below two keys: a point is not a path. */
 const PATH_SAMPLES = 120;
+let cachedPathStamp = '';
+let cachedPathPoints = [];
+
+function pathStamp(keys) {
+  let out = '';
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const p = k.value.position;
+    const q = k.value.quaternion;
+    out += `${k.t},${p[0]},${p[1]},${p[2]},${q[0]},${q[1]},${q[2]},${q[3]},${k.value.fov ?? ''};`;
+    for (const h of k.easeOut) out += `${h[0]},${h[1]},`;
+    out += '|';
+    for (const h of k.easeIn) out += `${h[0]},${h[1]},`;
+    out += '/';
+  }
+  return out;
+}
 
 function pathPoints() {
   const keys = cameraKeys();
   if (keys.length < 2) return [];
+  const stamp = pathStamp(keys);
+  if (stamp === cachedPathStamp) return cachedPathPoints;
   const from = keys[0].t;
   const to = keys[keys.length - 1].t;
   const out = [];
   for (let i = 0; i < PATH_SAMPLES; i++) {
     out.push(poseAt(keys, from + ((to - from) * i) / (PATH_SAMPLES - 1)).position);
   }
+  cachedPathStamp = stamp;
+  cachedPathPoints = out;
   return out;
 }
 
@@ -9574,6 +9714,12 @@ function drawBeads(points, project) {
   }
 }
 
+const planCloudCanvas = document.createElement('canvas');
+const planCloudCtx = planCloudCanvas.getContext('2d');
+let lastPlanSource = null;
+let lastPlanVersion = -1;
+let lastPlanStamp = '';
+
 /** The point cloud from above, straight off the depth texture's own array. */
 function drawPlanCloud(rect) {
   const depth = depthCurr.image.data;
@@ -9587,7 +9733,32 @@ function drawPlanCloud(rect) {
   level.updateWorldMatrix(true, false);
   level.getWorldQuaternion(scratchQuat);
   level.getWorldPosition(scratchPosition);
-  chromeCtx.fillStyle = 'rgba(232, 236, 241, 0.55)';
+  const dpr = Math.min(devicePixelRatio, 2);
+  const ox = Math.floor(rect.x * dpr);
+  const oy = Math.floor(rect.y * dpr);
+  const ow = Math.max(1, Math.ceil((rect.x + rect.w) * dpr) - ox);
+  const oh = Math.max(1, Math.ceil((rect.y + rect.h) * dpr) - oy);
+  const source = previewDepth ?? depthCurr;
+  const stamp = `${dpr}|${ox},${oy},${ow},${oh}|${rect.x},${rect.y},${rect.w},${rect.h}|`
+    + `${fx},${fy},${cx},${cy}|${uniforms.cropOn.value},${uniforms.nearClip.value},${uniforms.farClip.value},`
+    + `${uniforms.cropL.value},${uniforms.cropR.value},${uniforms.cropB.value},${uniforms.cropT.value}|`
+    + `${scratchQuat.x},${scratchQuat.y},${scratchQuat.z},${scratchQuat.w}|`
+    + `${scratchPosition.x},${scratchPosition.y},${scratchPosition.z}`;
+  if (source === lastPlanSource && depthCurr.version === lastPlanVersion && stamp === lastPlanStamp) {
+    chromeCtx.save();
+    chromeCtx.setTransform(1, 0, 0, 1, 0, 0);
+    chromeCtx.drawImage(planCloudCanvas, ox, oy);
+    chromeCtx.restore();
+    return;
+  }
+  if (planCloudCanvas.width !== ow || planCloudCanvas.height !== oh) {
+    planCloudCanvas.width = ow;
+    planCloudCanvas.height = oh;
+  }
+  planCloudCtx.setTransform(1, 0, 0, 1, 0, 0);
+  planCloudCtx.clearRect(0, 0, ow, oh);
+  planCloudCtx.setTransform(dpr, 0, 0, dpr, -ox, -oy);
+  planCloudCtx.fillStyle = 'rgba(232, 236, 241, 0.55)';
   for (let row = 0; row < DEPTH_H; row += PLAN_STRIDE) {
     for (let col = 0; col < DEPTH_W; col += PLAN_STRIDE) {
       // Reuse the depth picker's forward map so the plan and pivot cannot drift apart.
@@ -9601,9 +9772,16 @@ function drawPlanCloud(rect) {
       const px = rect.x + rect.w / 2 + (planVec.x - TOP_CENTRE.x) * s;
       const py = rect.y + rect.h / 2 + (planVec.z - TOP_CENTRE.z) * s;
       if (px < rect.x || px > rect.x + rect.w || py < rect.y || py > rect.y + rect.h) continue;
-      chromeCtx.fillRect(px, py, 1, 1);
+      planCloudCtx.fillRect(px, py, 1, 1);
     }
   }
+  lastPlanSource = source;
+  lastPlanVersion = depthCurr.version;
+  lastPlanStamp = stamp;
+  chromeCtx.save();
+  chromeCtx.setTransform(1, 0, 0, 1, 0, 0);
+  chromeCtx.drawImage(planCloudCanvas, ox, oy);
+  chromeCtx.restore();
 }
 
 // Indexed `axis * 2 + side`, side 0 being the low face.
@@ -10114,17 +10292,21 @@ let nodeDrag = null;
 
 // Captured on the window and not the canvas, because OrbitControls listens on the canvas.
 addEventListener('pointerdown', (e) => {
-  if (!chromeOn || e.target !== renderer.domElement) return;
+  if (e.button !== 0 || !chromeOn || e.target !== renderer.domElement) return;
   const view = viewUnder(e.clientX, e.clientY);
   if (!view) return;
   const hit = hitAfterOrbitSettles(() => nodeUnder(view));
   if (!hit) return;
   e.preventDefault();
   e.stopPropagation();
+  if (refuseEdit('moving a camera key')) return;
   renderer.domElement.setPointerCapture(e.pointerId);
   controls.enabled = false;
+  if (selectedMark) { selectedMark = null; paintMarks(); }
   selection = { owner: 'camera', key: hit.key };
   nodeDrag = { plan: view.plan, hit, pointerId: e.pointerId };
+  chromeStale = true;
+  lanesChanged();
 }, true);
 
 renderer.domElement.addEventListener('pointermove', (e) => {
@@ -10177,6 +10359,7 @@ addEventListener('pointerdown', (e) => {
   if (!hit) return;
   e.preventDefault();
   e.stopPropagation();
+  if (refuseEdit('moving a crop handle')) return;
   renderer.domElement.setPointerCapture(e.pointerId);
   controls.enabled = false;
   // The projection is read once and held for the gesture.
@@ -10229,7 +10412,7 @@ const pivotForward = new THREE.Vector3();
 
 /** Moves the pivot along the view axis without changing the saved Reset pose. */
 function setPivotDistance(distance) {
-  const d = Math.min(Math.max(distance, PIVOT_MIN_M), uniforms.farClip.value);
+  const d = Math.max(distance, PIVOT_MIN_M);
   freeCamera.getWorldDirection(pivotForward);
   controls.target.copy(freeCamera.position).addScaledVector(pivotForward, d);
   return d;
@@ -10244,17 +10427,29 @@ addEventListener('pointerdown', (e) => {
   if (timeline?.previewed) return;
   const view = viewUnder(e.clientX, e.clientY);
   if (!view || view.plan) return;
-  const hit = hitAfterOrbitSettles(() => pickDepth({
-    depth: depthCurr.image.data,
-    focal: uniforms.focal.value,
-    center: uniforms.center.value,
-    tilt: level.quaternion,
-    camera: freeCamera,
-    stage: { x: 0, y: 0, ...stageSize() },
-    x: view.x,
-    y: view.y,
-    croppedOut,
-  }));
+  const stage = { x: 0, y: 0, ...stageSize() };
+  const hit = hitAfterOrbitSettles(() => {
+    let closest = null;
+    for (const clip of clips) {
+      if (!clip.transform.visible) continue;
+      const candidate = withClip(clip, () => {
+        level.updateWorldMatrix(true, false);
+        return pickDepth({
+          depth: depthCurr.image.data,
+          focal: uniforms.focal.value,
+          center: uniforms.center.value,
+          worldMatrix: level.matrixWorld,
+          camera: freeCamera,
+          stage,
+          x: view.x,
+          y: view.y,
+          croppedOut,
+        });
+      });
+      if (candidate && (!closest || candidate.distance < closest.distance)) closest = candidate;
+    }
+    return closest;
+  });
   // Empty space, a hole in the returns or a press past the crop box keeps the pivot it had.
   if (!hit) return;
   setPivotDistance(hit.distance);
@@ -10547,6 +10742,7 @@ function paintExportName() {
 function takeExportName() {
   ensureActiveDeliverable();
   activeDeliverable.name = ui.exportName.value;
+  if (!adoptingDeliverable) showAdoptedDeliverable('');
   paintDeliverable();
 }
 
@@ -10859,7 +11055,10 @@ function paintProjectCommands() {
 
 ui.deliverable?.addEventListener('change', async () => {
   const name = ui.deliverable.value;
-  if (!name) return;
+  if (!name) {
+    showAdoptedDeliverable('');
+    return;
+  }
   try {
     const doc = await (await fetch(`/deliverables/${encodeURIComponent(name)}`)).json();
     if (doc.error) throw new Error(doc.error);
@@ -11098,6 +11297,7 @@ shell.lookExport.addEventListener('click', () => {
 
 shell.cameraReset.addEventListener('click', () => {
   closeApplicationMenus();
+  if (exporting) return;
   finishOrbitDrift();
   controls.reset();
   requestRepaint();
@@ -11476,6 +11676,7 @@ if (ui.recGo) {
 
 // Everything below the shooting controls, revealed rather than removed.
 function toggleCameraView() {
+  if (exporting) return;
   const program = viewCamera === freeCamera;
   setViewCamera(program ? programCamera : freeCamera);
   ui.camView.setAttribute('aria-pressed', String(program));
@@ -11772,6 +11973,19 @@ function warmPrograms() {
   }
 }
 warmPrograms();
+renderer.domElement.addEventListener('webglcontextlost', (e) => {
+  e.preventDefault();
+  say('graphics context lost; waiting for the browser to restore WebGL');
+});
+renderer.domElement.addEventListener('webglcontextrestored', () => {
+  try {
+    warmPrograms();
+    say('graphics context restored');
+    requestRepaint();
+  } catch (err) {
+    showTimelineError(err);
+  }
+});
 
 // Which transport owns the loop is decided once, here, and the three doors are exclusive.
 const EDIT_QUERY = new URLSearchParams(location.search);
@@ -11779,6 +11993,7 @@ const REQUESTED_TAKE = EDIT_QUERY.get('take');
 const REQUESTED_PROJECT = EDIT_QUERY.get('project');
 // Comma-joined, and a take id cannot carry a comma by its own rule, so the list is unambiguous.
 const REQUESTED_NEW = EDIT_QUERY.get('new');
+let previewRendererBooted = false;
 
 /**
  * The editor's three doors, and what each one leaves the page holding.
@@ -11794,7 +12009,9 @@ const editorDoor = () => {
   return { what: `take ${REQUESTED_TAKE}`, open: () => openTake(REQUESTED_TAKE) };
 };
 
-if (EDITING && !REQUESTED_TAKE && !REQUESTED_PROJECT && !REQUESTED_NEW) {
+if (PREVIEW_RENDERER && !REQUESTED_TAKE && !REQUESTED_PROJECT && !REQUESTED_NEW) {
+  previewRendererBooted = true;
+} else if (EDITING && !REQUESTED_TAKE && !REQUESTED_PROJECT && !REQUESTED_NEW) {
   // The editor has no entry that comes up on no footage, and a project is the human route in.
   location.replace('/projects');
 } else if (EDITING) {
@@ -11854,7 +12071,7 @@ globalThis.__kinect = {
     clear: () => previews?.clear(),
   },
   previewRenderer: PREVIEW_RENDERER ? {
-    ready: () => takeOpened,
+    ready: () => (PREVIEW_RENDERER ? previewRendererBooted || takeOpened : takeOpened),
     error: () => previewBootError,
     prepare: preparePreview,
     frame: renderPreviewFrame,

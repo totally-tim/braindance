@@ -10,8 +10,8 @@ import { revealable } from './reveal.js';
 import { NODE_MAJOR, PORT, STOP_GRACE_MS, findNode, nodeDirs, portFree, rootsUnder, startService } from './service.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
-// The service is the checkout's own server.
-const repo = join(here, '..');
+// The service is the checkout's own server, or the packaged app's resources directory.
+const repo = app.isPackaged ? process.resourcesPath : join(here, '..');
 
 const log = (line) => console.log(`[desktop] ${line}`);
 
@@ -138,6 +138,10 @@ async function boot() {
   try {
     ready = await service.ready;
   } catch (err) {
+    if (/\bEADDRINUSE\b/.test(err.message)) {
+      return refuse(`Port ${PORT} is in use`,
+        `Braindance serves its editor on port ${PORT} and no other. Close the program that holds it and start Braindance again.`);
+    }
     return refuse('Braindance could not start its service', err.message);
   }
   log(`service ready pid=${ready.pid} url=${ready.url}`);

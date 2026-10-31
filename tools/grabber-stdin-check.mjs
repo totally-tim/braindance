@@ -61,6 +61,15 @@ const MUTATIONS = {
     edits: [[STOP_BRANCH, '    if (line.compare(0, 4, "stop") == 0) {\n']],
     fails: 'the near-miss row: "stopped", "stop now" and the rest stop the run',
   },
+  'blocking-stdin-waits': {
+    section: 'reader',
+    file: 'native/grabber.cpp',
+    edits: [[
+      '  while (stdinReady() && (n = ::read(STDIN_FILENO, buf, sizeof(buf))) > 0) {',
+      '  while ((n = ::read(STDIN_FILENO, buf, sizeof(buf))) > 0) {',
+    ]],
+    fails: 'the blocking-stdin rows: read blocks when stdin is not O_NONBLOCK until the timer interrupts it',
+  },
   'cut-message-leaves-the-output-open': {
     section: 'writer',
     file: 'native/grabber.cpp',

@@ -369,7 +369,7 @@ export function createPreviews({ describe, viewStamp, state, pause, settle, stag
       iframe.title = 'Preview renderer';
       iframe.setAttribute('aria-hidden', 'true');
       iframe.tabIndex = -1;
-      iframe.src = `/edit?take=${encodeURIComponent(run.snapshot.project.clips[0].take.id)}&preview-renderer=1`;
+      iframe.src = '/edit?preview-renderer=1';
       worker = iframe;
       workerReady = new Promise((resolve, reject) => {
         const began = performance.now();
@@ -429,6 +429,7 @@ export function createPreviews({ describe, viewStamp, state, pause, settle, stag
           for (const [key, evicted] of saved.removed) {
             if (key !== signature) continue;
             available.delete(evicted);
+            images.delete(evicted);
             if (evicted >= run.from && evicted <= run.to) full = true;
           }
           storageBytes = saved.total;

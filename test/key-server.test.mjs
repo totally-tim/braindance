@@ -93,3 +93,13 @@ test('malformed depth is dropped and a blocked client is owed a whole later pair
   f.key.offer(payload(2, 1));
   assert.deepEqual(f.pairs()[0].colour, new Uint8Array([1]));
 });
+
+test('resetting a client clears its remembered colour stamp so the next pair resends colour', () => {
+  const f = fixture();
+  f.key.offer(payload(1, 1));
+  f.key.offer(payload(2, 1));
+  assert.equal(f.pairs()[1].colour, null);
+  f.key.reset(f.ws);
+  f.key.offer(payload(3, 1));
+  assert.deepEqual(f.pairs()[2].colour, new Uint8Array([1]));
+});

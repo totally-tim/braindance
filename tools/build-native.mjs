@@ -33,6 +33,30 @@ if (argv.includes('--stage') && (!stageDir || stageDir.startsWith('--'))) {
   process.exit(2);
 }
 
+const KNOWN_FLAGS = {
+  '--preset': { value: true },
+  '--jobs': { value: true },
+  '--clean': { value: false },
+  '--stage': { value: true },
+  '--help': { value: false },
+  '-h': { value: false },
+};
+for (let i = 0; i < argv.length; i++) {
+  const token = argv[i];
+  const spec = Object.hasOwn(KNOWN_FLAGS, token) ? KNOWN_FLAGS[token] : null;
+  if (!spec) {
+    console.error(`unknown argument: ${token} - see --help`);
+    process.exit(2);
+  }
+  if (spec.value) {
+    if (i + 1 >= argv.length || argv[i + 1].startsWith('--')) {
+      console.error(`${token} wants a value - see --help`);
+      process.exit(2);
+    }
+    i++;
+  }
+}
+
 // Two presets, and the Pi rides with linux because its V3D has no OpenCL. ENABLE_OPENGL=ON
 // is only a request - a missing GLFW3 gives a successful CPU-only build - so `backend` is
 // what the built grabber must report back.
@@ -66,7 +90,12 @@ if (!preset || !PRESETS[preset]) {
   process.exit(2);
 }
 
-const JOBS = Number(flag('--jobs')) || Math.min(cpus().length || 4, 8);
+const rawJobs = flag('--jobs');
+if (rawJobs !== null && (!/^\d+$/.test(rawJobs) || Number(rawJobs) < 1)) {
+  console.error(`--jobs wants a positive whole number, got ${rawJobs}`);
+  process.exit(2);
+}
+const JOBS = rawJobs !== null ? Number(rawJobs) : Math.min(cpus().length || 4, 8);
 
 const VENDOR_BUILD = join(REPO, 'vendor/build');
 const VENDOR_PREFIX = join(REPO, 'vendor/prefix');

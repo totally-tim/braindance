@@ -497,4 +497,40 @@ test('a fork may add and retune, and may not drop', () => {
   delete short.manifest.params.speed;
   assert.match(forkRefusal(short, noise), /drops noise\.speed/,
     'a fork short of a placed name is a registry that cannot assemble');
+
+  const moshPkg = all.find((p) => p.id === 'datamosh');
+  for (const [param, flag] of [['cycleRefresh', 'cycles'], ['refresh', 'bounds'], ['amount', 'gates']]) {
+    const fork = { id: 'datamosh', manifest: JSON.parse(JSON.stringify(moshPkg.manifest)), chunks: moshPkg.chunks };
+    delete fork.manifest.params[param].bind[flag];
+    assert.match(forkRefusal(fork, moshPkg) ?? '', new RegExp(`bind\\.${flag}`),
+      `a fork of datamosh may not drop bind.${flag} from datamosh.${param}`);
+  }
+});
+
+test('the door refuses non-array consumes, unbalanced chunk braces, under cycles, invalid panelGroups and bad cycles bindings', () => {
+  assert.match(brokenBy('rain', (c) => { c.manifest.consumes = {}; }) ?? '', /declares consumes as /);
+  // Unbalanced closing brace must return a refusal sentence, never throw TypeError out of scopes.pop().
+  const unbalanced = brokenBy('glyph', (c) => { c.chunks['size.vert.glsl'] = `}\n${c.chunks['size.vert.glsl']}`; });
+  assert.match(unbalanced ?? '', /unbalanced|brace|\}/i);
+
+  // Two-step under cycle: speed -> span -> speed.
+  assert.match(brokenBy('rain', (c) => {
+    c.manifest.params.speed.under = 'span';
+    c.manifest.params.span.under = 'speed';
+  }) ?? '', /cycle|under/i);
+
+  // Malformed panelGroups: empty group with no parameters, unknown tab, missing label.
+  assert.match(brokenBy('rain', (c) => {
+    c.manifest.panelGroups.push({
+      key: 'orphan', label: 'Orphan', tab: 'look', lookgroup: true, collapses: true, after: 'style', order: 110,
+    });
+  }) ?? '', /orphan/i);
+  assert.match(brokenBy('rain', (c) => { c.manifest.panelGroups[0].tab = 'nowhere'; }) ?? '', /tab/i);
+  assert.match(brokenBy('rain', (c) => { c.manifest.panelGroups[0].label = ''; }) ?? '', /label/i);
+
+  // `bind.cycles` is allowed as a boolean on a step binding of a bounded pass, and refused elsewhere.
+  assert.equal(brokenBy('datamosh', (c) => { c.manifest.params.cycleRefresh.bind.cycles = true; }), null);
+  assert.match(brokenBy('datamosh', (c) => { c.manifest.params.cycleRefresh.bind.cycles = 'yes'; }) ?? '', /cycles/);
+  assert.match(brokenBy('datamosh', (c) => { c.manifest.params.reach.bind.cycles = true; }) ?? '', /cycles/);
+  assert.match(brokenBy('rain', (c) => { c.manifest.params.amount.bind.cycles = true; }) ?? '', /cycles/);
 });

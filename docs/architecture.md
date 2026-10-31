@@ -246,7 +246,7 @@ so does every `window.open`, which makes the app one window.
 through only from the top frame of the window while it shows the service's origin.
 `chooseExportDestination` takes a file name. `revealPath` takes an absolute path and passes it to the
 OS file manager only when `revealable` allows it. `revealable` allows a path that one of the three
-dialogs returned in this session, and a path that exists and has a real path inside one of the seven
+dialogs returned in this session, and a path that exists and has a real path inside one of the eight
 data folders. A path from a dialog is shown as given, and a chosen folder does not allow its
 contents. For any other path, including a `..` climb, a link that leads out of a data folder and a
 path that does not exist, the bridge refuses with one message. It shows the real path that it
@@ -329,9 +329,12 @@ and a chunk naming a joint nothing holds is refused by name instead of landing n
 
 Two passes keep memory. `web/mosh-pass.js` holds a ping-pong pair of targets, drawing into one
 while reading the one it drew into last time, which lets a chunk hold pixels back as well as
-transform what is in front of it; the trails pass in `web/post-chain.js` reads its own last target
-too. `renderProgramFrame` clears the trails on a camera move, because screen-space history belongs
-to a pose, while the mosh keeps its history, which is the point of it.
+transform what is in front of it. While disabled it holds 1x1 placeholder targets, allocates its
+drawing-buffer pair on first enable and disposes them back to 1x1 when disabled. The trails pass in
+`web/post-chain.js` reads its own last target too. `renderProgramFrame` evaluates keyframe tracks
+and audio modulation before stepping each active clip's surface memory, and clears the trails on a
+camera move, because screen-space history belongs to a pose, while the mosh keeps its history, which
+is the point of it.
 
 Memory makes a pass unseekable, so a package binding on the mosh table declares one parameter as
 its `bounds`, in seconds, and the loop raises `moshIFrame` for one frame whenever that much program
@@ -425,7 +428,8 @@ write different files from one document.
 
 **The pipeline splits per take and per clip.** The capture bytes, the frame index and the fetch
 cache belong to the take, and every clip cut on it shares one `IndexedTake`, so two clips decode a
-frame once between them. Everything from `createImageBitmap` on is the clip's: the bound bitmap,
+frame once between them. `IndexedTake` promotes accessed frames in an LRU map and coalesces
+overlapping range requests in `fetchSpan`. Everything from `createImageBitmap` on is the clip's: the bound bitmap,
 the four texture cells, the surface memory and the uniform table are per cloud. So a trim skips the
 bitmaps bound by every clip, selected or not, and keeps the frames every outstanding fetch
 claimed.
@@ -477,8 +481,8 @@ is one the page opened.
 
 ### Rendered timeline previews
 
-`web/previews.js` schedules one hidden editor iframe and displays completed images during
-playback. The iframe opens the same document door and calls the same `renderProgramFrame` as
+`web/previews.js` schedules one hidden editor iframe on `/edit?preview-renderer=1` and displays completed images during
+playback. That page boots the renderer without opening a take or document, then opens the same document door and calls the same `renderProgramFrame` as
 the editor and export. Each discontinuity seeks with full effect history; adjacent frames step
 forward. Readback captures the requested framebuffer as a lossless PNG. The top-down inset
 receives a small depth sample for each clip, so it follows the displayed frame too. The iframe
@@ -564,13 +568,14 @@ name joins to, up to `MAX_DOCUMENT_NAME_BYTES`.
 body over, so only frames and each take's stamps are fetched. The finger moves through program
 time: the clip covering that second is found by its `start` and `length`, its `speed` and
 `sourceStart` map it into source time, and the skim changes capture at a cut. Nothing here holds
-the grade, the effects or the camera, so the skim is raw geometry. `web/take-draw.js` draws it — a
-take, a canvas and a source second or a frame index in, a frame out, the capture free to change
-between draws — and the library page and the clip picker are its other callers.
+the grade, the effects or the camera, so the skim is raw geometry. `web/take-draw.js` draws a
+depth-buffered frame into a reusable pixel buffer from a take, a canvas and a source second or
+frame index, requesting `depth=1` so the server omits the unused colour JPEG. The capture can
+change between draws, and the library page and the clip picker are its other callers.
 
 **A source second finds its frame through the take's stamps, on every surface.** A take's frames
 are unevenly spaced wherever the link dropped some, so the skim reads the stamps from the take's
-index, or from the node's copy through `/library/remote-index/:id`, and resolves a second with
+index, or from the node's copy through `/library/remote-index/:hash`, and resolves a second with
 `frameAtOrBefore`, the search the editor's bracket runs. A mark lands on one frame whichever
 surface pressed it. The bar under a skim is the take's time, so a tick and the playhead stopped on
 it agree. A skim moves only once it has the stamps; a take whose stamps do not arrive stays on its

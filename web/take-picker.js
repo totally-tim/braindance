@@ -9,7 +9,10 @@ import { createSkim, paintMarks } from './take-draw.js';
 // node, and a node that has gone away would otherwise leave the dialog reading forever.
 const LISTING_TIMEOUT_MS = 15000;
 
-const mmss = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+const mmss = (s) => {
+  const t = Math.max(0, Math.round(Number(s) || 0));
+  return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+};
 const gb = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${(b / 1e6).toFixed(0)} MB`);
 // A count on its way onto the tile: `frames` and `marks.length` come off a manifest a node wrote.
 const countOf = (v) => (Number.isFinite(Number(v)) ? Math.trunc(Number(v)) : 0);
@@ -220,6 +223,7 @@ export function pickTakes({ ceiling, taken = 0, title = 'Pick footage', confirmL
     tile.tabIndex = 0;
     if (why) tile.setAttribute('aria-disabled', 'true');
     tile.addEventListener('keydown', (e) => {
+      if (e.target !== tile) return;
       if (e.key !== 'Enter' && e.key !== ' ') return;
       e.preventDefault();
       toggle(take, why);
@@ -274,8 +278,17 @@ export function pickTakes({ ceiling, taken = 0, title = 'Pick footage', confirmL
     // A captured pointer can end without a `pointerup` - the browser fires `pointercancel` -
     // and `pressX` left set makes the next move over this tile scrub with no button held.
     skimEl.addEventListener('pointercancel', () => { pressX = null; dragged = false; });
-    skimEl.addEventListener('pointerleave', () => { pressX = null; });
-    barEl.addEventListener('pointerdown', (e) => skim.fromX(e.clientX, barEl));
+    skimEl.addEventListener('pointerleave', (e) => {
+      if (skimEl.hasPointerCapture?.(e.pointerId)) return;
+      pressX = null;
+    });
+    barEl.addEventListener('pointerdown', (e) => {
+      barEl.setPointerCapture?.(e.pointerId);
+      skim.fromX(e.clientX, barEl);
+    });
+    barEl.addEventListener('pointermove', (e) => {
+      if (e.buttons) skim.fromX(e.clientX, barEl);
+    });
     // Everything below the poster picks: the poster is the scrub surface and the meta is not.
     tile.querySelector('.tp-meta').addEventListener('click', () => toggle(take, why));
     requestAnimationFrame(() => skim.setIndex(0));

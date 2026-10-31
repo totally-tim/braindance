@@ -123,7 +123,7 @@ Read the assertion count, never the exit code.
 | `module-check.mjs` | the boundaries in `web/`: the import graph, what crosses it | nothing |
 | `preview-check.mjs` | rendered previews, camera identity, cancellation, and live fallback | `--url`, a take of at least 9s, a GPU browser |
 | `cli-check.mjs` | CLI, standby, demand wake, camera and server-owned output | port 8401 free, a synthetic capture, ffmpeg and a GPU browser |
-| `syntax-check.mjs` | every shipped file parses, the cross-language constants agree, the citations resolve, every tool is named here, every check tool is run by CI or listed as not run | nothing |
+| `syntax-check.mjs` | every shipped file parses, `CLAUDE.md` and `AGENTS.md` match, the cross-language constants agree, the citations resolve, every tool is named here, every check tool is run by CI or listed as not run | nothing |
 | `hd-encoder-check.mjs` | native pairing under encoder backlog, held colour, key range and RGBX, and the join when an encoder's scope ends early | a C++ compiler and TurboJPEG |
 | `grabber-stdin-check.mjs` | the grabber's stop path against a fake sensor: `stop` and end-of-file on stdin end the run through its teardown with every frame it took returned, even with stdout unread and the encoder stalled in a write; a pipe with nothing in it and a line that only resembles `stop` do not; after a message cut short neither writer adds a byte, and after a stop neither starts a message, the hello included | a C++ compiler and TurboJPEG |
 | `cpp-check.mjs` | both C++ files parse and typecheck, in eight pipeline and colour-decoder configurations, and each ColorDecoder enumerator exists only where its decoder does | a C++ compiler and turbojpeg's headers |

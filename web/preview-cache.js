@@ -121,8 +121,6 @@ export class PreviewImages {
 export class PreviewStore {
   constructor({ name = 'braindance-previews-v2', limit = DISK_BYTES } = {}) {
     this.limit = limit;
-    // Earlier stores keyed frames by the whole document; nothing reads them, so free the disk.
-    try { indexedDB.deleteDatabase('braindance-previews-v1'); } catch { /* No storage here. */ }
     this.listeners = new Set();
     this.channel = new BroadcastChannel(name);
     this.channel.onmessage = ({ data }) => {
@@ -303,7 +301,7 @@ export class PreviewStore {
   }
 
   async close() {
-    this.channel.close();
+    this.channel?.close();
     this.channel = null;
     this.listeners.clear();
     (await this.open).close();

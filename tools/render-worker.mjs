@@ -215,7 +215,15 @@ export async function runQueue({ browser, fetch: request, url: URL_, name: NAME,
   console.log(`[worker] ${NAME} on ${renderer}`);
 
   while (claimed < MAX) {
-    const claim = await post('/jobs/claim', { worker: NAME, renderer });
+    let claim;
+    try {
+      claim = await post('/jobs/claim', { worker: NAME, renderer }, { timeoutMs: 15_000 });
+    } catch (err) {
+      if (IDLE_EXIT) throw err;
+      console.error(`[worker] claim failed: ${err.message}`);
+      await new Promise((r) => { setTimeout(r, POLL_MS); });
+      continue;
+    }
     if (claim.status === 409 || claim.status >= 500) {
       // Work exists and none of it is ours, or the queue itself failed. Reported rather than slept
       // on: a worker that quietly polled forever would turn the scheduling failure
@@ -428,6 +436,16 @@ async function main() {
     console.log(USAGE);
     process.exit(0);
   }
+  const wholeAtLeast = (name, value, min) => {
+    const n = Number(value);
+    if (!Number.isInteger(n) || n < min) {
+      throw new Error(`${name} must be an integer >= ${min}, got ${JSON.stringify(value)}`);
+    }
+    return n;
+  };
+  const max = wholeAtLeast('--max', flag('--max', has('--once') ? '1' : '16'), 1);
+  const pollMs = wholeAtLeast('--poll', flag('--poll', '2000'), 10);
+  const beatMs = wholeAtLeast('--beat', flag('--beat', '15000'), 100);
   const { chromium } = await loadPlaywright();
   // `channel: 'chromium'` and not the bundled headless shell, which has no GPU and falls back to
   // SwiftShader - the software rasteriser the class guard refuses.
@@ -439,10 +457,10 @@ async function main() {
       fetch,
       url: flag('--url', 'http://localhost:8080'),
       name: flag('--name', 'worker'),
-      max: Number(flag('--max', has('--once') ? '1' : '16')),
+      max,
       drain: has('--drain'),
-      pollMs: Number(flag('--poll', '2000')),
-      beatMs: Number(flag('--beat', '15000')),
+      pollMs,
+      beatMs,
     });
   } finally {
     await browser.close();

@@ -227,13 +227,25 @@ public:
   }
 
   bool enabled() const { return enabled_.load(std::memory_order_relaxed); }
-  void setEnabled(bool on) { enabled_.store(on, std::memory_order_relaxed); }
+  void setEnabled(bool on) {
+    std::lock_guard<std::mutex> lock(m_);
+    enabled_.store(on, std::memory_order_relaxed);
+    if (!on && !keyEnabled_.load(std::memory_order_relaxed)) clearHeldLocked();
+  }
   uint64_t sent() const { return sent_.load(std::memory_order_relaxed); }
   uint64_t encodeUs() const { return encodeUs_.load(std::memory_order_relaxed); }
   uint64_t dropped() const { return dropped_.load(std::memory_order_relaxed); }
 
   bool keyEnabled() const { return keyEnabled_.load(std::memory_order_relaxed); }
-  void setKeyEnabled(bool on) { keyEnabled_.store(on, std::memory_order_relaxed); }
+  void setKeyEnabled(bool on) {
+    std::lock_guard<std::mutex> lock(m_);
+    keyEnabled_.store(on, std::memory_order_relaxed);
+    if (!on && !enabled_.load(std::memory_order_relaxed)) clearHeldLocked();
+  }
+  bool hasColour() {
+    std::lock_guard<std::mutex> lock(m_);
+    return (bool)latestColour_;
+  }
   uint64_t keySent() const { return keySent_.load(std::memory_order_relaxed); }
   uint64_t keyEncodeUs() const { return keyEncodeUs_.load(std::memory_order_relaxed); }
   uint64_t keyDropped() const { return keyDropped_.load(std::memory_order_relaxed); }
@@ -243,15 +255,14 @@ public:
     {
       std::lock_guard<std::mutex> lock(m_);
       if (!pixels || bytes != (size_t)CW * CH * 4 || (format != TJPF_BGRX && format != TJPF_RGBX)) {
-        latestColour_.reset();
-        pendingColour_.reset();
-        pendingColourIsNew_ = false;
-        depth_.clear();
+        clearHeldLocked();
         return;
       }
       if (pendingColourIsNew_) dropped_.fetch_add(1, std::memory_order_relaxed);
       if (!depth_.empty()) keyDropped_.fetch_add(1, std::memory_order_relaxed);
-      latestColour_ = std::make_shared<Colour>();
+      latestColour_.reset();
+      pendingColour_.reset();
+      latestColour_ = acquireColourLocked();
       latestColour_->pixels.assign(pixels, pixels + bytes);
       latestColour_->ts = ts;
       latestColour_->format = format;
@@ -385,26 +396,50 @@ private:
    */
   void quantise(const std::vector<float> &mm, std::vector<uint8_t> &grey) const {
     const float fullScaleMm = keyRangeM_ * 1000.0f;
+    const float scale = fullScaleMm > 0.0f ? (float)KEY_DEPTH_LEVELS / fullScaleMm : 0.0f;
     grey.resize((size_t)CW * CH);
-    for (size_t i = 0; i < grey.size(); i++) {
-      const float v = mm[i];
-      if (!(v > 0.0f) || !std::isfinite(v) || v > fullScaleMm) { grey[i] = 0; continue; }
-      long level = std::lround((double)KEY_DEPTH_LEVELS * (double)v / (double)fullScaleMm);
+    const float *src = mm.data();
+    uint8_t *dst = grey.data();
+    const size_t n = grey.size();
+    for (size_t i = 0; i < n; i++) {
+      const float v = src[i];
+      if (!(v > 0.0f) || !std::isfinite(v) || v > fullScaleMm) { dst[i] = 0; continue; }
+      int level = (int)(v * scale + 0.5f);
       if (level < 1) level = 1;
-      if (level > (long)KEY_DEPTH_LEVELS) level = (long)KEY_DEPTH_LEVELS;
-      grey[i] = (uint8_t)level;
+      else if (level > KEY_DEPTH_LEVELS) level = KEY_DEPTH_LEVELS;
+      dst[i] = (uint8_t)level;
     }
+  }
+
+  struct Colour {
+    std::vector<uint8_t> pixels;
+    uint64_t ts;
+    int format;
+  };
+
+  void clearHeldLocked() {
+    latestColour_.reset();
+    pendingColour_.reset();
+    pendingColourIsNew_ = false;
+    depth_.clear();
+  }
+
+  std::shared_ptr<Colour> acquireColourLocked() {
+    for (int i = 0; i < 4; i++) {
+      if (!pool_[i]) {
+        pool_[i] = std::make_shared<Colour>();
+        return pool_[i];
+      }
+      if (pool_[i].use_count() == 1) return pool_[i];
+    }
+    return std::make_shared<Colour>();
   }
 
   const int quality_;
   std::thread thread_;
   std::mutex m_;
   std::condition_variable cv_;
-  struct Colour {
-    std::vector<uint8_t> pixels;
-    uint64_t ts;
-    int format;
-  };
+  std::shared_ptr<Colour> pool_[4];
   std::shared_ptr<Colour> latestColour_, pendingColour_;
   bool pendingColourIsNew_ = false;
   std::vector<float> depth_;
@@ -435,13 +470,22 @@ static void applyLowLight(libfreenect2::Freenect2Device *dev, bool on) {
 // 4s inside libfreenect2.
 //
 // `stop` and end-of-file both set g_stop, so a parent can end the run without a signal and a
-// parent that dies takes the grabber with it. Only 0 is end-of-file: the descriptor is
-// non-blocking, so -1 with EAGAIN is a pipe with nothing in it yet.
+// parent that dies takes the grabber with it. Only 0 is end-of-file: a pipe is non-blocking and a
+// terminal is polled first, so -1 is a descriptor with nothing to read yet.
+static bool stdinReady() {
+  if ((::fcntl(STDIN_FILENO, F_GETFL) & O_NONBLOCK) != 0) return true;
+  struct pollfd pfd = { STDIN_FILENO, POLLIN, 0 };
+  return ::poll(&pfd, 1, 0) > 0 && (pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
+}
+
 static void pollCommands(libfreenect2::Freenect2Device *dev, std::string &pending, bool wantColor,
                          HdEncoder *hd) {
   char buf[256];
-  ssize_t n;
-  while ((n = ::read(STDIN_FILENO, buf, sizeof(buf))) > 0) pending.append(buf, (size_t)n);
+  ssize_t n = -1;
+  while (stdinReady() && (n = ::read(STDIN_FILENO, buf, sizeof(buf))) > 0) {
+    pending.append(buf, (size_t)n);
+    n = -1;
+  }
   if (n == 0) {
     std::fprintf(stderr, "[grabber] stdin closed, stopping\n");
     g_stop = 1;
@@ -791,6 +835,34 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  // Debug is genuinely noisy - one line per incomplete depth frame - so it stays opt-in.
+  libfreenect2::Logger::Level level = libfreenect2::Logger::Warning;
+  if (logLevel == "none") level = libfreenect2::Logger::None;
+  else if (logLevel == "error") level = libfreenect2::Logger::Error;
+  else if (logLevel == "warning") level = libfreenect2::Logger::Warning;
+  else if (logLevel == "info") level = libfreenect2::Logger::Info;
+  else if (logLevel == "debug") level = libfreenect2::Logger::Debug;
+  else {
+    std::fprintf(stderr, "[grabber] unknown --log level '%s' (want none, error, warning, info or debug)\n",
+                 logLevel.c_str());
+    return 2;
+  }
+
+  if (pipelineName == "gl") {
+#ifndef LIBFREENECT2_WITH_OPENGL_SUPPORT
+    std::fprintf(stderr, "[grabber] this libfreenect2 was built without OpenGL support\n");
+    return 1;
+#endif
+  } else if (pipelineName == "cl") {
+#ifndef LIBFREENECT2_WITH_OPENCL_SUPPORT
+    std::fprintf(stderr, "[grabber] this libfreenect2 was built without OpenCL support\n");
+    return 1;
+#endif
+  } else if (pipelineName != "cpu") {
+    std::fprintf(stderr, "[grabber] unknown pipeline '%s' (want gl, cl or cpu)\n", pipelineName.c_str());
+    return 2;
+  }
+
   // Every refusal above this line is about the arguments alone, so --check reaches all of them
   // without a sensor, a USB bus or a GL context. It stops here rather than building a pipeline,
   // because constructing the gl one opens a window.
@@ -800,12 +872,6 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  // Debug is genuinely noisy - one line per incomplete depth frame - so it stays opt-in.
-  libfreenect2::Logger::Level level = libfreenect2::Logger::Warning;
-  if (logLevel == "none") level = libfreenect2::Logger::None;
-  else if (logLevel == "error") level = libfreenect2::Logger::Error;
-  else if (logLevel == "info") level = libfreenect2::Logger::Info;
-  else if (logLevel == "debug") level = libfreenect2::Logger::Debug;
   libfreenect2::setGlobalLogger(new StderrLogger(level));
 
   std::signal(SIGINT, on_signal);
@@ -887,7 +953,9 @@ int main(int argc, char **argv) {
   if (wantColor) applyLowLight(dev, lowLight);
 
   // Non-blocking so the capture loop never stalls waiting on a command that may never come.
-  ::fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
+  if (!::isatty(STDIN_FILENO)) {
+    ::fcntl(STDIN_FILENO, F_SETFL, ::fcntl(STDIN_FILENO, F_GETFL) | O_NONBLOCK);
+  }
   // stdout too, so a pipe the parent stopped reading is a wait the stop can end rather than a
   // write that never returns. Its flags are read first, because a redirect may have set others.
   ::fcntl(STDOUT_FILENO, F_SETFL, ::fcntl(STDOUT_FILENO, F_GETFL) | O_NONBLOCK);
@@ -908,6 +976,8 @@ int main(int argc, char **argv) {
     if (::mkdir(dumpCorpus.c_str(), 0755) != 0 && errno != EEXIST) {
       std::fprintf(stderr, "[grabber] cannot create %s: %s\n",
                    dumpCorpus.c_str(), std::strerror(errno));
+      dev->stop();
+      dev->close();
       return 1;
     }
     // The calibration goes out as the raw structs rather than as JSON: Registration builds its
@@ -917,7 +987,11 @@ int main(int argc, char **argv) {
                               (uint32_t)sizeof(ir), (uint32_t)sizeof(cp)};
     const void *parts[3] = {head, &ir, &cp};
     const size_t lens[3] = {sizeof(head), sizeof(ir), sizeof(cp)};
-    if (!write_file(dumpCorpus + "/params.bin", parts, lens, 3)) return 1;
+    if (!write_file(dumpCorpus + "/params.bin", parts, lens, 3)) {
+      dev->stop();
+      dev->close();
+      return 1;
+    }
     std::fprintf(stderr, "[grabber] corpus into %s: %d frames, every %d\n",
                  dumpCorpus.c_str(), dumpCount, dumpEvery);
   }
@@ -944,6 +1018,8 @@ int main(int argc, char **argv) {
   if (helloLen < 0 || (size_t)helloLen >= sizeof(hello)) {
     std::fprintf(stderr, "[grabber] hello needs %d bytes and the buffer is %zu: refusing to "
                  "stream a sensor record that would be cut in half\n", helloLen, sizeof(hello));
+    dev->stop();
+    dev->close();
     return 1;
   }
   // A stop that came while the device opened refuses the hello and still ends through the
@@ -975,6 +1051,7 @@ int main(int argc, char **argv) {
 
   libfreenect2::FrameMap depthFrames, colorFrames;
   bool haveColor = false;
+  uint64_t colorTs = 0;
   // Said once rather than per frame: a decoder producing something the webcam cannot encode
   // does it thirty times a second, and a log that repeats at frame rate is a log nobody reads.
   bool hdFormatWarned = false;
@@ -1035,15 +1112,16 @@ int main(int argc, char **argv) {
 
     // Depth keeps its own time when low light reuses an older colour frame.
     const uint64_t iterTs = now_ms();
+    if (newColor) colorTs = iterTs;
 
-    // Copy only new colour frames, including when the depth readback below fails.
+    // Copy new colour frames, or seed the currently held colour when a stream turns on mid-stream.
     const bool hdColourValid = rgb && rgb->data && rgb->status == 0
       && (int)rgb->width == CW && (int)rgb->height == CH && rgb->bytes_per_pixel == 4
       && (rgb->format == libfreenect2::Frame::BGRX || rgb->format == libfreenect2::Frame::RGBX);
     if (!hdColourValid) hdEncoder.submitColour(nullptr, 0, iterTs);
     uint64_t tHdStart = now_us();
     uint64_t tHdDone = tHdStart;
-    if (newColor && rgb && (hdEncoder.enabled() || hdEncoder.keyEnabled())) {
+    if (rgb && (hdEncoder.enabled() || hdEncoder.keyEnabled()) && (newColor || !hdEncoder.hasColour())) {
       if (!hdColourValid) {
         if (!hdFormatWarned) {
           std::fprintf(stderr, "[grabber] hd colour and key off: unsupported colour frame "
@@ -1053,7 +1131,7 @@ int main(int argc, char **argv) {
           hdFormatWarned = true;
         }
       } else {
-        hdEncoder.submitColour((const uint8_t *)rgb->data, (size_t)CW * CH * 4, iterTs,
+        hdEncoder.submitColour((const uint8_t *)rgb->data, (size_t)CW * CH * 4, colorTs,
           rgb->format == libfreenect2::Frame::RGBX ? TJPF_RGBX : TJPF_BGRX);
       }
       tHdDone = now_us();
@@ -1092,6 +1170,11 @@ int main(int argc, char **argv) {
                               (size_t)rgb->width * rgb->height * rgb->bytes_per_pixel};
       if (!write_file(path, parts, lens, 3)) {
         g_stop = 1; // the encoder's destructor joins a writer that may be stalled on stdout
+        depthListener.release(depthFrames);
+        if (haveColor) colorListener.release(colorFrames);
+        hdEncoder.stop();
+        dev->stop();
+        dev->close();
         return 1;
       }
       if (++dumped >= dumpCount) {

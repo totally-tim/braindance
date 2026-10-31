@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   AUDIO_RATE, AUDIO_SECONDS, AUDIO_UPLOAD_BYTES, analyseAudio, checkAudioClip, defaultConditioning,
-  audioSpectrum, modulatedValue, readAudioWav, signalAt,
+  audioSpectrum, modulatedValue, readAudioWav, readAudioWavHeader, signalAt,
 } from '../web/audio-source.js';
 import { AUDIO_UPLOAD_MS, AudioStore } from '../server/audio.js';
 import { requireMutation } from '../server/http-guard.js';
@@ -122,6 +122,23 @@ test('WAV reader checks chunk bounds, sample format and complete PCM frames', ()
     assert.throws(() => readAudioWav(broken));
   }
   assert.throws(() => readAudioWav(Buffer.alloc(0)));
+  const header = readAudioWavHeader(bytes);
+  assert.equal(header.channels, 1);
+  assert.equal(header.rate, AUDIO_RATE);
+  assert.equal(header.samplesPerChannel, 2);
+  assert.equal(header.duration, 2 / AUDIO_RATE);
+  assert.equal('samples' in header, false);
+  for (const [at, value] of [[4, 200], [16, 100], [24, 44100], [40, 3]]) {
+    const broken = Buffer.from(bytes); broken.writeUInt32LE(value, at);
+    assert.throws(() => readAudioWavHeader(broken));
+  }
+});
+
+test('audioSpectrum reads the opening window at second 0 instead of indexing negative samples as silence', () => {
+  const pcm = tone(1000, 0.5);
+  const atStart = audioSpectrum(pcm, 0, settings());
+  const loudest = atStart.reduce((a, b) => (a.input > b.input ? a : b));
+  assert.ok(loudest.input > -40, `spectrum at second 0 reported ${loudest.input} dB instead of the opening tone`);
 });
 
 test('audio store refuses missing, changed and symlinked assets without leaving imports behind', async () => {
@@ -342,4 +359,29 @@ test('an export reaches no output frame past LAST_EXPORT_FRAME, counted or not',
   assert.throws(() => validateExport({ ...shape, programStart: (LAST_EXPORT_FRAME - 30) / 30 }), /past frame/, 'an uncounted export may run to the four-hour ceiling');
   assert.throws(() => validateExport({ ...shape, frames: 30, programStart: 'late' }), /past frame/, 'a start that is not a number');
   assert.equal(validateExport({ ...shape, frames: 30 }).frames, 30, 'no start, no bound');
+});
+
+test('readAudioWav and readAudioWavHeader accept both Uint8Array and browser ArrayBuffer inputs', () => {
+  const pcmBytes = 4800 * 2;
+  const wav = Buffer.alloc(44 + pcmBytes);
+  wav.write('RIFF', 0, 'ascii');
+  wav.writeUInt32LE(36 + pcmBytes, 4);
+  wav.write('WAVE', 8, 'ascii');
+  wav.write('fmt ', 12, 'ascii');
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(AUDIO_RATE, 24);
+  wav.writeUInt32LE(AUDIO_RATE * 2, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write('data', 36, 'ascii');
+  wav.writeUInt32LE(pcmBytes, 40);
+  wav.writeInt16LE(16384, 44);
+  const ab = wav.buffer.slice(wav.byteOffset, wav.byteOffset + wav.byteLength);
+  const header = readAudioWavHeader(ab);
+  assert.equal(header.channels, 1);
+  assert.equal(header.samplesPerChannel, 4800);
+  const decoded = readAudioWav(ab);
+  assert.equal(decoded.samples[0][0], 0.5);
 });

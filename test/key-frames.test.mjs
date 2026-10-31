@@ -136,3 +136,21 @@ test('new depth cannot keep a frozen colour alive, and a late decode cannot undo
   assert.equal(f.clears, 1);
   assert.equal(f.stream.lastColourTs, null);
 });
+
+test('missing held colour requests a fresh colour reference without firing on valid reuse', async () => {
+  let needed = 0;
+  const draws = [];
+  const stream = new KeyFrames({
+    decode: async (bytes) => bitmap(bytes[0]),
+    draw: (p, c, d) => draws.push({ p, c, d }),
+    clear: () => {},
+    onNeedColour: () => { needed++; },
+  });
+  stream.offer(pair(1)); await flush();
+  stream.offer(pair(2, 1, null)); await flush();
+  assert.equal(needed, 0, 'valid held colour reuse must not ask for a reset');
+  stream.offer(pair(3, 2, null)); await flush();
+  assert.equal(needed, 1, 'unknown elided colour asks the server for a fresh colour frame');
+  stream.offer(pair(4, 4, null)); await flush();
+  assert.equal(needed, 2, 'elided colour after an outage reset asks again');
+});

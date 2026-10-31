@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Kinect v2 · point cloud</title>
+<title>Braindance</title>
 <link rel="icon" href="data:," />
 <!-- Before the page's own rules on purpose: nav.css owns how the chips look and the
      page owns where they sit, so a placement rule here has to win the tie. -->
@@ -12,8 +12,8 @@
      open it draw one thing rather than three that drift. -->
 <link rel="stylesheet" href="/take-picker.css" />
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
   :root {
+    --bg: #05070a;
     --ink: #e8ecf1;
     --dim: #7d8794;
     --line: rgba(255, 255, 255, 0.1);
@@ -62,7 +62,7 @@
     --ruler-h: 32px;
   }
   * { box-sizing: border-box; }
-  html, body { height: 100%; margin: 0; background: #05070a; color: var(--ink);
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ink);
     font: 14px/1.5 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; }
   canvas { display: block; }
   /* The frame edge. The stage is letterboxed to the export aspect so that what is
@@ -320,7 +320,7 @@
     border: 0; background: transparent; padding: 0; color: var(--dim); cursor: pointer;
   }
   .pickerdelete svg { width: 12px; height: 12px; display: block; }
-  .pickerdelete:hover { color: var(--rec); }
+  .pickerdelete:hover { color: var(--red); }
   .pickeradd {
     width: 24px; height: 24px; margin: 4px auto; display: grid; place-items: center;
     border: 1px solid var(--line-2); border-radius: 0;
@@ -1221,12 +1221,15 @@
   .tclipedge.head::after { left: 3px; }
   .tclipedge.tail::after { right: 3px; }
   .tclip.sel .tclipedge::after { background: var(--accent); }
-  .tclipcmd {
+  .tclipcmd, .tchip button.tclipcmd {
     font: inherit; font-size: 10px; color: var(--dim); background: none;
     border: 1px solid var(--line-2); border-radius: 3px; padding: 2px 6px; cursor: pointer;
   }
-  .tclipcmd:hover:not(:disabled) { color: var(--ink); border-color: var(--accent); }
-  .tclipcmd:disabled { opacity: 0.4; cursor: default; }
+  .tclipcmd[hidden], .tchip button.tclipcmd[hidden] { display: none; }
+  .tclipcmd:hover:not(:disabled), .tchip button.tclipcmd:hover:not(:disabled) {
+    color: var(--ink); border-color: var(--accent);
+  }
+  .tclipcmd:disabled, .tchip button.tclipcmd:disabled { opacity: 0.4; cursor: default; }
   .tcol.rail .trow.clip-add-row { padding: 3px 8px; }
   .tclipcmd.tclipadd {
     flex: 1 1 auto; width: 100%; height: 28px; padding: 0; border-radius: 3px;
@@ -1234,12 +1237,16 @@
   }
   /* A command that is a mode rather than an action says which mode is armed. Without this the
      only thing on screen saying so is the shape of the handles in the viewport. */
-  .tclipcmd[aria-pressed=true] { color: var(--bg); background: var(--accent);
-    border-color: var(--accent); }
+  .tclipcmd[aria-pressed=true], .tchip button.tclipcmd[aria-pressed=true] {
+    color: var(--bg); background: var(--accent); border-color: var(--accent);
+  }
   /* The placement's keyframe control, painted by the same three states as a panel row's. */
-  .tclipcmd[data-kf=some] { color: var(--accent); border-color: var(--accent); }
-  .tclipcmd[data-kf=here] { color: var(--bg); background: var(--accent);
-    border-color: var(--accent); }
+  .tclipcmd[data-kf=some], .tchip button.tclipcmd[data-kf=some] {
+    color: var(--accent); border-color: var(--accent);
+  }
+  .tclipcmd[data-kf=here], .tchip button.tclipcmd[data-kf=here] {
+    color: var(--bg); background: var(--accent); border-color: var(--accent);
+  }
   .tkey {
     position: absolute; width: 11px; height: 11px; margin: -5.5px 0 0 -5.5px;
     background: var(--dim); transform: rotate(45deg); cursor: grab; z-index: 5;

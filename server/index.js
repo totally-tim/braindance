@@ -14,7 +14,7 @@ import { openCapture, withCapture, forgetCapture, openCaptureCount, decimatePayl
 import { ffmpegBinary, handleExportSocket, MAX_FRAME_BYTES, stopExports } from './export.js';
 import { AudioStore } from './audio.js';
 import {
-  VALID_HASH, DocumentStore, NodeLink, appendMarks, checkedMarkLog, copyOnNode, downloadTake,
+  VALID_HASH, DocumentStore, NodeLink, appendMarks, checkedMarkLog, copyOnNode, directoryNames, downloadTake,
   downloadsInFlight, hashFile, markLogPath, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
   adoptNamedMarkLogs, removeName, removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeFileFor,
 } from './library.js';
@@ -256,9 +256,10 @@ const serveFrame = (req, res, [hash, index], query) => withOpenCapture(res, hash
     res.writeHead(400).end('decimate must be a whole number from 1 to 16');
     return;
   }
+  const stripColour = query.get('depth') === '1';
   let payload;
   try {
-    payload = await capture.readFrame(n, divisor);
+    payload = await capture.readFrame(n, divisor, stripColour ? { stripColour: true } : undefined);
   } catch (err) {
     // Refused rather than sampled past, or the tail of the response is recycled heap.
     res.writeHead(422).end(err.message);
@@ -278,6 +279,7 @@ const serveFrame = (req, res, [hash, index], query) => withOpenCapture(res, hash
 // Where a take's cloud reaches laterally, so the editor can fit the crop box to the footage. The
 // cache keys on the range as well as the take, because the answer excludes points outside it.
 const extentCache = new Map();
+const extentInFlight = new Map();
 // Four numbers per entry, so the bound is about not growing with every range anybody scrubbed.
 const MAX_EXTENTS = 32;
 
@@ -294,11 +296,31 @@ const serveExtent = (req, res, [hash], query) => withOpenCapture(res, hash, asyn
     res.writeHead(404).end('this capture carries no hello');
     return;
   }
-  const hello = JSON.parse(payload.toString('utf8'));
+  let hello;
+  try {
+    hello = JSON.parse(payload.toString('utf8'));
+  } catch (err) {
+    res.writeHead(422).end(`unusable hello: ${err.message}`);
+    return;
+  }
+  if (!hello || typeof hello !== 'object'
+    || !(Number.isFinite(hello.fx) && hello.fx > 0 && Number.isFinite(hello.fy) && hello.fy > 0
+      && Number.isFinite(hello.cx) && Number.isFinite(hello.cy))) {
+    res.writeHead(422).end('this capture hello carries unusable intrinsics');
+    return;
+  }
   const key = `${hash}|${near}|${far}`;
   if (!extentCache.has(key)) {
-    if (extentCache.size >= MAX_EXTENTS) extentCache.delete(extentCache.keys().next().value);
-    extentCache.set(key, await cloudExtent(capture, hello, near, far));
+    let pending = extentInFlight.get(key);
+    if (!pending) {
+      pending = cloudExtent(capture, hello, near, far).finally(() => extentInFlight.delete(key));
+      extentInFlight.set(key, pending);
+    }
+    const computed = await pending;
+    if (!extentCache.has(key)) {
+      if (extentCache.size >= MAX_EXTENTS) extentCache.delete(extentCache.keys().next().value);
+      extentCache.set(key, computed);
+    }
   }
   sendJson(res, { hash, near, far, ...extentCache.get(key) });
 });
@@ -316,6 +338,10 @@ const serveFrameRun = (req, res, [hash, from, to]) => withOpenCapture(res, hash,
     'Content-Length': bytes,
     'Cache-Control': 'no-cache',
   });
+  if (req.method === 'HEAD') {
+    res.end();
+    return;
+  }
   // `pipeline` rather than `pipe`, because the headers are already out and a bare pipe leaves a
   // read error as an unhandled stream event. Awaited, because the lease lasts as long as this does.
   await new Promise((done) => {
@@ -328,24 +354,23 @@ const serveFrameRun = (req, res, [hash, from, to]) => withOpenCapture(res, hash,
 
 // Streamed: a take is routinely past the 2 GiB `readFileSync` refuses. The copy is hashed where it
 // lands, so the name read here is checked there.
-async function serveTakeFile(req, res, [hash]) {
-  const path = await takeFile(hash);
-  let stat;
-  try {
-    stat = statSync(path ?? '');
-  } catch {
-    unknownTake(res);
-    return;
-  }
+const serveTakeFile = (req, res, [hash]) => withOpenCapture(res, hash, async (capture) => {
   res.writeHead(200, {
     'Content-Type': 'application/octet-stream',
-    'Content-Length': stat.size,
+    'Content-Length': capture.index.bytes,
     'Cache-Control': 'no-cache',
   });
-  pipeline(createReadStream(path), res, (err) => {
-    if (err) console.error(`[server] serving ${basename(path)} failed: ${err.message}`);
+  if (req.method === 'HEAD') {
+    res.end();
+    return;
+  }
+  await new Promise((done) => {
+    pipeline(capture.createFileStream(), res, (err) => {
+      if (err) console.error(`[server] serving ${basename(capture.path)} failed: ${err.message}`);
+      done();
+    });
   });
-}
+});
 
 // Marks are an append-only log filed by the take's content hash, so moving, renaming and deleting
 // a mark are one operation, the two-machine merge is concatenate-and-resolve, and a rename moves
@@ -420,7 +445,7 @@ function readBody(req) {
     req.on('data', (chunk) => {
       bytes += chunk.length;
       if (bytes > MAX_BODY_BYTES) {
-        fail(new Error(`body over ${MAX_BODY_BYTES} bytes`));
+        fail(Object.assign(new Error(`body over ${MAX_BODY_BYTES} bytes`), { status: 413 }));
         req.destroy();
         return;
       }
@@ -435,7 +460,7 @@ function readBody(req) {
       try {
         done(JSON.parse(text));
       } catch (err) {
-        fail(new Error(`body is not JSON: ${err.message}`));
+        fail(Object.assign(new Error(`body is not JSON: ${err.message}`), { status: 400 }));
       }
     });
     req.on('error', fail);
@@ -444,6 +469,7 @@ function readBody(req) {
 
 // The takes the recorder still owns are named on the way in, so the manifest describes them unscanned.
 const localTakes = () => scanTakes(CAPTURES_DIR, (path) => recorder.owns(path));
+const hasLocalTake = async (id) => (await directoryNames(CAPTURES_DIR, { what: 'captures directory' })).includes(`${id}.knct`);
 
 // Per request rather than per server, because the answer is about the socket: Reveal opens a window
 // on the machine running this process, which is only the operator's when the browser is on it.
@@ -467,6 +493,7 @@ function revealAvailability(req) {
 // `close` when it ends and a listener attached after `readBody` never fires.
 const untilCallerLeaves = (res) => {
   const ctl = new AbortController();
+  if (res.destroyed) ctl.abort();
   res.on('close', () => ctl.abort());
   return ctl.signal;
 };
@@ -494,9 +521,7 @@ async function serveLibrary(req, res) {
 // `renameTake` and deliberately not here - two gates that agree cannot be tested apart.
 async function serveRename(req, res, [id]) {
   const body = await readBody(req);
-  const here = await localTakes();
-  const mine = here.takes.find((t) => t.id === id);
-  if (!mine) {
+  if (!await hasLocalTake(id)) {
     sendJson(res, { error: `${id} is not on this machine, so there is nothing here to rename` }, 404);
     return;
   }
@@ -537,15 +562,13 @@ async function serveReveal(req, res, [id]) {
     }, 409);
     return;
   }
-  const here = await localTakes();
-  const mine = here.takes.find((t) => t.id === id);
-  if (!mine) {
+  if (!await hasLocalTake(id)) {
     sendJson(res, { error: `${id} is not on this machine, so there is no file here to show` }, 404);
     return;
   }
   // The take being recorded is refused: revealing hands the path to a program whose job is to
   // stat, index and preview it, against the disk the recorder is writing to.
-  if (mine.recording) {
+  if (recorder.owns(join(CAPTURES_DIR, `${id}.knct`))) {
     sendJson(res, {
       error: `${id} is being recorded right now: a file manager pointed at it would stat, index and `
         + 'preview the file the recorder is writing to, which is disk the take needs',
@@ -696,7 +719,9 @@ async function serveRemoval(req, res, [id], kind) {
 async function readFromNode(res, path, what, cap) {
   let upstream;
   try {
-    upstream = await fetch(`${node.url}${path}`, { signal: untilCallerLeaves(res) });
+    upstream = await fetch(`${node.url}${path}`, {
+      signal: AbortSignal.any([untilCallerLeaves(res), AbortSignal.timeout(15000)]),
+    });
   } catch {
     // The caller going away is the ordinary case here rather than an error.
     if (!res.writableEnded) res.writeHead(502).end(`the node did not answer for that ${what}`);
@@ -756,8 +781,9 @@ async function serveRemoteFrame(req, res, [hash, n], query) {
     res.writeHead(400).end('decimate must be a whole number from 1 to 16');
     return;
   }
+  const depthOnly = query.get('depth') === '1' ? '&depth=1' : '';
   // Bounded by what the format allows a payload to be. A real decimated frame is under 486KB.
-  const body = await readFromNode(res, `/capture/${encodeURIComponent(hash)}/frame/${n}?decimate=${divisor}`,
+  const body = await readFromNode(res, `/capture/${encodeURIComponent(hash)}/frame/${n}?decimate=${divisor}${depthOnly}`,
     'frame', MAX_PAYLOAD_BYTES);
   if (body === null) return;
   res.writeHead(200, {
@@ -843,7 +869,7 @@ async function serveEffectWrite(req, res, [id]) {
   try {
     body = await readBody(req);
   } catch (err) {
-    return sendJson(res, { error: err.message }, 400);
+    return sendJson(res, { error: err.message }, err.status ?? 400);
   }
   const candidate = { id, manifest: body.manifest, chunks: body.chunks ?? {} };
   // Held against the shipped package rather than the whole store, because this rule is about
@@ -874,7 +900,7 @@ async function serveEffectRefusal(req, res) {
   try {
     body = await readBody(req);
   } catch (err) {
-    return sendJson(res, { error: err.message }, 400);
+    return sendJson(res, { error: err.message }, err.status ?? 400);
   }
   if (!Array.isArray(body.ids)) {
     return sendJson(res, {
@@ -920,7 +946,7 @@ async function serveEffectRefusal(req, res) {
 const sendRefusal = (res, err) => sendJson(res, {
   error: err.message,
   ...(err.stale ? { stale: true, rev: err.rev } : {}),
-}, 409);
+}, err.status ?? 409);
 
 async function writeDocument(req, res, store, name, query) {
   const rev = query?.get('rev') ?? '';
@@ -998,7 +1024,7 @@ const shooting = (run) => async (req, res, args, query) => {
   try {
     await run(req, res, args, query);
   } catch (err) {
-    sendJson(res, { error: err.message }, 409);
+    sendJson(res, { error: err.message }, err.status ?? 409);
   }
 };
 
@@ -1118,7 +1144,7 @@ const serveJobEnqueue = async (req, res) => {
   try {
     sendJson(res, await JOBS.enqueue(await readBody(req)));
   } catch (err) {
-    sendJson(res, { error: err.message }, 400);
+    sendJson(res, { error: err.message }, err.status ?? 400);
   }
 };
 
@@ -1146,7 +1172,7 @@ const serveJobClaim = async (req, res) => {
     }
     sendJson(res, { job: null, queued: 0, blocked: [] });
   } catch (err) {
-    sendJson(res, { error: err.message }, 400);
+    sendJson(res, { error: err.message }, err.status ?? 400);
   }
 };
 
@@ -1164,7 +1190,7 @@ const serveJobFinish = async (req, res, args) => {
     if (body.state === 'done' && job.state !== 'done') console.log(`[jobs] ${job.id} reported done and is recorded ${job.state}: ${job.error}`);
     sendJson(res, job);
   } catch (err) {
-    sendJson(res, { error: err.message }, 409);
+    sendJson(res, { error: err.message }, err.status ?? 409);
   }
 };
 
@@ -1175,7 +1201,7 @@ const serveJobHeartbeat = async (req, res, args) => {
     const body = await readBody(req);
     sendJson(res, withoutLease(await JOBS.heartbeat(args[0], { lease: body.lease ?? null })));
   } catch (err) {
-    sendJson(res, { error: err.message }, 409);
+    sendJson(res, { error: err.message }, err.status ?? 409);
   }
 };
 
@@ -1329,7 +1355,7 @@ const serveCameraWrite = async (req, res) => {
     }
     const restarting = Boolean(applyCamera({ ...camera, ...body }));
     sendJson(res, { ...cameraState(), restarting });
-  } catch (err) { sendJson(res, { error: err.message }, 400); }
+  } catch (err) { sendJson(res, { error: err.message }, err.status ?? 400); }
 };
 
 // The HTTP surface as one table, walked by one dispatcher - the table *is* the dispatch, which is
@@ -1341,7 +1367,7 @@ const ROUTES = [
     try { sendJson(res, await AUDIO.import(req)); }
     catch (err) { sendJson(res, { error: err.message }, 400); }
   } } },
-  { path: '/audio/:hash', pattern: /^\/audio\/(sha256:[0-9a-f]{64})$/, read: async (req, res, [hash]) => {
+  { path: '/audio/:hash', pattern: /^\/audio\/(sha256(?::|%3[aA])[0-9a-f]{64})$/, read: async (req, res, [hash]) => {
     let bytes;
     try { bytes = await AUDIO.read(hash); } catch (err) {
       if (err.code !== 'ENOENT') throw err;
@@ -1561,9 +1587,12 @@ const PAGES = {
   '/key': 'key.html',
 };
 
+let adoptedReady = Promise.resolve();
+
 // One dispatcher, and the only place a mutating route is let through. Returns false for a path no
 // entry claims, so the static file server downstream still gets its turn.
 async function serveRoute(req, res, urlPath, query) {
+  await adoptedReady;
   const reading = req.method === 'GET' || req.method === 'HEAD';
   const offered = new Set();
   for (const r of ROUTES) {
@@ -1604,20 +1633,24 @@ async function serveRoute(req, res, urlPath, query) {
     for (const method of r.write?.methods ?? []) offered.add(method);
   }
   if (offered.size === 0) return false;
+  let shownPath = urlPath;
+  try { shownPath = decodeURIComponent(urlPath); } catch { /* rawPath is already validated */ }
   res.setHeader('Allow', [...offered].join(', '));
   sendJson(res, {
-    error: `${req.method} is not how ${urlPath} is called: it takes ${[...offered].join(' or ')}`,
+    error: `${req.method} is not how ${shownPath} is called: it takes ${[...offered].join(' or ')}`,
   }, 405);
   return true;
 }
 
 
 const httpServer = createServer((req, res) => {
+  let rawPath;
   let urlPath;
   let query;
   try {
     const url = new URL(req.url, 'http://localhost');
-    urlPath = decodeURIComponent(url.pathname);
+    rawPath = url.pathname;
+    urlPath = decodeURIComponent(rawPath);
     query = url.searchParams;
   } catch {
     // A malformed percent escape such as /%zz throws here, and an exception out of this handler
@@ -1631,18 +1664,19 @@ const httpServer = createServer((req, res) => {
   // reachable below.
   let handledByTable = true;
   try {
-    handledByTable = ROUTES.some((r) => r.pattern.test(urlPath));
+    handledByTable = ROUTES.some((r) => r.pattern.test(rawPath));
   } catch {
     handledByTable = false;
   }
   if (handledByTable) {
-    serveRoute(req, res, urlPath, query)
+    serveRoute(req, res, rawPath, query)
       .then((handled) => {
         if (!handled) res.writeHead(404).end('not found');
       })
       .catch((err) => {
-        console.error('[server] request failed:', err.message);
-        if (!res.headersSent) sendJson(res, { error: err.message }, 500);
+        const status = Number.isInteger(err?.status) ? err.status : 500;
+        if (status >= 500) console.error('[server] request failed:', err.message);
+        if (!res.headersSent) sendJson(res, { error: err.message }, status);
         else res.end();
       });
     return;
@@ -1661,14 +1695,18 @@ const httpServer = createServer((req, res) => {
   }
 
   let filePath;
+  let allowedRoot;
   if (page) {
     filePath = join(WEB_DIR, page);
+    allowedRoot = WEB_DIR;
   } else if (urlPath.startsWith('/vendor/three/')) {
     filePath = join(THREE_DIR, urlPath.slice('/vendor/three/'.length));
+    allowedRoot = THREE_DIR;
   } else if (urlPath.startsWith('/exports/')) {
     // Served so a finished export can be played back in the browser: a video that decodes is the
     // last thing an export has to prove and the only one a metadata check cannot make.
     filePath = join(EXPORTS_DIR, urlPath.slice('/exports/'.length));
+    allowedRoot = EXPORTS_DIR;
   } else {
     // A page under `web/` has exactly one URL and its filename is not a second way in, refused as a
     // class. Lowercased, because APFS is case-insensitive and `extname` is not - `/LIBRARY.HTML`
@@ -1678,6 +1716,7 @@ const httpServer = createServer((req, res) => {
       return;
     }
     filePath = join(WEB_DIR, urlPath);
+    allowedRoot = WEB_DIR;
   }
 
   // Resolved through the filesystem and not only through the string: `normalize` folds `..`
@@ -1690,7 +1729,7 @@ const httpServer = createServer((req, res) => {
     res.writeHead(404).end('not found');
     return;
   }
-  if (![WEB_DIR, THREE_DIR, EXPORTS_DIR].map(realOrLexical).some((root) => isInside(root, resolved))) {
+  if (!isInside(realOrLexical(allowedRoot), resolved)) {
     res.writeHead(403).end('forbidden');
     return;
   }
@@ -1703,6 +1742,10 @@ const httpServer = createServer((req, res) => {
       'Content-Length': stat.size,
       'Cache-Control': 'no-cache',
     });
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
     // `pipeline` rather than `pipe`: a bare pipe unpipes when the client walks away and never
     // destroys the file stream, so an aborted page load leaks the descriptor - and this handler
     // serves every asset of every page.
@@ -1871,6 +1914,10 @@ wss.on('connection', (ws, req) => {
       // Answered, and the answer is the seam: this socket was granted frames on connect, so the
       // client needs to know which binary message is the first one that is a pair.
       ws.send(JSON.stringify({ key: { attached: true, loopback } }));
+      return;
+    }
+    if (msg.key === 'reset') {
+      keyStream.reset(ws);
       return;
     }
 
@@ -2172,6 +2219,7 @@ function startLive() {
     const dying = child;
     if (!dying) return Promise.resolve();
     const exited = new Promise((done) => dying.once('exit', done));
+    if (dying.stdin && !dying.stdin.destroyed && dying.stdin.writable) dying.stdin.write('stop\n');
     dying.kill('SIGTERM');
     const timer = setTimeout(() => {
       if (dying.exitCode === null && dying.signalCode === null) {
@@ -2497,8 +2545,10 @@ async function startReplay() {
 
   // The recorded arrival spacing rather than a uniform 30fps: a live stream is deeply irregular -
   // measured p50 64ms against p90 222ms - so interpolation tuned against a uniform replay stutters.
-  const gaps = stamps.slice(1).map((t, i) => t - stamps[i]).filter((g) => g > 0 && g < 2000);
-  const median = gaps.length ? gaps.slice().sort((a, b) => a - b)[gaps.length >> 1] : 33;
+  const rawGaps = stamps.slice(1).map((t, i) => t - stamps[i]);
+  const validGaps = rawGaps.filter((g) => g > 0 && g < 2000);
+  const median = validGaps.length ? validGaps.slice().sort((a, b) => a - b)[validGaps.length >> 1] : 33;
+  const gaps = rawGaps.map((g) => (g > 0 && g < 2000 ? g : median));
   gaps.push(median);
 
   console.log(
@@ -2582,7 +2632,7 @@ httpServer.listen(PORT, HOST, () => {
     console.log(`[server] reachable from the network on ${HOST} - anyone who can route here can drive the recorder`);
   }
   // Inside the bind for the same reason: this moves files in the captures directory.
-  adoptNamedMarkLogs(CAPTURES_DIR, { owns: (path) => recorder.owns(path) }).then((adopted) => {
+  adoptedReady = adoptNamedMarkLogs(CAPTURES_DIR, { owns: (path) => recorder.owns(path) }).then((adopted) => {
     for (const { file, take, hash, records } of adopted) {
       console.log(`[library] moved ${file} into the marks log of ${take} (${hash.slice(0, 15)}…), ${records} new record(s)`);
     }

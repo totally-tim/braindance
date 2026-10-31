@@ -759,3 +759,17 @@ test('a short render late in a long program is refused where its frames cannot b
     await h.cleanup();
   }
 });
+
+test('removing an actively running job is refused until its lease goes stale or finishes', async () => {
+  const h = await harness();
+  try {
+    await h.enqueue();
+    const job = await claimOne(h);
+    await assert.rejects(h.store.remove(job.id), /running/);
+    assert.equal((await h.store.read(job.id)).state, 'running');
+    h.clock.t += STALE_MS;
+    assert.deepEqual(await h.store.remove(job.id), { removed: job.id });
+  } finally {
+    await h.cleanup();
+  }
+});

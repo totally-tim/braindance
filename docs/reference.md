@@ -101,8 +101,8 @@ A `turbojpeg` that cannot open its decompressor logs the reason once and deliver
 so the grabber streams, the hello says colour is on, and the `[grabber] N frames (M colour, ...)`
 line it writes every 150 frames holds M at zero. A `videotoolbox` that cannot decode logs nothing
 and delivers the frame anyway, with its error flag clear and no pixel buffer behind it; the
-grabber counts it as colour and hands it to registration, which checks the dimensions and not the
-pointer. On this build that is a crash, not a quiet loss of colour.
+grabber checks both `status` and `data`, counts the null frame under `bad colour` and drops it
+before registration.
 
 The default order is `videotoolbox`, `turbojpeg`, `tegrajpeg`, `vaapi`. `turbojpeg` decodes on the
 CPU and cannot lose a device context, and it comes ahead of the two decoders that can, so on a
@@ -224,7 +224,7 @@ terms and a finite field of view, and a patch whose pose is not that shape is re
 | `+` `=` `-` `_` | Zooms the ruler about the playhead. |
 | `,` `.` | Pans the ruler. |
 | `f` | Fits the ruler to the clip. |
-| `g` | Cycles the selected clip's move and turn handles. |
+| `g` | Cycles the selected clip's move handle, turn handle and off. |
 | `h` | Hides the panel. |
 | `?` | Says this list. |
 | `cmd-z` `ctrl-z` | Undoes. |
@@ -244,7 +244,8 @@ orbit pivot with the camera.
 **A focused text field keeps the whole keyboard**, and gaining text focus releases any flight
 keys being held. Sliders, dropdowns and other non-text inputs keep only the arrows, enter, home,
 end and the page keys, so a focused slider still nudges with the arrows while shift-`w` flies
-and `cmd-z` undoes. Space plays and pauses whatever else has focus, a number field included.
+and `cmd-z` undoes. Space plays and pauses whatever else has focus, a number field included, while
+no modal dialog is open; an open modal dialog keeps every editor shortcut from firing behind it.
 
 **A shift-drag turns the view the way you drag it**, which is the opposite of an orbit: drag
 right and the view turns right, so the scene sweeps left. A drag the height of the stage turns
@@ -252,10 +253,10 @@ the view by one field of view, so a longer lens turns through a smaller angle. T
 not move, so letting go of shift orbits whatever you are now looking at.
 
 **The orbit turns about whatever you pressed on.** A left press moves the pivot along the view
-axis to the depth under the pointer, and a press on the background, on a hole in the returns
-or on geometry outside the crop box leaves the pivot where it was. The pick reads the depth
-frame, so it lands on the surface really under the pointer even
-with the displacement effects or the datamosh up.
+axis to the closest depth under the pointer across all visible clips in world space, and a press
+on the background, on a hole in the returns or on geometry outside the crop box leaves the pivot
+where it was. The pick reads each clip's depth frame, so it lands on the surface really under the
+pointer even with the displacement effects or the datamosh up.
 
 **The ruler shows a window of the clip**, and the overview underneath is always the whole clip.
 
@@ -311,7 +312,7 @@ through the full renderer.
 | File | Project settings… | The shape the stage is letterboxed to and the rate frames come out at. |
 | Output | Whole clip | Restores the trim to `{ in: 0, out: null }`. |
 | Output | Export | Opens the export dialog. |
-| Output | Output to OBS | The two OBS addresses, with a copy button on each. |
+| Output | Output to OBS | The three OBS addresses, with a copy button on each. |
 | View | Default camera position | Goes to the home pose. |
 | View | Show top view | Toggles the top-down inset. |
 | View | Show sidebar | Toggles the panel. |
@@ -333,8 +334,8 @@ through the full renderer.
 | Camera tab: `add key`, `delete key` | Writes a camera key at the playhead, and removes the one under it. |
 | loop | Plays the trimmed range round instead of stopping at its end. Off whenever the editor opens. |
 
-**`move` and `rotate` put handles on the selected clip in the viewport**, and `g` cycles the
-two. A clip carries a position and a rotation in the room and nothing else. While the handles
+**`move` and `rotate` put handles on the selected clip in the viewport**, and `g` cycles move,
+rotate and off. A clip carries a position and a rotation in the room and nothing else. While the handles
 have the pointer the orbit stands down, and an export detaches their hit target as well as
 hiding them. Once a placement track has keys a handle drag writes one at the playhead, and
 `key` plants the first. Placement keys are measured from the clip's own in-point, so dragging
@@ -539,7 +540,7 @@ boundary, because a finer monitor costs the take; coarser settings pass. A monit
 on loopback is exempt, since it costs the link nothing. A running stream is never capped
 mid-take.
 
-**Output > Output to OBS** carries the two source URLs and the settings behind them.
+**Output > Output to OBS** carries the three source URLs and the settings behind them.
 
 | Control | What it does |
 | --- | --- |
@@ -548,10 +549,11 @@ mid-take.
 | Custom output size | A `WxH` pair, revealed by `custom…`. |
 | Browser source, copy | The program-out URL for an OBS browser source. |
 | Webcam source, copy | The colour camera's own 1080p frame, at `/camera.mjpg`. |
+| Keyed webcam source, copy | The colour camera keyed by depth, at `/key`. |
 | open source | Opens the browser source in a tab. |
 
-The dialog also says how many webcam sources are attached right now. It counts `/camera.mjpg`
-subscribers only, so a browser source on `/program` does not show there.
+The dialog also says how many webcam sources are attached right now. It sums `/camera.mjpg` and
+`/key` subscribers, so a browser source on `/program` does not show there.
 
 ## Levelling a canted mount
 
@@ -946,7 +948,7 @@ hash, `sha256:` and 64 hex digits, percent-encoded; `:id` is its name.
 | --- | --- | --- |
 | `/capture/:hash/hello` | GET | The capture's own hello stanza. |
 | `/capture/:hash/index` | GET | The frame index, and the colour camera's messages listed apart as `colour`. |
-| `/capture/:hash/extent` | GET | How much of the capture is on disk. |
+| `/capture/:hash/extent` | GET | The cloud's lateral `x` and `y` bounds in sensor metres between `?near=` and `?far=`. |
 | `/capture/:hash/file` | GET | The capture's bytes. |
 | `/capture/:hash/frame/:n` | GET | One frame's payload. |
 | `/capture/:hash/frames/:a-:b` | GET | A run of frames, framing included, back to back; a colour message between them is left out. |
@@ -1051,8 +1053,8 @@ install, it would fail the next page load with nothing on screen. It refuses:
 - a package over 64 files, over 256 KiB of chunk text, or with a manifest over 32 KiB.
 
 A refused package leaves nothing behind. A parameter names its group and nothing else about
-the panel, so a manifest carries no tab. **A fork may add parameters and retune the ones it
-inherits, and may not drop one**: the panel places every shipped parameter by hand, so a fork
+the panel (only declared `panelGroups` carry `tab`). **A fork may add parameters and retune the ones it
+inherits, and may not drop a parameter or a `bind.gates`, `bind.bounds` or `bind.cycles` flag**: the panel places every shipped parameter by hand, so a fork
 short of one is a registry that cannot assemble, and the door names what it dropped.
 
 ### What the door cannot see

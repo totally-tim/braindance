@@ -32,9 +32,9 @@ const COLOUR_STAMP_BYTES = 8;
 // One frame's payload sampled down by a depth divisor, or the payload itself at a divisor of 1. A
 // function rather than a method because the live socket holds a buffer instead of a `Capture`. The
 // colour block is copied through untouched, and nothing here can reach the take.
-export function decimatePayload(payload, depthDivisor, what = 'frame') {
-  const k = Math.trunc(depthDivisor);
-  if (!(k > 1)) return payload;
+export function decimatePayload(payload, depthDivisor, what = 'frame', { stripColour = false } = {}) {
+  const k = Math.max(1, Math.trunc(depthDivisor) || 1);
+  if (k === 1 && !stripColour) return payload;
 
   const depthBytes = payload.readUInt32LE(0);
   const colorBytes = payload.readUInt32LE(4);
@@ -52,20 +52,33 @@ export function decimatePayload(payload, depthDivisor, what = 'frame') {
       + 'this divisor samples: refusing rather than sampling a shape nobody declared',
     );
   }
+  const keptColorBytes = stripColour ? 0 : colorBytes;
+  if (k === 1) {
+    const out = Buffer.allocUnsafe(16 + depthBytes);
+    out.writeUInt32LE(depthBytes, 0);
+    out.writeUInt32LE(0, 4);
+    payload.copy(out, 8, 8, 16 + depthBytes);
+    return out;
+  }
   const w = Math.ceil(DEPTH_W / k);
   const h = Math.ceil(DEPTH_H / k);
-  const out = Buffer.allocUnsafe(16 + w * h * 2 + colorBytes);
+  // Unpooled so `out.byteOffset` is 0 and `dstDepth` views `out.buffer` directly without copying.
+  const out = Buffer.allocUnsafeSlow(16 + w * h * 2 + keptColorBytes);
   out.writeUInt32LE(w * h * 2, 0);
-  out.writeUInt32LE(colorBytes, 4);
+  out.writeUInt32LE(keptColorBytes, 4);
   // Verbatim: a decimated frame is the same moment, and a stamp rewritten here would put a second
   // timeline into a format that has one.
   payload.copy(out, 8, 8, 16);
+  const srcDepth = ((payload.byteOffset + 16) & 1) === 0
+    ? new Uint16Array(payload.buffer, payload.byteOffset + 16, DEPTH_W * DEPTH_H)
+    : new Uint16Array(Uint8Array.prototype.slice.call(payload, 16, 16 + depthBytes).buffer);
+  const dstDepth = new Uint16Array(out.buffer, out.byteOffset + 16, w * h);
   for (let y = 0; y < h; y++) {
-    const src = 16 + y * k * DEPTH_W * 2;
-    const dst = 16 + y * w * 2;
-    for (let x = 0; x < w; x++) out.writeUInt16LE(payload.readUInt16LE(src + x * k * 2), dst + x * 2);
+    const srcRow = y * k * DEPTH_W;
+    const dstRow = y * w;
+    for (let x = 0; x < w; x++) dstDepth[dstRow + x] = srcDepth[srcRow + x * k];
   }
-  payload.copy(out, 16 + w * h * 2, 16 + depthBytes);
+  if (keptColorBytes > 0) payload.copy(out, 16 + w * h * 2, 16 + depthBytes);
   return out;
 }
 
@@ -241,8 +254,8 @@ function indexDescribes(cached, size) {
     let after = 0;
     for (let i = 0; i < list.offset.length; i++) {
       if (!spans(list.offset[i], list.length[i], least)) return false;
-      // Ordered and non-overlapping, because that is what appending messages to a file produces.
-      if (list.offset[i] < after) return false;
+      // Ordered and non-overlapping, including each message's 12-byte framing header.
+      if (list.offset[i] - HEADER_BYTES < after) return false;
       if (!Number.isFinite(list.stampMs[i])) return false;
       after = list.offset[i] + list.length[i];
     }
@@ -253,8 +266,8 @@ function indexDescribes(cached, size) {
 }
 
 /** The sidecar when it still describes the file, else a scan. `handle` as for `buildIndex`. */
-export async function loadIndex(capturePath, handle = null) {
-  const st = handle ? await handle.stat() : await stat(capturePath);
+export async function loadIndex(capturePath, handle = null, preStat = null) {
+  const st = preStat ?? (handle ? await handle.stat() : await stat(capturePath));
   try {
     // The sidecar is three orders of magnitude smaller than the take, so this is the one read
     // here that can safely be a whole-file read.
@@ -326,10 +339,10 @@ export class Capture {
   }
 
   // Sampled down by `decimatePayload`, which the live socket shares rather than reimplementing.
-  async readFrame(n, depthDivisor = 1) {
+  async readFrame(n, depthDivisor = 1, options = undefined) {
     const { offset, length } = this.index.frames;
     const payload = await this.readAt(offset[n], length[n]);
-    return decimatePayload(payload, depthDivisor, `frame ${n}`);
+    return decimatePayload(payload, depthDivisor, `frame ${n}`, options);
   }
 
   get colourCount() {
@@ -383,6 +396,34 @@ export class Capture {
         }
         const end = spans[at][1];
         const want = Math.min(RUN_CHUNK, end - pos + 1);
+        const buf = Buffer.allocUnsafe(want);
+        handle.read(buf, 0, want, pos).then(
+          ({ bytesRead }) => {
+            if (bytesRead === 0) {
+              this.destroy(new Error(`short read at ${pos} in ${path}`));
+              return;
+            }
+            pos += bytesRead;
+            this.push(bytesRead === want ? buf : buf.subarray(0, bytesRead));
+          },
+          (err) => this.destroy(err),
+        );
+      },
+    });
+  }
+
+  createFileStream() {
+    const { handle, path } = this;
+    const total = this.index.bytes;
+    let pos = 0;
+    return new Readable({
+      highWaterMark: RUN_CHUNK,
+      read() {
+        if (pos >= total) {
+          this.push(null);
+          return;
+        }
+        const want = Math.min(RUN_CHUNK, total - pos);
         const buf = Buffer.allocUnsafe(want);
         handle.read(buf, 0, want, pos).then(
           ({ bytesRead }) => {
@@ -455,8 +496,11 @@ export async function cloudExtent(capture, hello, near, far) {
         if (z < near || z > far) continue;
         // The negation on x is the same mirror correction `drawPlanCloud` carries: without it the
         // box comes back reflected about the optical axis.
-        x[bin((-(col + 0.5 - cx) / fx) * z)]++;
-        y[bin(-((row + 0.5 - cy) / fy) * z)]++;
+        const px = (-(col + 0.5 - cx) / fx) * z;
+        const py = -((row + 0.5 - cy) / fy) * z;
+        if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+        x[bin(px)]++;
+        y[bin(py)]++;
         total++;
       }
     }
@@ -480,30 +524,33 @@ export const MAX_OPEN_CAPTURES = 24;
 // The index without the descriptor, for a manifest that wants a hash for every take and none of
 // them held open. Cached on the sidecar's own staleness test.
 const indexCache = new Map();
+const helloCache = new Map();
 
 // Scans in flight, keyed by path: a take being written moves its size and mtime continuously, so
 // every poll fails the staleness test and used to start its own full read plus sha256.
 const indexPending = new Map();
 
-export async function cachedIndex(capturePath) {
+export async function cachedIndex(capturePath, handle = null, preStat = null) {
   const path = resolve(capturePath);
-  const st = await stat(path);
+  const st = preStat ?? (handle ? await handle.stat() : await stat(path));
   const held = indexCache.get(path);
   if (held && held.bytes === st.size && held.mtimeMs === st.mtimeMs) return held;
-  const running = indexPending.get(path);
-  if (running) return running;
-  const started = loadIndex(path);
-  indexPending.set(path, started);
+  if (!handle) {
+    const running = indexPending.get(path);
+    if (running) return running;
+  }
+  const started = loadIndex(path, handle, st);
+  if (!handle) indexPending.set(path, started);
   started.then(
     (index) => {
       // Only if this scan is still the one in flight: `forgetCapture` clears the entry when the
       // file changes underneath, and a later-finishing scan describes bytes now gone.
-      if (indexPending.get(path) === started) {
+      if (handle || indexPending.get(path) === started) {
         indexCache.set(path, index);
-        indexPending.delete(path);
+        if (!handle && indexPending.get(path) === started) indexPending.delete(path);
       }
     },
-    () => { if (indexPending.get(path) === started) indexPending.delete(path); },
+    () => { if (!handle && indexPending.get(path) === started) indexPending.delete(path); },
   );
   return started;
 }
@@ -532,15 +579,30 @@ export async function readHelloOnce(capturePath, index) {
   }
 }
 
+/** Memoised hello read keyed on the file's `(bytes, mtimeMs)` so library polls skip preads. */
+export async function readHelloCached(capturePath, index, st = null) {
+  if (!index?.hello) return null;
+  const path = resolve(capturePath);
+  const bytes = st?.size ?? index.bytes;
+  const mtimeMs = st?.mtimeMs ?? index.mtimeMs;
+  const held = helloCache.get(path);
+  if (held && held.bytes === bytes && held.mtimeMs === mtimeMs) return held.hello;
+  const hello = await readHelloOnce(path, index);
+  helloCache.set(path, { bytes, mtimeMs, hello });
+  return hello;
+}
+
 // Drops a take's cached index and closes the descriptor whenever the last reader lets go. A
 // `FileHandle` collected unclosed throws `ERR_INVALID_STATE` from the garbage collector on Node
 // 26, where nothing can catch it.
 export function forgetCapture(capturePath) {
   const path = resolve(capturePath);
   indexCache.delete(path);
+  helloCache.delete(path);
   indexPending.delete(path);
   const pending = openCaptures.get(path);
   openCaptures.delete(path);
+  pending?._markDoomed?.();
   pending?.then((capture) => {
     capture.doomed = true;
     if (capture.leases === 0) capture.close().catch(() => {});
@@ -554,11 +616,29 @@ export function openCapture(capturePath) {
   const path = resolve(capturePath);
   let pending = openCaptures.get(path);
   if (!pending) {
-    pending = (async () => new Capture(path, await cachedIndex(path), await open(path, 'r')))();
+    let doomedBeforeResolve = false;
+    pending = (async () => {
+      const handle = await open(path, 'r');
+      try {
+        const index = await cachedIndex(path, handle);
+        return new Capture(path, index, handle);
+      } catch (err) {
+        await handle.close().catch(() => {});
+        throw err;
+      }
+    })();
+    pending._markDoomed = () => { doomedBeforeResolve = true; };
     // A failure must not be remembered, or a capture that appears a moment later would keep
     // reporting the error from before it existed.
-    pending.catch(() => openCaptures.delete(path));
+    pending.catch(() => {
+      if (openCaptures.get(path) === pending) openCaptures.delete(path);
+    });
     pending.then((capture) => {
+      if (doomedBeforeResolve || openCaptures.get(path) !== pending) {
+        capture.doomed = true;
+        if (capture.leases === 0) capture.close().catch(() => {});
+        return;
+      }
       settledValue.set(pending, capture);
       // Swept again now this one has a descriptor: the pass below runs while the promise is still
       // unresolved, and an unresolved entry is not a candidate.

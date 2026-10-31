@@ -197,6 +197,30 @@ int main() {
     encoder.stop();
   }
 
+  clearMessages();
+  {
+    HdEncoder encoder(80); encoder.setKeyHeader(1000, 1000, 960, 540, 9);
+    encoder.setEnabled(true); encoder.setKeyEnabled(true); encoder.start();
+    encoder.submitColour(red.data(), red.size(), 60);
+    encoder.submitDepth(depth.data(), depth.size(), 60);
+    check(waitMessages(TYPE_KEY, 60), "enabled key pairs with the active colour frame");
+    encoder.setEnabled(false); encoder.setKeyEnabled(false);
+    clearMessages();
+    encoder.setKeyEnabled(true);
+    encoder.submitDepth(depth.data(), depth.size(), 61);
+    {
+      std::unique_lock<std::mutex> lock(gate);
+      const bool staleEmitted = wake.wait_for(lock, std::chrono::milliseconds(100), [] { return !messages.empty(); });
+      check(!staleEmitted,
+        "turning both streams off drops held colour so re-enabling key never pairs new depth with stale colour");
+    }
+    encoder.submitColour(green.data(), green.size(), 62);
+    encoder.submitDepth(depth.data(), depth.size(), 62);
+    check(waitMessages(TYPE_KEY, 62) && stamp(keys().back().payload, 8) == 62,
+      "fresh colour submitted after re-enabling resumes pairing cleanly");
+    encoder.stop();
+  }
+
   // The grabber's corpus writer returns from `main` with the encoder running and never reaches
   // `stop()`. Asked in a child, because the defect is `std::terminate`, which would take this
   // process and its count with it. Forked here, after every encoder above has been joined.

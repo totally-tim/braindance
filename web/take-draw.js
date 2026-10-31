@@ -59,6 +59,34 @@ export function timesFor(take) {
   return entry;
 }
 
+const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+const BG_PIXEL = LITTLE_ENDIAN ? 0xff0a0604 : 0x04060aff;
+const packPixel = LITTLE_ENDIAN
+  ? (v, b) => (0xff000000 | (b << 16) | (v << 8) | v) >>> 0
+  : (v, b) => ((v << 24) | (v << 16) | (b << 8) | 0xff) >>> 0;
+const canvasScratch = new WeakMap();
+
+function scratchFor(canvas, ctx, W, H, gw, gh) {
+  let state = canvasScratch.get(canvas);
+  if (!state || state.w !== W || state.h !== H) {
+    const img = ctx.createImageData(W, H);
+    state = {
+      w: W,
+      h: H,
+      img,
+      u32: new Uint32Array(img.data.buffer, img.data.byteOffset, W * H),
+      zBuf: new Uint16Array(W * H),
+      sxLut: new Int32Array(gw),
+      syLut: new Int32Array(gh),
+    };
+    canvasScratch.set(canvas, state);
+  } else {
+    if (state.sxLut.length < gw) state.sxLut = new Int32Array(gw);
+    if (state.syLut.length < gh) state.syLut = new Int32Array(gh);
+  }
+  return state;
+}
+
 // One frame of a take, drawn to a 2D canvas. Depth rather than the colour JPEG, because
 // `--no-color` records none. Never sizes the backing store - the box is CSS.
 function drawFrame(canvas, take, payload) {
@@ -66,53 +94,66 @@ function drawFrame(canvas, take, payload) {
   const H = canvas.height;
   if (!W || !H) return;
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#04060a';
-  ctx.fillRect(0, 0, W, H);
-  if (!payload) return;
+  if (!payload || payload.byteLength < 16) {
+    ctx.fillStyle = '#04060a';
+    ctx.fillRect(0, 0, W, H);
+    return;
+  }
 
   const divisor = divisorFor(take);
   const view = new DataView(payload);
   const depthBytes = view.getUint32(0, true);
   const gw = Math.ceil(DEPTH_W / divisor);
   const gh = Math.ceil(DEPTH_H / divisor);
-  if (depthBytes !== gw * gh * 2) return;
+  if (depthBytes !== gw * gh * 2 || payload.byteLength < 16 + depthBytes) {
+    ctx.fillStyle = '#04060a';
+    ctx.fillRect(0, 0, W, H);
+    return;
+  }
   const depth = new Uint16Array(payload, 16, depthBytes / 2);
 
-  const fx = (take.hello?.fx ?? 366) / divisor;
-  const fy = (take.hello?.fy ?? 366) / divisor;
-  const cx = (take.hello?.cx ?? DEPTH_W / 2) / divisor;
-  const cy = (take.hello?.cy ?? DEPTH_H / 2) / divisor;
+  const fx = (take?.hello?.fx ?? 366) / divisor;
+  const fy = (take?.hello?.fy ?? 366) / divisor;
+  const cx = (take?.hello?.cx ?? DEPTH_W / 2) / divisor;
+  const cy = (take?.hello?.cy ?? DEPTH_H / 2) / divisor;
 
   const scale = H * 1.15;
   const ox = W / 2;
   const oy = H * 0.42;
-  const img = ctx.createImageData(W, H);
-  const px = img.data;
+  const { img, u32, zBuf, sxLut, syLut } = scratchFor(canvas, ctx, W, H, gw, gh);
+  u32.fill(BG_PIXEL);
+  zBuf.fill(0xffff);
+
+  const kX = scale / fx;
+  const kY = scale / fy;
+  for (let x = 0; x < gw; x++) sxLut[x] = Math.round(ox - (x - cx) * kX);
+  for (let y = 0; y < gh; y++) syLut[y] = Math.round(oy + (y - cy) * kY);
+
   // From the sensor's own focal length and never the decimated one, so a coarse frame is
   // visibly sparser rather than splatted up to look local.
-  const fxFull = take.hello?.fx ?? 366;
+  const fxFull = take?.hello?.fx ?? 366;
   const splat = Math.max(1, Math.round(scale / fxFull));
   for (let y = 0; y < gh; y++) {
+    const sy = syLut[y];
+    if (sy < 0 || sy >= H) continue;
+    const rowOff = y * gw;
+    const yEnd = Math.min(H, sy + splat);
     for (let x = 0; x < gw; x++) {
-      const mm = depth[y * gw + x];
-      if (mm === 0) continue;
-      const z = mm / 1000;
-      if (z < 0.4 || z > 6) continue;
-      // The negation on x is the mirror correction: the sensor's frames arrive flipped.
-      const wx = (-(x - cx) * z) / fx;
-      const wy = -((y - cy) * z) / fy;
-      const sx = Math.round(ox + (wx * scale) / z);
-      const sy = Math.round(oy - (wy * scale) / z);
-      if (sx < 0 || sy < 0 || sx >= W || sy >= H) continue;
-      const v = Math.max(24, Math.round(255 * Math.max(0, (5 - z) / 5)));
-      for (let dy = 0; dy < splat; dy++) {
-        const py = sy + dy;
-        if (py >= H) break;
-        for (let dx = 0; dx < splat; dx++) {
-          const qx = sx + dx;
-          if (qx >= W) break;
-          const i = (py * W + qx) * 4;
-          px[i] = v; px[i + 1] = v; px[i + 2] = Math.min(255, v + 12); px[i + 3] = 255;
+      const mm = depth[rowOff + x];
+      if (mm < 400 || mm > 6000) continue;
+      const sx = sxLut[x];
+      if (sx < 0 || sx >= W) continue;
+      const v = Math.max(24, Math.round(255 * Math.max(0, (5000 - mm) / 5000)));
+      const rgba = packPixel(v, Math.min(255, v + 12));
+      const xEnd = Math.min(W, sx + splat);
+      for (let py = sy; py < yEnd; py++) {
+        const pRow = py * W;
+        for (let qx = sx; qx < xEnd; qx++) {
+          const idx = pRow + qx;
+          if (mm < zBuf[idx]) {
+            zBuf[idx] = mm;
+            u32[idx] = rgba;
+          }
         }
       }
     }
@@ -172,13 +213,14 @@ export function createSkim({ canvas, surface, bar = null, onDraw }) {
   let released = false;
   // Kept so a resize can redraw the frame on screen; a window drag is a stream of resizes.
   let payload = null;
+  let inFlight = null;
 
   // By content hash, so a rename landing mid-skim can never draw another take under this one's name.
-  const frameAt = async (t, n) => {
+  const frameAt = async (t, n, signal) => {
     const url = t.state === 'remote'
-      ? `/library/remote-frame/${encodeURIComponent(t.hash)}/${n}?decimate=${divisorFor(t)}`
-      : `/capture/${encodeURIComponent(t.hash)}/frame/${n}?decimate=${divisorFor(t)}`;
-    const res = await fetch(url);
+      ? `/library/remote-frame/${encodeURIComponent(t.hash)}/${n}?decimate=${divisorFor(t)}&depth=1`
+      : `/capture/${encodeURIComponent(t.hash)}/frame/${n}?decimate=${divisorFor(t)}&depth=1`;
+    const res = await fetch(url, { signal });
     if (!res.ok) throw new Error(`${res.status}`);
     return res.arrayBuffer();
   };
@@ -233,9 +275,13 @@ export function createSkim({ canvas, surface, bar = null, onDraw }) {
           break;
         }
         let got = null;
+        const ctl = new AbortController();
+        inFlight = ctl;
         try {
-          got = await frameAt(mine, n);
-        } catch { /* a take deleted mid-skim draws nothing rather than throwing */ }
+          got = await frameAt(mine, n, ctl.signal);
+        } catch { /* a take deleted or aborted mid-skim draws nothing rather than throwing */ } finally {
+          if (inFlight === ctl) inFlight = null;
+        }
         if (released) return;
         // The await above is where the take changes, so `got` may be the old take's frame:
         // thrown away and asked again rather than drawn under the new take's name. Asked
@@ -262,6 +308,7 @@ export function createSkim({ canvas, surface, bar = null, onDraw }) {
      * next seek, so a caller crossing a cut leaves the frame it had rather than flashing.
      */
     show(next) {
+      if (next !== take) inFlight?.abort();
       take = next;
       frames = Math.max(0, next?.frames ?? 0);
       last = Math.max(0, frames - 1);
@@ -316,6 +363,7 @@ export function createSkim({ canvas, surface, bar = null, onDraw }) {
   const dpr = () => Math.min(devicePixelRatio || 1, 2);
   const fit = () => {
     const r = surface.getBoundingClientRect();
+    if (surface.isConnected === false) return;
     const w = Math.max(1, Math.round(r.width * dpr()));
     const h = Math.max(1, Math.round(r.height * dpr()));
     if (canvas.width === w && canvas.height === h) return;
@@ -328,6 +376,8 @@ export function createSkim({ canvas, surface, bar = null, onDraw }) {
   fit();
   api.release = () => {
     released = true;
+    inFlight?.abort();
+    inFlight = null;
     ro.disconnect();
   };
   return api;

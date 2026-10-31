@@ -42,14 +42,14 @@ Everything, to everyone who can route to the port:
 | Route | What it allows |
 | --- | --- |
 | `POST /record/start`, `/record/stop`, `/record/mark` | arm the node, end a shoot, write marks into a take |
-| `GET /library/all`, `GET /capture/:id/file` | list every take and download the footage |
+| `GET /library/all`, `GET /capture/:hash/file` | list every take and download the footage |
 | `POST /library/delete/:id` | destroy a take; its `confirm` flag is a misclick interlock, not an identity check |
 | `POST /library/rename/:id` | rename a take; the content hash does not move, so projects still resolve |
 | `PUT` and `DELETE` on `/projects/:name`, `/presets/:name`, `/deliverables/:name` | overwrite or delete saved work |
 | `POST /jobs` | queue renders without limit on the disk the takes are written to |
-| `POST /audio`, `GET /audio/:hash` | import an audio file through FFmpeg, one upload at a time: up to 64 MiB, which must arrive within 120 seconds, and the server refuses audio longer than ten minutes. The decoder reads only its input pipe. GET reads a stored WAV after the server checks its content hash |
+| `POST /audio`, `GET /audio/:hash` | import an audio file through FFmpeg, one upload at a time: up to 64 MiB, which must arrive within 120 seconds, and the server refuses audio longer than ten minutes. The decoder reads only its input pipe. GET checks the stored WAV's header and content hash before streaming |
 | the WebSocket | the live sensor feed and the recorder's controls |
-| the `/export` WebSocket | starts an ffmpeg process on the server for each render, at 24, 30, 60 or 120 fps for at most four hours of frames and soundtrack, with at most four frames unacknowledged. It refuses a last output frame past 2^50, counted from the program start the client declares; a begin that declares none skips that check |
+| the `/export` WebSocket | starts an ffmpeg process on the server for each render, at 24, 30, 60 or 120 fps for at most four hours of frames and soundtrack, with messages bounded to 64 MiB and at most four frames unacknowledged. It refuses a last output frame past 2^50, counted from the program start the client declares; a begin that declares none skips that check |
 | `GET /camera.mjpg` | the colour camera, live, as an MJPEG stream; opening it starts the encode |
 | `GET /key`, and the WebSocket `{key: true}` behind it | the colour camera keyed by depth, and the depth of every colour pixel — a floor plan of the room; opening it starts both encodes |
 

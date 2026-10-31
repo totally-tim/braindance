@@ -3,7 +3,7 @@
 // the shell run the same code.
 import { execFile, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { delimiter, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 
 // The editor's preview cache and its settings belong to the page's origin, and the origin
 // includes the port. The port is fixed and never replaced by another.
@@ -64,11 +64,17 @@ export function lineSplitter(onLine) {
 const NODE_BINARY = process.platform === 'win32' ? 'node.exe' : 'node';
 
 // A window started from Finder has a minimal PATH, which leaves out Homebrew's.
-export const nodeDirs = () => [...new Set([
-  ...(process.env.PATH ?? '').split(delimiter).filter(Boolean),
+export const nodeDirs = (pathEnv = process.env.PATH) => [...new Set([
+  ...(pathEnv ?? '').split(delimiter).filter(Boolean),
   '/opt/homebrew/bin',
   '/usr/local/bin',
 ])];
+
+export function serviceEnv(node, baseEnv = process.env) {
+  const nodeDir = node && (node.includes('/') || node.includes('\\')) ? dirname(node) : null;
+  const dirs = [...new Set([...(nodeDir ? [nodeDir] : []), ...nodeDirs(baseEnv.PATH)])];
+  return { ...baseEnv, PATH: dirs.join(delimiter) };
+}
 
 const versionOf = (path) => new Promise((resolve) => {
   execFile(path, ['--version'], { timeout: 5000 }, (err, stdout) => resolve(err ? null : stdout.trim()));
@@ -103,15 +109,18 @@ export function portFree(port) {
  * refusal as its `error`.
  */
 export function startService({
-  node, entry, cwd, roots, port = PORT, onLine = () => {},
+  node, entry, cwd, roots, port = PORT, env = process.env, onLine = () => {},
   readyTimeoutMs = READY_TIMEOUT_MS, stopGraceMs = STOP_GRACE_MS,
 }) {
-  const child = spawn(node, serviceArgs({ entry, port, roots }), { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(node, serviceArgs({ entry, port, roots }), {
+    cwd, env: serviceEnv(node, env), stdio: ['pipe', 'pipe', 'pipe'],
+  });
   // A service that exited has a closed stdin, and the write of `stop` then fails on it.
   child.stdin.on('error', () => {});
 
   const tail = [];
   let exit = null;
+  let probingKill = false;
   const exited = new Promise((resolve) => {
     const done = (result) => {
       if (exit) return;
@@ -123,7 +132,7 @@ export function startService({
     // which leaves no pid, has ended it.
     child.on('error', (error) => {
       if (child.pid === undefined) done({ code: null, signal: null, error });
-      else onLine('stderr', `[desktop] service ${child.pid}: ${error.message}`);
+      else if (!probingKill) onLine('stderr', `[desktop] service ${child.pid}: ${error.message}`);
     });
   });
 
@@ -177,9 +186,11 @@ export function startService({
       const refusal = new Promise((resolve) => { refused = resolve; });
       const timer = setTimeout(() => {
         forced = true;
+        probingKill = true;
         child.once('error', refused);
         child.kill('SIGKILL');
         child.off('error', refused);
+        probingKill = false;
       }, stopGraceMs);
       const result = await Promise.race([
         exited, refusal.then((error) => ({ code: null, signal: null, error, survived: true })),

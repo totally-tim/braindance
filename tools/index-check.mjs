@@ -578,7 +578,8 @@ console.log('\n== a take with the colour camera between its frames ==');
     && scanned.frames.stampMs.every((t, i) => t === twin.frames.stampMs[i] && scanned.frames.length[i] === twin.frames.length[i]),
     'and its frames are the colour-free twin\'s, with the colour and the unknown type walked past');
 
-  const served = JSON.parse((await getBytes(`${URL_BASE}/capture/${id}/index`)).toString('utf8'));
+  const key = encodeURIComponent(scanned.hash);
+  const served = JSON.parse((await getBytes(`${URL_BASE}/capture/${key}/index`)).toString('utf8'));
   check(served.version === INDEX_VERSION && listMismatches(served.colour, walk.colour) === 0,
     `${id}: /index serves version ${INDEX_VERSION} with every colour message listed`
     + ` (${served.colour?.offset?.length ?? 'no'} listed of ${walk.colour.length})`);
@@ -594,7 +595,7 @@ console.log('\n== a take with the colour camera between its frames ==');
   };
   let singleBad = 0;
   for (const i of [0, 1, Math.floor(n / 2), n - 1]) {
-    const got = await getBytes(`${URL_BASE}/capture/${id}/frame/${i}`).catch(() => Buffer.alloc(0));
+    const got = await getBytes(`${URL_BASE}/capture/${key}/frame/${i}`).catch(() => Buffer.alloc(0));
     if (!got.equals(await twinFrame(i))) singleBad++;
   }
   check(singleBad === 0, `a single frame over HTTP is the twin's, byte for byte (${singleBad} of 4 differ)`);
@@ -603,7 +604,7 @@ console.log('\n== a take with the colour camera between its frames ==');
   // message inside the run is read as a frame and its depth length is nonsense.
   const a = 1;
   const b = a + 7;
-  const res = await fetch(`${URL_BASE}/capture/${id}/frames/${a}-${b}`);
+  const res = await fetch(`${URL_BASE}/capture/${key}/frames/${a}-${b}`);
   const run = Buffer.from(await res.arrayBuffer());
   let off = 0;
   let runBad = 0;
@@ -622,13 +623,22 @@ console.log('\n== a take with the colour camera between its frames ==');
   await tfh.close();
 
   // A take written before the colour list existed: its sidecar is the older version and holds no
-  // colour list. It is read, not refused, and the scan it gets is the same take.
+  // colour list. It is read, not refused, and the scan it gets is the same take. One byte is flipped
+  // so its content hash does not collide with the fixture the server already holds open.
   const old = `captures/index-check-older-${process.pid}.knct`;
   await copyFile(src, old);
+  {
+    const ofh = await open(old, 'r+');
+    const one = Buffer.alloc(1);
+    await ofh.read(one, 0, 1, twin.frames.offset[0] + 42);
+    one[0] ^= 0xff;
+    await ofh.write(one, 0, 1, twin.frames.offset[0] + 42);
+    await ofh.close();
+  }
   const current = await buildIndex(old);
   const { colour: _, ...rest } = current;
   writeFileSync(indexPathFor(old), JSON.stringify({ ...rest, version: INDEX_VERSION - 1 }));
-  const oldServed = JSON.parse((await getBytes(`${URL_BASE}/capture/${captureIdFor(old)}/index`)).toString('utf8'));
+  const oldServed = JSON.parse((await getBytes(`${URL_BASE}/capture/${encodeURIComponent(current.hash)}/index`)).toString('utf8'));
   const onDisk = JSON.parse(readFileSync(indexPathFor(old), 'utf8'));
   check(oldServed.version === INDEX_VERSION && oldServed.colour?.offset?.length === 0
     && oldServed.hash === current.hash && oldServed.frames.offset.length === current.frames.offset.length

@@ -110,3 +110,17 @@ test('the decoded budget includes the top-down depth samples', () => {
   assert.equal(closed, true);
   assert.equal(cache.bytes, 0);
 });
+
+test('previewIdentity handles undefined properties and sparse array slots identically to JSON canonicalisation', () => {
+  const base = snapshot();
+  const withUndefined = snapshot();
+  withUndefined.extra = undefined;
+  withUndefined.project.look.params.unused = undefined;
+  assert.equal(previewIdentity(withUndefined), previewIdentity(base));
+
+  const arrUndefined = snapshot();
+  arrUndefined.cropOutside = [undefined];
+  const arrNull = snapshot();
+  arrNull.cropOutside = [null];
+  assert.equal(previewIdentity(arrUndefined), previewIdentity(arrNull));
+});

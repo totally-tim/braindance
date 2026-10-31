@@ -49,8 +49,16 @@ export function checkAudioClip(value) {
   return { kind: 'audio-file', hash: value.hash, name: value.name, start, duration, conditioning: checkConditioning(value.conditioning), target };
 }
 
+const toBytes = (input) => {
+  if (input instanceof Uint8Array) return input;
+  if (input instanceof ArrayBuffer) return new Uint8Array(input);
+  if (ArrayBuffer.isView(input)) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+  throw new Error('audio is not a complete PCM WAV');
+};
+
 // Only the server's bounded PCM WAV is read here; compressed files go through the import door.
-export function readAudioWav(bytes) {
+export function readAudioWavHeader(input) {
+  const bytes = toBytes(input);
   const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const text = (at, n) => String.fromCharCode(...bytes.subarray(at, at + n));
   if (bytes.length < 44 || text(0, 4) !== 'RIFF' || text(8, 4) !== 'WAVE'
@@ -60,23 +68,58 @@ export function readAudioWav(bytes) {
   for (let at = 12; at + 8 <= bytes.length;) {
     const n = v.getUint32(at + 4, true);
     if (at + 8 + n > bytes.length) throw new Error('audio WAV has a truncated chunk');
-    if (text(at, 4) === 'fmt ') {
+    const tag = text(at, 4);
+    if (tag === 'fmt ') {
       if (n < 16 || v.getUint16(at + 8, true) !== 1 || v.getUint32(at + 12, true) !== AUDIO_RATE
         || v.getUint16(at + 22, true) !== 16) throw new Error('audio must be 48 kHz, 16-bit PCM');
       channels = v.getUint16(at + 10, true);
       if (![1, 2].includes(channels) || v.getUint16(at + 20, true) !== channels * 2) throw new Error('audio must be mono or stereo');
+    } else if (tag === 'data') {
+      data = { at: at + 8, n };
     }
-    if (text(at, 4) === 'data') data = { at: at + 8, n };
     at += 8 + n + (n % 2);
   }
   if (!channels || !data || !data.n || data.n % (channels * 2)) throw new Error('audio WAV has no complete samples');
   const frames = data.n / (channels * 2);
   if (frames > AUDIO_SECONDS * AUDIO_RATE) throw new Error(`audio is longer than ${AUDIO_SECONDS} seconds`);
+  return {
+    channels,
+    rate: AUDIO_RATE,
+    samplesPerChannel: frames,
+    duration: frames / AUDIO_RATE,
+    dataOffset: data.at,
+    dataBytes: data.n,
+  };
+}
+
+const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
+export function readAudioWav(input) {
+  const bytes = toBytes(input);
+  const { channels, samplesPerChannel: frames, duration, rate, dataOffset } = readAudioWavHeader(bytes);
   const samples = Array.from({ length: channels }, () => new Float32Array(frames));
-  for (let i = 0; i < frames; i++) {
-    for (let c = 0; c < channels; c++) samples[c][i] = v.getInt16(data.at + (i * channels + c) * 2, true) / 32768;
+  const scale = 1 / 32768;
+  const byteStart = bytes.byteOffset + dataOffset;
+  if (LITTLE_ENDIAN && (byteStart & 1) === 0) {
+    const pcm16 = new Int16Array(bytes.buffer, byteStart, frames * channels);
+    if (channels === 1) {
+      const dst = samples[0];
+      for (let i = 0; i < frames; i++) dst[i] = pcm16[i] * scale;
+    } else {
+      const left = samples[0];
+      const right = samples[1];
+      for (let i = 0, src = 0; i < frames; i++, src += 2) {
+        left[i] = pcm16[src] * scale;
+        right[i] = pcm16[src + 1] * scale;
+      }
+    }
+  } else {
+    const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    for (let i = 0; i < frames; i++) {
+      for (let c = 0; c < channels; c++) samples[c][i] = v.getInt16(dataOffset + (i * channels + c) * 2, true) * scale;
+    }
   }
-  return { samples, duration: frames / AUDIO_RATE, rate: AUDIO_RATE };
+  return { samples, duration, rate };
 }
 
 // Two complementary low-pass splits keep unity EQ equal to the input, including phase.
@@ -88,16 +131,24 @@ export function analyseAudio(pcm, settings) {
   const energy = new Float64Array(count);
   const lowK = 1 - Math.exp(-2 * Math.PI * 200 / AUDIO_RATE);
   const midK = 1 - Math.exp(-2 * Math.PI * 2000 / AUDIO_RATE);
-  const gains = [s.low, s.mid, s.high].map((db) => 10 ** (db / 20));
+  const g0 = 10 ** (s.low / 20);
+  const g1 = 10 ** (s.mid / 20);
+  const g2 = 10 ** (s.high / 20);
   for (const channel of pcm.samples) {
     let low = 0;
     let belowHigh = 0;
-    for (let i = 0; i < frames; i++) {
-      const sample = channel[i];
-      low += lowK * (sample - low);
-      belowHigh += midK * (sample - belowHigh);
-      const filtered = low * gains[0] + (belowHigh - low) * gains[1] + (sample - belowHigh) * gains[2];
-      energy[Math.floor(i / hop)] += filtered * filtered;
+    for (let block = 0; block < count; block++) {
+      const start = block * hop;
+      const stop = Math.min(frames, start + hop);
+      let sum = 0;
+      for (let i = start; i < stop; i++) {
+        const sample = channel[i];
+        low += lowK * (sample - low);
+        belowHigh += midK * (sample - belowHigh);
+        const filtered = low * g0 + (belowHigh - low) * g1 + (sample - belowHigh) * g2;
+        sum += filtered * filtered;
+      }
+      energy[block] += sum;
     }
   }
   const values = new Float32Array(count + 1);
@@ -130,58 +181,127 @@ export function modulatedValue(base, depth, signal, min, max) {
   return Math.min(max, Math.max(min, base + depth * signal));
 }
 
+const SPEC_N = 2048;
+const SPEC_HALF = SPEC_N / 2;
+const SPEC_WINDOW = Float64Array.from({ length: SPEC_N }, (_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / SPEC_N));
+const SPEC_BITREV = (() => {
+  const rev = new Uint16Array(SPEC_N);
+  for (let i = 1, j = 0; i < SPEC_N; i++) {
+    let bit = SPEC_N >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    rev[i] = j;
+  }
+  return rev;
+})();
+const SPEC_TWIDDLE_COS = new Float64Array(SPEC_N);
+const SPEC_TWIDDLE_SIN = new Float64Array(SPEC_N);
+for (let size = 2; size <= SPEC_N; size *= 2) {
+  const half = size >> 1;
+  for (let j = 0; j < half; j++) {
+    const angle = -2 * Math.PI * j / size;
+    SPEC_TWIDDLE_COS[half + j] = Math.cos(angle);
+    SPEC_TWIDDLE_SIN[half + j] = Math.sin(angle);
+  }
+}
+const SPEC_BANDS = Array.from({ length: 64 }, (_, i) => {
+  const lo = 20 * 1000 ** (i / 64);
+  const hi = 20 * 1000 ** ((i + 1) / 64);
+  return {
+    hz: Math.sqrt(lo * hi),
+    kLo: Math.max(1, Math.floor(lo * SPEC_N / AUDIO_RATE)),
+    kHi: Math.min(SPEC_HALF - 1, Math.ceil(hi * SPEC_N / AUDIO_RATE)),
+  };
+});
+const SPEC_RE0 = new Float64Array(SPEC_N);
+const SPEC_RE1 = new Float64Array(SPEC_N);
+const SPEC_IM = new Float64Array(SPEC_N);
+const SPEC_POW0 = new Float64Array(SPEC_HALF);
+const SPEC_POW1 = new Float64Array(SPEC_HALF);
+
+function accumulateSpectrumPowers(re, dst, scale) {
+  const im = SPEC_IM;
+  im.fill(0);
+  for (let i = 1; i < SPEC_N; i++) {
+    const j = SPEC_BITREV[i];
+    if (i < j) {
+      const tmp = re[i];
+      re[i] = re[j];
+      re[j] = tmp;
+    }
+  }
+  for (let size = 2; size <= SPEC_N; size *= 2) {
+    const half = size >> 1;
+    for (let at = 0; at < SPEC_N; at += size) {
+      for (let j = 0; j < half; j++) {
+        const c = SPEC_TWIDDLE_COS[half + j];
+        const s = SPEC_TWIDDLE_SIN[half + j];
+        const x = at + j;
+        const y = x + half;
+        const ry = re[y];
+        const iy = im[y];
+        const a = ry * c - iy * s;
+        const b = ry * s + iy * c;
+        re[y] = re[x] - a;
+        im[y] = im[x] - b;
+        re[x] += a;
+        im[x] += b;
+      }
+    }
+  }
+  for (let i = 1; i < SPEC_HALF; i++) {
+    const r = re[i];
+    const m = im[i];
+    dst[i] += (r * r + m * m) * scale;
+  }
+}
+
 // The display windows the input and filtered samples at the playhead, including while paused.
 export function audioSpectrum(pcm, second, settings) {
-  const n = 2048;
-  const powers = [new Float64Array(n / 2), new Float64Array(n / 2)];
-  const end = Math.floor(second * AUDIO_RATE);
+  const powers0 = SPEC_POW0;
+  const powers1 = SPEC_POW1;
+  powers0.fill(0);
+  powers1.fill(0);
+  const inBounds = second >= 0 && second < pcm.duration;
+  const rawEnd = Math.floor(second * AUDIO_RATE);
   const lowK = 1 - Math.exp(-2 * Math.PI * 200 / AUDIO_RATE);
   const midK = 1 - Math.exp(-2 * Math.PI * 2000 / AUDIO_RATE);
-  const gains = [settings.low, settings.mid, settings.high].map((db) => 10 ** (db / 20));
+  const g0 = 10 ** (settings.low / 20);
+  const g1 = 10 ** (settings.mid / 20);
+  const g2 = 10 ** (settings.high / 20);
   const gain = 10 ** (settings.gain / 20);
+  const powerScale = (4 / SPEC_N) ** 2 / pcm.samples.length;
   for (const channel of pcm.samples) {
-    const windows = [new Float64Array(n), new Float64Array(n)];
-    let low = 0; let belowHigh = 0;
+    const end = inBounds ? Math.max(Math.min(SPEC_N, channel.length), rawEnd) : 0;
+    const w0 = SPEC_RE0;
+    const w1 = SPEC_RE1;
+    let low = 0;
+    let belowHigh = 0;
     // This lead-in settles the slowest filter below floating-point precision.
-    for (let i = -n; i < n; i++) {
-      const sample = second < 0 || second >= pcm.duration ? 0 : (channel[end - n + i] ?? 0);
+    for (let i = -SPEC_N; i < SPEC_N; i++) {
+      const idx = end - SPEC_N + i;
+      const sample = !inBounds || idx < 0 || idx >= channel.length ? 0 : channel[idx];
       low += lowK * (sample - low);
       belowHigh += midK * (sample - belowHigh);
       if (i < 0) continue;
-      const window = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / n);
-      windows[0][i] = sample * window;
-      windows[1][i] = (low * gains[0] + (belowHigh - low) * gains[1] + (sample - belowHigh) * gains[2]) * gain * window;
+      const w = SPEC_WINDOW[i];
+      w0[i] = sample * w;
+      w1[i] = (low * g0 + (belowHigh - low) * g1 + (sample - belowHigh) * g2) * gain * w;
     }
-    for (const [band, re] of windows.entries()) {
-      const im = new Float64Array(n);
-      for (let i = 1, j = 0; i < n; i++) {
-        let bit = n >> 1;
-        for (; j & bit; bit >>= 1) j ^= bit;
-        j ^= bit;
-        if (i < j) [re[i], re[j]] = [re[j], re[i]];
-      }
-      for (let size = 2; size <= n; size *= 2) {
-        for (let at = 0; at < n; at += size) {
-          for (let j = 0; j < size / 2; j++) {
-            const angle = -2 * Math.PI * j / size;
-            const x = at + j; const y = x + size / 2;
-            const a = re[y] * Math.cos(angle) - im[y] * Math.sin(angle);
-            const b = re[y] * Math.sin(angle) + im[y] * Math.cos(angle);
-            re[y] = re[x] - a; im[y] = im[x] - b;
-            re[x] += a; im[x] += b;
-          }
-        }
-      }
-      for (let i = 1; i < powers[band].length; i++) powers[band][i] += (re[i] ** 2 + im[i] ** 2) * (4 / n) ** 2 / pcm.samples.length;
-    }
+    accumulateSpectrumPowers(w0, powers0, powerScale);
+    accumulateSpectrumPowers(w1, powers1, powerScale);
   }
-  return Array.from({ length: 64 }, (_, i) => {
-    const lo = 20 * 1000 ** (i / 64); const hi = 20 * 1000 ** ((i + 1) / 64);
-    const levels = powers.map((bins) => {
-      let power = 0;
-      for (let k = Math.max(1, Math.floor(lo * n / AUDIO_RATE)); k <= Math.min(bins.length - 1, Math.ceil(hi * n / AUDIO_RATE)); k++) power = Math.max(power, bins[k]);
-      return Math.max(-120, 10 * Math.log10(Math.max(1e-12, power)));
-    });
-    return { hz: Math.sqrt(lo * hi), input: levels[0], output: levels[1] };
+  return SPEC_BANDS.map(({ hz, kLo, kHi }) => {
+    let p0 = 0;
+    let p1 = 0;
+    for (let k = kLo; k <= kHi; k++) {
+      if (powers0[k] > p0) p0 = powers0[k];
+      if (powers1[k] > p1) p1 = powers1[k];
+    }
+    return {
+      hz,
+      input: Math.max(-120, 10 * Math.log10(Math.max(1e-12, p0))),
+      output: Math.max(-120, 10 * Math.log10(Math.max(1e-12, p1))),
+    };
   });
 }

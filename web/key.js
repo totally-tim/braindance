@@ -138,12 +138,24 @@ function draw(pair, colour, depth) {
   quad.render(renderer);
 }
 
+let liveSocket = null;
+let reconnectDelayMs = 1000;
+
 const stream = new KeyFrames({
   decode: bitmapOf,
   draw,
   clear: () => {
+    colourTex.dispose();
+    depthTex.dispose();
+    colourTex.image = null;
+    depthTex.image = null;
     renderer.setRenderTarget(null);
     renderer.clear();
+  },
+  onNeedColour: () => {
+    if (liveSocket?.readyState === WebSocket.OPEN) {
+      liveSocket.send(JSON.stringify({ key: 'reset' }));
+    }
   },
 });
 
@@ -175,10 +187,13 @@ function readText(text) {
 }
 
 function connect() {
-  const ws = new WebSocket(`ws://${location.host}`);
+  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${scheme}//${location.host}`);
+  liveSocket = ws;
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
+    reconnectDelayMs = 1000;
     ws.send(JSON.stringify({ key: true }));
   };
 
@@ -193,10 +208,13 @@ function connect() {
   };
 
   ws.onclose = () => {
+    if (liveSocket === ws) liveSocket = null;
     attached = false;
     available = false;
     stream.reset();
-    setTimeout(connect, 1000);
+    const wait = reconnectDelayMs;
+    reconnectDelayMs = Math.min(5000, reconnectDelayMs * 2);
+    setTimeout(connect, wait);
   };
 
   ws.onerror = () => ws.close();

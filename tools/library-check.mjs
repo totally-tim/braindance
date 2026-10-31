@@ -200,13 +200,13 @@ const MUTATIONS = {
   ]] },
   // The depth divisor strides the flat byte array instead of sampling per axis.
   'decimate-flat-stride': { file: 'server/capture.js', edits: [[
-    `    for (let x = 0; x < w; x++) out.writeUInt16LE(payload.readUInt16LE(src + x * k * 2), dst + x * 2);`,
-    `    for (let x = 0; x < w; x++) out.writeUInt16LE(payload.readUInt16LE(16 + ((y * w + x) * k) * 2), dst + x * 2);`,
+    '    for (let x = 0; x < w; x++) dstDepth[dstRow + x] = srcDepth[srcRow + x * k];',
+    '    for (let x = 0; x < w; x++) dstDepth[dstRow + x] = srcDepth[(y * w + x) * k];',
   ]] },
   // The colour block is dropped from a decimated frame.
   'decimate-drops-colour': { file: 'server/capture.js', edits: [
-    ['  out.writeUInt32LE(colorBytes, 4);', '  out.writeUInt32LE(0, 4);'],
-    ['  payload.copy(out, 16 + w * h * 2, 16 + depthBytes);', '  /* mutation: colour dropped */'],
+    ['  out.writeUInt32LE(keptColorBytes, 4);', '  out.writeUInt32LE(0, 4);'],
+    ['  if (keptColorBytes > 0) payload.copy(out, 16 + w * h * 2, 16 + depthBytes);', '  /* mutation: colour dropped */'],
   ] },
   // The document version stops being checked, so a file whose point size is in the old unit
   // loads silently and draws 1.8x wrong at every output size.
@@ -748,7 +748,7 @@ const MUTATIONS = {
   // The drop count reaches the monitor and the close log and stops there, so a take with a hole in
   // it lists exactly like a whole one once the process that counted is gone.
   'flush-forgets-the-drop': { file: 'server/recorder.js', edits: [[
-    "    ? [{ id: `drop:${take.id}`, at: Date.now(), kind: 'drop', dropped: take.dropped }]",
+    "    ? [{ id: `drop:${take.id}`, at: Date.now(), kind: 'drop', dropped: take.dropped, ...dropExtras }]",
     '    ? [/* mutation: the drop leaves no record */]',
   ]] },
   // The record is written and the listing never reads it back.
