@@ -854,13 +854,17 @@ export async function hashFile(path) {
 /**
  * Removes a copy of a take. Both hashes are read rather than trusted - `verifiedElsewhere` is what
  * the surviving copy reported, and this take's own is re-derived, because delete cannot be undone.
+ * `unreadable` removes a file that failed `describeTake`: it has no content hash, so the scan is
+ * re-run under the lock to confirm the file is still unreadable before it is unlinked.
  */
-export async function removeTake(dir, id, { hash, verifiedElsewhere = null, marksRead = null, ownsFile = () => false }) {
+export async function removeTake(dir, id, { hash, verifiedElsewhere = null, marksRead = null, unreadable = false, ownsFile = () => false }) {
   if (!VALID_ID.test(id)) throw new Error(`unusable take id ${id}`);
   const path = join(dir, `${id}.knct`);
   // The marks log's lock as well, so no marks write lands between the hash and the unlink.
   const log = VALID_HASH.test(hash ?? '') ? [marksPathFor(dir, hash)] : [];
-  return withTakeLock([path, ...log], () => removeHeld(dir, id, path, { hash, verifiedElsewhere, marksRead, ownsFile }));
+  return withTakeLock([path, ...log], () => (unreadable
+    ? removeUnreadableHeld(dir, id, path, { ownsFile })
+    : removeHeld(dir, id, path, { hash, verifiedElsewhere, marksRead, ownsFile })));
 }
 
 /**
@@ -931,6 +935,41 @@ async function removeHeld(dir, id, path, { hash, verifiedElsewhere, marksRead, o
   await unlink(indexPathFor(path)).catch(() => {});
   forgetCapture(path);
   return { removed: `${id}.knct`, hash: actual };
+}
+
+// `removeTake` for a file in `unreadable`: re-runs `describeTake` under the lock so a file that
+// finished writing or was replaced since the listing is refused rather than unlinked without a hash.
+async function removeUnreadableHeld(dir, id, path, { ownsFile }) {
+  const handle = await open(path, 'r');
+  let checked;
+  try {
+    checked = await handle.stat();
+    if (ownsFile(checked)) throw new Error(`${id} is being recorded right now: stop the take before removing it`);
+  } finally {
+    await handle.close();
+  }
+  let nowReadable = null;
+  try {
+    nowReadable = await describeTake(dir, basename(path), false);
+  } catch {
+    // Still fails to scan, which is what an unreadable removal is for.
+  }
+  if (nowReadable !== null) {
+    throw new Error(
+      `${id} scans as ${nowReadable.hash} now, not as an unreadable file: `
+      + 'the library moved underneath the request and nothing was removed',
+    );
+  }
+  if (!sameTake(checked, takeIdentity(path))) {
+    throw new Error(
+      `${id} was renamed or replaced while it was being checked: the file under that name now is not `
+      + 'the one that failed to scan, and nothing was removed',
+    );
+  }
+  await unlink(path);
+  await unlink(indexPathFor(path)).catch(() => {});
+  forgetCapture(path);
+  return { removed: `${id}.knct`, hash: null };
 }
 
 /**
