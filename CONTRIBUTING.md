@@ -42,9 +42,10 @@ CI runs `syntax-check`, `module-check`, `vendor-check`, `npm run test:unit`, `gu
 `cpp-check`, `hd-encoder-check`, `grabber-stdin-check` and `release-gate-check`, and `sweep-all`
 runs every mutation of `syntax-check`, `module-check`, `cpp-check`, `hd-encoder-check`,
 `grabber-stdin-check` and `release-gate-check`. A `native` job builds libfreenect2 and the grabber
-on macOS and Ubuntu, stages them, moves `vendor/prefix` away and runs the staged grabber's `--help`
+on macOS and Ubuntu, runs `vendor-check`, `decoder-check` and `grabber-args-check` against the
+built prefix, stages the build, moves `vendor/prefix` away and runs the staged grabber's `--help`
 and `--check`.
-`vendor-check` exits 2 there, because a runner has no built prefix to check the library against.
+`vendor-check` exits 2 in the `syntax` job, because that runner has no built prefix to check the library against.
 `.github/workflows/checks.yml` names every other check tool on a `not-run:` line, and
 `syntax-check` fails when a tool is in neither place. `release-gate-check` needs an npm that
 knows `min-release-age` (npm 11 or newer, which Node 26 bundles) and access to the registry. The

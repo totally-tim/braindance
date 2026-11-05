@@ -14,18 +14,22 @@ const SHIPPED = /\.(js|html|json)$/;
 const known = new Map();
 
 async function shippedFiles(web, three, server) {
-  const files = [];
   async function walk(root, prefix = '') {
     const entries = await readdir(join(root, prefix), { withFileTypes: true });
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    const sorted = entries.sort((a, b) => a.name.localeCompare(b.name));
+    const nested = await Promise.all(sorted.map(async (entry) => {
       const file = join(prefix, entry.name);
-      if (entry.isDirectory()) await walk(root, file);
-      else if (SHIPPED.test(file)) files.push([file, join(root, file)]);
-    }
+      if (entry.isDirectory()) return walk(root, file);
+      return SHIPPED.test(file) ? [[file, join(root, file)]] : [];
+    }));
+    return nested.flat();
   }
-  await walk(web);
-  await walk(join(three, 'build'));
-  await walk(join(three, 'examples', 'jsm'));
+  const [webFiles, buildFiles, jsmFiles] = await Promise.all([
+    walk(web),
+    walk(join(three, 'build')),
+    walk(join(three, 'examples', 'jsm')),
+  ]);
+  const files = [...webFiles, ...buildFiles, ...jsmFiles];
   files.push(['package.json', join(three, 'package.json')]);
   for (const path of server) files.push([`server/${basename(path)}`, path]);
   return files;
@@ -39,8 +43,11 @@ export async function renderVersion(web, three, server = []) {
   const slot = [web, three, ...server].join('\0');
   const cached = known.get(slot);
   if (cached?.fingerprint === fingerprint) return cached.digest;
+  const contents = await Promise.all(files.map(([, path]) => readFile(path)));
   const hash = createHash('sha256');
-  for (const [file, path] of files) hash.update(file).update('\0').update(await readFile(path)).update('\0');
+  for (let i = 0; i < files.length; i++) {
+    hash.update(files[i][0]).update('\0').update(contents[i]).update('\0');
+  }
   const digest = hash.digest('hex');
   known.set(slot, { fingerprint, digest });
   return digest;

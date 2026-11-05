@@ -402,11 +402,11 @@ multiply against `streak.angle`, so each tap carries arithmetic these numbers le
 
 Per rendered frame it is enabled for, `web/mosh-pass.js` costs **two full-screen draws** — the
 mosh program into one target and a copy out of it — against the grade's one and bloom's ten. Its
-memory is two RGBA targets at the drawing buffer's size in the chain's pixel type, which is
-half-float wherever it renders, eight bytes a pixel each:
-**33.2 MB at 1920x1080 and 132.7 MB at 3840x2160**. Both are allocated whenever the chain exists
-whether the pass is switched on or off, so a build nobody has raised the smear on still holds
-them. Its time is not measured; see [Not measured](#not-measured).
+memory while enabled is two RGBA targets at the drawing buffer's size in the chain's pixel type,
+which is half-float wherever it renders, eight bytes a pixel each:
+**33.2 MB at 1920x1080 and 132.7 MB at 3840x2160**. While the pass is disabled it holds two 1x1
+placeholder targets, allocates the drawing-buffer pair on first enable and disposes them back to 1x1
+when disabled. Its time is not measured; see [Not measured](#not-measured).
 
 ## The 8-bit post chain
 
@@ -452,7 +452,13 @@ discarded because nothing in these renders is timed.
 | a take with the colour camera in it | 21.4 MB/s with colour at 30 fps and 18.2 MB/s at 15 fps in dim light, against 14.9 MB/s without: 77, 65 and 54 GB an hour | derived rather than measured on a sensor. `FRAME_BYTES`, 486 KiB of depth and registered colour a frame, was measured on the sensor; `COLOUR_FRAME_BYTES`, 215,082 bytes, is the size one real 1920x1080 colour frame came to, which the MJPEG backpressure measurement synthesised its frames at. Which frame, scene and light that was is not recorded, and a JPEG's size follows the scene. The number that settles it is `/record/state`'s `storage.bytesPerSec` during a take on the sensor, read after a five-second window has closed inside the take |
 | the take buffer against a stalled card | 64 MiB holds 3.1 s at 21.4 MB/s, against 4.5 s at 14.9 MB/s | arithmetic on the row above. Past it the recorder drops frames and colour messages alike and writes the count of dropped frames into the take's marks log |
 | `/record/state` against `/library/all` | 1.2 ms against 145 ms | interleaved A/B, 20 pairs against a 200-take library, indexes warm and sidecars written, first eight pairs discarded as page cache settling and the steady-state figures taken from the last twelve, the linked pair on one machine so the listing includes its node round trip. `describeTake` reads a marks sidecar per take, so the listing's cost is per take |
+| `scanTakes` over 200 warm indexed takes with marks | 3.585 ms | interleaved ABBA, 16 pairs after 2 warmup pairs discarded, warm page cache, `stat` memoised on `dev`, `ino`, `size`, `mtimeMs` and `ctimeMs` |
 | the first listing over 200 unindexed takes | 7m30s cold, 2.4s warm | `cachedIndex` scans each file once and writes a `.idx` beside it; a second server over the same directory warms off those sidecars |
+| `decimatePayload` at divisor 4 over 100 synthetic `sample` frames | 3.386 ms with colour, 1.826 ms with `depth=1` | interleaved ABBA, 24 pairs after 4 warmup pairs discarded, warm memory; `depth=1` omits the JPEG tail, sending 27,152 wire bytes per frame against 678,416 whole |
+| `drawFrame` over 60 synthetic `sample` frames onto 640x360 at divisor 1 | 70.240 ms (1.171 ms per frame) | interleaved ABBA, 24 pairs after 4 warmup pairs discarded, warm memory, z-buffered splats into a reusable `ImageData` |
+| `readAudioWavHeader` on a 180 s 48 kHz stereo WAV | 0.021 ms | interleaved ABBA, 12 pairs after 2 warmup pairs discarded, warm memory, checking the RIFF/fmt/data header without allocating PCM floats |
+| `audioSpectrum` over 60 playhead reads on 48 kHz stereo PCM | 11.098 ms (0.185 ms per read) | interleaved ABBA, 16 pairs after 2 warmup pairs discarded, warm memory, precomputed radix-2 tables and reusable scratch buffers |
+| `spansOver` over 16 bisect queries on a 54,000-frame (30 min at 30 fps) 8-clip edit | 0.012 ms | interleaved ABBA, 24 pairs after 4 warmup pairs discarded, warm memory, direct boundary arithmetic per clip |
 
 ## The orbit pivot's press
 

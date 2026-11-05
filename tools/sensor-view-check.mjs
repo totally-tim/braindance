@@ -1084,15 +1084,18 @@ try {
       `${ed.lookNames}/${rec.lookNames} parameters, ${ed.blocks.length}/${rec.blocks.length} blocks`);
 
     // These were two lists of ids and the lists went stale twice. The mechanism they approximated
-    // is one sentence: each surface hides exactly one inspector tab outright, and what it cannot
-    // reach is exactly what lives on that tab - both halves measured, so a group added later is
+    // is one sentence: each surface hides its own inspector tabs outright, and what it cannot
+    // reach is exactly what lives on those tabs - both halves measured, so a group added later is
     // asked by existing.
     const listed = (blocks) => blocks.map((b) => b.key);
     const cannotReach = (surface) => listed(surface.blocks.filter((b) => !b.visible));
-    const onlyUnder = (states, tab) => listed(Object.values(states)[0].blocks).filter((key) => {
-      const shows = (name) => !!states[name].blocks.find((b) => b.key === key)?.visible;
-      return shows(tab) && Object.keys(states).every((name) => name === tab || !shows(name));
-    });
+    const onlyUnder = (states, hiddenTabs) => {
+      const hiddenSet = new Set(hiddenTabs);
+      return listed(Object.values(states)[0].blocks).filter((key) => {
+        const shows = (name) => !!states[name].blocks.find((b) => b.key === key)?.visible;
+        return hiddenTabs.some(shows) && Object.keys(states).every((name) => hiddenSet.has(name) || !shows(name));
+      });
+    };
     const recHides = recPanelRun.value.hidden;
     const edHides = panelRun.value.hidden;
     const same = (a, b) => a.length === b.length && [...a].sort().join(' ') === [...b].sort().join(' ');
@@ -1100,23 +1103,23 @@ try {
     check(listed(rec.blocks).length === listed(ed.blocks).length,
       'the panel holds every block these rules name, so none of them is asserted about nothing',
       listed(rec.blocks).join(' '));
-    check(recHides.length === 1 && edHides.length === 1 && recHides[0] !== edHides[0],
-      'each surface hides exactly one inspector tab, and not the same one as the other',
+    check(recHides.length > 0 && edHides.length > 0 && recHides.every((t) => !edHides.includes(t)),
+      'each surface hides its own inspector tabs, and neither hides what the other hides',
       `the recorder hides [${recHides.join(' ') || 'nothing'}] of ${recTabs.concat(recHides).length}, `
       + `the editor hides [${edHides.join(' ') || 'nothing'}]`);
-    // Both sets have to be non-empty or the comparison is two empties agreeing.
+    // Every hidden tab has to own exclusive blocks or hiding it changes nothing, and their union is what is unreachable.
     const recCannot = cannotReach(rec);
-    const recShould = onlyUnder(edStates, recHides[0]);
-    check(recShould.length > 0 && same(recCannot, recShould),
-      'what the recorder cannot reach is exactly what lives on the tab it hides, and that is not nothing',
+    const recShould = onlyUnder(edStates, recHides);
+    check(recShould.length > 0 && recHides.every((t) => onlyUnder(edStates, [t]).length > 0) && same(recCannot, recShould),
+      'what the recorder cannot reach is exactly what lives on the tabs it hides, and none of them is empty',
       `unreachable on the recorder [${recCannot.join(' ') || 'none'}], `
-      + `on the editor's ${recHides[0]} tab alone [${recShould.join(' ') || 'none'}]`);
+      + `on the editor's [${recHides.join(' ')}] tabs alone [${recShould.join(' ') || 'none'}]`);
     const edCannot = cannotReach(ed);
-    const edShould = onlyUnder(recStates, edHides[0]);
-    check(edShould.length > 0 && same(edCannot, edShould),
+    const edShould = onlyUnder(recStates, edHides);
+    check(edShould.length > 0 && edHides.every((t) => onlyUnder(recStates, [t]).length > 0) && same(edCannot, edShould),
       'and what the editor cannot reach is exactly what lives on the tab it hides',
       `unreachable on the editor [${edCannot.join(' ') || 'none'}], `
-      + `on the recorder's ${edHides[0]} tab alone [${edShould.join(' ') || 'none'}]`);
+      + `on the recorder's [${edHides.join(' ')}] tab alone [${edShould.join(' ') || 'none'}]`);
     // Counted in controls as well as in headings: a group's node stays visible when the collapse
     // rule shuts it, so "9 look groups, all 9 visible" was true of a panel with four showing
     // nothing gradeable. The look groups are split by the `shut` class the panel itself sets and

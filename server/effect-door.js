@@ -231,7 +231,7 @@ const redeclaredIn = (text) => {
       for (const stmt of inner) for (const name of declaredNamesIn(stmt)) if (declare(name)) return name;
       buffer = '';
     } else if (ch === '}') {
-      scopes.pop();
+      if (scopes.length > 1) scopes.pop();
       buffer = '';
     } else {
       buffer += ch;
@@ -347,7 +347,7 @@ export function doorRefusal(candidate, { beside = [], spines }) {
   // out of a function whose whole contract is to answer a sentence - and out of the boot gate,
   // which is a server that will not start. An explicit `null` is refused too, or `?? []` reads it
   // as "none at all".
-  for (const field of ['chunks', 'varyings', 'panelGroups', 'hostDriven']) {
+  for (const field of ['chunks', 'varyings', 'panelGroups', 'hostDriven', 'consumes']) {
     if (manifest[field] === undefined || Array.isArray(manifest[field])) continue;
     return `effect ${id} declares ${field} as ${JSON.stringify(manifest[field])} - a manifest's ${field} is a `
       + 'list, and a package that has none of them leaves the key out rather than putting something else '
@@ -377,9 +377,22 @@ export function doorRefusal(candidate, { beside = [], spines }) {
     }
     // A macro can expand to a declaration the scope walk below never sees, and a conditional can
     // hide one from it, so the compiler would be the first thing to read what the door accepted.
-    if (/^\s*#/m.test(withoutComments(chunks[file]))) {
+    const cleanChunk = withoutComments(chunks[file]);
+    if (/^\s*#/m.test(cleanChunk)) {
       return `effect ${id}'s ${file} carries a preprocessor directive - a chunk is spliced into a program the spine `
         + 'writes, and a directive can produce or hide a declaration this door cannot see, so none is accepted';
+    }
+    let braces = 0;
+    let parens = 0;
+    for (const ch of cleanChunk) {
+      if (ch === '{') braces++;
+      else if (ch === '}') { braces--; if (braces < 0) break; }
+      else if (ch === '(') parens++;
+      else if (ch === ')') { parens--; if (parens < 0) break; }
+    }
+    if (braces !== 0 || parens !== 0) {
+      return `effect ${id}'s ${file} has unbalanced ${braces !== 0 ? 'braces' : 'parentheses'} - `
+        + 'a chunk is spliced into a function body, so an unmatched delimiter escapes its own block';
     }
   }
   for (const file of Object.keys(chunks)) {
@@ -433,6 +446,7 @@ export function doorRefusal(candidate, { beside = [], spines }) {
   }
   let masters = 0;
   let bounds = 0;
+  let cycles = 0;
   let onBounded = 0;
   for (const [short, spec] of Object.entries(manifest.params)) {
     const name = `${id}.${short}`;
@@ -570,6 +584,18 @@ export function doorRefusal(candidate, { beside = [], spines }) {
           + 'seconds. A step or a two-component value has no reading the pre-roll could divide by';
       }
     }
+    if (bind.cycles !== undefined && typeof bind.cycles !== 'boolean') {
+      return `${name} declares cycles as ${JSON.stringify(bind.cycles)} - it says whether this term switches `
+        + 'periodic refreshes of its pass, which is a yes or a no';
+    }
+    if (bind.cycles) {
+      cycles += 1;
+      if (!EFFECT_BOUNDED_TABLES.includes(bind.on) || spec.kind !== 'step') {
+        return `${name} declares cycles on ${JSON.stringify(bind.on)} as a ${spec.kind} binding - `
+          + `cycles switches periodic refreshes on a pass with memory (${EFFECT_BOUNDED_TABLES.join(' and ')}), `
+          + 'so it belongs on a step parameter bound there';
+      }
+    }
     if (spec.role !== undefined) {
       if (spec.role !== 'master') {
         return `${name} declares the role ${JSON.stringify(spec.role)} - the only role this build knows is master, `
@@ -602,11 +628,24 @@ export function doorRefusal(candidate, { beside = [], spines }) {
         return `${name} declares itself under ${JSON.stringify(spec.under)}, which is not a valid parent in ${id} - `
           + 'the parent is a master or a step defaulting to false, whose non-zero value reveals this row';
       }
+      const seen = new Set([short]);
+      let cursor = spec.under;
+      while (typeof cursor === 'string') {
+        if (seen.has(cursor)) {
+          return `${name} sits in an under cycle (${[...seen, cursor].join(' -> ')}) - `
+            + 'a child row reveals when its parent is active, and a cycle has no root control';
+        }
+        seen.add(cursor);
+        cursor = manifest.params[cursor]?.under;
+      }
     }
   }
   if (masters > 1) {
     return `effect ${id} declares ${masters} parameters with the role master - one package is absent at one term, `
       + 'and two of them is two answers to whether this effect is contributing';
+  }
+  if (cycles > 1) {
+    return `effect ${id} declares ${cycles} parameters with cycles - at most one switch decides whether a feedback pass refreshes on its period`;
   }
   // A pass with memory has to say how long it remembers, once. Nothing else in this program can
   // supply that number: a seek reproduces a feedback pass by decoding from the last frame that
@@ -679,17 +718,39 @@ export function doorRefusal(candidate, { beside = [], spines }) {
       return `effect ${id}'s ${v.name} carries no numeric order, and where a varying sits decides the register layout of both stages`;
     }
   }
+  const validPanelTabs = ['record', 'camera', 'framing', 'look', 'region', 'audio'];
+  const allowedGroupFields = new Set(['key', 'label', 'tab', 'lookgroup', 'collapses', 'after', 'order']);
+  const usedGroups = new Set(Object.values(manifest.params).map((s) => s.panel.group));
   for (const g of manifest.panelGroups ?? []) {
-    if (!g || typeof g.key !== 'string' || !g.key.length) {
+    if (!g || typeof g !== 'object' || Array.isArray(g) || typeof g.key !== 'string' || !g.key.length) {
       return `effect ${id} declares a panel group with no key - the group's rows are found by it`;
     }
-    if (typeof g.after !== 'string' || !g.after.length) {
-      return `effect ${id}'s ${g.key} group anchors after ${JSON.stringify(g.after)} - a group with no anchor `
-        + 'would be appended wherever the splice happened to end, which is a package author\'s placement decision quietly overridden';
+    for (const field of Object.keys(g)) {
+      if (!allowedGroupFields.has(field)) {
+        return `effect ${id}'s ${g.key} group carries the unknown field ${JSON.stringify(field)}`;
+      }
+    }
+    if (typeof g.label !== 'string' || !g.label.trim().length) {
+      return `effect ${id}'s ${g.key} group declares no label - a heading with no words on it cannot be read`;
+    }
+    if (typeof g.tab !== 'string' || !validPanelTabs.includes(g.tab)) {
+      return `effect ${id}'s ${g.key} group names the tab ${JSON.stringify(g.tab)}, and the panel holds ${validPanelTabs.join(', ')}`;
+    }
+    if (typeof g.after !== 'string' || !g.after.length || !CORE_PANEL_GROUP_KEYS.includes(g.after)) {
+      return `effect ${id}'s ${g.key} group anchors after ${JSON.stringify(g.after)}, which is not one of the core groups (${CORE_PANEL_GROUP_KEYS.join(', ')})`;
     }
     if (!Number.isFinite(g.order)) {
       return `effect ${id}'s ${g.key} group carries no numeric order - two packages anchored at one place `
         + 'would then be laid out by whichever was fetched first';
+    }
+    if (g.lookgroup !== undefined && typeof g.lookgroup !== 'boolean') {
+      return `effect ${id}'s ${g.key} group declares lookgroup as ${JSON.stringify(g.lookgroup)}`;
+    }
+    if (g.collapses !== undefined && typeof g.collapses !== 'boolean') {
+      return `effect ${id}'s ${g.key} group declares collapses as ${JSON.stringify(g.collapses)}`;
+    }
+    if (!usedGroups.has(g.key)) {
+      return `effect ${id} declares the panel group ${JSON.stringify(g.key)} and puts no parameters in it`;
     }
   }
 
@@ -847,9 +908,21 @@ export function doorRefusal(candidate, { beside = [], spines }) {
 export function forkRefusal(candidate, shadowed) {
   const dropped = Object.keys(shadowed.manifest.params)
     .filter((short) => !Object.hasOwn(candidate.manifest.params, short));
-  if (dropped.length === 0) return null;
-  return `effect ${candidate.id} forks the shipped package and drops `
-    + `${dropped.map((s) => `${candidate.id}.${s}`).join(', ')} - the registry's declaration order places `
-    + `${dropped.length === 1 ? 'that name' : 'those names'} by hand, so a fork short of `
-    + `${dropped.length === 1 ? 'it' : 'them'} is a build whose registry cannot assemble at all. A fork adds and retunes; it does not remove`;
+  if (dropped.length > 0) {
+    return `effect ${candidate.id} forks the shipped package and drops `
+      + `${dropped.map((s) => `${candidate.id}.${s}`).join(', ')} - the registry's declaration order places `
+      + `${dropped.length === 1 ? 'that name' : 'those names'} by hand, so a fork short of `
+      + `${dropped.length === 1 ? 'it' : 'them'} is a build whose registry cannot assemble at all. A fork adds and retunes; it does not remove`;
+  }
+  for (const [short, spec] of Object.entries(shadowed.manifest.params)) {
+    const candBind = candidate.manifest.params[short]?.bind;
+    for (const flag of ['gates', 'bounds', 'cycles']) {
+      if (spec.bind?.[flag] && !candBind?.[flag]) {
+        return `effect ${candidate.id} forks the shipped package and drops bind.${flag} from `
+          + `${candidate.id}.${short} - that flag tells the host how this parameter drives its pass, `
+          + 'so dropping it changes what the pass remembers or refreshes without refusing the document';
+      }
+    }
+  }
+  return null;
 }

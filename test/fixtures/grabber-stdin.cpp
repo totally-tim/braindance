@@ -1,7 +1,10 @@
 #include <atomic>
+#include <csignal>
 #include <cstdio>
 #include <string>
 #include <fcntl.h>
+#include <poll.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -22,6 +25,16 @@ struct HdEncoder {
 };
 
 static std::atomic<bool> g_stop{false};
+static volatile sig_atomic_t g_alarmFired = 0;
+static void onAlarm(int) { g_alarmFired = 1; }
+
+static void armAlarmMs(int ms) {
+  if (ms > 0) g_alarmFired = 0;
+  struct itimerval it = {};
+  it.it_value.tv_sec = ms / 1000;
+  it.it_value.tv_usec = (ms % 1000) * 1000;
+  ::setitimer(ITIMER_REAL, &it, nullptr);
+}
 
 #include "poll-under-test.h"
 
@@ -38,10 +51,10 @@ struct Stdin {
   libfreenect2::Freenect2Device dev;
   HdEncoder hd;
   std::string pending;
-  Stdin() {
+  Stdin(bool nonblock = true) {
     int fds[2];
     if (::pipe(fds) != 0) std::_Exit(2);
-    ::fcntl(fds[0], F_SETFL, O_NONBLOCK);
+    if (nonblock) ::fcntl(fds[0], F_SETFL, O_NONBLOCK);
     if (::dup2(fds[0], STDIN_FILENO) < 0) std::_Exit(2);
     ::close(fds[0]);
     writer = fds[1];
@@ -133,6 +146,33 @@ int main() {
     check(!in.poll(), "data on an open pipe does not stop");
     in.close();
     check(in.poll(), "and the close that follows does");
+  }
+  {
+    struct sigaction sa = {};
+    sa.sa_handler = onAlarm;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+    ::sigaction(SIGALRM, &sa, nullptr);
+
+    Stdin in(false);
+    armAlarmMs(200);
+    const bool stoppedIdle = in.poll();
+    armAlarmMs(0);
+    check(!g_alarmFired && !stoppedIdle,
+          "a blocking stdin with nothing in it returns without waiting or stopping");
+
+    in.send("low-light on\n");
+    armAlarmMs(200);
+    const bool stoppedLine = in.poll();
+    armAlarmMs(0);
+    check(!g_alarmFired && !stoppedLine && in.dev.autoExposure == 1,
+          "a line on a blocking stdin is applied without waiting for a second read");
+
+    in.close();
+    armAlarmMs(200);
+    const bool stoppedEof = in.poll();
+    armAlarmMs(0);
+    check(!g_alarmFired && stoppedEof, "and end-of-file on a blocking stdin stops");
   }
 
   std::printf("the reader: %d assertions, %d failed\n", checked, failed);

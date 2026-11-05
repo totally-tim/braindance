@@ -2,10 +2,11 @@ import { decodePair } from './key-stream.js';
 
 // Own decoded images until the draw finishes, and invalidate work across every outage.
 export class KeyFrames {
-  constructor({ decode, draw, clear, clock = globalThis }) {
+  constructor({ decode, draw, clear, onNeedColour = null, clock = globalThis }) {
     this.decode = decode;
     this.draw = draw;
     this.clear = clear;
+    this.onNeedColour = onNeedColour;
     this.clock = clock;
     this.frames = 0;
     this.errors = 0;
@@ -65,12 +66,13 @@ export class KeyFrames {
         depth?.close();
         return;
       }
-      if (!depth || (pair.colour && !colour)
-          || (!colour && (!this.colour || this.lastColourTs !== pair.colourTs))) {
+      const missingColour = !colour && (!this.colour || this.lastColourTs !== pair.colourTs);
+      if (!depth || (pair.colour && !colour) || missingColour) {
         colour?.close();
         depth?.close();
         this.errors++;
         this.reset();
+        if (missingColour && depth) this.onNeedColour?.();
         return;
       }
       const oldColour = this.colour, oldDepth = this.depth;

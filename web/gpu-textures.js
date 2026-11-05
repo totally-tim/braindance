@@ -209,6 +209,12 @@ export function bindDepth(data) {
 // later, once it is certainly unbound; the indexed cache holds its own until the
 // frame is evicted. Closing one here would free a bitmap the other still needs.
 export function bindColor(bitmap) {
+  if (selected.colorPrev === selected.colorCurr) {
+    selected.colorPrev.dispose();
+    selected.colorPrev = makeColorTexture();
+    selected.colorCurr = makeColorTexture();
+    selected.colorPairReady = false;
+  }
   if (!selected.colorPairReady) {
     selected.colorPrev.image = bitmap;
     selected.colorPrev.needsUpdate = true;
@@ -250,6 +256,10 @@ export function resetColorSource() {
  * inside a pair is not one.
  */
 export function plantColor(rgba, width, height) {
+  const prev = selected.colorPrev;
+  const curr = selected.colorCurr;
+  prev.dispose();
+  if (curr !== prev) curr.dispose();
   const tex = new THREE.DataTexture(
     new Uint8Array(rgba), width, height, THREE.RGBAFormat, THREE.UnsignedByteType,
   );

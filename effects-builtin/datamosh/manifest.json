@@ -142,7 +142,8 @@
       },
       "bind": {
         "on": "mosh",
-        "uniform": "moshCycleRefresh"
+        "uniform": "moshCycleRefresh",
+        "cycles": true
       },
       "under": "amount"
     },

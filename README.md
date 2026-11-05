@@ -24,7 +24,7 @@ commitment. Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Linux Specific step you might need before install
 
-libfreenect2 comes with a udev rule you need to access the Kinect via usb. Move move it to the right place and refresh rules.
+libfreenect2 comes with a udev rule you need to access the Kinect via usb. Move it to the right place and refresh rules.
 ```bash
 sudo cp third_party/libfreenect2/platform/linux/udev/90-kinect2.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
@@ -193,9 +193,9 @@ previews are ready.
 
 ### 5. Export a video
 
-Aspect ratio and frame rate belong to the project: set them under **Project settings** in the
-application bar. Then set **in** and **out** on the timeline bar, open **Output → Export**
-(`⌘E`), pick a resolution, a format and a name, and press **Export**.
+Aspect ratio and frame rate belong to the project: set them under **Project settings…** in the
+**File** menu. Then set **in** and **out** on the timeline bar, open **Export** in the **Output**
+menu (`⌘E`), pick a resolution, a format and a name, and press **Export**.
 
 ![The Export dialog. A Deliverable select with a new button, reading 1920x1080 h264
 underneath; a Resolution of 1920x1080; a Format row of MP4, MOV and PNG sequence with MP4
@@ -220,7 +220,7 @@ Renders can also be queued from the command line without the browser. See
 
 ## Streaming to OBS
 
-Two outputs, both listed with copy buttons under **Output → OBS**:
+Three outputs, all listed with copy buttons under **Output to OBS** in the **Output** menu:
 
 | What | How | What it is |
 | --- | --- | --- |
@@ -248,6 +248,7 @@ npm link
 braindance status
 braindance sensor standby
 braindance sensor wake --wait
+braindance camera color on
 braindance camera low-light off
 braindance record start
 braindance record mark

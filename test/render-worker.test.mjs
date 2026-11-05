@@ -311,3 +311,32 @@ test('a done report the queue records as failed is a failed job, and is not repo
   assert.ok(w.lines.some((l) => /job-a failed: the render reported done but its artifact/.test(l)), 'and the reason is printed');
   assert.ok(!w.lines.some((l) => /job-a done /.test(l)), 'where the worker would otherwise have said done');
 });
+
+test('a daemon worker survives a transient /jobs/claim transport failure and claims on the next poll', async (t) => {
+  const browser = fakeBrowser();
+  const a = makeJob('a');
+  const queue = fakeQueue([a]);
+  const realFetch = queue.fetch;
+  let claims = 0;
+  const flakyFetch = async (url, init = {}) => {
+    if (url.endsWith('/jobs/claim') && ++claims === 1) {
+      throw new Error('fetch failed: ECONNREFUSED');
+    }
+    return realFetch(url, init);
+  };
+  t.mock.method(console, 'log', () => {});
+  t.mock.method(console, 'error', () => {});
+  t.after(() => { delete globalThis.__kinect; });
+  const run = runQueue({
+    browser, fetch: flakyFetch, url: BASE, name: 'worker', max: 1, drain: false, pollMs: 5, beatMs: BEAT_MS,
+  });
+  let crash = null;
+  run.catch((err) => { crash = err; });
+  await until('A to be rendering after retry', () => {
+    if (crash) throw crash;
+    return browser.pages[0]?.runs.length === 1;
+  });
+  browser.pages[0].runs[0].resolve(rendered('a'));
+  assert.deepEqual(await run, { claimed: 1, failed: 0, cancelled: 0, blockedExit: false });
+  assert.equal(claims, 2);
+});

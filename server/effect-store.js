@@ -74,6 +74,10 @@ export class EffectStore {
     const readable = [];
     for (const id of this.idsIn(this.dir)) {
       try {
+        const userManifest = join(this.dir, id, 'manifest.json');
+        if (!existsSync(userManifest) || !lstatSync(userManifest).isFile()) {
+          throw new Error(`effect ${id} at ${join(this.dir, id)} has no manifest.json - a package without its manifest is not a package`);
+        }
         readable.push(this.packageOf(id));
       } catch (err) {
         this.setAside(id, `it cannot be read as a package at all: ${err.message}`);
@@ -121,8 +125,13 @@ export class EffectStore {
         standing.delete(candidate.id);
         const beside = [...standing.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
         const shadowed = builtins.get(candidate.id) ?? null;
-        let refusal = doorRefusal(candidate, { beside, spines: this.spines })
-          ?? (shadowed ? forkRefusal(candidate, shadowed) : null);
+        let refusal;
+        try {
+          refusal = doorRefusal(candidate, { beside, spines: this.spines })
+            ?? (shadowed ? forkRefusal(candidate, shadowed) : null);
+        } catch (err) {
+          refusal = `the install door threw on this package: ${err.message}`;
+        }
         // The other direction: everything above asks whether the candidate works beside the set,
         // this asks whether the set still works beside the candidate.
         if (!refusal) {
@@ -131,7 +140,12 @@ export class EffectStore {
           for (const id of [...resulting.keys()].sort()) {
             const member = resulting.get(id);
             if (member === candidate || bornRefused.has(member)) continue;
-            const broke = doorRefusal(member, { beside: besideIn(resulting, id), spines: this.spines });
+            let broke;
+            try {
+              broke = doorRefusal(member, { beside: besideIn(resulting, id), spines: this.spines });
+            } catch (err) {
+              broke = `the install door threw on ${id}: ${err.message}`;
+            }
             if (!broke) continue;
             refusal = `with it installed this build can no longer assemble ${id}: ${broke}. Nothing is `
               + `wrong with ${id} on its own - it stood a moment ago and stands again once ${candidate.id} `
@@ -233,8 +247,10 @@ export class EffectStore {
   rootFor(id) {
     if (!VALID_EFFECT_ID.test(id)) return null;
     // A real directory and not a link to one: `idsIn` already drops a link, and resolving by name
-    // here would answer for a package that is in no listing.
-    const real = (path) => existsSync(path) && lstatSync(path).isDirectory();
+    // here would answer for a package that is in no listing. Require `manifest.json` so a
+    // half-created folder in the user root does not crash `list()` or shadow a shipped package.
+    const real = (path) => existsSync(path) && lstatSync(path).isDirectory()
+      && existsSync(join(path, 'manifest.json')) && lstatSync(join(path, 'manifest.json')).isFile();
     if (real(join(this.dir, id))) return { root: this.dir, builtin: false };
     if (real(join(this.builtinDir, id))) return { root: this.builtinDir, builtin: true };
     return null;
@@ -250,13 +266,18 @@ export class EffectStore {
       .map((e) => e.name)
       .sort();
     if (!names.includes('manifest.json')) {
-      throw new Error(`effect ${id} at ${dir} has no manifest.json - a package without its manifest is not a package`);
+      return null;
     }
-    const files = names.map((name) => ({ name, rev: `sha256:${sha256(readFileSync(join(dir, name)))}` }));
+    let manifestBytes = null;
+    const files = names.map((name) => {
+      const bytes = readFileSync(join(dir, name));
+      if (name === 'manifest.json') manifestBytes = bytes;
+      return { name, rev: `sha256:${sha256(bytes)}` };
+    });
     const rev = `sha256:${sha256(files.map((f) => `${f.name} ${f.rev}\n`).join(''))}`;
     let manifest;
     try {
-      manifest = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8'));
+      manifest = JSON.parse(manifestBytes.toString('utf8'));
     } catch (err) {
       throw new Error(`effect ${id}'s manifest.json does not parse: ${err.message}`);
     }
@@ -274,10 +295,14 @@ export class EffectStore {
    */
   list() {
     const ids = [...new Set([...this.idsIn(this.builtinDir), ...this.idsIn(this.dir)])].sort();
-    return ids.map((id) => {
-      const { manifest, files, rev, builtin } = this.read(id);
-      return { id, version: manifest.version, title: manifest.title, rev, builtin, files };
-    });
+    const out = [];
+    for (const id of ids) {
+      const pkg = this.read(id);
+      if (!pkg && VALID_EFFECT_ID.test(id)) continue;
+      const { manifest, files, rev, builtin } = pkg;
+      out.push({ id, version: manifest.version, title: manifest.title, rev, builtin, files });
+    }
+    return out;
   }
 
   /**
@@ -347,7 +372,8 @@ export class EffectStore {
     const tmp = join(this.dir, `${id}.${seq}.tmp`);
     const aside = join(this.dir, `${id}.${seq}.old`);
     const live = join(this.dir, id);
-    mkdirSync(tmp, { recursive: true });
+    rmSync(tmp, { recursive: true, force: true });
+    mkdirSync(tmp);
     try {
       // Written from the object, because `read` parses this file and the door checked the object.
       writeFileSync(join(tmp, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -359,7 +385,8 @@ export class EffectStore {
       rmSync(tmp, { recursive: true, force: true });
       throw err;
     }
-    const replaced = existsSync(live);
+    let replaced = false;
+    try { lstatSync(live); replaced = true; } catch { /* absent */ }
     if (replaced) renameSync(live, aside);
     try {
       renameSync(tmp, live);
@@ -383,7 +410,9 @@ export class EffectStore {
   remove(id) {
     if (!VALID_EFFECT_ID.test(id)) return { error: `${JSON.stringify(id)} is not an effect id`, status: 400 };
     const mine = join(this.dir, id);
-    if (!existsSync(mine)) {
+    let mineHere = false;
+    try { lstatSync(mine); mineHere = true; } catch { /* absent */ }
+    if (!mineHere) {
       if (existsSync(join(this.builtinDir, id))) {
         return {
           error: `effect ${id} is shipped with this build and nothing is forking it - `
@@ -414,7 +443,7 @@ export class EffectStore {
     if (!existsSync(this.dir)) return;
     const liveHere = existsSync(join(this.dir, id));
     for (const entry of readdirSync(this.dir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
       if (!entry.name.startsWith(`${id}.`)) continue;
       if (!/\.(tmp|old|gone)$/.test(entry.name)) continue;
       if (entry.name.endsWith('.old') && !liveHere) continue;

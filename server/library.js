@@ -8,7 +8,7 @@ import { readdir, readFile, writeFile, appendFile, stat, unlink, rename, link, m
 import { pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
 import { basename, dirname, join, resolve } from 'node:path';
-import { cachedIndex, forgetCapture, indexPathFor, captureIdFor, loadIndex, readHelloOnce } from './capture.js';
+import { cachedIndex, forgetCapture, indexPathFor, captureIdFor, loadIndex, readHelloCached } from './capture.js';
 
 export { VALID_ID };
 
@@ -49,6 +49,27 @@ export const marksPathFor = (dir, hash) => {
 
 export async function readMarkLog(dir, hash) {
   return readLogAt(marksPathFor(dir, hash));
+}
+
+// Memoises parsed mark logs by `(bytes, mtimeMs)` so warm `/library/takes` scans do not re-read
+// and re-parse unchanged JSONL logs across hundreds of takes.
+const markLogCache = new Map();
+
+async function readMarkLogCached(dir, hash, markFiles = null) {
+  const path = marksPathFor(dir, hash);
+  if (markFiles && !markFiles.has(basename(path))) return [];
+  let st;
+  try {
+    st = await stat(path);
+  } catch {
+    markLogCache.delete(path);
+    return [];
+  }
+  const held = markLogCache.get(path);
+  if (held && held.bytes === st.size && held.mtimeMs === st.mtimeMs) return held.log;
+  const log = await readLogAt(path);
+  markLogCache.set(path, { bytes: st.size, mtimeMs: st.mtimeMs, log });
+  return log;
 }
 
 async function readLogAt(path) {
@@ -116,8 +137,10 @@ async function appendLines(dir, hash, records) {
   const lines = records.map((rec) => `${JSON.stringify(rec)}\n`).join('');
   if (!lines) return;
   markWrites++;
+  const path = marksPathFor(dir, hash);
+  markLogCache.delete(path);
   await mkdir(join(dir, 'marks'), { recursive: true });
-  await appendFile(marksPathFor(dir, hash), lines);
+  await appendFile(path, lines);
 }
 
 /**
@@ -276,7 +299,7 @@ function manifestRefusal(take) {
 const carriesRefusals = (take) => Array.isArray(take.openRefusals)
   && take.openRefusals.every((r) => r && typeof r.key === 'string' && typeof r.why === 'string' && r.why !== '');
 
-async function describeTake(dir, file, recording) {
+async function describeTake(dir, file, recording, markFiles = null) {
   const path = join(dir, file);
   const id = captureIdFor(path);
   const st = await stat(path);
@@ -309,10 +332,10 @@ async function describeTake(dir, file, recording) {
     };
   }
 
-  const index = await cachedIndex(path);
+  const index = await cachedIndex(path, null, st);
   const stamps = index.frames.stampMs;
-  const hello = await readHelloOnce(path, index);
-  const log = await readMarkLog(dir, index.hash);
+  const hello = await readHelloCached(path, index, st);
+  const log = await readMarkLogCached(dir, index.hash, markFiles);
   const marks = resolveMarks(log);
   // The recorder's `kind: 'drop'` record, which carries no `sourceMs` and so never resolves as a
   // mark. A count that is not a whole number reads as none.
@@ -384,17 +407,30 @@ export async function takeFileFor(dir, hash, { owns = () => false, also = [] } =
   return found;
 }
 
+export async function localTakeFile(dir, id) {
+  const file = (await directoryNames(dir, { what: 'captures directory' }))
+    .find((name) => isKnct(name) && captureIdFor(name) === id);
+  return file ? join(dir, file) : null;
+}
+
 export async function scanTakes(dir, owns = () => false) {
   const files = (await directoryNames(dir, { what: 'captures directory' })).filter(isKnct);
+  const markFiles = await readdir(join(dir, 'marks')).then((list) => new Set(list), () => null);
   const takes = [];
   const unreadable = [];
-  for (const file of files) {
-    try {
-      takes.push(await describeTake(dir, file, owns(join(dir, file))));
-    } catch (err) {
-      unreadable.push({ id: captureIdFor(file), file, error: err.message });
+  const limit = 16;
+  let next = 0;
+  const worker = async () => {
+    while (next < files.length) {
+      const file = files[next++];
+      try {
+        takes.push(await describeTake(dir, file, owns(join(dir, file)), markFiles));
+      } catch (err) {
+        unreadable.push({ id: captureIdFor(file), file, error: err.message });
+      }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, files.length) }, () => worker()));
   takes.sort((a, b) => b.capturedAt - a.capturedAt);
   return { takes, unreadable };
 }
@@ -414,7 +450,14 @@ export class NodeLink {
 
   async fetchJson(path, init) {
     const res = await fetch(`${this.url}${path}`, init);
-    if (!res.ok) throw new Error(`${path}: ${res.status} ${res.statusText}`);
+    if (!res.ok) {
+      let detail = '';
+      try {
+        const errBody = await res.json();
+        if (typeof errBody?.error === 'string' && errBody.error) detail = errBody.error;
+      } catch { /* non-JSON error body */ }
+      throw new Error(`${path}: ${res.status} ${detail || res.statusText}`);
+    }
     return res.json();
   }
 
@@ -423,12 +466,16 @@ export class NodeLink {
    * take by take, because a shelf that drops the unreadable ones looks complete.
    */
   async takes(signal = null) {
+    if (this.buildRefusal) await this.recordState();
     if (this.buildRefusal) {
       this.lastError = this.buildRefusal;
       return null;
     }
     try {
-      const body = await this.fetchJson('/library/takes', signal ? { signal } : undefined);
+      const reqSignal = signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(5000)])
+        : AbortSignal.timeout(5000);
+      const body = await this.fetchJson('/library/takes', { signal: reqSignal });
       const takes = body.takes.filter((t) => VALID_ID.test(t.id) && (t.hash === null || VALID_HASH.test(t.hash)));
       for (const t of takes) {
         const why = manifestRefusal(t);
@@ -478,6 +525,7 @@ export class NodeLink {
         writingIds: body.writingIds,
       };
     } catch {
+      this.buildRefusal = null;
       return { name: this.name, reachable: false, recording: false, takeId: null, writingIds: [] };
     }
   }
@@ -562,21 +610,27 @@ export const downloadsInFlight = new Map();
 const downloadClaims = new Set();
 
 /** No-progress bound. A total timeout short enough to catch a dead node would kill a real copy. */
-const STALL_MS = 30_000;
+const STALL_POLL_MS = 5_000;
+const STALL_LIMIT_MS = 60_000;
 
 const MARKS_MS = 20_000;
 
 function untilItStalls(readSoFar) {
   const ctl = new AbortController();
   let last = readSoFar();
+  let lastMovedAt = Date.now();
   const timer = setInterval(() => {
     const now = readSoFar();
-    if (now === last) {
-      ctl.abort(new Error(`no bytes for ${(STALL_MS * 2) / 1000}s`));
+    if (now !== last) {
+      last = now;
+      lastMovedAt = Date.now();
+      return;
+    }
+    if (Date.now() - lastMovedAt >= STALL_LIMIT_MS) {
+      ctl.abort(new Error(`no bytes for ${STALL_LIMIT_MS / 1000}s`));
       clearInterval(timer);
     }
-    last = now;
-  }, STALL_MS);
+  }, STALL_POLL_MS);
   timer.unref?.();
   return { signal: ctl.signal, stop: () => clearInterval(timer) };
 }
@@ -665,7 +719,8 @@ async function downloadToPath(node, take, dir, targetIn) {
     throw new Error(`downloading ${take.id}: ${res.status} ${res.statusText}`);
   }
 
-  downloadsInFlight.set(take.id, progress);
+  const flightKey = take.id.toLowerCase();
+  downloadsInFlight.set(flightKey, progress);
   try {
     const counted = new Transform({
       transform(chunk, _enc, done) {
@@ -734,7 +789,7 @@ async function downloadToPath(node, take, dir, targetIn) {
     await unlink(temp).catch(() => {});
     throw err;
   } finally {
-    downloadsInFlight.delete(take.id);
+    downloadsInFlight.delete(flightKey);
     stall.stop();
   }
 
@@ -872,6 +927,7 @@ async function removeHeld(dir, id, path, { hash, verifiedElsewhere, marksRead, o
   await unlink(marksPathFor(dir, actual)).catch((err) => {
     if (err.code !== 'ENOENT') console.warn(`[library] ${id} was removed but its marks log was not: ${err.message}`);
   });
+  markLogCache.delete(marksPathFor(dir, actual));
   await unlink(indexPathFor(path)).catch(() => {});
   forgetCapture(path);
   return { removed: `${id}.knct`, hash: actual };
@@ -943,7 +999,7 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
   }
   if (to === id) throw new Error(`${id} is already its name, so there is nothing to rename`);
 
-  const from = join(dir, `${id}.knct`);
+  let from = join(dir, `${id}.knct`);
   const target = join(dir, `${to}.knct`);
   const root = resolve(dir);
   for (const path of [from, target]) {
@@ -955,14 +1011,23 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
   return withTakeLock([from, target], async () => {
     // Opened and asked about by the file opened, as `downloadClaimed` does: while this waited for
     // the lock the name could have gone to the recorder's next take, which a read by name would scan.
-    const opened = await open(from, 'r').catch((err) => {
+    const opened = await open(from, 'r').catch(async (err) => {
+      if (err.code === 'ENOENT') {
+        const matched = await localTakeFile(dir, id);
+        if (matched) {
+          from = matched;
+          return open(from, 'r');
+        }
+      }
       throw err.code === 'ENOENT' ? new Error(`${id} is no longer in ${root}`) : err;
     });
     let index;
+    let openedStat;
     try {
       if (ownsFile(await opened.stat())) {
         throw new Error(`${id} is being recorded right now: stop the take before renaming it`);
       }
+      openedStat = await opened.stat();
       index = await loadIndex(from, opened);
     } finally {
       await opened.close();
@@ -972,6 +1037,15 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
         `${id} is ${index.hash} here, not the ${hash} this rename named: `
         + 'the library moved underneath the request and nothing was renamed',
       );
+    }
+
+    if (id.toLowerCase() === to.toLowerCase() && sameTake(openedStat, takeIdentity(target))) {
+      await rename(from, target);
+      await rename(indexPathFor(from), indexPathFor(target))
+        .catch(() => unlink(indexPathFor(from)).catch(() => {}));
+      forgetCapture(from);
+      forgetCapture(target);
+      return { renamed: `${id}.knct`, id: to, file: `${to}.knct`, hash: index.hash };
     }
 
     for (const path of [target, indexPathFor(target)]) {
@@ -1038,8 +1112,8 @@ export async function revealTake(dir, id, { command = [] } = {}) {
     throw new Error(`no file manager is known for ${process.platform}, so there is nothing to open a take in`);
   }
   const root = resolve(dir);
-  const path = join(root, `${id}.knct`);
-  if (resolve(path) !== join(root, `${id}.knct`)) throw new Error(`refusing to reveal outside ${root}`);
+  const path = (await localTakeFile(root, id)) ?? join(root, `${id}.knct`);
+  if (resolve(path) !== join(root, basename(path))) throw new Error(`refusing to reveal outside ${root}`);
   await stat(path);
   const args = shape.args(path);
   const [bin, ...prefix] = command.length ? command : [shape.program];
@@ -1080,6 +1154,7 @@ export async function listJsonNames(dir, { required = false, what = 'directory' 
 export const ABSENT_REV = 'absent';
 
 const revOf = (text) => `sha256:${createHash('sha256').update(text).digest('hex')}`;
+const docKey = (name) => String(name).normalize('NFC').toLowerCase();
 
 export class DocumentStore {
   // Serialises writes to each name, so the revision check and the write it guards are atomic.
@@ -1103,7 +1178,7 @@ export class DocumentStore {
 
   /** Queues a change behind every change already queued on any name it touches. */
   #serialise(names, run) {
-    const held = [...new Set(names)].sort();
+    const held = [...new Set(names.map(docKey))].sort();
     const mine = Promise.all(held.map((n) => this.#inFlight.get(n) ?? Promise.resolve())).then(run);
     // Swallows failures so one refusal does not block the queue.
     const settled = mine.then(() => {}, () => {});
@@ -1132,45 +1207,77 @@ export class DocumentStore {
     return path;
   }
 
+  async #existingPathIn(dir, name) {
+    const exact = join(dir, `${name}.json`);
+    try {
+      await stat(exact);
+      return exact;
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err;
+    }
+    const want = docKey(name);
+    const files = await listJsonNames(dir, { what: `${this.kind} directory` });
+    const hit = files.find((f) => docKey(basename(f, '.json')) === want);
+    return hit ? join(dir, hit) : null;
+  }
+
   async readPathFor(name) {
     const own = this.pathFor(name);
+    const existingOwn = await this.#existingPathIn(this.dir, name);
+    if (existingOwn) return { path: existingOwn, builtin: false };
     if (!this.builtinDir) return { path: own, builtin: false };
-    try {
-      await stat(own);
-      return { path: own, builtin: false };
-    } catch (err) {
-      // Only there-is-no-fork falls back. Any other `stat` failure is a case where a fork does
-      // exist, and serving the shipped document under the forked name loses a grade silently.
-      if (err?.code !== 'ENOENT') throw err;
-      return { path: join(this.builtinDir, `${name}.json`), builtin: true };
-    }
+    const existingBuiltin = await this.#existingPathIn(this.builtinDir, name);
+    return { path: existingBuiltin ?? join(this.builtinDir, `${name}.json`), builtin: true };
   }
 
   async list() {
     // The two roots fail differently: the user's directory is made on the first write, where the
     // built-in root is only consulted because somebody configured it and has no fallback behind it.
     const own = await listJsonNames(this.dir, { what: `${this.kind} directory` });
-    const owned = new Set(own);
+    const owned = new Set(own.map((f) => docKey(basename(f, '.json'))));
     const shipped = this.builtinDir
       ? (await listJsonNames(this.builtinDir, { required: true, what: `shipped ${this.kind} directory` }))
-        .filter((f) => !owned.has(f)).map((f) => [this.builtinDir, f, true])
+        .filter((f) => !owned.has(docKey(basename(f, '.json')))).map((f) => [this.builtinDir, f, true])
       : [];
     const files = [...shipped, ...own.map((f) => [this.dir, f, false])];
     const out = [];
     for (const [dir, file, builtin] of files) {
+      const docName = basename(file, '.json');
+      if (this.reservedBy.has(docName)) continue;
       const path = join(dir, file);
+      let text;
+      let st;
       try {
-        const text = await readFile(path, 'utf8');
-        const st = await stat(path);
-        out.push({
-          name: basename(file, '.json'),
-          rev: revOf(text),
-          bytes: st.size,
-          savedAt: st.mtimeMs,
-          builtin,
-          body: JSON.parse(text),
-        });
-      } catch { /* a document this build cannot read is not a reason to hide the rest */ }
+        text = await readFile(path, 'utf8');
+        st = await stat(path);
+      } catch {
+        continue;
+      }
+      let body;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        if (this.kind === 'project') {
+          out.push({
+            name: docName,
+            rev: revOf(text),
+            bytes: st.size,
+            savedAt: st.mtimeMs,
+            builtin,
+            body: null,
+            reason: 'this file is not valid JSON',
+          });
+        }
+        continue;
+      }
+      out.push({
+        name: docName,
+        rev: revOf(text),
+        bytes: st.size,
+        savedAt: st.mtimeMs,
+        builtin,
+        body,
+      });
     }
     return out;
   }
@@ -1235,6 +1342,7 @@ export class DocumentStore {
     return this.#serialise([name], async () => {
       await this.#heldToRev(name, rev, 'write');
       await mkdir(this.dir, { recursive: true });
+      const priorOwn = await this.#existingPathIn(this.dir, name);
       const text = `${JSON.stringify({ ...body, version: this.version }, null, 2)}\n`;
       const seq = ++this.writes;
       const scratch = join(this.dir, `.write-${seq}.tmp`);
@@ -1244,37 +1352,55 @@ export class DocumentStore {
       } finally {
         await unlink(scratch).catch(() => {});
       }
+      if (priorOwn && priorOwn !== path && !sameTake(takeIdentity(priorOwn), takeIdentity(path))) {
+        await unlink(priorOwn).catch(() => {});
+      }
       return { name, rev: revOf(text), bytes: text.length };
     });
   }
 
   async remove(name, rev) {
-    const path = this.pathFor(name);
+    this.pathFor(name);
     return this.#serialise([name], async () => {
-      await this.#heldToRev(name, rev, 'delete');
+      const current = await this.#heldToRev(name, rev, 'delete');
+      if (current === ABSENT_REV) {
+        throw Object.assign(new Error(`there is no ${this.kind} named ${name}`), { code: 'ENOENT' });
+      }
+      const { path: targetPath, builtin } = await this.readPathFor(name);
+      if (builtin) {
+        throw new Error(
+          `${name} is a ${this.kind} this build ships, and a shipped one is read and never removed`,
+        );
+      }
       this.writes++;
-      await unlink(path);
+      await unlink(targetPath);
       return { removed: name };
     });
   }
 
   /** Moves a document to a new name, holding both names for the whole move. */
   async rename(name, to, rev) {
-    const fromPath = this.pathFor(name);
+    this.pathFor(name);
     const toPath = this.pathFor(to);
-    if (resolve(fromPath) === resolve(toPath)) {
+    if (name === to) {
       throw new Error(`${name} is already its name, so there is nothing to rename`);
     }
     return this.#serialise([name, to], async () => {
-      const { builtin } = await this.readPathFor(name);
-      if (builtin) {
+      const { path: fromPath, builtin } = await this.readPathFor(name);
+      if (builtin && await this.currentRev(name) !== ABSENT_REV) {
         throw new Error(
           `${name} is a ${this.kind} this build ships, and a shipped one is read and never moved: `
           + `save it as ${to} to fork it, which leaves the shipped one where it is`,
         );
       }
       await this.#heldToRev(name, rev, 'rename');
-      if (await this.currentRev(to) !== ABSENT_REV) {
+      if (docKey(name) === docKey(to)) {
+        const fromId = takeIdentity(fromPath);
+        const toId = takeIdentity(toPath);
+        if (toId !== null && !sameTake(fromId, toId)) {
+          throw new Error(`${to} is taken: there is already a ${this.kind} filed under that name`);
+        }
+      } else if (await this.currentRev(to) !== ABSENT_REV) {
         throw new Error(`${to} is taken: there is already a ${this.kind} filed under that name`);
       }
       this.writes++;

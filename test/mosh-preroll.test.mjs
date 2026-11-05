@@ -3,6 +3,7 @@
 // and it is arithmetic over two functions of program time - so it is asked here, under bare
 // node, where every input can be moved one at a time.
 
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { moshFramesBack, moshRefreshes } from '../web/mosh-pass.js';
@@ -69,4 +70,20 @@ test('the walk and the loop ask the same question, so a moved period moves both'
   const at = 5.2 - back.frames / FPS;
   assert.ok(moshRefreshes(at - 1 / FPS, stepped(at - 1 / FPS), at, stepped(at)),
     'and that frame is one the loop would have refreshed on');
+});
+
+test('non-cycling mosh has an infinite period and walks back to the first live frame', () => {
+  assert.equal(moshRefreshes(4.9, Infinity, 5.0, Infinity), false);
+  assert.equal(moshRefreshes(4.9, 1.2, 5.0, Infinity), false);
+  assert.equal(moshRefreshes(4.9, Infinity, 5.0, 1.2), true);
+  const upAtThree = (t) => (t >= 3 ? 1 : 0);
+  assert.deepEqual(moshFramesBack(4.5, FPS, upAtThree, period(Infinity), CEILING),
+    { frames: 45, covered: true });
+});
+
+test('datamosh manifest declares cycleRefresh as the cycling gate on mosh', () => {
+  const manifest = JSON.parse(
+    readFileSync(new URL('../effects-builtin/datamosh/manifest.json', import.meta.url), 'utf8'),
+  );
+  assert.equal(manifest.params?.cycleRefresh?.bind?.cycles, true);
 });

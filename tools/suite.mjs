@@ -49,7 +49,7 @@ const SELF_SPAWNING = [
   { name: 'jobs-check', ports: [8231, 8232] },
   { name: 'effect-check', ports: [8281] },
   { name: 'audio-check', ports: [8196] },
-  { name: 'library-check', ports: range(8210, 8227) },
+  { name: 'library-check', ports: range(8210, 8229) },
 ];
 const ON_ONE_SERVER = [
   { name: 'registry-check' },
@@ -70,6 +70,7 @@ const LEFT_OUT = {
   'hd-encoder-check': 'compiles and runs native code against TurboJPEG',
   'grabber-stdin-check': 'builds the grabber against a fake sensor and runs it',
   'decoder-check': 'needs vendor/prefix and the built grabber',
+  'grabber-args-check': 'needs vendor/prefix and the built grabber',
   'registration-check': 'needs a corpus from grabber --dump-corpus',
 };
 
@@ -184,7 +185,7 @@ async function startServer() {
   server = spawn(process.execPath, ['server/index.js', '--port', String(PORT), '--standby-after', '0',
     '--grabber', `${process.execPath} tools/fake-grabber.mjs --hd`,
     '--projects', store('projects'), '--presets', store('presets'), '--effects', store('effects'),
-    '--deliverables', store('deliverables'), '--jobs', store('jobs')],
+    '--deliverables', store('deliverables'), '--jobs', store('jobs'), '--audio', store('audio')],
   { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'] });
   const log = [];
   server.stdout.on('data', (c) => log.push(c.toString()));

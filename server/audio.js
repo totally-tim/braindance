@@ -4,7 +4,7 @@ import { createReadStream, constants } from 'node:fs';
 import { link, mkdir, mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
-import { validAudioHash, AUDIO_RATE, AUDIO_SECONDS, AUDIO_UPLOAD_BYTES, readAudioWav } from '../web/audio-source.js';
+import { validAudioHash, AUDIO_RATE, AUDIO_SECONDS, AUDIO_UPLOAD_BYTES, readAudioWavHeader } from '../web/audio-source.js';
 import { ffmpegBinary, killRefusal } from './export.js';
 
 const digest = (bytes) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
@@ -23,9 +23,13 @@ export class AudioStore {
     this.running = null;
   }
 
-  async read(hash) {
+  pathFor(hash) {
     if (!validAudioHash(hash)) throw new Error('invalid audio content hash');
-    const file = await open(join(this.root, `${hash.slice(7)}.wav`), constants.O_RDONLY | constants.O_NOFOLLOW);
+    return join(this.root, `${hash.slice(7)}.wav`);
+  }
+
+  async read(hash) {
+    const file = await open(this.pathFor(hash), constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
       const stat = await file.stat();
       if (!stat.isFile() || stat.size > AUDIO_SECONDS * AUDIO_RATE * 4 + 4096) throw new Error('audio asset is not a bounded WAV file');
@@ -68,13 +72,14 @@ export class AudioStore {
         await file.writeFile(chunks);
       } finally { await file.close(); }
       const output = join(scratch, 'audio.wav');
+      const ffmpeg = ffmpegBinary({ purpose: 'decode audio' });
       await new Promise((resolve, reject) => {
         // With no await between this and the spawn, a stop either finds the decoder or prevents it.
         if (this.stopped) {
           reject(new Error('the server stopped before the audio was decoded'));
           return;
         }
-        const child = spawn(ffmpegBinary(), [
+        const child = spawn(ffmpeg, [
           '-hide_banner', '-nostdin', '-loglevel', 'error', '-protocol_whitelist', 'pipe', '-i', 'pipe:0',
           '-map', '0:a:0', '-vn', '-t', String(AUDIO_SECONDS + 0.01), '-ac', '2', '-ar', String(AUDIO_RATE),
           '-c:a', 'pcm_s16le', '-map_metadata', '-1', '-fflags', '+bitexact', '-flags:a', '+bitexact', output,
@@ -96,7 +101,7 @@ export class AudioStore {
         pipeline(createReadStream(input), child.stdin).catch(() => { /* Decoder refusal is reported on close. */ });
       });
       const bytes = await readFile(output);
-      const { duration } = readAudioWav(bytes);
+      const { duration } = readAudioWavHeader(bytes);
       const hash = digest(bytes);
       try {
         // Publish the complete file atomically; a failed write must not occupy its content hash.

@@ -179,7 +179,9 @@ export function pollRecordState(saw, believed = null) {
   const run = async () => {
     let state;
     try {
-      state = await (await fetch('/record/state')).json();
+      const res = await fetch('/record/state');
+      if (res.ok === false) return;
+      state = await res.json();
     } catch {
       // A server that went away is the status line's problem, not this one's, and a
       // poll that stopped on the first failed fetch would never notice it come back.

@@ -16,7 +16,7 @@ const args = process.argv.slice(2);
 const at = (name) => args[args.indexOf(name) + 1];
 const mode = process.env.STUB_MODE;
 const readyText = (port) => '[server] ready ' + JSON.stringify({
-  url: 'http://127.0.0.1:' + port + '/', pid: process.pid, argv: args,
+  url: 'http://127.0.0.1:' + port + '/', pid: process.pid, argv: args, path: process.env.PATH,
 });
 if (mode === 'dies-early') {
   console.error('listen EADDRINUSE: address already in use');

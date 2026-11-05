@@ -19,8 +19,19 @@ async function main() {
         ...(method === 'GET' ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
       });
     } catch (err) { throw Object.assign(new Error(`no server answered at ${command.url}: ${err.message}`), { exit: 2 }); }
-    const data = await res.json();
-    if (!res.ok) throw Object.assign(new Error(data.error ?? `HTTP ${res.status}`), { exit: 1 });
+    const text = await res.text();
+    let data = null;
+    let parsed = false;
+    try { data = JSON.parse(text); parsed = true; } catch {}
+    if (!res.ok) {
+      const detail = parsed && typeof data?.error === 'string' && data.error
+        ? data.error
+        : `HTTP ${res.status}`;
+      throw Object.assign(new Error(detail), { exit: 1 });
+    }
+    if (!parsed) {
+      throw Object.assign(new Error(`non-JSON response from ${command.url}${route}`), { exit: 2 });
+    }
     return data;
   };
   try {

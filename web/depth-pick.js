@@ -31,25 +31,35 @@ export const PICK_TOLERANCE_M = 0.15;
 
 /** Returns the camera distance to undisplaced depth under a stage point, or null. */
 export function pickDepth({
-  depth, focal, center, tilt, camera, stage, x, y,
+  depth, focal, center, tilt, worldMatrix = null, camera, stage, x, y,
   croppedOut = () => false,
   radiusPx = PICK_RADIUS_PX,
   stride = PICK_STRIDE,
   tolerance = PICK_TOLERANCE_M,
 }) {
-  const hit = sweep({ depth, focal, center, tilt, camera, stage, x, y, croppedOut, radiusPx, stride, tolerance });
+  const hit = sweep({
+    depth, focal, center, tilt, worldMatrix, camera, stage, x, y,
+    croppedOut, radiusPx, stride, tolerance,
+  });
   if (hit || stride === 1) return hit;
   // Retry every texel because the projected stage point has no cheap texel-space inverse.
-  return sweep({ depth, focal, center, tilt, camera, stage, x, y, croppedOut, radiusPx, stride: 1, tolerance });
+  return sweep({
+    depth, focal, center, tilt, worldMatrix, camera, stage, x, y,
+    croppedOut, radiusPx, stride: 1, tolerance,
+  });
 }
 
-function sweep({ depth, focal, center, tilt, camera, stage, x, y, croppedOut, radiusPx, stride, tolerance }) {
+function sweep({
+  depth, focal, center, tilt, worldMatrix, camera, stage, x, y,
+  croppedOut, radiusPx, stride, tolerance,
+}) {
   const { x: fx, y: fy } = focal;
   const { x: cx, y: cy } = center;
-  // Fold tilt, view and projection together before the inner loop.
+  // Fold placement, tilt, view and projection together before the inner loop.
   camera.updateMatrixWorld();
+  const model = worldMatrix ?? tiltMatrix.makeRotationFromQuaternion(tilt);
   viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
-    .multiply(tiltMatrix.makeRotationFromQuaternion(tilt));
+    .multiply(model);
   const radius2 = radiusPx * radiusPx;
   const eye = camera.position;
   const candidates = [];
@@ -60,7 +70,7 @@ function sweep({ depth, focal, center, tilt, camera, stage, x, y, croppedOut, ra
       if (z === 0) continue;
       // A press must not pivot on geometry the renderer discarded.
       if (croppedOut(scratch.x, scratch.y, z)) continue;
-      scratchWorld.copy(scratch).applyQuaternion(tilt);
+      scratchWorld.copy(scratch).applyMatrix4(model);
       scratch.applyMatrix4(viewProjection);
       // The unit-cube z test also rejects points behind the camera after division by w.
       if (scratch.z < -1 || scratch.z > 1) continue;

@@ -209,8 +209,8 @@ they are.
 Stage 2 lasts as long as `library-check`, and `editor-check` and `preview-check` are most of stage
 3.
 
-It leaves out `hd-encoder-check` and `grabber-stdin-check`, which compile native code, `decoder-check`
-and `registration-check`, which need a built library or a corpus, `desktop-check`, which opens Electron
+It leaves out `hd-encoder-check` and `grabber-stdin-check`, which compile native code, `decoder-check`,
+`grabber-args-check` and `registration-check`, which need a built library or a corpus, `desktop-check`, which opens Electron
 windows on the display, and `sweep-all`, which runs mutations. A `*-check.mjs` it
 neither runs nor leaves out by name comes back DID NOT RUN, so a new tool is placed in a stage or
 named as left out.
@@ -1078,6 +1078,8 @@ exits 1. Each mutation runs the part it names: reader, writer or stream.
   end-of-file rows stay green.
 - **`stop-matches-a-prefix`** — any line that begins `stop` stops the run, and the near-miss row
   fails.
+- **`blocking-stdin-waits`**: `poll` is skipped before reading a blocking stdin, and the
+  blocking-stdin rows fail when the timer interrupts `read`.
 - **`cut-message-leaves-the-output-open`** — a write that gave up part-way no longer closes the
   output to the next writer, and the cut rows find its bytes after the cut, where the parser
   desyncs.

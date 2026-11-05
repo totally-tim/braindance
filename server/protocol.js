@@ -64,23 +64,75 @@ export const MAX_PAYLOAD_BYTES = 8 * 1024 * 1024;
  * Reassembles whole messages from arbitrary chunk boundaries: a 500KB frame is always
  * split across many `data` events, so one chunk never equals one frame.
  */
+const EMPTY_BUF = Buffer.alloc(0);
+
 export class MessageParser {
   constructor() {
-    this.buf = Buffer.alloc(0);
+    this.chunks = [];
+    this.buffered = 0;
+  }
+
+  get buf() {
+    if (this.buffered === 0) return EMPTY_BUF;
+    return this.chunks.length === 1 ? this.chunks[0] : Buffer.concat(this.chunks, this.buffered);
+  }
+
+  #peekUInt32LE(offset) {
+    let pos = offset;
+    for (let i = 0; i < this.chunks.length; i++) {
+      const c = this.chunks[i];
+      if (pos + 4 <= c.length) return c.readUInt32LE(pos);
+      if (pos < c.length) {
+        const scratch = Buffer.allocUnsafe(4);
+        let written = 0;
+        let ci = i;
+        let co = pos;
+        while (written < 4) {
+          const cur = this.chunks[ci];
+          const take = Math.min(4 - written, cur.length - co);
+          cur.copy(scratch, written, co, co + take);
+          written += take;
+          ci++;
+          co = 0;
+        }
+        return scratch.readUInt32LE(0);
+      }
+      pos -= c.length;
+    }
+    return 0;
   }
 
   /** @returns {Array<{type: number, payload: Buffer, raw: Buffer}>} */
   push(chunk) {
-    this.buf = this.buf.length === 0 ? chunk : Buffer.concat([this.buf, chunk]);
+    if (!chunk || chunk.length === 0) return [];
+    this.chunks.push(chunk);
+    this.buffered += chunk.length;
+    if (this.buffered < HEADER_BYTES) return [];
+
+    const firstMagic = this.#peekUInt32LE(0);
+    if (firstMagic !== MAGIC) {
+      throw new Error(`stream desync: expected magic KNCT, got 0x${firstMagic.toString(16)}`);
+    }
+    const firstLen = this.#peekUInt32LE(8);
+    if (firstLen > MAX_PAYLOAD_BYTES) {
+      throw new Error(
+        `a message declares ${firstLen} payload bytes, past the ${MAX_PAYLOAD_BYTES} this format allows: `
+        + 'refusing rather than buffering toward it',
+      );
+    }
+    if (this.buffered < HEADER_BYTES + firstLen) return [];
+
+    const buf = this.chunks.length === 1 ? this.chunks[0] : Buffer.concat(this.chunks, this.buffered);
+    let offset = 0;
     const out = [];
 
-    while (this.buf.length >= HEADER_BYTES) {
-      const magic = this.buf.readUInt32LE(0);
+    while (buf.length - offset >= HEADER_BYTES) {
+      const magic = buf.readUInt32LE(offset);
       if (magic !== MAGIC) {
         throw new Error(`stream desync: expected magic KNCT, got 0x${magic.toString(16)}`);
       }
-      const type = this.buf.readUInt32LE(4);
-      const len = this.buf.readUInt32LE(8);
+      const type = buf.readUInt32LE(offset + 4);
+      const len = buf.readUInt32LE(offset + 8);
       // Refused before a byte of it is buffered: the loop below waits for `total` and
       // concatenates every chunk, so a declared 0xffffffff grows this process toward 4 GiB.
       if (len > MAX_PAYLOAD_BYTES) {
@@ -90,14 +142,34 @@ export class MessageParser {
         );
       }
       const total = HEADER_BYTES + len;
-      if (this.buf.length < total) break; // wait for the rest
+      if (buf.length - offset < total) break; // wait for the rest
 
+      const start = offset;
+      const end = offset + total;
       out.push({
         type,
-        payload: this.buf.subarray(HEADER_BYTES, total),
-        raw: this.buf.subarray(0, total),
+        payload: buf.subarray(start + HEADER_BYTES, end),
+        raw: buf.subarray(start, end),
       });
-      this.buf = this.buf.subarray(total);
+      offset = end;
+    }
+
+    const rem = buf.length - offset;
+    if (rem === 0) {
+      this.chunks = [];
+      this.buffered = 0;
+    } else {
+      // Copy small trailing partials when slicing out of a much larger slab so a partial header
+      // cannot keep a multi-megabyte pipe buffer alive across idle periods.
+      const tail = buf.subarray(offset);
+      if (tail.buffer.byteLength > Math.max(16 * 1024, rem * 4)) {
+        const copy = Buffer.allocUnsafeSlow(rem);
+        tail.copy(copy);
+        this.chunks = [copy];
+      } else {
+        this.chunks = [tail];
+      }
+      this.buffered = rem;
     }
     return out;
   }

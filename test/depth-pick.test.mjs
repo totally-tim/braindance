@@ -228,3 +228,23 @@ test('a press has company under it, which is what every rule about outvoting a s
     `${hit.cluster} samples in the winning cluster from ${hit.candidates} candidates, at a `
     + `${PICK_RADIUS_PX}px radius and stride ${PICK_STRIDE} - a lone candidate cannot be outvoted`);
 });
+
+test('the pick honours a clip placed and rotated in the room through worldMatrix', () => {
+  const placement = new THREE.Group();
+  placement.position.set(1.4, -0.3, -2.5);
+  placement.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -0.25);
+  const levelGroup = new THREE.Group();
+  levelGroup.quaternion.setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.15);
+  placement.add(levelGroup);
+  levelGroup.updateWorldMatrix(true, false);
+
+  const worldBox = new THREE.Vector3().fromArray(
+    pointAt((BOX.col0 + BOX.col1) / 2, (BOX.row0 + BOX.row1) / 2, 1.0),
+  ).applyMatrix4(levelGroup.matrixWorld);
+  const p = projectThrough(worldBox.toArray(), camera, stage);
+  assert.ok(p, 'the placed box projected to nothing');
+  const hit = pick(scene(), p, { worldMatrix: levelGroup.matrixWorld });
+  assert.ok(hit, 'nothing was under a press aimed at where worldMatrix puts the box');
+  const expected = worldBox.distanceTo(camera.position);
+  assert.ok(Math.abs(hit.distance - expected) < 0.02, `${hit.distance} against ${expected}`);
+});

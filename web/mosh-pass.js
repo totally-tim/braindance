@@ -35,15 +35,34 @@ export class MoshPass extends Pass {
       depthTest: false,
       depthWrite: false,
     });
+    this._width = 1;
+    this._height = 1;
+    this._allocated = false;
     const target = () => new THREE.WebGLRenderTarget(1, 1, {
       magFilter: THREE.NearestFilter,
       minFilter: THREE.NearestFilter,
       type,
+      depthBuffer: false,
+      stencilBuffer: false,
     });
     this.comp = target();
     this.old = target();
     this.quad = new FullScreenQuad(this.material);
     this.copyQuad = new FullScreenQuad(this.copyMaterial);
+  }
+
+  get enabled() {
+    return this._enabled ?? true;
+  }
+
+  set enabled(value) {
+    const on = Boolean(value);
+    this._enabled = on;
+    if (!on && this._allocated) {
+      this._allocated = false;
+      this.comp.setSize(1, 1);
+      this.old.setSize(1, 1);
+    }
   }
 
   /** The two targets the history lives in, so a reset can clear them by name rather than by index. */
@@ -52,6 +71,11 @@ export class MoshPass extends Pass {
   }
 
   render(renderer, writeBuffer, readBuffer) {
+    if (!this._allocated) {
+      this._allocated = true;
+      this.comp.setSize(this._width, this._height);
+      this.old.setSize(this._width, this._height);
+    }
     this.uniforms.tNew.value = readBuffer.texture;
     this.uniforms.tOld.value = this.old.texture;
 
@@ -73,8 +97,12 @@ export class MoshPass extends Pass {
   }
 
   setSize(width, height) {
-    this.comp.setSize(width, height);
-    this.old.setSize(width, height);
+    this._width = width;
+    this._height = height;
+    if (this._allocated) {
+      this.comp.setSize(width, height);
+      this.old.setSize(width, height);
+    }
   }
 
   dispose() {
@@ -102,6 +130,8 @@ export class MoshPass extends Pass {
  */
 export const moshRefreshes = (prevSec, prevPeriod, sec, period) => {
   if (!(prevPeriod > 0) || !(period > 0)) return true;
+  if (!Number.isFinite(period)) return false;
+  if (!Number.isFinite(prevPeriod)) return true;
   return Math.floor(prevSec / prevPeriod) !== Math.floor(sec / period);
 };
 

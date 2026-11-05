@@ -21,6 +21,7 @@ export function createAudioPanel({ getClip, targets, owners, selectedOwner, chan
   const inputs = new Map();
   let busy = false;
   let chosenOwner;
+  const queue = [];
   const settingRows = [
     ['low', 'Low', -60, 24, 1, 'dB'],
     ['mid', 'Mid', -60, 24, 1, 'dB'],
@@ -31,14 +32,44 @@ export function createAudioPanel({ getClip, targets, owners, selectedOwner, chan
     ['attack', 'Attack', 0, 2000, 1, 'ms'],
     ['release', 'Release', 0, 2000, 1, 'ms'],
   ];
-  const run = async (work) => {
-    if (busy) return;
+  const lockControls = (lockAll) => {
+    const locked = lockAll
+      ? root.querySelectorAll('button, input, select')
+      : root.querySelectorAll('button, select, input:not([type="range"])');
+    locked.forEach((el) => { if (el) el.disabled = true; });
+  };
+  const run = async (work, { lockAll = false } = {}) => {
+    if (busy) {
+      queue.push({ work, lockAll });
+      if (lockAll) lockControls(true);
+      return;
+    }
     busy = true;
-    root.querySelectorAll('button, input, select').forEach((el) => { el.disabled = true; });
-    note.textContent = 'Analyzing audio…';
-    try { await work(); note.textContent = ''; }
-    catch (err) { note.textContent = err.message; }
-    finally { busy = false; paint(); }
+    queue.push({ work, lockAll });
+    try {
+      while (queue.length) {
+        const next = queue.shift();
+        lockControls(next.lockAll);
+        note.textContent = 'Analyzing audio…';
+        try { await next.work(); note.textContent = ''; }
+        catch (err) { note.textContent = err.message; }
+      }
+    } finally { busy = false; paint(); }
+  };
+  const clampPair = (changedKey) => {
+    const floorEntry = inputs.get('floor');
+    const ceilingEntry = inputs.get('ceiling');
+    if (!floorEntry || !ceilingEntry) return;
+    const floorVal = Number(floorEntry.input.value);
+    const ceilingVal = Number(ceilingEntry.input.value);
+    if (floorVal < ceilingVal) return;
+    if (changedKey === 'floor') {
+      ceilingEntry.input.value = String(Math.min(0, floorVal + 1));
+      ceilingEntry.show();
+    } else if (changedKey === 'ceiling') {
+      floorEntry.input.value = String(Math.max(-96, ceilingVal - 1));
+      floorEntry.show();
+    }
   };
   for (const [key, label, min, max, step, unit] of settingRows) {
     const row = document.createElement('label');
@@ -50,8 +81,27 @@ export function createAudioPanel({ getClip, targets, owners, selectedOwner, chan
     input.min = min; input.max = max; input.step = step;
     const out = document.createElement('output');
     const show = () => { out.value = `${input.value} ${unit}`; };
-    input.addEventListener('input', show);
-    input.addEventListener('change', () => run(() => change({ conditioning: { ...getClip().conditioning, [key]: Number(input.value) } })));
+    input.addEventListener('input', () => {
+      clampPair(key);
+      show();
+    });
+    input.addEventListener('change', () => {
+      clampPair(key);
+      show();
+      const value = Number(input.value);
+      const floorValue = key === 'floor' || key === 'ceiling' ? Number(inputs.get('floor').input.value) : null;
+      const ceilingValue = key === 'floor' || key === 'ceiling' ? Number(inputs.get('ceiling').input.value) : null;
+      run(() => {
+        const clip = getClip();
+        if (!clip) return;
+        const nextConditioning = { ...clip.conditioning, [key]: value };
+        if (floorValue !== null) {
+          nextConditioning.floor = floorValue;
+          nextConditioning.ceiling = ceilingValue;
+        }
+        return change({ conditioning: nextConditioning });
+      });
+    });
     inputs.set(key, { input, show });
     row.append(text, input, out);
     const group = ['low', 'mid', 'high'].includes(key) ? 'audioEqBands'
@@ -67,9 +117,9 @@ export function createAudioPanel({ getClip, targets, owners, selectedOwner, chan
       if (!picked.size) throw new Error('Audio file is empty');
       if (picked.size > AUDIO_UPLOAD_BYTES) throw new Error('Audio files must be 64 MiB or smaller');
       await importFile(picked);
-    });
+    }, { lockAll: true });
   });
-  document.getElementById('audioRemove').addEventListener('click', () => run(remove));
+  document.getElementById('audioRemove').addEventListener('click', () => run(remove, { lockAll: true }));
   start.addEventListener('change', () => run(() => {
     if (start.value === '') throw new Error('Audio start needs a number');
     return change({ start: Number(start.value) });
@@ -79,6 +129,13 @@ export function createAudioPanel({ getClip, targets, owners, selectedOwner, chan
   });
   owner.addEventListener('change', () => {
     chosenOwner = JSON.parse(owner.value);
+    const prior = getClip()?.target;
+    const compatible = prior ? targets().find((t) => t.clip === chosenOwner && t.param === prior.param) : null;
+    if (compatible) {
+      const clampedDepth = Math.max(-(compatible.max - compatible.min), Math.min(compatible.max - compatible.min, prior.depth));
+      run(() => change({ target: { clip: compatible.clip, param: compatible.param, depth: clampedDepth } }));
+      return;
+    }
     selectTarget(null);
   });
   effect.addEventListener('change', () => selectTarget(targets().find((t) => t.clip === chosenOwner && t.effect === effect.value)));
@@ -108,7 +165,8 @@ export function createAudioPanel({ getClip, targets, owners, selectedOwner, chan
     effect.disabled = !effects.length;
     const selected = scoped.find((item) => item.param === clip.target?.param);
     effect.value = selected?.effect ?? '';
-    document.getElementById('audioMappingTitle').textContent = selected ? `${chosenOwner ?? 'Project'} · ${selected.effectLabel} · ${selected.label}` : 'Choose effect';
+    const ownerLabel = availableOwners.find((item) => item.id === chosenOwner)?.label ?? (chosenOwner ?? 'Project');
+    document.getElementById('audioMappingTitle').textContent = selected ? `${ownerLabel} · ${selected.effectLabel} · ${selected.label}` : 'Choose effect';
     target.replaceChildren(...scoped.filter((item) => item.effect === selected?.effect).map((item) => new Option(item.label, item.param)));
     target.value = selected?.param ?? '';
     target.disabled = !selected;

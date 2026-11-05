@@ -7,7 +7,7 @@
 //   tools/fake-grabber.mjs --hd --key          # type 3 and the keyed depth beside it
 //   tools/fake-grabber.mjs --hd --hd-counter   # every type 3 frame numbered in a code band
 
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, closeSync, openSync, readSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { MessageParser, TYPE_HELLO, TYPE_FRAME, TYPE_COLOR, TYPE_KEY, encodeMessage } from '../server/protocol.js';
@@ -119,9 +119,21 @@ if (HD_COUNTER && !HD) {
 const parser = new MessageParser();
 const frames = [];
 let sourceHello = null;
-for (const msg of parser.push(readFileSync(SOURCE))) {
-  if (msg.type === TYPE_HELLO) sourceHello ??= JSON.parse(msg.payload.toString('utf8'));
-  else if (msg.type === TYPE_FRAME) frames.push(Buffer.from(msg.payload));
+{
+  const fd = openSync(SOURCE, 'r');
+  try {
+    for (;;) {
+      const chunk = Buffer.allocUnsafe(4 * 1024 * 1024);
+      const got = readSync(fd, chunk, 0, chunk.length, null);
+      if (got === 0) break;
+      for (const msg of parser.push(got === chunk.length ? chunk : chunk.subarray(0, got))) {
+        if (msg.type === TYPE_HELLO) sourceHello ??= JSON.parse(msg.payload.toString('utf8'));
+        else if (msg.type === TYPE_FRAME) frames.push(Buffer.from(msg.payload));
+      }
+    }
+  } finally {
+    closeSync(fd);
+  }
 }
 if (!sourceHello || frames.length === 0) {
   process.stderr.write(`[fake-grabber] ${SOURCE} carries no hello or no frames\n`);
@@ -247,15 +259,22 @@ if (!COLOR) {
 let hdOn = false;
 let keyOn = false;
 
+const STUBBORN = given('--stubborn');
+
 // One command per line on stdin. `low-light` is accepted and ignored because there is no device
 // here to apply it to, and refusing it would reject a command the server legitimately sends.
 let stdinPending = '';
 process.stdin.on('data', (chunk) => {
   stdinPending += chunk.toString('utf8');
+  let offset = 0;
   let nl;
-  while ((nl = stdinPending.indexOf('\n')) !== -1) {
-    const line = stdinPending.slice(0, nl).replace(/\r$/, '');
-    stdinPending = stdinPending.slice(nl + 1);
+  while ((nl = stdinPending.indexOf('\n', offset)) !== -1) {
+    const line = stdinPending.slice(offset, nl).replace(/\r$/, '');
+    offset = nl + 1;
+    if (line === 'stop') {
+      if (!STUBBORN) process.stdout.write('', () => process.exit(0));
+      continue;
+    }
     if (line === 'hd-color on' || line === 'hd-color off') {
       // Mirrors `requestHdColor`, which never sends either command to a colour-off grabber: type 3
       // is the colour camera's own picture, so answering would manufacture the thing
@@ -286,6 +305,10 @@ process.stdin.on('data', (chunk) => {
       process.stderr.write(`[fake-grabber] key ${keyOn ? 'on' : 'off'}\n`);
     }
   }
+  if (offset > 0) stdinPending = stdinPending.slice(offset);
+});
+process.stdin.on('end', () => {
+  if (!STUBBORN) process.stdout.write('', () => process.exit(0));
 });
 process.stdin.resume();
 

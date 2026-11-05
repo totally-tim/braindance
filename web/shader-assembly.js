@@ -202,7 +202,7 @@ export function assembleShaders(spines, packages) {
     const claimed = new Set();
     for (const c of manifest.chunks ?? []) {
       const text = chunkText(pkg, c.file);
-      const claim = `${c.slot !== undefined ? 'slot' : 'stage'} ${c.slot ?? c.stage} ${c.file}`;
+      const claim = `${c.slot !== undefined ? 'slot' : 'stage'} ${c.slot ?? c.stage}\0${c.file}`;
       if (claimed.has(claim)) {
         throw new Error(`effect ${pkg.id}'s ${c.file} is spliced into ${JSON.stringify(c.slot ?? c.stage)} twice - `
           + 'a manifest may point two joints at one file, and one joint at one file twice is the same text '

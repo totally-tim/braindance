@@ -148,7 +148,12 @@ export function buildPostChain(gradeProgram, moshProgram) {
       throw new Error('afterimage internals moved: its history targets can no longer be typed');
     }
     afterimage[key].dispose();
-    afterimage[key] = new THREE.WebGLRenderTarget(1, 1, { magFilter: THREE.NearestFilter, type });
+    afterimage[key] = new THREE.WebGLRenderTarget(1, 1, {
+      magFilter: THREE.NearestFilter,
+      type,
+      depthBuffer: false,
+      stencilBuffer: false,
+    });
   }
   composer.addPass(afterimage);
 

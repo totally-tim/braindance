@@ -56,3 +56,24 @@ test('a cadence that arrives while a tick is still being handled asks nothing', 
   await settle();
   assert.equal(asked.length, 3, 'and the cadence resumes once the handler returns');
 });
+
+test('a non-ok HTTP status is ignored without calling the handler or advancing the fingerprint', async (t) => {
+  const clock = fakeClock(t);
+  let reply = { ok: true, json: async () => ({ writingIds: ['take-1'] }) };
+  t.mock.method(globalThis, 'fetch', async () => reply);
+  const seen = [];
+  pollRecordState((state, changed) => { seen.push({ state, changed }); });
+  await settle();
+  assert.equal(seen.length, 1);
+
+  reply = { ok: false, status: 502, json: async () => ({ error: 'bad gateway' }) };
+  clock.tick(EVERY);
+  await settle();
+  assert.equal(seen.length, 1, 'an error body is not mistaken for an idle recorder');
+
+  reply = { ok: true, json: async () => ({ writingIds: [] }) };
+  clock.tick(EVERY);
+  await settle();
+  assert.equal(seen.length, 2);
+  assert.equal(seen[1].changed, true, 'the transition after the error still reports changed');
+});

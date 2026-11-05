@@ -144,8 +144,8 @@ whose decompressor never opened logs the reason once and then delivers no frame 
 grabber's colour count stays at zero; one that fails on a single frame logs and decodes the next.
 VideoToolbox discards the status of its session and of every frame, logs none of it, and delivers
 the frame anyway with `status` 0 and no pixel buffer behind `Frame::data`. `Registration::apply`
-checks the dimensions and not the pointer, so a VideoToolbox decode failure is a null read rather
-than a missing frame. That is the failure mode of the decoder Apple builds default to.
+checks the dimensions and not the pointer, so `native/grabber.cpp` checks `data == nullptr` beside
+`status != 0`, counts the failed frame under `bad colour` and drops it before registration.
 
 The grabber picks a decoder with `--color-decoder` and defaults from `defaultColorDecoder()`,
 so one build cannot disagree with itself about which decoder it will use.

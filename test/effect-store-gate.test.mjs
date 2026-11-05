@@ -190,3 +190,14 @@ test('a fork reading a name only another fork declares is promoted on the second
       'and the store is serving both of them as user packages');
   });
 });
+
+test('a half-authored directory missing manifest.json does not crash list() or read()', () => {
+  withStore(() => {}, (store, dir) => {
+    mkdirSync(join(dir, 'halfwritten'), { recursive: true });
+    mkdirSync(join(dir, 'rain'), { recursive: true });
+    assert.doesNotThrow(() => store.list());
+    assert.equal(store.read('halfwritten'), null);
+    assert.equal(store.list().some((e) => e.id === 'halfwritten'), false);
+    assert.equal(store.read('rain')?.builtin, true);
+  });
+});

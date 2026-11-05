@@ -177,3 +177,18 @@ test('a take that fails mid-write says its marks were lost, and nothing is left 
     assert.equal(recorder.take, null);
   });
 });
+
+test('closeAll disarms an armed recorder and persists droppedColour even when dropped is zero', async () => {
+  await inTempDir(async (dir) => {
+    const recorder = new Recorder({ dir });
+    await recorder.start(HELLO);
+    assert.equal(recorder.state.armed, true);
+    recorder.write(frame(0, 64));
+    recorder.take.droppedColour = 2;
+    await recorder.closeAll('server stopped');
+    assert.equal(recorder.state.armed, false, 'closeAll disarmed the recorder');
+    const marks = await markLabels(dir);
+    assert.match(marks, /"kind":"drop"/, 'a colour-only drop still writes a drop record');
+    assert.match(marks, /"droppedColour":2/);
+  });
+});

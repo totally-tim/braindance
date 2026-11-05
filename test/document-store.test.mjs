@@ -270,3 +270,52 @@ test('a refused write does not refuse the writes queued behind it', async () => 
   const now = await s.read('Queued');
   assert.equal((await s.write('Queued', { clips: ['d'] }, now.rev)).bytes > 0, true);
 });
+
+test('case-variant names share one lock, exact routes leave capitalised names open, and invalid JSON is surfaced', async () => {
+  const s = await store({ builtin: true });
+  await mkdir(s.builtinDir, { recursive: true });
+  s.reserve([['all', '/projects/all']]);
+  assert.match(await refused(() => s.write('all', { clips: [] }, ABSENT_REV)), /is a route of this server/);
+  // An existing or capitalised `All` does not collide with lowercase `/projects/all`.
+  const cap = await s.write('All', { clips: ['ok'] }, ABSENT_REV);
+  assert.equal((await s.read('All')).rev, cap.rev);
+  assert.ok((await s.list()).some((d) => d.name === 'All'));
+  await s.remove('All', cap.rev);
+
+  // Two creates differing only by ASCII case cannot both pass the revision check in one tick.
+  const [a, b] = await Promise.allSettled([
+    s.write('beach', { clips: ['lower'] }, ABSENT_REV),
+    s.write('Beach', { clips: ['upper'] }, ABSENT_REV),
+  ]);
+  assert.equal([a, b].filter((r) => r.status === 'fulfilled').length, 1);
+
+  const winner = (await s.list())[0];
+  const targetCase = winner.name === 'beach' ? 'Beach' : 'beach';
+  const renamed = await s.rename(winner.name, targetCase, winner.rev);
+  assert.equal(renamed.name, targetCase);
+  assert.deepEqual((await s.list()).map((d) => d.name), [targetCase]);
+
+  // A user fork filed as `shipped` shadows a built-in `Shipped` in both `list()` and `read('Shipped')`.
+  await writeFile(join(s.builtinDir, 'Shipped.json'), `${JSON.stringify({ version: DOCUMENT_VERSIONS.project, clips: ['builtin'] }, null, 2)}\n`);
+  const shipped = await s.read('Shipped');
+  const writesBefore = s.writes;
+  const missingErr = await s.remove('Nowhere', ABSENT_REV).catch((e) => e);
+  assert.equal(missingErr.code, 'ENOENT');
+  assert.equal(s.writes, writesBefore);
+  assert.match(await refused(() => s.remove('Shipped', shipped.rev)), /this build ships/);
+  assert.equal(s.writes, writesBefore);
+
+  const forked = await s.write('shipped', { clips: ['fork'] }, shipped.rev);
+  const readUpper = await s.read('Shipped');
+  assert.equal(readUpper.builtin, false);
+  assert.deepEqual(readUpper.body.clips, ['fork']);
+  await s.remove('shipped', forked.rev);
+
+  // A corrupt project file on disk is surfaced with body: null and a reason rather than hidden.
+  await writeFile(join(s.dir, 'Broken.json'), '{ not valid json');
+  const listed = await s.list();
+  const broken = listed.find((d) => d.name === 'Broken');
+  assert.ok(broken, 'corrupt project file is present in list()');
+  assert.equal(broken.body, null);
+  assert.match(broken.reason, /JSON/i);
+});

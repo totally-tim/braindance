@@ -11,7 +11,10 @@ const listEl = document.getElementById('list');
 const noteEl = document.getElementById('note');
 const dlg = document.getElementById('confirm');
 
-const mmss = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+const mmss = (s) => {
+  const t = Math.max(0, Math.round(Number(s) || 0));
+  return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+};
 const stamp = (ms) => {
   const d = new Date(ms);
   const p = (n) => String(n).padStart(2, '0');
@@ -44,7 +47,11 @@ function layout(body) {
   });
 }
 
-const lengthOf = (spans) => spans.reduce((a, s) => Math.max(a, s.start + s.span), 0);
+const audioEndOf = (body) => (Number.isFinite(body?.audio?.start) && Number.isFinite(body?.audio?.duration)
+  ? Math.max(0, body.audio.start) + Math.max(0, body.audio.duration)
+  : 0);
+
+const lengthOf = (spans, body) => spans.reduce((a, s) => Math.max(a, s.start + s.span), audioEndOf(body));
 
 /** The clip covering a program second, or null in a gap. Returns the topmost when clips overlap. */
 function clipAt(spans, programSec) {
@@ -61,8 +68,8 @@ const missingIn = (body) => body.clips
   .map((clip) => clip.take.id);
 
 /** Why this page cannot draw a project, or null. */
-function bodyRefusal(body) {
-  if (!body || typeof body !== 'object') return 'this file does not hold an object';
+function bodyRefusal(body, reason = null) {
+  if (!body || typeof body !== 'object') return reason ?? 'this file does not hold an object';
   if (body.version !== DOCUMENT_VERSIONS.project) return versionRefusal('project', body.version);
   if (!Array.isArray(body.clips)) return 'this file carries no clips array, so it is not an edit';
   if (body.clips.some((c) => !c || typeof c !== 'object' || !usableClipRate(c.speed)
@@ -182,10 +189,10 @@ const openProject = (name) => { location.href = `/edit?project=${encodeURICompon
 
 function buildRow(project) {
   const body = project.body;
-  const refusal = bodyRefusal(body);
+  const refusal = bodyRefusal(body, project.reason ?? null);
   if (refusal) return buildUnreadableRow(project, refusal);
   const spans = layout(body);
-  const length = lengthOf(spans);
+  const length = lengthOf(spans, body);
   const missing = missingIn(body);
 
   const row = document.createElement('article');
@@ -244,6 +251,7 @@ function buildRow(project) {
   row.setAttribute('aria-label', `Open ${project.name}`);
   row.tabIndex = 0;
   row.addEventListener('keydown', (e) => {
+    if (e.target !== row) return;
     if (e.key !== 'Enter' && e.key !== ' ') return;
     e.preventDefault();
     openProject(project.name);
@@ -360,8 +368,14 @@ function attachSkim(row, spans, length) {
     if (tap) openProject(row.dataset.name);
   });
   skimEl.addEventListener('pointercancel', () => { pressX = null; dragged = false; });
-  skimEl.addEventListener('pointerleave', () => { pressX = null; });
-  barEl.addEventListener('pointerdown', (e) => fromX(e.clientX, barEl));
+  skimEl.addEventListener('pointerleave', (e) => {
+    if (skimEl.hasPointerCapture?.(e.pointerId)) return;
+    pressX = null;
+  });
+  barEl.addEventListener('pointerdown', (e) => {
+    barEl.setPointerCapture?.(e.pointerId);
+    fromX(e.clientX, barEl);
+  });
   barEl.addEventListener('pointermove', (e) => { if (e.buttons) fromX(e.clientX, barEl); });
 
   requestAnimationFrame(() => seek(0));
@@ -389,14 +403,19 @@ let refreshGeneration = 0;
 
 async function refresh() {
   const mine = ++refreshGeneration;
+  let takesError = null;
   const [listing, library] = await Promise.all([
     jsonOf('/projects/all'),
-    jsonOf('/library/all', { signal: AbortSignal.timeout(LISTING_TIMEOUT_MS) })
-      .catch(() => ({ takes: [] })),
+    jsonOf('/library/takes', { signal: AbortSignal.timeout(LISTING_TIMEOUT_MS) })
+      .catch((err) => {
+        takesError = err;
+        return { takes: [] };
+      }),
   ]);
   if (mine !== refreshGeneration) return;
   localTakes = (library.takes ?? []).filter((t) => t.state !== 'remote');
   projects = [...(listing.projects ?? [])].sort((a, b) => b.savedAt - a.savedAt);
+  if (takesError) say(`the media library could not be read: ${takesError.message}`);
   paint();
 }
 

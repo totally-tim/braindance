@@ -45,21 +45,29 @@ export const VERBS = [
 // Store editors, the render queue and its workers use document revisions, job ids or leases rather
 // than these controls.
 export const MUTATION_EXEMPTIONS = [
-  '/audio', '/capture/:id/marks', '/library/download/:id', '/library/delete/:id',
-  '/library/reclaim/:id', '/library/sync-marks/:id', '/library/rename/:id', '/library/reveal/:id',
-  '/projects/:name', '/projects/:name/rename', '/presets/:name', '/deliverables/:name',
-  '/effects/:id', '/effect-refusals', '/jobs', '/jobs/claim', '/jobs/:id/finish',
-  '/jobs/:id/heartbeat', '/jobs/:id/cancel', '/jobs/:id/requeue',
+  '/audio', '/capture/:hash/marks', '/library/download/:id', '/library/delete/:id',
+  '/library/reclaim/:id', '/library/sync-marks/:hash', '/library/rename/:id', '/library/remove-name/:id',
+  '/library/reveal/:id', '/projects/:name', '/projects/:name/rename', '/presets/:name',
+  '/deliverables/:name', '/effects/:id', '/effect-refusals', '/jobs', '/jobs/claim',
+  '/jobs/:id/finish', '/jobs/:id/heartbeat', '/jobs/:id/cancel', '/jobs/:id/requeue',
 ];
 
 export function parse(argv, env = {}) {
   let url = env.BRAINDANCE_URL || 'http://127.0.0.1:8080';
   let json = false;
   let wait = false;
+  let literal = false;
   const words = [];
   for (let i = 0; i < argv.length; i++) {
     const word = argv[i];
-    if (word === '--url') { if (!argv[i + 1]) throw new Error('--url needs a URL'); url = argv[++i]; }
+    if (literal) { words.push(word); continue; }
+    if (word === '--') literal = true;
+    else if (word === '--url') { if (!argv[i + 1]) throw new Error('--url needs a URL'); url = argv[++i]; }
+    else if (word.startsWith('--url=')) {
+      const val = word.slice('--url='.length);
+      if (!val) throw new Error('--url needs a URL');
+      url = val;
+    }
     else if (word === '--json') json = true;
     else if (word === '--wait') wait = true;
     else if (word.startsWith('--')) throw new Error(`unknown option ${word}`);
@@ -67,13 +75,15 @@ export function parse(argv, env = {}) {
   }
   const target = new URL(url);
   if (!['http:', 'https:'].includes(target.protocol)) throw new Error('--url must be HTTP or HTTPS');
+  if (target.search || target.hash) throw new Error('--url must not include query or hash');
+  const basePath = target.pathname.replace(/\/+$/, '');
   const spec = [...VERBS].sort((a, b) => b.verb.length - a.verb.length).find((row) => {
     const parts = row.verb.split(' ');
     return parts.every((part, i) => words[i] === part);
   });
   if (!spec) throw new Error('unknown command; use --help');
   if (wait && spec.verb !== 'sensor wake') throw new Error('--wait is only for sensor wake');
-  return { ...spec, body: spec.body(words.slice(spec.verb.split(' ').length)), url: target.origin, json, wait };
+  return { ...spec, body: spec.body(words.slice(spec.verb.split(' ').length)), url: target.origin + basePath, json, wait };
 }
 
 export function format(value, prefix = '') {

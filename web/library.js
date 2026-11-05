@@ -12,7 +12,10 @@ const dlg = document.getElementById('confirm');
 const noteEl = document.getElementById('note');
 const vSayEl = document.getElementById('vSay');
 
-const mmss = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+const mmss = (s) => {
+  const t = Math.max(0, Math.round(Number(s) || 0));
+  return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+};
 const gb = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${(b / 1e6).toFixed(0)} MB`);
 // A count on its way into markup: `frames` and `marks.length` reach `innerHTML`, and a
 // manifest can come from a node.
@@ -44,8 +47,8 @@ const say = (text) => {
 
 async function jsonOf(url, init) {
   const res = await fetch(url, init);
-  const body = await res.json();
-  if (body.error) throw new Error(body.error);
+  const body = await res.json().catch(() => null);
+  if (!res.ok || body?.error) throw new Error(body?.error ?? `HTTP ${res.status}`);
   return body;
 }
 
@@ -505,7 +508,11 @@ function buildTile(take) {
   // A captured pointer can end without a `pointerup` - the browser fires `pointercancel` -
   // and `pressX` left set makes the next move over this tile scrub with no button held.
   skimEl.addEventListener('pointercancel', () => { pressX = null; dragged = false; });
-  skimEl.addEventListener('pointerleave', () => { pressX = null; skim.setIndex(0); });
+  skimEl.addEventListener('pointerleave', (e) => {
+    if (skimEl.hasPointerCapture?.(e.pointerId)) return;
+    pressX = null;
+    skim.setIndex(0);
+  });
   // A role rather than a `<button>`: the poster is also the scrub surface, and a button would
   // put a native activation on the pointer path.
   skimEl.tabIndex = 0;
@@ -516,11 +523,19 @@ function buildTile(take) {
     e.preventDefault();
     openViewer(take.hash ?? take.id);
   });
-  barEl.addEventListener('pointerdown', (e) => skim.fromX(e.clientX, barEl));
+  barEl.addEventListener('pointerdown', (e) => {
+    barEl.setPointerCapture?.(e.pointerId);
+    skim.fromX(e.clientX, barEl);
+  });
+  barEl.addEventListener('pointermove', (e) => {
+    if (e.buttons) skim.fromX(e.clientX, barEl);
+  });
   requestAnimationFrame(() => skim.setIndex(0));
 
   return tile;
 }
+
+let viewerBusy = 0;
 
 /**
  * Runs one surface's action with its controls held down, and reports while it runs. `watch`
@@ -528,6 +543,7 @@ function buildTile(take) {
  * `host` is the surface the press came from, so the viewer holds its own controls down.
  */
 async function run(host, message, action, watch = null, { refresh: doRefresh = true } = {}) {
+  if (host === viewer) viewerBusy++;
   const buttons = host ? [...host.querySelectorAll('.act:not(.vclose), .mi')] : [];
   // What each control was, because reveal does not repaint and these are the same nodes.
   const was = buttons.map((b) => b.disabled);
@@ -561,13 +577,15 @@ async function run(host, message, action, watch = null, { refresh: doRefresh = t
     restore();
     throw err;
   } finally {
+    if (host === viewer) viewerBusy--;
     if (ticking) clearInterval(ticking);
   }
 }
 
 async function downloadProgress(id) {
   const res = await fetch('/library/downloads');
-  const d = (await res.json()).downloading?.find((x) => x.id === id);
+  const body = await res.json().catch(() => null);
+  const d = body?.downloading?.find((x) => x.id === id);
   if (!d) return null;
   if (d.phase === 'verifying') return `verifying ${id} — hashing ${gb(d.bytes)} to check the copy against the node`;
   const pct = d.bytes ? Math.min(100, (d.received / d.bytes) * 100) : 0;
@@ -688,7 +706,9 @@ const vTime = document.getElementById('vTime');
 const vNote = document.getElementById('vNote');
 let viewing = null;
 
-const takeByKey = (key) => library.takes.find((t) => (t.hash ?? t.id) === key) ?? null;
+const takeByKey = (key) => library.takes.find((t) => (t.hash ?? t.id) === key)
+  ?? (!String(key).startsWith('sha256:') ? library.takes.find((t) => t.id === key) : null)
+  ?? null;
 
 const shownTakes = () => library.takes.filter((t) => filter === 'all' || t.state === filter);
 
@@ -705,7 +725,9 @@ function openViewer(key) {
   const focusWas = viewer.contains(document.activeElement) ? controlKey(document.activeElement) : null;
   // Where the operator was, kept across a rebuild: `paint` re-opens the viewer on every
   // refresh, so the `setIndex(0)` below sent them back to the first frame.
-  const resumeAt = viewing && viewing.key === (take.hash ?? take.id) ? viewing.skim.index : 0;
+  const resumeAt = viewing && (viewing.key === (take.hash ?? take.id) || viewing.take.id === take.id)
+    ? viewing.skim.index
+    : 0;
   const divisor = divisorFor(take);
 
   document.getElementById('vName').textContent = take.id;
@@ -804,13 +826,18 @@ vStage.addEventListener('pointerup', () => { vPressX = null; });
 vStage.addEventListener('pointercancel', () => { vPressX = null; });
 vBar.addEventListener('pointerdown', (e) => {
   if (e.target.classList.contains('mk')) return;
+  vBar.setPointerCapture?.(e.pointerId);
+  viewing?.skim.fromX(e.clientX, vBar);
+});
+vBar.addEventListener('pointermove', (e) => {
+  if (!e.buttons) return;
   viewing?.skim.fromX(e.clientX, vBar);
 });
 
 // The viewer's keys. The step is a frame and not a fraction, which is why `createSkim`
 // counts in indices. Escape is not here - a `<dialog>` closes on it already.
 viewer.addEventListener('keydown', (e) => {
-  if (!viewing) return;
+  if (!viewing || viewerBusy > 0) return;
   const shown = shownTakes();
   const here = shown.findIndex((t) => (t.hash ?? t.id) === viewing.key);
   // A take can leave the filter while the viewer holds it open, so `here` is -1 and both
@@ -834,10 +861,17 @@ viewer.addEventListener('keydown', (e) => {
 });
 
 
+let bankedLibrary = null;
+const tileBank = new Map();
+
 function paint() {
   closeMenus();
   const shown = shownTakes();
-  for (const tile of grid.querySelectorAll('.tile')) tile.__skim?.release();
+  if (bankedLibrary !== library) {
+    for (const tile of tileBank.values()) tile.__skim?.release();
+    tileBank.clear();
+    bankedLibrary = library;
+  }
   grid.replaceChildren();
   if (shown.length === 0) {
     const empty = document.createElement('div');
@@ -847,7 +881,15 @@ function paint() {
       : `No takes are ${filter}.`;
     grid.appendChild(empty);
   }
-  for (const take of shown) grid.appendChild(buildTile(take));
+  for (const take of shown) {
+    const key = `${take.hash ?? take.id}\0${take.state}`;
+    let tile = tileBank.get(key);
+    if (!tile) {
+      tile = buildTile(take);
+      tileBank.set(key, tile);
+    }
+    grid.appendChild(tile);
+  }
 
   const total = library.takes.reduce((a, t) => a + t.durationSec, 0);
   document.getElementById('sum').innerHTML =
@@ -870,7 +912,7 @@ function paint() {
 
   if (viewing) {
     const still = takeByKey(viewing.key);
-    if (still) openViewer(viewing.key);
+    if (still) openViewer(still.hash ?? still.id);
     else {
       viewer.close();
       say('that take is no longer in the media library');

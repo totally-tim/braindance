@@ -126,8 +126,8 @@ export function writeClipRange(values, dur) {
   // upstream of here compares it against the take that is open.
   //
   // **Here rather than in those getters, and here rather than at `applyDeliverable`.**
-  // This is the only thing that can write the pair - the two marker drags, the rate
-  // rescale in `reparameteriseProgramTime`, the deliverable and the two buttons that set
+  // This is the only thing that can write the pair - the two marker drags, the preview
+  // reset in `preparePreview`, the deliverable and the two buttons that set
   // a bound from the playhead all come through it - so there is no second clamp to keep in
   // step with this one, and the writer added next year is held by existing. The markers
   // still clamp themselves at their own ends, which is a different rule: it decides where

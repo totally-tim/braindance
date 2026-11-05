@@ -83,6 +83,7 @@
 }
 .appmenu-popover[hidden] { display: none; }
 .menu-command {
+  position: relative;
   width: 100%;
   min-height: 32px;
   display: grid;

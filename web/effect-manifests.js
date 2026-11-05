@@ -134,6 +134,7 @@ export const tableFromPackages = (packages, order) => {
     if (p.bind.transform !== undefined) entry.transform = p.bind.transform;
     if (p.bind.gates !== undefined) entry.gates = p.bind.gates;
     if (p.bind.bounds !== undefined) entry.bounds = p.bind.bounds;
+    if (p.bind.cycles !== undefined) entry.cycles = p.bind.cycles;
     if (p.reading !== undefined) entry.reading = p.reading;
     if (p.under !== undefined) entry.under = `${name.slice(0, name.indexOf('.'))}.${p.under}`;
     table[name] = Object.freeze(entry);
@@ -171,7 +172,9 @@ export const withEffectGroups = (coreGroups, packages) => {
     merged.push(core);
     const here = (inserts.get(core.key) ?? []).sort((a, b) => (a.order - b.order) || (a.key < b.key ? -1 : 1));
     for (const g of here) {
-      const { after, order, ...group } = g;
+      const group = { key: g.key, label: g.label, tab: g.tab };
+      if (g.lookgroup !== undefined) group.lookgroup = g.lookgroup;
+      if (g.collapses !== undefined) group.collapses = g.collapses;
       merged.push(group);
     }
   }

@@ -6,6 +6,7 @@ import { OnDemand } from './on-demand.js';
 // Appears in the response header and between every part, and the two have to agree.
 const BOUNDARY = 'braindanceframe';
 const HOLD_MS = 45000;
+const CRLF = Buffer.from('\r\n');
 
 // Drop-to-latest. MJPEG has no divisor or stride to negotiate, so this is the webcam's only
 // backpressure control - a queue would push back through the grabber's pipe and cost the take.
@@ -19,6 +20,7 @@ export class Webcam {
   constructor({ request, recording = () => false }) {
     this.subscribers = new Set();
     this.latest = null;
+    this.latestPart = null;
     this.latestAt = 0;
     this.demand = new OnDemand({ request, count: () => this.subscribers.size + (recording() ? 1 : 0) });
     // Why the picture is not available, or null when it is; served to whoever asked. It asks
@@ -68,6 +70,7 @@ export class Webcam {
   /** A colour frame off the wire. Held, not queued: a subscriber that missed one is not owed it. */
   offer(jpeg, timestampMs) {
     this.latest = jpeg;
+    this.latestPart = null;
     this.latestAt = timestampMs;
     for (const s of this.subscribers) this.#push(s);
   }
@@ -76,11 +79,13 @@ export class Webcam {
     this.unavailable = reason;
     this.transient = transient;
     for (const sub of this.subscribers) {
+      if (!transient) { clearTimeout(sub.hold); sub.hold = null; }
       if (!transient) sub.res.end(reason);
       else this.#hold(sub);
     }
     // Dropped, so a source reconnecting during an outage is not painted a still of a dead sensor.
     this.latest = null;
+    this.latestPart = null;
   }
 
   setAvailable() {
@@ -149,12 +154,14 @@ export class Webcam {
       this.dropped++;
       return;
     }
-    const head = Buffer.from(
-      `--${BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: ${this.latest.length}\r\n\r\n`,
-    );
+    const part = (this.latestPart ??= Buffer.concat([
+      Buffer.from(`--${BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: ${this.latest.length}\r\n\r\n`),
+      this.latest,
+      CRLF,
+    ]));
     sub.inFlight++;
     // One write for the whole part, so a slow socket cannot leave a header without its body.
-    sub.res.write(Buffer.concat([head, this.latest, Buffer.from('\r\n')]), () => {
+    sub.res.write(part, () => {
       sub.inFlight--;
     });
     this.served++;
