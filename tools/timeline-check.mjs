@@ -1000,6 +1000,71 @@ console.log('\n== 1e. a seek the clip moves under lands where it was asked, or s
 }
 
 
+console.log('\n== 1f. a sub-frame out-point lands playback and seek on the same last frame ==');
+{
+  const out = await page.evaluate(`(async () => {
+    const k = globalThis.__kinect;
+    const tl = globalThis.__tl;
+    const t = k.timeline.transport();
+    await tl.configure(${JSON.stringify({ look: BLACKWALL_LOOK, rate: 1, fps: 30 })});
+    try {
+      k.editor.setClipRange(0, 0.99);
+      await k.timeline.settled();
+      const range = t.inOutFrames;
+      const clamped = t.frameAt(0.99);
+      const nearest = t.frameOf(0.99);
+      await t.seek(0);
+      await t.runTo(clamped);
+      const playedFrame = t.frame;
+      const steppedPast = t.step();
+      tl.grab('subframe-played');
+
+      const seek = await t.seek(0.99);
+      const seekFrame = t.frame;
+      tl.grab('subframe-seeked');
+
+      k.editor.setClipRange(0.99, 0.99);
+      await k.timeline.settled();
+      const singleRange = t.inOutFrames;
+      await t.seek(0.99);
+      k.resetAccumulators();
+      t.frame = singleRange.to - 1;
+      const steppedOntoSingle = t.step();
+      const singleFrame = t.frame;
+      const steppedBeyondSingle = t.step();
+
+      return {
+        range, clamped, nearest,
+        playedFrame, steppedPast,
+        seekTarget: seek.target, seekFrame,
+        singleRange, steppedOntoSingle, singleFrame, steppedBeyondSingle,
+      };
+    } finally {
+      k.editor.setClipRange(0, null);
+      await k.timeline.settled();
+    }
+  })()`);
+  const same = await diff('subframe-played', 'subframe-seeked');
+  console.log(`  0..0.99s at 30 fps: nearest frame ${out.nearest}, inOutFrames ${out.range.from}..${out.range.to}, `
+    + `played to ${out.playedFrame} (next step ${out.steppedPast}), seeked to ${out.seekFrame}, ${show(same)}`);
+  console.log(`  0.99..0.99s at 30 fps: inOutFrames ${out.singleRange.from}..${out.singleRange.to}, `
+    + `step onto ${out.singleRange.to} returned ${out.steppedOntoSingle} (frame ${out.singleFrame}, next ${out.steppedBeyondSingle})`);
+  check(out.nearest === 30 && out.range.from === 0 && out.range.to === 29 && out.clamped === 29,
+    'an out-point at 0.99s rounds to frame 30 on the grid and clamps to frame 29 inside the range',
+    `frameOf ${out.nearest}, inOutFrames ${out.range.from}..${out.range.to}, frameAt ${out.clamped}`);
+  check(out.playedFrame === 29 && out.steppedPast === false && out.seekTarget === 29 && out.seekFrame === 29,
+    'playback and seek at 0.99s both stop on frame 29',
+    `played ${out.playedFrame}, step ${out.steppedPast}, seek ${out.seekFrame}`);
+  check(same.max <= SAME_MAX,
+    `and the image seeked at 0.99s matches playback to frame 29 within ${SAME_MAX}/255`,
+    show(same));
+  check(out.singleRange.from === 30 && out.singleRange.to === 30
+    && out.steppedOntoSingle === true && out.singleFrame === 30 && out.steppedBeyondSingle === false,
+    'when a sub-frame range holds only frame 30, step() still advances onto frame 30 and stops there',
+    `inOutFrames ${out.singleRange.from}..${out.singleRange.to}, step ${out.steppedOntoSingle} -> ${out.singleFrame}, next ${out.steppedBeyondSingle}`);
+}
+
+
 console.log('\n== 2. pre-roll length is a function of fade, wake, damp and output fps ==');
 const PREROLL_CASES = [
   { label: 'Blackwall, 30 fps, 1.00x', look: {}, rate: 1, fps: 30 },
