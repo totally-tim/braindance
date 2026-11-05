@@ -407,6 +407,12 @@ export async function takeFileFor(dir, hash, { owns = () => false, also = [] } =
   return found;
 }
 
+export async function localTakeFile(dir, id) {
+  const file = (await directoryNames(dir, { what: 'captures directory' }))
+    .find((name) => isKnct(name) && captureIdFor(name) === id);
+  return file ? join(dir, file) : null;
+}
+
 export async function scanTakes(dir, owns = () => false) {
   const files = (await directoryNames(dir, { what: 'captures directory' })).filter(isKnct);
   const markFiles = await readdir(join(dir, 'marks')).then((list) => new Set(list), () => null);
@@ -993,7 +999,7 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
   }
   if (to === id) throw new Error(`${id} is already its name, so there is nothing to rename`);
 
-  const from = join(dir, `${id}.knct`);
+  let from = join(dir, `${id}.knct`);
   const target = join(dir, `${to}.knct`);
   const root = resolve(dir);
   for (const path of [from, target]) {
@@ -1005,7 +1011,14 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
   return withTakeLock([from, target], async () => {
     // Opened and asked about by the file opened, as `downloadClaimed` does: while this waited for
     // the lock the name could have gone to the recorder's next take, which a read by name would scan.
-    const opened = await open(from, 'r').catch((err) => {
+    const opened = await open(from, 'r').catch(async (err) => {
+      if (err.code === 'ENOENT') {
+        const matched = await localTakeFile(dir, id);
+        if (matched) {
+          from = matched;
+          return open(from, 'r');
+        }
+      }
       throw err.code === 'ENOENT' ? new Error(`${id} is no longer in ${root}`) : err;
     });
     let index;
@@ -1099,8 +1112,8 @@ export async function revealTake(dir, id, { command = [] } = {}) {
     throw new Error(`no file manager is known for ${process.platform}, so there is nothing to open a take in`);
   }
   const root = resolve(dir);
-  const path = join(root, `${id}.knct`);
-  if (resolve(path) !== join(root, `${id}.knct`)) throw new Error(`refusing to reveal outside ${root}`);
+  const path = (await localTakeFile(root, id)) ?? join(root, `${id}.knct`);
+  if (resolve(path) !== join(root, basename(path))) throw new Error(`refusing to reveal outside ${root}`);
   await stat(path);
   const args = shape.args(path);
   const [bin, ...prefix] = command.length ? command : [shape.program];

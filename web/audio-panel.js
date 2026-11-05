@@ -21,6 +21,7 @@ export function createAudioPanel({ getClip, targets, owners, selectedOwner, chan
   const inputs = new Map();
   let busy = false;
   let chosenOwner;
+  const queue = [];
   const settingRows = [
     ['low', 'Low', -60, 24, 1, 'dB'],
     ['mid', 'Mid', -60, 24, 1, 'dB'],
@@ -31,17 +32,29 @@ export function createAudioPanel({ getClip, targets, owners, selectedOwner, chan
     ['attack', 'Attack', 0, 2000, 1, 'ms'],
     ['release', 'Release', 0, 2000, 1, 'ms'],
   ];
-  const run = async (work, { lockAll = false } = {}) => {
-    if (busy) return;
-    busy = true;
+  const lockControls = (lockAll) => {
     const locked = lockAll
       ? root.querySelectorAll('button, input, select')
       : root.querySelectorAll('button, select, input:not([type="range"])');
     locked.forEach((el) => { if (el) el.disabled = true; });
-    note.textContent = 'Analyzing audio…';
-    try { await work(); note.textContent = ''; }
-    catch (err) { note.textContent = err.message; }
-    finally { busy = false; paint(); }
+  };
+  const run = async (work, { lockAll = false } = {}) => {
+    if (busy) {
+      queue.push({ work, lockAll });
+      if (lockAll) lockControls(true);
+      return;
+    }
+    busy = true;
+    queue.push({ work, lockAll });
+    try {
+      while (queue.length) {
+        const next = queue.shift();
+        lockControls(next.lockAll);
+        note.textContent = 'Analyzing audio…';
+        try { await next.work(); note.textContent = ''; }
+        catch (err) { note.textContent = err.message; }
+      }
+    } finally { busy = false; paint(); }
   };
   const clampPair = (changedKey) => {
     const floorEntry = inputs.get('floor');
@@ -75,12 +88,19 @@ export function createAudioPanel({ getClip, targets, owners, selectedOwner, chan
     input.addEventListener('change', () => {
       clampPair(key);
       show();
-      const nextConditioning = { ...getClip().conditioning, [key]: Number(input.value) };
-      if (key === 'floor' || key === 'ceiling') {
-        nextConditioning.floor = Number(inputs.get('floor').input.value);
-        nextConditioning.ceiling = Number(inputs.get('ceiling').input.value);
-      }
-      run(() => change({ conditioning: nextConditioning }));
+      const value = Number(input.value);
+      const floorValue = key === 'floor' || key === 'ceiling' ? Number(inputs.get('floor').input.value) : null;
+      const ceilingValue = key === 'floor' || key === 'ceiling' ? Number(inputs.get('ceiling').input.value) : null;
+      run(() => {
+        const clip = getClip();
+        if (!clip) return;
+        const nextConditioning = { ...clip.conditioning, [key]: value };
+        if (floorValue !== null) {
+          nextConditioning.floor = floorValue;
+          nextConditioning.ceiling = ceilingValue;
+        }
+        return change({ conditioning: nextConditioning });
+      });
     });
     inputs.set(key, { input, show });
     row.append(text, input, out);

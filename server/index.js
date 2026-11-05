@@ -14,8 +14,8 @@ import { openCapture, withCapture, forgetCapture, openCaptureCount, decimatePayl
 import { ffmpegBinary, handleExportSocket, MAX_FRAME_BYTES, stopExports } from './export.js';
 import { AudioStore } from './audio.js';
 import {
-  VALID_HASH, DocumentStore, NodeLink, appendMarks, checkedMarkLog, copyOnNode, directoryNames, downloadTake,
-  downloadsInFlight, hashFile, markLogPath, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
+  VALID_HASH, DocumentStore, NodeLink, appendMarks, checkedMarkLog, copyOnNode, downloadTake,
+  downloadsInFlight, hashFile, localTakeFile, markLogPath, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
   adoptNamedMarkLogs, removeName, removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeFileFor,
 } from './library.js';
 import { COLOUR_FRAME_BYTES, nominalTakeRate } from './library.js';
@@ -469,7 +469,7 @@ function readBody(req) {
 
 // The takes the recorder still owns are named on the way in, so the manifest describes them unscanned.
 const localTakes = () => scanTakes(CAPTURES_DIR, (path) => recorder.owns(path));
-const hasLocalTake = async (id) => (await directoryNames(CAPTURES_DIR, { what: 'captures directory' })).includes(`${id}.knct`);
+const hasLocalTake = async (id) => Boolean(await localTakeFile(CAPTURES_DIR, id));
 
 // Per request rather than per server, because the answer is about the socket: Reveal opens a window
 // on the machine running this process, which is only the operator's when the browser is on it.
@@ -562,13 +562,14 @@ async function serveReveal(req, res, [id]) {
     }, 409);
     return;
   }
-  if (!await hasLocalTake(id)) {
+  const localPath = await localTakeFile(CAPTURES_DIR, id);
+  if (!localPath) {
     sendJson(res, { error: `${id} is not on this machine, so there is no file here to show` }, 404);
     return;
   }
   // The take being recorded is refused: revealing hands the path to a program whose job is to
   // stat, index and preview it, against the disk the recorder is writing to.
-  if (recorder.owns(join(CAPTURES_DIR, `${id}.knct`))) {
+  if (recorder.owns(localPath)) {
     sendJson(res, {
       error: `${id} is being recorded right now: a file manager pointed at it would stat, index and `
         + 'preview the file the recorder is writing to, which is disk the take needs',

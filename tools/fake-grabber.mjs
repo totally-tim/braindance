@@ -122,8 +122,8 @@ let sourceHello = null;
 {
   const fd = openSync(SOURCE, 'r');
   try {
-    const chunk = Buffer.allocUnsafe(4 * 1024 * 1024);
     for (;;) {
+      const chunk = Buffer.allocUnsafe(4 * 1024 * 1024);
       const got = readSync(fd, chunk, 0, chunk.length, null);
       if (got === 0) break;
       for (const msg of parser.push(got === chunk.length ? chunk : chunk.subarray(0, got))) {

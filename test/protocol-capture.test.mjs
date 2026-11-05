@@ -3,6 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -182,6 +183,35 @@ test('cloudExtent ignores non-finite projections when intrinsics carry zero foca
     } finally {
       forgetCapture(path);
     }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('fake-grabber reads captures whose frames straddle the 4 MiB read buffer with > 1 MiB retained', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'braindance-fake-grabber-slab-'));
+  try {
+    const path = join(dir, 'straddle.knct');
+    const hello = encodeMessage(TYPE_HELLO, Buffer.from(JSON.stringify({
+      fx: 366, fy: 366, cx: 256, cy: 212,
+    })));
+    const normalFrame = encodeMessage(TYPE_FRAME, makeFramePayload({ ts: 1000n, fill: 1100 }));
+    const largeColour = Buffer.alloc(1536 * 1024, 0x7f);
+    const largeFrame = encodeMessage(TYPE_FRAME, makeFramePayload({ colour: largeColour, ts: 2000n, fill: 1200 }));
+    // Six normal frames (~2.6 MiB) place `largeFrame` (~1.95 MiB) across the 4 MiB read boundary with
+    // > 1.2 MiB buffered in `MessageParser.chunks`, followed by eight normal frames (~3.4 MiB) so the
+    // second 4 MiB read covers the offset where `largeFrame`'s retained tail begins.
+    const parts = [hello];
+    for (let i = 0; i < 6; i++) parts.push(normalFrame);
+    parts.push(largeFrame);
+    for (let i = 0; i < 8; i++) parts.push(normalFrame);
+    await writeFile(path, Buffer.concat(parts));
+
+    const out = execFileSync(process.execPath, [
+      'tools/fake-grabber.mjs', '--source', path, '--burst', '1', '--frames', '1', '--die-after', '1',
+    ], { maxBuffer: 16 * 1024 * 1024 });
+    const parsed = new MessageParser().push(out);
+    assert.equal(parsed.filter((m) => m.type === TYPE_FRAME).length, 1);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

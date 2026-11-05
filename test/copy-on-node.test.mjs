@@ -3,12 +3,15 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { createServer } from 'node:http';
 import { copyOnNode, NodeLink, renameTake, scanTakes } from '../server/library.js';
 import { encodeMessage, TYPE_FRAME, TYPE_HELLO } from '../server/protocol.js';
+import { CAPTURE_FORMAT } from '../web/format.js';
 
 const node = { name: 'pi', lastError: null };
 const HASH = `sha256:${'a'.repeat(64)}`;
@@ -81,6 +84,74 @@ test('renameTake allows a case-only rename on the same take file', async () => {
     const after = await scanTakes(dir);
     assert.deepEqual(after.takes.map((t) => t.id), ['Clip']);
   } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('/library/rename and /library/reveal resolve takes stored with an uppercase .KNCT extension', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'braindance-upper-knct-'));
+  let child = null;
+  try {
+    const hello = encodeMessage(TYPE_HELLO, Buffer.from(JSON.stringify({
+      fx: 366, fy: 366, cx: 256, cy: 212, format: CAPTURE_FORMAT, startedAt: 1700000000000,
+    })));
+    const f1 = Buffer.alloc(20);
+    f1.writeBigUInt64LE(1000n, 8);
+    const f2 = Buffer.alloc(20);
+    f2.writeBigUInt64LE(1033n, 8);
+    const captures = join(dir, 'captures');
+    await mkdir(captures);
+    const noop = join(dir, 'noop.mjs');
+    await writeFile(noop, '');
+    await writeFile(join(captures, 'clip.KNCT'), Buffer.concat([
+      hello, encodeMessage(TYPE_FRAME, f1), encodeMessage(TYPE_FRAME, f2),
+    ]));
+
+    const roots = ['projects', 'presets', 'deliverables', 'effects', 'jobs', 'exports', 'audio']
+      .flatMap((name) => [`--${name}`, join(dir, name)]);
+    child = spawn(process.execPath, [
+      'server/index.js', '--port', '0', '--standby-after', '0', '--captures', captures,
+      '--reveal-with', `${process.execPath} ${noop}`, ...roots,
+    ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+    let stderr = '';
+    child.stderr.on('data', (c) => { stderr += c.toString('utf8'); });
+    const origin = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`server did not print ready line: ${stderr}`)), 10000);
+      createInterface({ input: child.stdout }).on('line', (line) => {
+        if (!line.startsWith('[server] ready ')) return;
+        const msg = JSON.parse(line.slice('[server] ready '.length));
+        clearTimeout(timer);
+        resolve(msg.url);
+      });
+      child.once('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error(`server exited early with ${code}: ${stderr}`));
+      });
+    });
+
+    const listed = await (await fetch(`${origin}/library/takes`)).json();
+    assert.equal(listed.takes.length, 1);
+    assert.equal(listed.takes[0].id, 'clip');
+    assert.equal(listed.takes[0].file, 'clip.KNCT');
+
+    const revealed = await fetch(`${origin}/library/reveal/clip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(revealed.status, 200);
+
+    const renamed = await fetch(`${origin}/library/rename/clip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hash: listed.takes[0].hash, to: 'renamed' }),
+    });
+    assert.equal(renamed.status, 200);
+    const body = await renamed.json();
+    assert.equal(body.id, 'renamed');
+  } finally {
+    child?.kill('SIGKILL');
     await rm(dir, { recursive: true, force: true });
   }
 });

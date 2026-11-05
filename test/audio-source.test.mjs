@@ -4,6 +4,7 @@ import {
   AUDIO_RATE, AUDIO_SECONDS, AUDIO_UPLOAD_BYTES, analyseAudio, checkAudioClip, defaultConditioning,
   audioSpectrum, modulatedValue, readAudioWav, readAudioWavHeader, signalAt,
 } from '../web/audio-source.js';
+import { createAudioPanel } from '../web/audio-panel.js';
 import { AUDIO_UPLOAD_MS, AudioStore } from '../server/audio.js';
 import { requireMutation } from '../server/http-guard.js';
 import { createHash } from 'node:crypto';
@@ -384,4 +385,127 @@ test('readAudioWav and readAudioWavHeader accept both Uint8Array and browser Arr
   assert.equal(header.samplesPerChannel, 4800);
   const decoded = readAudioWav(ab);
   assert.equal(decoded.samples[0][0], 0.5);
+});
+
+test('createAudioPanel queues range slider changes that arrive while audio analysis is busy', async () => {
+  const prevDoc = globalThis.document;
+  const prevOption = globalThis.Option;
+  const elements = new Map();
+  const makeEl = (tag = 'div', id = '') => {
+    const listeners = new Map();
+    const children = [];
+    const el = {
+      tagName: tag.toUpperCase(),
+      id,
+      type: '',
+      value: '',
+      disabled: false,
+      hidden: false,
+      textContent: '',
+      className: '',
+      min: '',
+      max: '',
+      step: '',
+      files: [],
+      children,
+      append(...items) { children.push(...items); },
+      replaceChildren(...items) { children.length = 0; children.push(...items); },
+      addEventListener(evt, fn) {
+        if (!listeners.has(evt)) listeners.set(evt, []);
+        listeners.get(evt).push(fn);
+      },
+      dispatchEvent(evt) {
+        for (const fn of listeners.get(evt) ?? []) fn();
+      },
+      click() { this.dispatchEvent('click'); },
+      querySelector() { return { setAttribute() {} }; },
+      querySelectorAll(selector) {
+        const all = [];
+        const walk = (node) => {
+          for (const child of node.children) {
+            all.push(child);
+            walk(child);
+          }
+        };
+        walk(this);
+        return selector.includes(':not([type="range"])')
+          ? all.filter((item) => item.type !== 'range')
+          : all;
+      },
+    };
+    if (id) elements.set(id, el);
+    return el;
+  };
+  const root = makeEl('div', 'audioGroup');
+  for (const id of [
+    'audioFile', 'audioName', 'audioControls', 'audioNote', 'audioTarget', 'audioOwner', 'audioEffect',
+    'audioStart', 'audioDepth', 'audioMeter', 'audioValue', 'audioSpectrum', 'audioBase', 'audioAdded',
+    'audioResult', 'audioResultMeter', 'audioEqBands', 'audioAdvancedSettings', 'audioSettings',
+    'audioImport', 'audioRemove', 'audioMappingTitle',
+  ]) {
+    root.append(makeEl('div', id));
+  }
+  const created = [];
+  globalThis.document = {
+    getElementById(id) {
+      return elements.get(id) ?? created.find((el) => el.id === id) ?? null;
+    },
+    createElement(tag) {
+      const el = makeEl(tag);
+      created.push(el);
+      return el;
+    },
+  };
+  globalThis.Option = class Option {
+    constructor(label, value) {
+      this.label = label;
+      this.value = value;
+      this.children = [];
+    }
+  };
+  try {
+    let currentClip = clip();
+    let resolveFirst;
+    const firstGate = new Promise((r) => { resolveFirst = r; });
+    let calls = 0;
+    const panel = createAudioPanel({
+      getClip: () => currentClip,
+      targets: () => [{
+        clip: 'c1', param: 'glitch.amount', min: 0, max: 1, step: 0.01,
+        effect: 'glitch', effectLabel: 'Glitch', label: 'Amount',
+      }],
+      owners: () => [{ id: 'c1', label: 'c1' }, { id: null, label: 'Project' }],
+      selectedOwner: () => 'c1',
+      change: async (patch) => {
+        calls++;
+        if (calls === 1) await firstGate;
+        currentClip = { ...currentClip, ...patch };
+      },
+      importFile: async () => {},
+      remove: async () => {},
+      open: () => {},
+    });
+    panel.paint();
+    const low = globalThis.document.getElementById('audio-low');
+    const mid = globalThis.document.getElementById('audio-mid');
+    low.value = '6';
+    low.dispatchEvent('change');
+    assert.equal(calls, 1);
+
+    // Adjust a second range slider while the first analysis is still in flight.
+    mid.value = '-9';
+    mid.dispatchEvent('change');
+
+    resolveFirst();
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(calls, 2);
+    assert.equal(currentClip.conditioning.low, 6);
+    assert.equal(currentClip.conditioning.mid, -9);
+    assert.equal(Number(low.value), 6);
+    assert.equal(Number(mid.value), -9);
+  } finally {
+    globalThis.document = prevDoc;
+    globalThis.Option = prevOption;
+  }
 });
