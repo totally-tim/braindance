@@ -4332,7 +4332,7 @@ try {
         if (t.programSec < 9.4) break;
         await new Promise((r) => setTimeout(r, 20));
       }
-      return { playing: t.playing, programSec: t.programSec, looping: t.looping };
+      return { playing: t.playing, programSec: t.programSec, frame: t.frame, looping: t.looping };
     })()`);
   };
 
@@ -4363,6 +4363,49 @@ try {
 
   await page.evaluate('__kinect.timeline.transport().pause()');
   await page.locator('#tLoop').click();
+
+  await page.evaluate('__kinect.timeline.transport().seek(10)');
+  await settle();
+  await page.evaluate('__kinect.editor.setClipRange(8, 9.99)');
+  await settle();
+  const subRange = await page.evaluate(`(() => {
+    const t = __kinect.timeline.transport();
+    return {
+      frame: t.frame,
+      nearest: t.frameOf(9.99),
+      inOut: t.inOutFrames,
+    };
+  })()`);
+  check(subRange.nearest === 300 && subRange.inOut.to === 299 && subRange.frame === 299,
+    'setting a sub-frame out-point pulls a playhead on the rounded frame back to the last frame inside the range',
+    `frameOf ${subRange.nearest}, inOut.to ${subRange.inOut.to}, frame ${subRange.frame}`);
+  await page.evaluate('__kinect.timeline.transport().seek(8)');
+  await settle();
+  await focusStage();
+  await page.keyboard.press('End');
+  await settle();
+  const endSubFrame = await page.evaluate('__kinect.timeline.transport().frame');
+  await page.evaluate('__kinect.timeline.transport().seek(8)');
+  await settle();
+  await focusStage();
+  await page.keyboard.press('Shift+O');
+  await settle();
+  const shiftOSubFrame = await page.evaluate('__kinect.timeline.transport().frame');
+  check(endSubFrame === 299 && shiftOSubFrame === 299,
+    'End and Shift+O park on that same last frame inside a sub-frame out-point',
+    `End ${endSubFrame}, Shift+O ${shiftOSubFrame}`);
+  const unloopedSub = await runToOutPoint();
+  check(!unloopedSub.playing && unloopedSub.frame === 299,
+    '  and with loop off, playback stops and pauses on the frame before the sub-frame out-point',
+    `playing ${unloopedSub.playing} at frame ${unloopedSub.frame} (${unloopedSub.programSec.toFixed(3)}s)`);
+  await page.locator('#tLoop').click();
+  const loopedSub = await runToOutPoint();
+  check(loopedSub.playing && loopedSub.programSec < 9.4,
+    '  and with loop on, reaching the frame before a sub-frame out-point wraps back to the in-point',
+    `playing ${loopedSub.playing} at ${loopedSub.programSec.toFixed(3)}s`);
+  await page.evaluate('__kinect.timeline.transport().pause()');
+  await page.locator('#tLoop').click();
+
   await page.evaluate(`__kinect.editor.setClipRange(${rangeBeforeLoop.in}, ${rangeBeforeLoop.out})`);
   await settle();
   await focusStage();

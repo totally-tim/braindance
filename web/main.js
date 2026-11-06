@@ -33,7 +33,7 @@ import {
 import { pickDepth, sensorPoint } from './depth-pick.js';
 import { ZOOM_PER_NOTCH, rulerTickSeconds, tickLabel, makeViewWindow } from './view-window.js';
 import {
-  clipIn, clipOut, clipBoundOrThrow, lastFrameRefusal, pastOutPoint, rangeFrames, writeClipRange,
+  clipIn, clipOut, clipBoundOrThrow, lastFrameRefusal, rangeFrames, writeClipRange,
 } from './clip-range.js';
 import {
   RATE_MIN, RATE_MAX, clipAffordedSec, clipProgramSecAt, clipSourceSecAt, frameAtOrBefore,
@@ -2052,7 +2052,7 @@ function setClipInOut(values) {
   if (timeline) {
     // Compared on the output grid, because that is the only place the playhead can be.
     const frameIn = timeline.frameOf(clipIn);
-    const frameOut = clipOut === null ? null : timeline.frameOf(clipOut);
+    const frameOut = clipOut === null ? null : timeline.inOutFrames.to;
     if (timeline.frame < frameIn) timeline.seek(clipIn).catch(showTimelineError);
     else if (frameOut !== null && timeline.frame > frameOut) timeline.seek(clipOut).catch(showTimelineError);
     else timeline.paint();
@@ -5488,9 +5488,8 @@ class TimelineTransport {
    */
   step() {
     const next = this.frame + 1;
-    if (next > this.lastFrame) return false;
+    if (next > this.inOutFrames.to) return false;
     const t = next / this.outputFps;
-    if (pastOutPoint(t, this.clipOutSec)) return false;
     const navigating = this.playing && !exporting && !PREVIEW_RENDERER;
     if (navigating) {
       advanceNavigation(t);
@@ -5587,10 +5586,10 @@ class TimelineTransport {
     let wanted;
     if (this.previewed) {
       previews?.prefetch(this.frame + 1);
-      const end = this.frameAt(this.clipOutSec);
+      const { from: start, to: end } = this.inOutFrames;
       const ahead = Math.min(end, this.frame + PREFETCH_FRAMES);
       const missing = previews?.firstMissing(this.frame + 1, ahead);
-      const target = missing ?? (ahead === end ? (this.looping ? this.frameAt(this.clipInSec) : end) : null);
+      const target = missing ?? (ahead === end ? (this.looping ? start : end) : null);
       if (target === null) return null;
       wanted = this.planSeek(target / this.outputFps).spans;
     } else wanted = this.planPrefetch().spans;
@@ -5879,7 +5878,7 @@ function setupPreviews() {
     state: () => (timeline ? {
       frame: timeline.frame, fps: timeline.outputFps, duration: timeline.duration,
       viewStart: view.startSec, viewEnd: view.endSec,
-      from: timeline.frameAt(timeline.clipInSec), to: timeline.frameAt(timeline.clipOutSec),
+      ...timeline.inOutFrames,
       playing: timeline.playing || timeline.pendingPlay,
       busy: timeline.working || repaintBusy || draftBusy || presetGesture,
       moving: orbiting || orbitSettling || flying() || lookDrag !== null || scrubbing,
