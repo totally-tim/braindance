@@ -708,7 +708,11 @@ let viewing = null;
 
 const matchesId = (t, id) => t.id === id || Boolean(t.names?.includes(id));
 const sameViewedTake = (take, resolvedKey) => Boolean(
-  viewing && (viewing.key === resolvedKey || (viewing.take.hash === null && matchesId(take, viewing.take.id))),
+  viewing && (viewing.key === resolvedKey || (
+    viewing.take.hash === null
+    && matchesId(take, viewing.take.id)
+    && (take.state === viewing.take.state || take.state === 'both')
+  )),
 );
 
 const takeByKey = (key) => {

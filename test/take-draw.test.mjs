@@ -411,6 +411,23 @@ test('a take opened while its hash is still settling stays open and keeps its po
 
     currentTakes = [
       currentTakes[0],
+      { ...currentTakes[1], recording: false, frames: 4, durationSec: 1, openRefusals: [], openable: true },
+      currentTakes[2],
+    ];
+    await api.refresh();
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    api.viewer.key('ArrowRight');
+    assert.equal(api.viewer.state().index, 1, 'scrubbed unsettled remote take to frame 1');
+    api.viewer.key('ArrowUp');
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    assert.equal(api.viewer.state().hash, settledOtherHash, 'ArrowUp from an unsettled remote take steps to the settled local take sharing its id');
+    assert.equal(api.viewer.state().index, 0, 'stepping from an unsettled take to a settled take on the opposite side starts at frame 0');
+    api.viewer.key('ArrowDown');
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    assert.equal(api.viewer.state().hash, null, 'ArrowDown returns to the unsettled remote take');
+
+    currentTakes = [
+      currentTakes[0],
       { ...currentTakes[1], hash: settledTargetHash, recording: false, frames: 4, durationSec: 1, openRefusals: [], openable: true },
       currentTakes[2],
     ];
