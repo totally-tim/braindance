@@ -7,15 +7,16 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import { ChildProcess, spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, delimiter, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { externalUrl, sameOrigin, senderTrusted } from '../desktop/origin.js';
 import { revealable, within } from '../desktop/reveal.js';
 import {
-  PORT, findNode, lineSplitter, parseReadyLine, portFree, rootsUnder, serviceArgs, startService,
+  PORT, findNode, lineSplitter, parseReadyLine, portFree, rootsUnder, serviceArgs, serviceEnv, startService,
 } from '../desktop/service.js';
+import { ffmpegBinary } from '../server/export.js';
 import { REAP_MS, STUB, TEST_PORT, alive, sleep, startStub } from './desktop-stub.mjs';
 
 // Every child's `kill` in this file goes through here. A child with no pid never spawned, and Node
@@ -360,13 +361,37 @@ test('a service that ignores the stop line ends when its parent is killed', asyn
   assert.ok(await until(() => !alive(pid), REAP_MS), `the service (pid ${pid}) outlived its killed parent`);
 });
 
-test('a service started with a minimal Finder PATH receives fallback directories and its Node directory on PATH', async (t) => {
+test('a service started with a minimal Finder PATH receives fallback directories and its Node directory on PATH without reordering existing PATH entries', async (t) => {
   const minimal = '/usr/bin:/bin:/usr/sbin:/sbin';
   const service = run(t, 'well-behaved', { env: { ...process.env, PATH: minimal, STUB_MODE: 'well-behaved' } });
   const info = await service.ready;
   const entries = (info.path ?? '').split(delimiter);
+  assert.deepEqual(entries.slice(0, 4), ['/usr/bin', '/bin', '/usr/sbin', '/sbin'],
+    `expected Finder PATH entries to remain first in order: ${info.path}`);
   assert.ok(entries.includes('/opt/homebrew/bin'), `expected /opt/homebrew/bin in child PATH: ${info.path}`);
   assert.ok(entries.includes('/usr/local/bin'), `expected /usr/local/bin in child PATH: ${info.path}`);
   assert.ok(entries.includes(dirname(process.execPath)), `expected ${dirname(process.execPath)} in child PATH: ${info.path}`);
   await service.stop();
+
+  const ffmpegName = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+  const nodeName = process.platform === 'win32' ? 'node.exe' : 'node';
+  const fallbackBin = join(dir, 'fallback-bin');
+  const preferredBin = join(dir, 'preferred-bin');
+  await mkdir(fallbackBin, { recursive: true });
+  await mkdir(preferredBin, { recursive: true });
+  for (const binDir of [fallbackBin, preferredBin]) {
+    const candidate = join(binDir, ffmpegName);
+    await writeFile(candidate, '#!/bin/sh\nexit 0\n');
+    await chmod(candidate, 0o755);
+  }
+  const fallbackNode = join(fallbackBin, nodeName);
+
+  const finderEnv = serviceEnv(fallbackNode, { PATH: `${fallbackBin}-missing` });
+  assert.throws(() => ffmpegBinary({ named: null, searchPath: `${fallbackBin}-missing` }), /no ffmpeg to export with/);
+  assert.equal(ffmpegBinary({ named: null, searchPath: finderEnv.PATH }), join(fallbackBin, ffmpegName),
+    'ffmpeg installed beside a fallback Node is found by ffmpegBinary');
+
+  const orderedEnv = serviceEnv(fallbackNode, { PATH: [preferredBin, fallbackBin].join(delimiter) });
+  assert.equal(ffmpegBinary({ named: null, searchPath: orderedEnv.PATH }), join(preferredBin, ffmpegName),
+    'an earlier PATH directory keeps precedence over dirname(node)');
 });
