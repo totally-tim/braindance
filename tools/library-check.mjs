@@ -3528,6 +3528,13 @@ async function runChecks() {
       'reclaim refuses a take that cannot be scanned, because it has no content hash to match against the node',
       (reclaimBad.error ?? 'ACCEPTED').slice(0, 100));
     const unreadablePath = join(macCaps, 'z-unreadable-take.knct');
+    const staleHashBad = await post(`${macUrl}/library/delete/z-unreadable-take`, {
+      confirm: true,
+      hash: NEVER_HASH,
+    });
+    check(/cannot be scanned here/.test(staleHashBad.error ?? '') && existsSync(unreadablePath),
+      'a delete naming a content hash refuses a file that cannot be scanned, so a take that broke since the listing is not unlinked as a match',
+      (staleHashBad.error ?? 'ACCEPTED').slice(0, 100));
     const pressedBad = await page.evaluate(`(() => {
       const btn = document.querySelector('.urow[data-id="z-unreadable-take"] .act[data-act="delete-unreadable"]');
       if (!btn) return null;
@@ -3540,7 +3547,9 @@ async function runChecks() {
       };
     })()`);
     if (pressedBad?.open) await page.click('#cGo');
-    for (let i = 0; i < 40 && existsSync(unreadablePath); i++) {
+    for (let i = 0; i < 40; i++) {
+      const drawnNow = await page.evaluate('globalThis.__library.unreadable()');
+      if (!existsSync(unreadablePath) && !drawnNow.some((u) => u.id === 'z-unreadable-take')) break;
       await new Promise((r) => setTimeout(r, 100));
     }
     const unreadableAfter = (await getJson(`${macUrl}/library/all`)).unreadable ?? [];
@@ -5436,6 +5445,14 @@ async function runChecks() {
         String(await hashOf('moved-away')).slice(7, 19));
     }
     writeFileSync(join(raceDir, 'broken-on-disk.knct'), 'NOT-A-KNCT-FILE\n');
+    const refusedHashOnUnreadable = await lib.removeTake(raceDir, 'broken-on-disk', {
+      unreadable: true,
+      hash: asked.hash,
+    }).then(() => ({ ok: true }), (err) => ({ ok: false, error: err.message }));
+    check(!refusedHashOnUnreadable.ok && /cannot be scanned here/.test(refusedHashOnUnreadable.error ?? '')
+      && existsSync(join(raceDir, 'broken-on-disk.knct')),
+      'deleting an unreadable take is refused when the request names a content hash, keeping a take that broke since the listing',
+      refusedHashOnUnreadable.error ?? 'REMOVED');
     const refusedOpen = await lib.removeTake(raceDir, 'broken-on-disk', {
       unreadable: true,
       ownsFile: () => true,

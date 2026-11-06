@@ -863,7 +863,7 @@ export async function removeTake(dir, id, { hash, verifiedElsewhere = null, mark
   // The marks log's lock as well, so no marks write lands between the hash and the unlink.
   const log = VALID_HASH.test(hash ?? '') ? [marksPathFor(dir, hash)] : [];
   return withTakeLock([path, ...log], () => (unreadable
-    ? removeUnreadableHeld(dir, id, path, { ownsFile })
+    ? removeUnreadableHeld(dir, id, path, { hash, verifiedElsewhere, ownsFile })
     : removeHeld(dir, id, path, { hash, verifiedElsewhere, marksRead, ownsFile })));
 }
 
@@ -939,8 +939,24 @@ async function removeHeld(dir, id, path, { hash, verifiedElsewhere, marksRead, o
 
 // `removeTake` for a file in `unreadable`: re-runs `describeTake` under the lock so a file that
 // finished writing or was replaced since the listing is refused rather than unlinked without a hash.
-async function removeUnreadableHeld(dir, id, path, { ownsFile }) {
-  const handle = await open(path, 'r');
+async function removeUnreadableHeld(dir, id, path, { hash, verifiedElsewhere, ownsFile }) {
+  if (hash !== undefined || (verifiedElsewhere !== undefined && verifiedElsewhere !== null)) {
+    throw new Error(
+      `${id} cannot be scanned here, not the ${hash ?? verifiedElsewhere} `
+      + 'this removal named: the library moved underneath the request and nothing was removed',
+    );
+  }
+  let target = path;
+  const handle = await open(target, 'r').catch(async (err) => {
+    if (err.code === 'ENOENT') {
+      const matched = await localTakeFile(dir, id);
+      if (matched) {
+        target = matched;
+        return open(target, 'r');
+      }
+    }
+    throw err;
+  });
   let checked;
   try {
     checked = await handle.stat();
@@ -950,7 +966,7 @@ async function removeUnreadableHeld(dir, id, path, { ownsFile }) {
   }
   let nowReadable = null;
   try {
-    nowReadable = await describeTake(dir, basename(path), false);
+    nowReadable = await describeTake(dir, basename(target), false);
   } catch {
     // Still fails to scan, which is what an unreadable removal is for.
   }
@@ -960,15 +976,15 @@ async function removeUnreadableHeld(dir, id, path, { ownsFile }) {
       + 'the library moved underneath the request and nothing was removed',
     );
   }
-  if (!sameTake(checked, takeIdentity(path))) {
+  if (!sameTake(checked, takeIdentity(target))) {
     throw new Error(
       `${id} was renamed or replaced while it was being checked: the file under that name now is not `
       + 'the one that failed to scan, and nothing was removed',
     );
   }
-  await unlink(path);
-  await unlink(indexPathFor(path)).catch(() => {});
-  forgetCapture(path);
+  await unlink(target);
+  await unlink(indexPathFor(target)).catch(() => {});
+  forgetCapture(target);
   return { removed: `${id}.knct`, hash: null };
 }
 

@@ -110,11 +110,11 @@ row rebuilds the manifest's lines into git tree objects, and the root has to equ
 upstream's commit, read from upstream. A constant taken from the tool's own output would prove only
 that the tool agrees with itself.
 
-A file that fails to scan is skipped the same way when every consumer reads the readable list.
-`scanTakes` catches a broken `.knct` file into `unreadable` so the rest of the directory still
-lists, and `paint` and `serveRemoval` both read `takes` alone, so the gallery never draws the file
-and delete answers 404 for it. The fixture plants an unreadable file alongside the readable ones
-and drives its removal through both surfaces.
+A file that fails to scan is skipped the same way unless a check plants one. `scanTakes` catches a
+broken `.knct` file into `unreadable` so the rest of the directory still lists, and `paint` and
+`serveRemoval` handle `unreadable` alongside `takes` so the gallery draws the row and delete
+removes the file. The fixture plants an unreadable file beside the readable ones and drives its
+removal through both surfaces.
 
 ## Close the class, not the instance
 

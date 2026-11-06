@@ -680,6 +680,8 @@ async function serveRemoval(req, res, [id], kind) {
     try {
       const done = await removeTake(CAPTURES_DIR, id, {
         unreadable: true,
+        hash: body.hash,
+        verifiedElsewhere: body.verifiedElsewhere ?? null,
         ownsFile: (identity) => recorder.ownsFile(identity),
       });
       sendJson(res, done);

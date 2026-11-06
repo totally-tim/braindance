@@ -4,6 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -99,6 +100,36 @@ test('a merge lands in the log of the hash it was given, not the take under the 
     assert.equal((await readMarkLog(dir, hashB)).some((r) => r.id === 'mark-of-a'), false,
       'and B, back under the name, did not gain it: the log is the hash\'s, not the name\'s');
     assert.ok((await readMarkLog(dir, hashA)).some((r) => r.id === 'mark-of-a'), 'it is on A under whatever name A now has');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('removeTake on an unreadable file refuses requests carrying hash or verifiedElsewhere and unlinks only an unhashed unreadable file', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'braindance-take-unreadable-'));
+  try {
+    const staleHash = `sha256:${'a'.repeat(64)}`;
+    const brokenPath = join(dir, 'BROKEN-UPPER.KNCT');
+    await writeFile(brokenPath, 'NOT-A-KNCT-FILE\n');
+
+    const withHash = await removeTake(dir, 'BROKEN-UPPER', {
+      unreadable: true,
+      hash: staleHash,
+    }).then(() => null, (err) => err.message);
+    assert.match(withHash ?? 'REMOVED', /cannot be scanned here/, 'refuses a delete that named a content hash');
+    assert.equal(existsSync(brokenPath), true, 'keeps the file on disk when a content hash was supplied');
+
+    const withReclaim = await removeTake(dir, 'BROKEN-UPPER', {
+      unreadable: true,
+      verifiedElsewhere: staleHash,
+    }).then(() => null, (err) => err.message);
+    assert.match(withReclaim ?? 'REMOVED', /cannot be scanned here/, 'refuses a reclaim removal when the local file cannot be scanned');
+    assert.equal(existsSync(brokenPath), true, 'keeps the file on disk when verifiedElsewhere was supplied');
+
+    const done = await removeTake(dir, 'BROKEN-UPPER', { unreadable: true });
+    assert.equal(done.removed, 'BROKEN-UPPER.knct');
+    assert.equal(done.hash, null);
+    assert.equal(existsSync(brokenPath), false, 'unlinks the unreadable file when no hash or verifiedElsewhere was supplied');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
