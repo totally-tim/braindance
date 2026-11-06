@@ -1321,7 +1321,7 @@ const MUTATIONS = {
     '  if (unreadable) {\n    try {\n      const done = await removeTake(CAPTURES_DIR, id, {\n        unreadable: true,',
     '  if (false && unreadable) {\n    try {\n      const done = await removeTake(CAPTURES_DIR, id, {\n        unreadable: true,',
   ]],
-    fails: 'the unreadable removal row alone - the gallery still draws the row',
+    fails: 'the unreadable removal rows alone - the gallery still draws the row',
   },
 };
 
@@ -3530,7 +3530,7 @@ async function runChecks() {
     const unreadablePath = join(macCaps, 'z-unreadable-take.knct');
     const staleHashBad = await post(`${macUrl}/library/delete/z-unreadable-take`, {
       confirm: true,
-      hash: NEVER_HASH,
+      hash: NO_SUCH_HASH,
     });
     check(/cannot be scanned here/.test(staleHashBad.error ?? '') && existsSync(unreadablePath),
       'a delete naming a content hash refuses a file that cannot be scanned, so a take that broke since the listing is not unlinked as a match',
