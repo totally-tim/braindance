@@ -216,12 +216,14 @@ refusal.
 
 **Start.** `findNode` takes the first Node of version 26 or newer on `PATH`, then in
 `/opt/homebrew/bin` and `/usr/local/bin`, because an app started from Finder has a minimal `PATH`.
-With none, a dialog names the versions it did find. The shell creates eight directories under
-`app.getPath('userData')` and starts `node server/index.js --port 8480 --stop-on-stdin` with
-`--captures`, `--projects`, `--presets`, `--deliverables`, `--effects`, `--jobs`, `--exports` and
-`--audio` each pointing at its own. The window opens on the `url` of the `[server] ready` line. `startService`
-rejects a line naming another port, an exit before the line, and 30 seconds without one, and the
-refusal carries the service's last lines.
+`serviceEnv` appends that Node's directory and the fallback directories to the service's `PATH`, so
+`ffmpegBinary` finds an `ffmpeg` installed beside Node. With no Node 26, a dialog names the versions
+it did find. The shell creates eight directories under `app.getPath('userData')` and starts
+`node server/index.js --port 8480 --stop-on-stdin` with `--captures`, `--projects`, `--presets`,
+`--deliverables`, `--effects`, `--jobs`, `--exports` and `--audio` each pointing at its own. The
+window opens on the `url` of the `[server] ready` line. `startService` rejects a line naming another
+port, an exit before the line, and 30 seconds without one, and the refusal carries the service's
+last lines.
 
 **Stop.** Closing the last window quits on every platform. Quit writes `stop` and a newline to the
 service's stdin, which is the stop message on Windows as well, where a signal never reaches the
