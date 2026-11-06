@@ -34,25 +34,119 @@ test('arguments refuse malformed input and URL overrides environment', () => {
   assert.equal(format({ state: 'standby', consumers: { webcam: 0 } }), 'state: standby\nconsumers.webcam: 0');
 });
 
-test('every mutating route in server/index.js has a CLI verb or exemption, and no exemption is stale', () => {
+function checkVerbsAndRoutes(routes, verbs, exemptions) {
+  const mutating = routes.filter((r) => r.mutates);
+  assert.ok(mutating.length >= 20, `expected at least 20 mutating routes, saw ${mutating.length}`);
+  for (const verb of verbs) {
+    assert.ok(
+      routes.some((route) => route.path === verb.route
+        && (verb.method === 'GET' ? route.read : route.methods.includes(verb.method))),
+      `verb ${verb.verb} (${verb.method} ${verb.route}) has no matching route in ROUTES`,
+    );
+    if (verb.read) {
+      assert.ok(
+        routes.some((route) => route.path === verb.read && route.read),
+        `verb ${verb.verb} reads ${verb.read}, which has no read route in ROUTES`,
+      );
+    }
+  }
+  for (const route of mutating) {
+    assert.ok(
+      exemptions.includes(route.path)
+        || verbs.some((verb) => verb.route === route.path && route.methods.includes(verb.method)),
+      `mutating route ${route.path} has neither a CLI verb nor a MUTATION_EXEMPTIONS entry`,
+    );
+  }
+  assert.equal(new Set(exemptions).size, exemptions.length, 'MUTATION_EXEMPTIONS contains duplicate entries');
+  for (const exempted of exemptions) {
+    assert.ok(
+      mutating.some((route) => route.path === exempted),
+      `MUTATION_EXEMPTIONS entry ${exempted} names no mutating route in ROUTES`,
+    );
+    assert.ok(
+      !verbs.some((verb) => verb.route === exempted && verb.method !== 'GET'),
+      `MUTATION_EXEMPTIONS entry ${exempted} is already covered by a mutating verb in VERBS`,
+    );
+  }
+}
+
+test('every verb and mutating route in server/index.js agrees with bin/verbs.js, and cli-check reads the staged copy', () => {
   const src = readFileSync(new URL('../server/index.js', import.meta.url), 'utf8');
   const block = /const ROUTES = \[([\s\S]*?)\n\];/.exec(src)?.[1] ?? '';
-  const mutating = new Set();
+  const routes = [];
   for (const entry of block.split(/\n  \{(?=\s*path:)/)) {
     const path = /path:\s*'([^']+)'/.exec(entry)?.[1];
-    if (path && /\bwrite:\s*\{/.test(entry)) mutating.add(path);
+    if (!path) continue;
+    const read = /\bread:\s/.test(entry);
+    const mutates = /\bwrite:\s*\{/.test(entry);
+    const methods = [...(/methods:\s*\[([^\]]*)\]/.exec(entry)?.[1] ?? '').matchAll(/'([A-Z]+)'/g)].map((m) => m[1]);
+    routes.push({ path, read, mutates, methods });
   }
-  assert.ok(mutating.size >= 20, `expected at least 20 mutating routes, saw ${mutating.size}`);
-  const covered = new Set([
-    ...VERBS.filter((v) => v.method !== 'GET').map((v) => v.route),
-    ...MUTATION_EXEMPTIONS,
-  ]);
-  for (const path of mutating) {
-    assert.ok(covered.has(path), `mutating route ${path} has neither a CLI verb nor a MUTATION_EXEMPTIONS entry`);
-  }
-  for (const exempted of MUTATION_EXEMPTIONS) {
-    assert.ok(mutating.has(exempted), `MUTATION_EXEMPTIONS entry ${exempted} names no mutating route in ROUTES`);
-  }
+  checkVerbsAndRoutes(routes, VERBS, MUTATION_EXEMPTIONS);
+
+  assert.throws(
+    () => checkVerbsAndRoutes(routes, VERBS, MUTATION_EXEMPTIONS.filter((p) => p !== '/library/remove-name/:id')),
+    /mutating route \/library\/remove-name\/:id has neither a CLI verb nor a MUTATION_EXEMPTIONS entry/,
+  );
+  assert.throws(
+    () => checkVerbsAndRoutes(
+      routes,
+      VERBS,
+      MUTATION_EXEMPTIONS.map((p) => (p === '/capture/:hash/marks' ? '/capture/:id/marks' : p)),
+    ),
+    /mutating route \/capture\/:hash\/marks has neither a CLI verb nor a MUTATION_EXEMPTIONS entry/,
+  );
+  assert.throws(
+    () => checkVerbsAndRoutes(routes, VERBS, [...MUTATION_EXEMPTIONS, '/capture/:id/marks']),
+    /MUTATION_EXEMPTIONS entry \/capture\/:id\/marks names no mutating route in ROUTES/,
+  );
+  assert.throws(
+    () => checkVerbsAndRoutes(routes, VERBS, [...MUTATION_EXEMPTIONS, MUTATION_EXEMPTIONS[0]]),
+    /MUTATION_EXEMPTIONS contains duplicate entries/,
+  );
+  assert.throws(
+    () => checkVerbsAndRoutes(routes, VERBS, [...MUTATION_EXEMPTIONS, '/sensor/standby']),
+    /MUTATION_EXEMPTIONS entry \/sensor\/standby is already covered by a mutating verb in VERBS/,
+  );
+  assert.throws(
+    () => checkVerbsAndRoutes(
+      routes,
+      VERBS.map((v) => (v.verb === 'takes' ? { ...v, route: '/library/missing' } : v)),
+      MUTATION_EXEMPTIONS,
+    ),
+    /verb takes \(GET \/library\/missing\) has no matching route in ROUTES/,
+  );
+  assert.throws(
+    () => checkVerbsAndRoutes(
+      routes,
+      VERBS.map((v) => (v.verb === 'output size' ? { ...v, route: '/output/missing' } : v)),
+      MUTATION_EXEMPTIONS,
+    ),
+    /verb output size \(POST \/output\/missing\) has no matching route in ROUTES/,
+  );
+  assert.throws(
+    () => checkVerbsAndRoutes(
+      routes,
+      VERBS.map((v) => (v.verb === 'sensor standby' ? { ...v, method: 'PUT' } : v)),
+      MUTATION_EXEMPTIONS,
+    ),
+    /verb sensor standby \(PUT \/sensor\/standby\) has no matching route in ROUTES/,
+  );
+  assert.throws(
+    () => checkVerbsAndRoutes(
+      routes,
+      VERBS.map((v) => (v.verb === 'sensor standby' ? { ...v, read: '/library/download/:id' } : v)),
+      MUTATION_EXEMPTIONS,
+    ),
+    /verb sensor standby reads \/library\/download\/:id, which has no read route in ROUTES/,
+  );
+
+  const cliCheckSrc = readFileSync(new URL('../tools/cli-check.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(
+    cliCheckSrc,
+    /from\s+['"]\.\.\/bin\/verbs\.js['"]/,
+    'cli-check must read VERBS and MUTATION_EXEMPTIONS from the staged WORK tree rather than ../bin/verbs.js',
+  );
 });
 
 test('CLI reports HTTP status cleanly on non-JSON error responses instead of V8 SyntaxError', async (t) => {

@@ -591,9 +591,10 @@ async function serveRemoval(req, res, [id], kind) {
   const body = await readBody(req);
   const here = await localTakes();
   const mine = here.takes.find((t) => t.id === id);
+  const unreadable = mine ? null : here.unreadable.find((t) => t.id === id) ?? null;
   // The open take has no hash yet, so neither removal can verify anything about it, and
   // unlinking underneath a running write stream loses the shoot in progress.
-  if (mine?.recording) {
+  if (mine?.recording || (unreadable && recorder.owns(join(CAPTURES_DIR, unreadable.file)))) {
     sendJson(res, { error: `${id} is being recorded right now: stop the take before removing it` }, 409);
     return;
   }
@@ -602,6 +603,13 @@ async function serveRemoval(req, res, [id], kind) {
   if (kind === 'reclaim') {
     // The surviving copy is the local one, re-hashed rather than trusted: a file truncated since
     // the last listing would otherwise be treated as what makes this recoverable.
+    if (unreadable) {
+      sendJson(res, {
+        error: `refusing to reclaim ${id}: ${id} could not be scanned (${unreadable.error}), `
+          + 'so it has no content hash to match against the node',
+      }, 409);
+      return;
+    }
     if (!mine) {
       sendJson(res, { error: `${id} is not on this machine, so there is nothing here to keep` }, 409);
       return;
@@ -666,6 +674,20 @@ async function serveRemoval(req, res, [id], kind) {
   // that changed since.
   if (body.confirm !== true) {
     sendJson(res, { error: 'delete needs an explicit confirm: this is the only irreversible action here' }, 400);
+    return;
+  }
+  if (unreadable) {
+    try {
+      const done = await removeTake(CAPTURES_DIR, id, {
+        unreadable: true,
+        hash: body.hash,
+        verifiedElsewhere: body.verifiedElsewhere ?? null,
+        ownsFile: (identity) => recorder.ownsFile(identity),
+      });
+      sendJson(res, done);
+    } catch (err) {
+      sendJson(res, { error: err.message }, 409);
+    }
     return;
   }
   if (!mine) {

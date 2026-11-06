@@ -964,7 +964,7 @@ hash, `sha256:` and 64 hex digits, percent-encoded; `:id` is its name.
 | `/library/remote-frame/:hash/:n` | GET | One frame of a node-only take, fetched through here. |
 | `/library/remote-index/:hash` | GET | The frame index of a node-only take, fetched through here. |
 | `/library/download/:id` | POST | Pulls a take from the linked node. |
-| `/library/delete/:id` | POST | Deletes a take and its marks. Refused while the node holds a copy or cannot be asked, or while the take has a second name here. |
+| `/library/delete/:id` | POST | Deletes a take and its marks, or an unreadable local file. Refused for a readable take while the node holds a copy or cannot be asked, or while the take has a second name here. |
 | `/library/reclaim/:id` | POST | Merges the node's marks into the local copy, then deletes the node's copy. |
 | `/library/sync-marks/:hash` | POST | Merges the node's marks for this take into its log here. |
 | `/library/rename/:id` | POST | Renames a take. |

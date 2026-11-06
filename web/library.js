@@ -30,6 +30,7 @@ const stamp = (ms) => {
 // Every field `paint` reads, because `paint` runs against this before the first listing lands.
 let library = {
   takes: [],
+  unreadable: [],
   node: null,
   here: '?',
   storage: {
@@ -627,6 +628,42 @@ function askDelete(tile, take) {
   dlg.showModal();
 }
 
+function askDeleteUnreadable(row, entry) {
+  document.getElementById('cTitle').textContent = 'Delete take';
+  const body = document.getElementById('cBody');
+  body.innerHTML = '<b class="tid"></b>';
+  body.querySelector('.tid').textContent = entry.id;
+  document.getElementById('cWarn').textContent =
+    `This file cannot be scanned (${entry.error}). Cannot be undone.`;
+  const go = document.getElementById('cGo');
+  go.textContent = 'Delete';
+  go.disabled = false;
+  confirmAction = () => run(row, `deleting ${entry.id}`,
+    () => post(`/library/delete/${encodeURIComponent(entry.id)}`, { confirm: true })).catch(() => {});
+  dlg.showModal();
+}
+
+function buildUnreadableRow(entry) {
+  const row = document.createElement('div');
+  row.className = 'urow';
+  row.dataset.id = entry.id;
+  const name = document.createElement('span');
+  name.className = 'uname';
+  name.textContent = entry.id;
+  const why = document.createElement('span');
+  why.className = 'uwhy';
+  why.textContent = entry.error;
+  why.title = entry.error;
+  row.append(name, why);
+  const noName = unnameable(entry);
+  addButton(row, 'Delete', 'act danger', () => askDeleteUnreadable(row, entry), {
+    disabled: Boolean(noName),
+    why: noName,
+    item: 'delete-unreadable',
+  });
+  return row;
+}
+
 function askReclaim(tile, take) {
   document.getElementById('cGo').disabled = false;
   document.getElementById('cTitle').textContent = `Reclaim on ${library.node?.name}`;
@@ -706,9 +743,27 @@ const vTime = document.getElementById('vTime');
 const vNote = document.getElementById('vNote');
 let viewing = null;
 
-const takeByKey = (key) => library.takes.find((t) => (t.hash ?? t.id) === key)
-  ?? (!String(key).startsWith('sha256:') ? library.takes.find((t) => t.id === key) : null)
-  ?? null;
+const matchesId = (t, id) => t.id === id || Boolean(t.names?.includes(id));
+const sameViewedTake = (take, resolvedKey) => Boolean(
+  viewing && (viewing.key === resolvedKey || (
+    viewing.take.hash === null
+    && matchesId(take, viewing.take.id)
+    && (take.state === viewing.take.state || take.state === 'both')
+  )),
+);
+
+const takeByKey = (key) => {
+  if (!key) return null;
+  const direct = library.takes.find((t) => (t.hash ?? t.id) === key);
+  if (direct || String(key).startsWith('sha256:')) return direct ?? null;
+  if (viewing?.key === key) {
+    const sameSide = library.takes.find(
+      (t) => matchesId(t, key) && (t.state === viewing.take.state || t.state === 'both'),
+    );
+    if (sameSide) return sameSide;
+  }
+  return library.takes.find((t) => matchesId(t, key)) ?? null;
+};
 
 const shownTakes = () => library.takes.filter((t) => filter === 'all' || t.state === filter);
 
@@ -725,7 +780,8 @@ function openViewer(key) {
   const focusWas = viewer.contains(document.activeElement) ? controlKey(document.activeElement) : null;
   // Where the operator was, kept across a rebuild: `paint` re-opens the viewer on every
   // refresh, so the `setIndex(0)` below sent them back to the first frame.
-  const resumeAt = viewing && (viewing.key === (take.hash ?? take.id) || viewing.take.id === take.id)
+  const resolvedKey = take.hash ?? take.id;
+  const resumeAt = sameViewedTake(take, resolvedKey)
     ? viewing.skim.index
     : 0;
   const divisor = divisorFor(take);
@@ -739,7 +795,7 @@ function openViewer(key) {
   paintFlags(document.getElementById('vFlags'), take);
   document.getElementById('vFacts').replaceChildren(...[
     gb(take.bytes),
-    `${take.frames} frames`,
+    take.recording === true ? 'recording now' : `${countOf(take.frames)} frames`,
     (take.marks ?? []).length ? `${take.marks.length} mark${take.marks.length === 1 ? '' : 's'}` : 'no marks',
     stamp(take.capturedAt),
     take.hash ? `${take.hash.slice(0, 15)}…` : '',
@@ -753,7 +809,11 @@ function openViewer(key) {
   // recorded has no index yet, and its badge already says so.
   const timed = take.frames > 0 ? timesFor(take) : null;
   if (timed && !timed.times && !timed.error) {
-    timed.ready.then(() => { if (timed.error && viewing?.key === key) openViewer(key); });
+    timed.ready.then(() => {
+      if (timed.error && sameViewedTake(take, resolvedKey)) {
+        openViewer(viewing.key);
+      }
+    });
   }
   vNote.textContent = [
     ...warningsOf(take).map((w) => w.why),
@@ -773,7 +833,7 @@ function openViewer(key) {
     },
   });
   skim.show(take);
-  viewing = { key: take.hash ?? take.id, take, skim };
+  viewing = { key: resolvedKey, take, skim };
   paintMarks(vBar, take, timed && !timed.error ? (sourceSec) => skim.seek(sourceSec) : null);
 
   const acts = document.getElementById('vActs');
@@ -873,6 +933,13 @@ function paint() {
     bankedLibrary = library;
   }
   grid.replaceChildren();
+  const unreadable = library.unreadable ?? [];
+  if (unreadable.length > 0) {
+    const list = document.createElement('div');
+    list.className = 'unreadable';
+    for (const entry of unreadable) list.appendChild(buildUnreadableRow(entry));
+    grid.appendChild(list);
+  }
   if (shown.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'empty';
@@ -995,7 +1062,7 @@ globalThis.__library = {
   refresh,
   tiles: () => [...grid.querySelectorAll('.tile')].map((el) => ({
     id: el.dataset.id,
-    hash: el.dataset.hash,
+    hash: el.dataset.hash || null,
     state: el.dataset.state,
     acts: [...el.querySelectorAll('.acts .act')].map((b) => ({
       item: b.dataset.act, label: b.textContent, disabled: b.disabled, why: b.title,
@@ -1012,6 +1079,13 @@ globalThis.__library = {
     empty: false,
   })),
   emptyLine: () => grid.querySelector('.empty')?.textContent ?? null,
+  unreadable: () => [...grid.querySelectorAll('.urow')].map((el) => ({
+    id: el.dataset.id,
+    name: el.querySelector('.uname')?.textContent ?? null,
+    error: el.querySelector('.uwhy')?.textContent ?? null,
+    disabled: el.querySelector('.act')?.disabled ?? null,
+    why: el.querySelector('.act')?.title ?? '',
+  })),
   badgeKeys: () => Object.keys(BADGES),
 
   // Off `getBoundingClientRect` and not the CSS: uniform height is a claim about the boxes.
@@ -1039,12 +1113,12 @@ globalThis.__library = {
 
   // Read out of the document, which is why the menus are built hidden rather than on demand.
   controls: () => [...document.querySelectorAll(
-    '.appbar a, .tab, .tile .act, .tile .mi, #viewer .act, #viewer .mi, #viewer .mk, dialog .act, dialog input',
+    '.appbar a, .tab, .urow .act, .tile .act, .tile .mi, #viewer .act, #viewer .mi, #viewer .mk, dialog .act, dialog input',
   )].map((el) => ({
     // `||` and never `??`: the DOM answers the absent ones with `''`, which `??` keeps.
     key: el.dataset.act || el.dataset.item || el.id || el.dataset.filter || el.className,
     tag: el.tagName.toLowerCase(),
-    where: el.closest('#viewer') ? 'viewer' : el.closest('dialog') ? 'dialog' : el.closest('.tile') ? 'tile' : 'chrome',
+    where: el.closest('#viewer') ? 'viewer' : el.closest('dialog') ? 'dialog' : el.closest('.tile') ? 'tile' : el.closest('.urow') ? 'unreadable' : 'chrome',
     text: (el.textContent ?? '').trim().slice(0, 24),
     disabled: el.disabled === true,
   })),
