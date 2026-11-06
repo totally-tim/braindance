@@ -6,7 +6,6 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import WebSocket from 'ws';
-import { VERBS, MUTATION_EXEMPTIONS } from '../bin/verbs.js';
 import { DOCUMENT_VERSIONS } from '../web/format.js';
 
 const MUTATIONS = {
@@ -187,12 +186,14 @@ async function main() {
     await start([], true, { timers: null });
     check(await state('live'), 'fake sensor becomes live');
     check(!log.includes('[timers]'), 'a launch that plants no test timer shortens none', log.match(/\[timers\][^\n]*/)?.[0] ?? 'no [timers] line');
-    const stagedVerbs = (await import(`${pathToFileURL(join(WORK, 'bin/verbs.js')).href}?v=${Date.now()}`)).VERBS;
+    const { VERBS: stagedVerbs, MUTATION_EXEMPTIONS: stagedExemptions } = await import(
+      `${pathToFileURL(join(WORK, 'bin/verbs.js')).href}?v=${Date.now()}`,
+    );
     const routes = (await json('/library/routes')).body.routes;
     for (const verb of stagedVerbs) check(routes.some((route) => route.path === verb.route
       && (verb.method === 'GET' ? route.read : route.methods.includes(verb.method))), `verb has route: ${verb.verb}`);
-    for (const route of routes.filter((row) => row.mutates)) check(MUTATION_EXEMPTIONS.includes(route.path)
-      || VERBS.some((verb) => verb.route === route.path && route.methods.includes(verb.method)), `mutation route has verb or exemption: ${route.path}`);
+    for (const route of routes.filter((row) => row.mutates)) check(stagedExemptions.includes(route.path)
+      || stagedVerbs.some((verb) => verb.route === route.path && route.methods.includes(verb.method)), `mutation route has verb or exemption: ${route.path}`);
     if (mutation === 'verb-without-a-route') return;
     const before = await health();
     const oldPid = pids()[0];

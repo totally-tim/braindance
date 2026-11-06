@@ -71,8 +71,9 @@ export const nodeDirs = (pathEnv = process.env.PATH) => [...new Set([
 ])];
 
 export function serviceEnv(node, baseEnv = process.env) {
+  const pathEntries = (baseEnv.PATH ?? '').split(delimiter).filter(Boolean);
   const nodeDir = node && (node.includes('/') || node.includes('\\')) ? dirname(node) : null;
-  const dirs = [...new Set([...(nodeDir ? [nodeDir] : []), ...nodeDirs(baseEnv.PATH)])];
+  const dirs = [...new Set([...pathEntries, ...(nodeDir ? [nodeDir] : []), ...nodeDirs(baseEnv.PATH)])];
   return { ...baseEnv, PATH: dirs.join(delimiter) };
 }
 
