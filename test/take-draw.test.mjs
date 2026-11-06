@@ -377,7 +377,7 @@ test('a take opened while its hash is still settling stays open and keeps its po
   const hello = { fx: 366, fy: 366, cx: DEPTH_W / 2, cy: DEPTH_H / 2 };
 
   let currentTakes = [
-    { id: 'shared-take', hash: settledOtherHash, state: 'local', recording: false, bytes: 12e6, frames: 6, durationSec: 2, capturedAt: 2000, marks: [], openRefusals: [], openable: true, hello },
+    { id: 'shared-take', hash: settledOtherHash, state: 'local', recording: false, bytes: 12e6, frames: 4, durationSec: 2, capturedAt: 2000, marks: [], openRefusals: [], openable: true, hello },
     { id: 'shared-take', hash: null, state: 'remote', recording: true, bytes: 8e6, frames: null, durationSec: 0, capturedAt: 1900, marks: [], openRefusals: [{ key: 'recording', why: 'still recording' }], openable: false, hello },
     { id: 'settling-dup', hash: null, state: 'local', recording: false, bytes: 9e6, frames: 4, durationSec: 1, capturedAt: 1800, marks: [{ t: 0.5 }], openRefusals: [], openable: true, hello },
   ];
@@ -388,7 +388,7 @@ test('a take opened while its hash is still settling stays open and keeps its po
     if (String(url).startsWith('/library/all')) {
       return { ok: true, status: 200, json: async () => ({ takes: currentTakes, node: { name: 'pi', reachable: true, error: null }, here: 'mac', storage, reveal }) };
     }
-    if (String(url).includes('/index')) {
+    if (String(url).includes('index')) {
       if (failIndex) return { ok: false, status: 503, text: async () => 'index unavailable' };
       const hash = decodeURIComponent(String(url).match(/\/(?:capture|remote-index)\/([^/?]+)/)?.[1] ?? '');
       return { ok: true, status: 200, json: async () => ({ hash: hash === 'null' ? null : hash, frames: { stampMs: [0, 33, 66, 100] } }) };
@@ -419,11 +419,16 @@ test('a take opened while its hash is still settling stays open and keeps its po
     assert.equal(api.viewer.isOpen(), true, 'viewer stays open when the remote take settles its hash');
     assert.equal(api.viewer.state().hash, settledTargetHash, 'viewer resolves the settling take on the same side rather than an earlier take sharing its id');
     assert.match(doc.getElementById('vFacts').textContent, /4 frames/);
-
-    api.viewer.open(unsettledLocal.hash ?? unsettledLocal.id);
+    api.viewer.key('ArrowRight');
+    assert.equal(api.viewer.state().index, 1);
+    api.viewer.key('ArrowUp');
+    assert.equal(api.viewer.state().hash, settledOtherHash, 'ArrowUp from the second of two takes sharing an id steps to the first');
+    assert.equal(api.viewer.state().index, 0, 'stepping to a different take that shares an id starts at frame 0');
+    api.viewer.key('ArrowDown');
+    assert.equal(api.viewer.state().hash, settledTargetHash, 'ArrowDown returns to the second take');
+    api.viewer.key('ArrowDown');
     for (let i = 0; i < 6; i++) await Promise.resolve();
-    assert.equal(api.viewer.isOpen(), true);
-    assert.equal(api.viewer.state().id, 'settling-dup');
+    assert.equal(api.viewer.state().id, 'settling-dup', 'ArrowDown from the second take advances to the third take instead of looping on the shared id');
     assert.equal(api.viewer.state().hash, null);
     api.viewer.key('ArrowRight');
     api.viewer.key('ArrowRight');

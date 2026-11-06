@@ -707,6 +707,9 @@ const vNote = document.getElementById('vNote');
 let viewing = null;
 
 const matchesId = (t, id) => t.id === id || Boolean(t.names?.includes(id));
+const sameViewedTake = (take, resolvedKey) => Boolean(
+  viewing && (viewing.key === resolvedKey || (viewing.take.hash === null && matchesId(take, viewing.take.id))),
+);
 
 const takeByKey = (key) => {
   if (!key) return null;
@@ -737,7 +740,7 @@ function openViewer(key) {
   // Where the operator was, kept across a rebuild: `paint` re-opens the viewer on every
   // refresh, so the `setIndex(0)` below sent them back to the first frame.
   const resolvedKey = take.hash ?? take.id;
-  const resumeAt = viewing && (viewing.key === resolvedKey || matchesId(take, viewing.take.id))
+  const resumeAt = sameViewedTake(take, resolvedKey)
     ? viewing.skim.index
     : 0;
   const divisor = divisorFor(take);
@@ -766,7 +769,7 @@ function openViewer(key) {
   const timed = take.frames > 0 ? timesFor(take) : null;
   if (timed && !timed.times && !timed.error) {
     timed.ready.then(() => {
-      if (timed.error && (viewing?.key === resolvedKey || (viewing && matchesId(take, viewing.take.id)))) {
+      if (timed.error && sameViewedTake(take, resolvedKey)) {
         openViewer(viewing.key);
       }
     });
@@ -855,7 +858,7 @@ vBar.addEventListener('pointermove', (e) => {
 viewer.addEventListener('keydown', (e) => {
   if (!viewing || viewerBusy > 0) return;
   const shown = shownTakes();
-  const here = shown.findIndex((t) => (t.hash ?? t.id) === viewing.key || matchesId(t, viewing.take.id));
+  const here = shown.findIndex((t) => (t.hash ?? t.id) === viewing.key);
   // A take can leave the filter while the viewer holds it open, so `here` is -1 and both
   // branches fell through. `shown` is sorted by capture time, so this is where it would sit.
   const gap = here >= 0 ? -1 : shown.findIndex((t) => t.capturedAt <= viewing.take.capturedAt);
