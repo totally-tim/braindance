@@ -107,6 +107,10 @@ const DEAD_CONTROLS = {
     '        () => post(`/library/download/${encodeURIComponent(take.id)}`),', '        () => Promise.resolve({}),',
   ]] },
   delete: { file: 'web/library.js', edits: [['    run: (host) => askDelete(host, take),', '    run: () => {},']] },
+  'delete-unreadable': { file: 'web/library.js', edits: [[
+    "  addButton(row, 'Delete', 'act danger', () => askDeleteUnreadable(row, entry), {",
+    "  addButton(row, 'Delete', 'act danger', () => {}, {",
+  ]] },
   more: { file: 'web/library.js', edits: [[
     "  buildMenu(tile.querySelector('.meta'), more, take, () => tile);",
     "  buildMenu(tile.querySelector('.meta'), document.createElement('button'), take, () => tile);",
@@ -1302,6 +1306,23 @@ const MUTATIONS = {
     'const coreLookNames = () => presetValueNames().filter((name) => effectOf(name) === null);',
     "const coreLookNames = () => presetValueNames()\n  .filter((name) => PARAMS[name].group !== 'post' && effectOf(name) === null);",
   ]] },
+  // The gallery goes back to painting only `library.takes`, so a file caught into `unreadable`
+  // by `scanTakes` is hidden from the page.
+  'gallery-hides-unreadable': { file: 'web/library.js', edits: [[
+    '  if (unreadable.length > 0) {',
+    '  if (false) {',
+  ]],
+    fails: 'the gallery unreadable row, the unreadable removal row, and the control sweep rows '
+      + 'for delete-unreadable',
+  },
+  // `serveRemoval` goes back to looking up the take in `here.takes` alone, so `/library/delete`
+  // answers 404 for a file that failed to scan.
+  'delete-refuses-unreadable': { file: 'server/index.js', edits: [[
+    '  if (unreadable) {\n    try {\n      const done = await removeTake(CAPTURES_DIR, id, {\n        unreadable: true,',
+    '  if (false && unreadable) {\n    try {\n      const done = await removeTake(CAPTURES_DIR, id, {\n        unreadable: true,',
+  ]],
+    fails: 'the unreadable removal rows alone - the gallery still draws the row',
+  },
 };
 
 function mutatedSource(name) {
@@ -1606,6 +1627,9 @@ function buildFixture() {
   writeTake(macCaps, 'future-format-take', { frames: 6, format: CAPTURE_FORMAT + 1 });
   // Seven frames rather than six, or it is `same-name`'s bytes and the two share one hash log.
   writeTake(macCaps, 'generation-zero-take', { frames: 7 });
+  // A `.knct` file whose magic is not `KNCT`, so `scanTakes` catches it into `unreadable`.
+  // Named `z-...` so a directory walk that picks the first `.knct` takes a readable take.
+  writeFileSync(join(macCaps, 'z-unreadable-take.knct'), 'NOT-A-KNCT-FILE\n');
 
   // Mark counts the tile renders differently.
   writeMarkLog(macCaps, 'local-clip',
@@ -3487,6 +3511,61 @@ async function runChecks() {
         .catch(() => {});
     }
 
+    // A file that fails `describeTake` is caught into `unreadable` so the directory still lists,
+    // and the gallery has to draw it and let the operator delete it.
+    const listedUnreadable = (await getJson(`${macUrl}/library/all`)).unreadable ?? [];
+    const badEntry = listedUnreadable.find((u) => u.id === 'z-unreadable-take');
+    const drawnUnreadable = await page.evaluate('globalThis.__library.unreadable()');
+    const drawnBad = drawnUnreadable.find((u) => u.id === 'z-unreadable-take');
+    check(badEntry !== undefined && /expected magic KNCT/.test(badEntry.error ?? '')
+      && drawnBad !== undefined && drawnBad.name === 'z-unreadable-take'
+      && drawnBad.error === badEntry.error && drawnBad.disabled === false,
+      'the gallery draws a row for every take the scan could not read',
+      drawnBad ? `${drawnBad.name}: ${drawnBad.error}`
+        : `none drawn (server listed ${listedUnreadable.map((u) => u.id).join(' ') || 'none'})`);
+    const reclaimBad = await post(`${macUrl}/library/reclaim/z-unreadable-take`, {});
+    check(/no content hash/.test(reclaimBad.error ?? ''),
+      'reclaim refuses a take that cannot be scanned, because it has no content hash to match against the node',
+      (reclaimBad.error ?? 'ACCEPTED').slice(0, 100));
+    const unreadablePath = join(macCaps, 'z-unreadable-take.knct');
+    const staleHashBad = await post(`${macUrl}/library/delete/z-unreadable-take`, {
+      confirm: true,
+      hash: NO_SUCH_HASH,
+    });
+    check(/cannot be scanned here/.test(staleHashBad.error ?? '') && existsSync(unreadablePath),
+      'a delete naming a content hash refuses a file that cannot be scanned, so a take that broke since the listing is not unlinked as a match',
+      (staleHashBad.error ?? 'ACCEPTED').slice(0, 100));
+    const pressedBad = await page.evaluate(`(() => {
+      const btn = document.querySelector('.urow[data-id="z-unreadable-take"] .act[data-act="delete-unreadable"]');
+      if (!btn) return null;
+      btn.click();
+      return {
+        open: document.getElementById('confirm').open,
+        body: document.getElementById('cBody').textContent,
+        warn: document.getElementById('cWarn').textContent,
+        disabled: document.getElementById('cGo').disabled,
+      };
+    })()`);
+    if (pressedBad?.open) await page.click('#cGo');
+    for (let i = 0; i < 40; i++) {
+      const drawnNow = await page.evaluate('globalThis.__library.unreadable()');
+      if (!existsSync(unreadablePath) && !drawnNow.some((u) => u.id === 'z-unreadable-take')) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const unreadableAfter = (await getJson(`${macUrl}/library/all`)).unreadable ?? [];
+    const drawnAfter = await page.evaluate('globalThis.__library.unreadable()');
+    check(pressedBad?.open === true && pressedBad.body === 'z-unreadable-take'
+      && pressedBad.disabled === false && pressedBad.warn.includes(badEntry?.error ?? 'expected magic KNCT')
+      && !existsSync(unreadablePath)
+      && !unreadableAfter.some((u) => u.id === 'z-unreadable-take')
+      && !drawnAfter.some((u) => u.id === 'z-unreadable-take'),
+      'deleting a take that cannot be scanned removes the file and the entry',
+      !pressedBad ? 'no delete button on the row'
+        : existsSync(unreadablePath) ? `still on disk (${await page.evaluate('document.getElementById("note")?.textContent ?? ""')})`
+          : 'removed from disk and listing');
+    if (existsSync(unreadablePath)) rmSync(unreadablePath, { force: true });
+    await page.evaluate("for (const d of document.querySelectorAll('dialog[open]')) d.close()");
+
     check(errors.length === 0, 'the library raises no page errors', errors.slice(0, 2).join(' | '));
     await page.close();
   }
@@ -5365,6 +5444,31 @@ async function runChecks() {
         'while the take the delete named survives under its new name, because nothing was removed',
         String(await hashOf('moved-away')).slice(7, 19));
     }
+    writeFileSync(join(raceDir, 'broken-on-disk.knct'), 'NOT-A-KNCT-FILE\n');
+    const refusedHashOnUnreadable = await lib.removeTake(raceDir, 'broken-on-disk', {
+      unreadable: true,
+      hash: asked.hash,
+    }).then(() => ({ ok: true }), (err) => ({ ok: false, error: err.message }));
+    check(!refusedHashOnUnreadable.ok && /cannot be scanned here/.test(refusedHashOnUnreadable.error ?? '')
+      && existsSync(join(raceDir, 'broken-on-disk.knct')),
+      'deleting an unreadable take is refused when the request names a content hash, keeping a take that broke since the listing',
+      refusedHashOnUnreadable.error ?? 'REMOVED');
+    const refusedOpen = await lib.removeTake(raceDir, 'broken-on-disk', {
+      unreadable: true,
+      ownsFile: () => true,
+    }).then(() => ({ ok: true }), (err) => ({ ok: false, error: err.message }));
+    check(!refusedOpen.ok && /being recorded right now/.test(refusedOpen.error ?? '')
+      && existsSync(join(raceDir, 'broken-on-disk.knct')),
+      'deleting an unreadable take is refused while the recorder owns the file, and the file stays on disk',
+      refusedOpen.error ?? 'REMOVED');
+    writeTake(raceDir, 'broken-on-disk', { frames: 3 });
+    const refusedReadable = await lib.removeTake(raceDir, 'broken-on-disk', {
+      unreadable: true,
+    }).then(() => ({ ok: true }), (err) => ({ ok: false, error: err.message }));
+    check(!refusedReadable.ok && /scans as sha256:/.test(refusedReadable.error ?? '')
+      && existsSync(join(raceDir, 'broken-on-disk.knct')),
+      'and an unreadable delete re-runs the scan under the lock and refuses a file that now scans cleanly',
+      refusedReadable.error ?? 'REMOVED');
     rmSync(raceDir, { recursive: true, force: true });
   }
 
@@ -6935,6 +7039,10 @@ async function runChecks() {
     check(shooting?.recording === true,
       'a take is genuinely open, which is what makes the tile below a tile that is lying rather than one that is right',
       String(shooting?.takeId));
+    const deleteOpen = await post(`${liveUrl}/library/delete/${shooting.takeId}`, { confirm: true });
+    check(/being recorded right now/.test(deleteOpen.error ?? ''),
+      'and /library/delete refuses the take the recorder has open',
+      (deleteOpen.error ?? 'ACCEPTED').slice(0, 90));
 
     const { page, errors } = await openPage(browser, timedLibraryPage(liveUrl));
     await page.waitForFunction('globalThis.__library !== undefined', null, { timeout: 20000 });
@@ -7534,6 +7642,7 @@ async function runChecks() {
     writeTake(sweepMac, 'sweep-kept', { frames: 5, ...at(3) });
     writeTake(sweepMac, 'sweep-doomed', { frames: 4, ...at(4) });
     writeTake(sweepMac, 'sweep-renamed', { frames: 3, ...at(5) });
+    writeFileSync(join(sweepMac, 'sweep-unreadable.knct'), 'NOT-A-KNCT-FILE\n');
     writeFileSync(join(sweepMac, 'sweep-marked.marks.jsonl'),
       markLine({ id: 's1', sourceMs: 500, label: 'halfway', at: 1000 }));
     const sweepLog = join(WORK, 'sweep-reveal-argv.log');
@@ -7664,6 +7773,15 @@ async function runChecks() {
           const open = await openDelete('sweep-kept');
           const body = await page.evaluate(() => document.getElementById('cBody').textContent);
           return { ok: open && body === 'sweep-kept', detail: `confirm ${open ? 'open' : 'shut'}, naming ${body || 'nothing'}` };
+        },
+      },
+      'delete-unreadable': {
+        does: 'asks to delete a take the scan could not read',
+        run: async () => {
+          await press('.urow[data-id="sweep-unreadable"] .act[data-act="delete-unreadable"]');
+          const open = await dialogOpen('confirm');
+          const body = await page.evaluate(() => document.getElementById('cBody').textContent);
+          return { ok: open && body === 'sweep-unreadable', detail: `confirm ${open ? 'open' : 'shut'}, naming ${body || 'nothing'}` };
         },
       },
       cCancel: {
