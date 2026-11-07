@@ -230,6 +230,8 @@ export async function buildIndex(capturePath, handle = null, seen = forgetsOf(ca
   };
 
   const forgotten = () => forgetsOf(capturePath) !== seen;
+  if (forgotten()) return index;
+
   const sidecar = indexPathFor(capturePath);
   // Two ids differing only in case are two cache keys and one file on APFS and NTFS, so two scans
   // of one take can overlap: with one scratch name the first rename moves it away from the second.

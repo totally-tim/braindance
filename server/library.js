@@ -1066,6 +1066,7 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
   }
   // Under both names' locks, so no removal or install in this process lands on either mid-rename.
   return withTakeLock([from, target], async () => {
+    const seen = forgetsOf(from);
     // Opened and asked about by the file opened, as `downloadClaimed` does: while this waited for
     // the lock the name could have gone to the recorder's next take, which a read by name would scan.
     const opened = await open(from, 'r').catch(async (err) => {
@@ -1085,7 +1086,7 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
         throw new Error(`${id} is being recorded right now: stop the take before renaming it`);
       }
       openedStat = await opened.stat();
-      index = await loadIndex(from, opened);
+      index = await loadIndex(from, opened, null, seen);
     } finally {
       await opened.close();
     }
