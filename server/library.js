@@ -998,11 +998,11 @@ export async function removeName(dir, id, { keep, hash, owns = () => false }) {
   }
   let path = join(dir, `${id}.knct`);
   let kept = join(dir, `${keep}.knct`);
-  // Asking which take a name holds reads the file, and the take being written has no hash yet.
-  if (owns(path) || owns(kept)) throw new Error(`${owns(path) ? id : keep} is being recorded right now: stop the take first`);
   return withTakeLock([path, kept], async () => {
     path = await storedTakeFile(dir, id);
     kept = await storedTakeFile(dir, keep);
+    // Asking which take a name holds reads the file, and the take being written has no hash yet.
+    if (owns(path) || owns(kept)) throw new Error(`${owns(path) ? id : keep} is being recorded right now: stop the take first`);
     const dropping = takeIdentity(path);
     const keeping = takeIdentity(kept);
     if (dropping === null) throw new Error(`${id} is not in ${resolve(dir)}, so there is no name to remove`);

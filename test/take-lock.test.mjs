@@ -179,6 +179,20 @@ test('removeName resolves both names, so one .KNCT name goes and the other stays
   }
 });
 
+test('removeName asks who owns the spelling it resolved, so a take being written under .KNCT is refused', async () => {
+  const { dir, stored, hash, released } = await openedUpperCaseTake(24);
+  try {
+    await link(stored, join(dir, 'kept.KNCT'));
+    const being = (path) => path === stored;
+    await assert.rejects(removeName(dir, 'clip', { keep: 'kept', hash, owns: being }), /is being recorded right now/);
+    assert.ok(existsSync(stored));
+    await removeName(dir, 'clip', { keep: 'kept', hash });
+    await released();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('renameTake forgets the .KNCT spelling it moved the take away from', async () => {
   const { dir, hash, released } = await openedUpperCaseTake(23);
   try {
