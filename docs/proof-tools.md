@@ -836,6 +836,7 @@ wrong, so a diff against declared defaults compares defaults with defaults and r
 - **`reload-reads-the-line-off-the-page`** — a reload compares the versions the page stamped, so a
   rebuild erases a true line and a revert names a version no file holds.
 - **`take-page-keeps-a-version-line`** — a page opened on a take reports on a document it has not got.
+- **`copy-keeps-the-version-line`** — a copy keeps the line about the file it was copied from.
 - **`the-load-arms-the-saved-stack-in-apply`** — `applyProject`'s tail reads `project.history`.
 - **`the-load-arms-the-saved-stack-in-the-loader`** — the loader reads `doc.body.history`, which
   is the site that is load-bearing; only the synchronous door can see it.

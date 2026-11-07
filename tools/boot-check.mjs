@@ -231,9 +231,15 @@ const MUTATIONS = {
 
   'undo-keeps-the-version-line': {
     file: 'web/main.js',
-    edits: [['      if (effectVersionSkew.length) {\n        effectVersionSkew = [];\n        paintMissingEffects();\n      }\n      writeOpenProject(serialiseProjectBody()).catch((err) => {\n        if (err.stale) stopWritingProject(err);\n        else say(`this undo',
-      '      writeOpenProject(serialiseProjectBody()).catch((err) => {\n        if (err.stale) stopWritingProject(err);\n        else say(`this undo']],
-    fails: 'the row that reads the version line after an undo across an effect upgrade, and that row alone',
+    edits: [['    clearVersionLine();\n    if (openedProjectName !== null && !projectDiverged) {\n      writeOpenProject(serialiseProjectBody())',
+      '    if (openedProjectName !== null && !projectDiverged) {\n      writeOpenProject(serialiseProjectBody())']],
+    fails: 'the two rows that read the version line after an undo across an effect upgrade, on a project and on a take',
+  },
+
+  'copy-keeps-the-version-line': {
+    file: 'web/main.js',
+    edits: [['  lastSavedAt = Date.now();\n  clearVersionLine();\n', '  lastSavedAt = Date.now();\n']],
+    fails: 'the row that copies a document with a version line, and that row alone',
   },
 
   'reload-reads-the-line-off-the-page': {
@@ -244,7 +250,7 @@ const MUTATIONS = {
 
   'take-page-keeps-a-version-line': {
     file: 'web/main.js',
-    edits: [["  if (openedProjectName === null && effectVersionSkew.length) {\n    effectVersionSkew = [];\n    paintMissingEffects();\n  }\n  return fetched.map(", '  return fetched.map(']],
+    edits: [['  if (openedProjectName === null) clearVersionLine();\n  return fetched.map(', '  return fetched.map(']],
     fails: 'the row that upgrades an effect under a page opened on a take, and that row alone',
   },
 
@@ -1213,6 +1219,16 @@ async function main() {
       + 'absence in the file rather than an absence everywhere',
       `depth ${saved.depth}${inProject.errors.length ? `, ${inProject.errors[0].slice(0, 90)}` : ''}`);
 
+    // An edit on the take page first, so its undo below crosses the upgrade. Both calls on that
+    // page bring it to the front: a page behind another does not answer.
+    await opened.page.bringToFront();
+    await opened.page.evaluate(`(() => {
+      const k = globalThis.__kinect;
+      k.params.set('pointSize', 23.5);
+      k.keyframes.undo.commit();
+    })()`);
+    await inProject.page.bringToFront();
+
     // The version line across reloads, with no edit and so no save: it is about what the file says.
     const lines = await inProject.page.evaluate(`(async () => {
       const k = globalThis.__kinect;
@@ -1235,11 +1251,13 @@ async function main() {
       const reloadedAgain = k.library.effectVersionSkew();
       return { entry, upgraded, reloadedAgain };
     })()`);
-    // In front, because a rebuild asked of a tab behind another does not finish.
     await opened.page.bringToFront();
-    const lineOnTheTakePage = await opened.page.evaluate(`(async () => {
-      await globalThis.__kinect.effects.reload();
-      return globalThis.__kinect.library.effectVersionSkew();
+    const takePage = await opened.page.evaluate(`(async () => {
+      const k = globalThis.__kinect;
+      await k.effects.reload();
+      const reloaded = k.library.effectVersionSkew();
+      const popped = k.keyframes.undo.pop();
+      return { reloaded, popped, undone: k.library.effectVersionSkew() };
     })()`);
     await inProject.page.bringToFront();
     const reverted = await inProject.page.evaluate(`(async () => {
@@ -1258,9 +1276,12 @@ async function main() {
     check(JSON.stringify(reverted) === '[]',
       'and the installed version coming back to the one the file names ends it, rather than naming the version in between',
       JSON.stringify(reverted));
-    check(JSON.stringify(lineOnTheTakePage) === '[]',
+    check(JSON.stringify(takePage.reloaded) === '[]',
       'and a page opened on a take holds no document, so the same upgrade raises no line there',
-      JSON.stringify(lineOnTheTakePage));
+      JSON.stringify(takePage.reloaded));
+    check(takePage.popped === true && JSON.stringify(takePage.undone) === '[]',
+      'and an undo there crossing the upgrade raises none either',
+      `popped ${takePage.popped}, ${JSON.stringify(takePage.undone)}`);
 
     // An effect upgraded between an edit and its undo: the stack entry names the old version and
     // the page runs the new one, so what the undo restores is not what the entry says.
@@ -1325,6 +1346,36 @@ async function main() {
     check(upgraded.skew?.length === 0,
       'and no line says the document requires a version the write just replaced',
       JSON.stringify(upgraded.skew));
+
+    // A copy names what is installed, so the line about the file it was copied from goes with it.
+    const copied = await inProject.page.evaluate(`(async () => {
+      const k = globalThis.__kinect;
+      const json = { 'Content-Type': 'application/json' };
+      const entry = (await (await fetch('/projects/${SAVED_PROJECT}')).json()).body.requires?.[0];
+      const held = await (await fetch('/effects/' + entry.id)).json();
+      const chunks = {};
+      for (const { name } of held.files.filter((f) => f.name !== 'manifest.json')) {
+        chunks[name] = await (await fetch('/effects/' + entry.id + '/file/' + name)).text();
+      }
+      await fetch('/effects/' + entry.id, {
+        method: 'PUT',
+        headers: json,
+        body: JSON.stringify({ manifest: { ...held.manifest, version: '8.8.8' }, chunks }),
+      });
+      await k.effects.reload();
+      const before = k.library.effectVersionSkew();
+      document.getElementById('menuDuplicateProject').click();
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline && !location.search.includes('copy')) await new Promise((r) => setTimeout(r, 50));
+      const after = k.library.effectVersionSkew();
+      await k.effects.reload();
+      const reloaded = k.library.effectVersionSkew();
+      await fetch('/effects/' + entry.id, { method: 'DELETE', headers: json });
+      return { before, moved: location.search, after, reloaded };
+    })()`);
+    check(copied.before?.length === 1 && /copy/.test(copied.moved) && JSON.stringify(copied.after) === '[]' && JSON.stringify(copied.reloaded) === '[]',
+      'and a copy of a document with a version line has none, and no reload brings it back',
+      JSON.stringify(copied));
     await inProject.page.close();
   }
 

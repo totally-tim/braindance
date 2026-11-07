@@ -1830,10 +1830,7 @@ async function reloadEffects() {
   refusedEffectSignature = null;
   if (history.baseline !== null) history.baseline = history.snapshot();
   // A page opened on a take holds no document for the line to be about.
-  if (openedProjectName === null && effectVersionSkew.length) {
-    effectVersionSkew = [];
-    paintMissingEffects();
-  }
+  if (openedProjectName === null) clearVersionLine();
   return fetched.map((p) => ({ id: p.id, version: p.manifest.version, rev: p.rev }));
 }
 
@@ -3517,10 +3514,7 @@ const history = {
     this.stack.push(this.baseline);
     if (this.stack.length > UNDO_LIMIT) this.stack.shift();
     this.baseline = now;
-    if (effectVersionSkew.length) {
-      effectVersionSkew = [];
-      paintMissingEffects();
-    }
+    clearVersionLine();
     // Every change is written to the project's own file. A page holding no document has no file
     // to write into and writes nothing at all, and a tab the store has refused has stopped.
     if (openedProjectName !== null && !projectDiverged) {
@@ -3553,11 +3547,9 @@ const history = {
     } finally {
       this.restoring = false;
     }
+    // A stack entry carries the versions this page stamped, so what it raised is not about the file.
+    clearVersionLine();
     if (openedProjectName !== null && !projectDiverged) {
-      if (effectVersionSkew.length) {
-        effectVersionSkew = [];
-        paintMissingEffects();
-      }
       writeOpenProject(serialiseProjectBody()).catch((err) => {
         if (err.stale) stopWritingProject(err);
         else say(`this undo could not be written to ${openedProjectName}: ${err.message}`);
@@ -6412,6 +6404,13 @@ if (gizmo) {
 
 // Built from `OUTPUT_RATES` rather than the markup, so there is one list of rates.
 for (const rate of OUTPUT_RATES) ui.fps?.appendChild(new Option(String(rate), String(rate)));
+
+/** Drops the version line, once what the page holds is what the file names. */
+function clearVersionLine() {
+  if (!effectVersionSkew.length) return;
+  effectVersionSkew = [];
+  paintMissingEffects();
+}
 
 /** The badge that says which effects this document names and this build has not got. */
 function paintMissingEffects() {
@@ -10979,6 +10978,7 @@ function enterProject(saved) {
   openedProjectName = saved.name;
   openedProjectRev = saved.rev;
   lastSavedAt = Date.now();
+  clearVersionLine();
   showProjectInUrl(saved.name);
   paintProjectCommands();
 }
