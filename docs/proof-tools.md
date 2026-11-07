@@ -829,6 +829,14 @@ wrong, so a diff against declared defaults compares defaults with defaults and r
   refusal sits inside the loop over clips whose footage changed.
 - **`take-page-invents-a-name-to-save-under`** — the take page saves under a name nobody chose.
 - **`the-save-writes-the-undo-stack`** — undo history written back into the file.
+- **`undo-writes-the-stack-entry`** — an undo across an effect upgrade writes the entry it popped.
+- **`undo-baseline-is-the-stack-entry`** — that undo leaves the entry as the baseline, so a commit
+  with nothing in it records one.
+- **`undo-keeps-the-version-line`** — that undo leaves a line naming a version its write replaced.
+- **`reload-reads-the-line-off-the-page`** — a reload compares the versions the page stamped, so a
+  rebuild erases a true line and a revert names a version no file holds.
+- **`take-page-keeps-a-version-line`** — a page opened on a take reports on a document it has not got.
+- **`copy-keeps-the-version-line`** — a copy keeps the line about the file it was copied from.
 - **`the-load-arms-the-saved-stack-in-apply`** — `applyProject`'s tail reads `project.history`.
 - **`the-load-arms-the-saved-stack-in-the-loader`** — the loader reads `doc.body.history`, which
   is the site that is load-bearing; only the synchronous door can see it.
