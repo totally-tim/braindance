@@ -147,7 +147,9 @@ the tool, and its green run proves nothing. `library-check`, `boot-check`, `effe
 `jobs/`: `effect-check` passes both store roots under `.effect-check/` to its staged server by
 flag, and `jobs-check` spawns its server out of `.jobs-check/root`. Both delete their tree on
 the way out of a run that reached its sections; a refusal at staging (a stale anchor, a missing
-sample) exits 2 with the tree left behind, so delete it by hand. A third writer picks one of those and says which.
+sample) exits 2 with the tree left behind, so delete it by hand. `boot-check` writes one package
+and takes `effect-check`'s way, passing `--effects` under its temporary directory. Another writer
+picks one of those and says which.
 
 `module-check` needs no port, no browser and no install. It reads `web/` off disk and refuses an
 import cycle, an import naming a missing file or export, state crossing a boundary as a writable

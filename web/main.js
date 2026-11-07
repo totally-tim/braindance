@@ -3538,12 +3538,18 @@ const history = {
     try {
       restoreProject(parsed);
       this.stack.pop();
-      this.baseline = previous;
+      // Read back rather than taken from `previous`, as the write below is: an effect installed,
+      // upgraded or removed since that entry was pushed makes the restored page a different body.
+      this.baseline = this.snapshot();
     } finally {
       this.restoring = false;
     }
+    if (effectVersionSkew.length) {
+      effectVersionSkew = [];
+      paintMissingEffects();
+    }
     if (openedProjectName !== null && !projectDiverged) {
-      writeOpenProject(parsed).catch((err) => {
+      writeOpenProject(serialiseProjectBody()).catch((err) => {
         if (err.stale) stopWritingProject(err);
         else say(`this undo could not be written to ${openedProjectName}: ${err.message}`);
       });

@@ -215,6 +215,27 @@ const MUTATIONS = {
   // synchronous door: through the loader it is invisible, because the loader starts a stack of
   // its own after `applyProject` returns and overwrites whatever this armed. That is why the
   // section carries a `restoreProject` probe beside its two navigations.
+  'undo-writes-the-stack-entry': {
+    file: 'web/main.js',
+    edits: [['      writeOpenProject(serialiseProjectBody()).catch((err) => {\n        if (err.stale) stopWritingProject(err);\n        else say(`this undo',
+      '      writeOpenProject(parsed).catch((err) => {\n        if (err.stale) stopWritingProject(err);\n        else say(`this undo']],
+    fails: 'the row that reads the version an undo wrote across an effect upgrade, and that row alone',
+  },
+
+  'undo-baseline-is-the-stack-entry': {
+    file: 'web/main.js',
+    edits: [['      this.baseline = this.snapshot();\n    } finally {\n      this.restoring = false;',
+      '      this.baseline = previous;\n    } finally {\n      this.restoring = false;']],
+    fails: 'the row that commits nothing after an undo across an effect upgrade, and that row alone',
+  },
+
+  'undo-keeps-the-version-line': {
+    file: 'web/main.js',
+    edits: [['    if (effectVersionSkew.length) {\n      effectVersionSkew = [];\n      paintMissingEffects();\n    }\n    if (openedProjectName !== null && !projectDiverged) {\n      writeOpenProject(serialiseProjectBody()).catch((err) => {\n        if (err.stale) stopWritingProject(err);\n        else say(`this undo',
+      '    if (openedProjectName !== null && !projectDiverged) {\n      writeOpenProject(serialiseProjectBody()).catch((err) => {\n        if (err.stale) stopWritingProject(err);\n        else say(`this undo']],
+    fails: 'the row that reads the version line after an undo across an effect upgrade, and that row alone',
+  },
+
   'the-load-arms-the-saved-stack-in-apply': {
     file: 'web/main.js',
     edits: [[
@@ -424,7 +445,7 @@ async function main() {
   // and its arguments.
   server = spawn(process.execPath, [
     join(ROOT, 'server/index.js'), '--standby-after', '0', '--port', String(PORT), '--captures', work,
-    '--projects', join(work, 'projects'),
+    '--projects', join(work, 'projects'), '--effects', join(work, 'effects'),
     '--grabber', join(work, 'no-grabber-in-a-boot-check'),
   ], {
     cwd: ROOT,
@@ -1179,6 +1200,74 @@ async function main() {
       'while the stack the file does not carry is on screen, which is what makes the row above an '
       + 'absence in the file rather than an absence everywhere',
       `depth ${saved.depth}${inProject.errors.length ? `, ${inProject.errors[0].slice(0, 90)}` : ''}`);
+
+    // An effect upgraded between an edit and its undo: the stack entry names the old version and
+    // the page runs the new one, so what the undo restores is not what the entry says.
+    const upgraded = await inProject.page.evaluate(`(async () => {
+      const k = globalThis.__kinect;
+      const json = { 'Content-Type': 'application/json' };
+      const read = async () => (await (await fetch('/projects/${SAVED_PROJECT}')).json()).body;
+      const before = await read();
+      const entry = before.requires?.[0];
+      if (!entry) return { entry: null };
+      const size = k.params.get('pointSize');
+      k.params.set('pointSize', 17.5);
+      k.keyframes.undo.commit();
+      const held = await (await fetch('/effects/' + entry.id)).json();
+      const chunks = {};
+      for (const { name } of held.files.filter((f) => f.name !== 'manifest.json')) {
+        chunks[name] = await (await fetch('/effects/' + entry.id + '/file/' + name)).text();
+      }
+      const install = await fetch('/effects/' + entry.id, {
+        method: 'PUT',
+        headers: json,
+        body: JSON.stringify({ manifest: { ...held.manifest, version: '9.9.9' }, chunks }),
+      });
+      await k.effects.reload();
+      const lineAfterReload = k.library.effectVersionSkew();
+      const popped = k.keyframes.undo.pop();
+      let stored = null;
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline) {
+        const body = await read();
+        if (body.clips?.[0]?.params?.pointSize === size) { stored = body; break; }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      const page = k.library.serialiseProjectBody();
+      const skew = k.library.effectVersionSkew();
+      const depth = k.keyframes.undo.depth();
+      const nothingToCommit = k.keyframes.undo.commit();
+      const out = {
+        entry,
+        installed: install.status,
+        lineAfterReload,
+        popped,
+        size,
+        storedVersion: stored?.requires?.find((e) => e.id === entry.id)?.version ?? null,
+        pageVersion: page.requires?.find((e) => e.id === entry.id)?.version ?? null,
+        skew,
+        depth,
+        depthAfter: k.keyframes.undo.depth(),
+        nothingToCommit,
+      };
+      await fetch('/effects/' + entry.id, { method: 'DELETE', headers: json });
+      await k.effects.reload();
+      return out;
+    })()`);
+    check(upgraded.entry !== null && upgraded.installed === 200 && upgraded.popped === true,
+      'the document names an effect, an edit is made, that effect is upgraded, and the edit is undone',
+      JSON.stringify({ entry: upgraded.entry, installed: upgraded.installed, popped: upgraded.popped }));
+    // Printed rather than asserted: `docs/reference.md` says the line stands until the next save.
+    console.log(`  ...   after the reload and before the undo the version line reads ${JSON.stringify(upgraded.lineAfterReload)}`);
+    check(upgraded.storedVersion === '9.9.9' && upgraded.pageVersion === '9.9.9',
+      'and the undo writes what the page now holds, naming the version installed rather than the one in the stack entry',
+      `file ${upgraded.storedVersion}, page ${upgraded.pageVersion}, entry ${upgraded.entry?.version}`);
+    check(upgraded.nothingToCommit === false && upgraded.depthAfter === upgraded.depth,
+      'and the baseline it leaves is the page, so a commit with nothing to record records nothing',
+      `commit answered ${upgraded.nothingToCommit}, depth ${upgraded.depth} to ${upgraded.depthAfter}`);
+    check(upgraded.skew?.length === 0,
+      'and no line says the document requires a version the write just replaced',
+      JSON.stringify(upgraded.skew));
     await inProject.page.close();
   }
 
