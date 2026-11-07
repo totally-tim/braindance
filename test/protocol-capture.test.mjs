@@ -4,16 +4,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import fsp, { mkdtemp, readdir, readFile, rename, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   encodeMessage, HEADER_BYTES, MAGIC, MAX_PAYLOAD_BYTES, MessageParser, TYPE_FRAME, TYPE_HELLO,
 } from '../server/protocol.js';
 import {
-  cloudExtent, decimatePayload, forgetCapture, indexPathFor, openCapture,
+  cachedIndex, cloudExtent, decimatePayload, forgetCapture, indexPathFor, openCapture, readHelloCached,
 } from '../server/capture.js';
-import { DEPTH_H, DEPTH_W } from '../web/format.js';
+import { scanTakes } from '../server/library.js';
+import { CAPTURE_FORMAT, DEPTH_H, DEPTH_W } from '../web/format.js';
 
 function makeFramePayload({ colour = Buffer.from([0xff, 0xd8, 0xff, 0xd9]), ts = 1000n, fill = 1200 } = {}) {
   const depthBytes = DEPTH_W * DEPTH_H * 2;
@@ -138,6 +141,191 @@ test('a failed openCapture never evicts a newer openCapture placed after forgetC
       forgetCapture(path);
     }
   } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a scan forgotten as it opens files no sidecar and leaves nothing in the cache', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'braindance-forgotten-scan-'));
+  try {
+    const path = join(dir, 'take.knct');
+    await writeFile(path, makeCaptureBytes(2));
+    const st = await stat(path);
+
+    const opening = openCapture(path);
+    forgetCapture(path);
+    const capture = await opening;
+    assert.equal(capture.frameCount, 2, 'the open itself still finishes, for whoever was waiting on it');
+    assert.equal(existsSync(indexPathFor(path)), false, 'the forgotten scan filed a sidecar');
+
+    await unlink(path);
+    await assert.rejects(cachedIndex(path, null, st), { code: 'ENOENT' }, 'the forgotten scan filled the cache');
+  } finally {
+    forgetCapture(join(dir, 'take.knct'));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a scan of the old take that finishes after its replacement does not overwrite it', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'braindance-replaced-scan-'));
+  const realOpen = fsp.open;
+  t.after(() => {
+    fsp.open = realOpen;
+    syncBuiltinESMExports();
+  });
+  // Holds the old scan on the old descriptor until its replacement is filed, so no timer decides
+  // which of the two finishes last.
+  let opened;
+  const descriptorHeld = new Promise((done) => { opened = done; });
+  let release;
+  const replacementFiled = new Promise((done) => { release = done; });
+  fsp.open = async (...args) => {
+    fsp.open = realOpen;
+    syncBuiltinESMExports();
+    const handle = await realOpen(...args);
+    opened();
+    await replacementFiled;
+    return handle;
+  };
+  syncBuiltinESMExports();
+  try {
+    const path = join(dir, 'take.knct');
+    await writeFile(path, makeCaptureBytes(3));
+    const openingOld = openCapture(path);
+    await descriptorHeld;
+
+    await unlink(path);
+    await writeFile(path, makeCaptureBytes(1));
+    forgetCapture(path);
+    const replacement = await cachedIndex(path);
+    release();
+
+    const old = (await openingOld).index;
+    assert.notEqual(old.hash, replacement.hash);
+    assert.equal(JSON.parse(await readFile(indexPathFor(path), 'utf8')).hash, replacement.hash, 'the sidecar is the old take');
+    const stale = { size: old.bytes, mtimeMs: old.mtimeMs };
+    assert.equal((await cachedIndex(path, null, stale)).hash, replacement.hash, 'the cache is the old take');
+  } finally {
+    forgetCapture(join(dir, 'take.knct'));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a forget landing during the sidecar rename takes the sidecar back out', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'braindance-rename-forget-'));
+  const path = join(dir, 'take.knct');
+  const realRename = fsp.rename;
+  t.after(() => {
+    fsp.rename = realRename;
+    syncBuiltinESMExports();
+  });
+  fsp.rename = async (from, to) => {
+    await realRename(from, to);
+    if (to === indexPathFor(path)) forgetCapture(path);
+  };
+  syncBuiltinESMExports();
+  try {
+    await writeFile(path, makeCaptureBytes(2));
+    await cachedIndex(path);
+    assert.equal(existsSync(indexPathFor(path)), false, 'the sidecar outlived the forget');
+  } finally {
+    forgetCapture(path);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a forget landing during the scratch write leaves the sidecar the name already has', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'braindance-write-forget-'));
+  const path = join(dir, 'take.knct');
+  const realWrite = fsp.writeFile;
+  t.after(() => {
+    fsp.writeFile = realWrite;
+    syncBuiltinESMExports();
+  });
+  fsp.writeFile = async (to, data) => {
+    await realWrite(to, data);
+    if (String(to).endsWith('.tmp')) forgetCapture(path);
+  };
+  syncBuiltinESMExports();
+  try {
+    await realWrite(path, makeCaptureBytes(2));
+    await realWrite(indexPathFor(path), 'the replacement take\'s sidecar');
+    await cachedIndex(path);
+    assert.equal(await readFile(indexPathFor(path), 'utf8'), 'the replacement take\'s sidecar');
+    assert.deepEqual((await readdir(dir)).filter((name) => name.endsWith('.tmp')), [], 'the scratch stayed behind');
+  } finally {
+    forgetCapture(path);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a scan forgotten during its stat is not the one the next caller waits on', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'braindance-stat-forget-'));
+  try {
+    const path = join(dir, 'take.knct');
+    await writeFile(path, makeCaptureBytes(2));
+    const forgottenRead = cachedIndex(path);
+    forgetCapture(path);
+    await Promise.all([forgottenRead, cachedIndex(path)]);
+    assert.equal(existsSync(indexPathFor(path)), true, 'the second caller waited on the forgotten scan and filed nothing');
+  } finally {
+    forgetCapture(join(dir, 'take.knct'));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a listing that stats a take just before its forget files nothing for it', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'braindance-listing-forget-'));
+  const path = join(dir, 'take.knct');
+  const realStat = fsp.stat;
+  t.after(() => {
+    fsp.stat = realStat;
+    syncBuiltinESMExports();
+  });
+  // The listing's own stat only: the scan stats the name again, and a forget there is another test.
+  fsp.stat = async (at, ...rest) => {
+    const st = await realStat(at, ...rest);
+    if (at === path) {
+      fsp.stat = realStat;
+      syncBuiltinESMExports();
+      forgetCapture(path);
+    }
+    return st;
+  };
+  syncBuiltinESMExports();
+  try {
+    await writeFile(path, Buffer.concat([
+      encodeMessage(TYPE_HELLO, Buffer.from(JSON.stringify({ fx: 366, fy: 366, cx: 256, cy: 212, format: CAPTURE_FORMAT }))),
+      encodeMessage(TYPE_FRAME, makeFramePayload()),
+    ]));
+    const { takes } = await scanTakes(dir);
+    assert.equal(takes.length, 1);
+    assert.equal(existsSync(indexPathFor(path)), false, 'the listing filed a sidecar past the forget');
+  } finally {
+    forgetCapture(path);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a hello read forgotten in flight is not remembered', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'braindance-forgotten-hello-'));
+  try {
+    const path = join(dir, 'take.knct');
+    const helloSaying = (cx) => encodeMessage(TYPE_HELLO, Buffer.from(JSON.stringify({ cx })));
+    await writeFile(path, helloSaying(100));
+    const index = await cachedIndex(path);
+    const st = await stat(path);
+
+    const reading = readHelloCached(path, index, st);
+    forgetCapture(path);
+    assert.equal((await reading).cx, 100);
+
+    // Same length, same mtime: only the memo can answer with the old bytes now.
+    await writeFile(path, helloSaying(200));
+    await utimes(path, st.atime, st.mtime);
+    assert.equal((await readHelloCached(path, index, st)).cx, 200, 'the forgotten read was remembered');
+  } finally {
+    forgetCapture(join(dir, 'take.knct'));
     await rm(dir, { recursive: true, force: true });
   }
 });
