@@ -1386,7 +1386,11 @@ export class DocumentStore {
 
   /** Writes a document, after checking the version and the revision. */
   async write(name, body, rev) {
-    if (body?.version !== undefined && body.version !== this.version) {
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      const carried = body === null ? 'null' : Array.isArray(body) ? 'an array' : `a ${typeof body}`;
+      throw new Error(`a ${this.kind} is one JSON object, and this write carried ${carried}: nothing was written`);
+    }
+    if (body.version !== undefined && body.version !== this.version) {
       throw new Error(
         `this ${this.kind} says version ${JSON.stringify(body.version)}, and this build writes `
         + `version ${this.version}: refused rather than restamped, because a document this build `
