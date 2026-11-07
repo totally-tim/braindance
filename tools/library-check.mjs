@@ -4417,7 +4417,7 @@ async function runChecks() {
     const OTHER_VERSION = 'projects-page-other-version';
     // The one of the three the store would file, which is what makes the press row able to fail.
     const NO_CLIPS = 'projects-page-no-clips';
-    const unreadableNames = [NOT_JSON, OTHER_VERSION, NO_CLIPS];
+    const unreadableNames = [NOT_JSON, OTHER_VERSION, NO_CLIPS]; // Last, for a press that navigates.
     writeFileSync(join(WORK, 'projects', `${NOT_JSON}.json`), '{not json');
     writeFileSync(join(WORK, 'projects', `${OTHER_VERSION}.json`),
       JSON.stringify({ version: DOCUMENT_VERSIONS.project - 1, clips: [] }));
@@ -4441,13 +4441,17 @@ async function runChecks() {
       // Forced, for a trusted press on the disabled button: a dispatched click reaches its handler
       // whether it is disabled or not.
       await row.locator('[data-item="duplicate"]').click({ force: true });
-      await row.locator('[data-act="more"]').click();
+      await row.locator('[data-act="more"]').click({ timeout: 2000 }).catch(() => { /* the row below says so */ });
     };
     for (const name of unreadableNames) await pressDuplicate(name);
     await page.waitForTimeout(500);
     check(new URL(page.url()).pathname === '/projects' && documentsOnDisk() === beforePress,
       'and pressing it writes no document and leaves the page where it is',
       `${page.url()}: ${documentsOnDisk()}`);
+    if (new URL(page.url()).pathname !== '/projects') {
+      await page.goto(projectsPage(macUrl));
+      await page.waitForFunction('globalThis.__projects !== undefined', null, { timeout: 20000 });
+    }
 
     // A refusal that is not about the name stops at the first PUT and is said as the server said it.
     const refusal = 'this store refused the document for a reason that has nothing to do with its name';
@@ -4487,7 +4491,9 @@ async function runChecks() {
     await page.unroute('**/projects/**', answerCreates);
 
     await page.close();
-    for (const name of unreadableNames) rmSync(join(WORK, 'projects', `${name}.json`));
+    for (const file of readdirSync(join(WORK, 'projects'))) {
+      if (unreadableNames.some((name) => file.startsWith(name))) rmSync(join(WORK, 'projects', file));
+    }
     await writeDoc(macUrl, 'projects', PRESENT, null, 'DELETE');
     await writeDoc(macUrl, 'projects', DARK, null, 'DELETE');
     await writeDoc(macUrl, 'projects', TRIMMED, null, 'DELETE');
