@@ -231,9 +231,21 @@ const MUTATIONS = {
 
   'undo-keeps-the-version-line': {
     file: 'web/main.js',
-    edits: [['    if (effectVersionSkew.length) {\n      effectVersionSkew = [];\n      paintMissingEffects();\n    }\n    if (openedProjectName !== null && !projectDiverged) {\n      writeOpenProject(serialiseProjectBody()).catch((err) => {\n        if (err.stale) stopWritingProject(err);\n        else say(`this undo',
-      '    if (openedProjectName !== null && !projectDiverged) {\n      writeOpenProject(serialiseProjectBody()).catch((err) => {\n        if (err.stale) stopWritingProject(err);\n        else say(`this undo']],
+    edits: [['      if (effectVersionSkew.length) {\n        effectVersionSkew = [];\n        paintMissingEffects();\n      }\n      writeOpenProject(serialiseProjectBody()).catch((err) => {\n        if (err.stale) stopWritingProject(err);\n        else say(`this undo',
+      '      writeOpenProject(serialiseProjectBody()).catch((err) => {\n        if (err.stale) stopWritingProject(err);\n        else say(`this undo']],
     fails: 'the row that reads the version line after an undo across an effect upgrade, and that row alone',
+  },
+
+  'reload-reads-the-line-off-the-page': {
+    file: 'web/main.js',
+    edits: [["    if (open.requires) open.requires = open.requires.map((e) => ({ ...e, version: filed.get(e.id) ?? e.version }));\n", '']],
+    fails: 'the two rows about a reload with no save: a rebuild erases a true line, and a revert names the version in between',
+  },
+
+  'take-page-keeps-a-version-line': {
+    file: 'web/main.js',
+    edits: [["  if (openedProjectName === null && effectVersionSkew.length) {\n    effectVersionSkew = [];\n    paintMissingEffects();\n  }\n  return fetched.map(", '  return fetched.map(']],
+    fails: 'the row that upgrades an effect under a page opened on a take, and that row alone',
   },
 
   'the-load-arms-the-saved-stack-in-apply': {
@@ -1201,6 +1213,55 @@ async function main() {
       + 'absence in the file rather than an absence everywhere',
       `depth ${saved.depth}${inProject.errors.length ? `, ${inProject.errors[0].slice(0, 90)}` : ''}`);
 
+    // The version line across reloads, with no edit and so no save: it is about what the file says.
+    const lines = await inProject.page.evaluate(`(async () => {
+      const k = globalThis.__kinect;
+      const json = { 'Content-Type': 'application/json' };
+      const entry = (await (await fetch('/projects/${SAVED_PROJECT}')).json()).body.requires?.[0];
+      if (!entry) return { entry: null };
+      const held = await (await fetch('/effects/' + entry.id)).json();
+      const chunks = {};
+      for (const { name } of held.files.filter((f) => f.name !== 'manifest.json')) {
+        chunks[name] = await (await fetch('/effects/' + entry.id + '/file/' + name)).text();
+      }
+      await fetch('/effects/' + entry.id, {
+        method: 'PUT',
+        headers: json,
+        body: JSON.stringify({ manifest: { ...held.manifest, version: '9.9.9' }, chunks }),
+      });
+      await k.effects.reload();
+      const upgraded = k.library.effectVersionSkew();
+      await k.effects.reload();
+      const reloadedAgain = k.library.effectVersionSkew();
+      return { entry, upgraded, reloadedAgain };
+    })()`);
+    // In front, because a rebuild asked of a tab behind another does not finish.
+    await opened.page.bringToFront();
+    const lineOnTheTakePage = await opened.page.evaluate(`(async () => {
+      await globalThis.__kinect.effects.reload();
+      return globalThis.__kinect.library.effectVersionSkew();
+    })()`);
+    await inProject.page.bringToFront();
+    const reverted = await inProject.page.evaluate(`(async () => {
+      const k = globalThis.__kinect;
+      await fetch('/effects/${lines.entry?.id}', { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+      await k.effects.reload();
+      return k.library.effectVersionSkew();
+    })()`);
+    const fileLine = JSON.stringify([{ id: lines.entry?.id, wanted: lines.entry?.version, installed: '9.9.9' }]);
+    check(JSON.stringify(lines.upgraded) === fileLine,
+      'an effect upgraded under an open document raises the line docs/reference.md gives it, naming the version the file holds',
+      JSON.stringify(lines.upgraded));
+    check(JSON.stringify(lines.reloadedAgain) === fileLine,
+      'and a rebuild that changes nothing leaves it standing, because the file still names that version',
+      JSON.stringify(lines.reloadedAgain));
+    check(JSON.stringify(reverted) === '[]',
+      'and the installed version coming back to the one the file names ends it, rather than naming the version in between',
+      JSON.stringify(reverted));
+    check(JSON.stringify(lineOnTheTakePage) === '[]',
+      'and a page opened on a take holds no document, so the same upgrade raises no line there',
+      JSON.stringify(lineOnTheTakePage));
+
     // An effect upgraded between an edit and its undo: the stack entry names the old version and
     // the page runs the new one, so what the undo restores is not what the entry says.
     const upgraded = await inProject.page.evaluate(`(async () => {
@@ -1224,7 +1285,6 @@ async function main() {
         body: JSON.stringify({ manifest: { ...held.manifest, version: '9.9.9' }, chunks }),
       });
       await k.effects.reload();
-      const lineAfterReload = k.library.effectVersionSkew();
       const popped = k.keyframes.undo.pop();
       let stored = null;
       const deadline = Date.now() + 10000;
@@ -1240,7 +1300,6 @@ async function main() {
       const out = {
         entry,
         installed: install.status,
-        lineAfterReload,
         popped,
         size,
         storedVersion: stored?.requires?.find((e) => e.id === entry.id)?.version ?? null,
@@ -1257,8 +1316,6 @@ async function main() {
     check(upgraded.entry !== null && upgraded.installed === 200 && upgraded.popped === true,
       'the document names an effect, an edit is made, that effect is upgraded, and the edit is undone',
       JSON.stringify({ entry: upgraded.entry, installed: upgraded.installed, popped: upgraded.popped }));
-    // Printed rather than asserted: `docs/reference.md` says the line stands until the next save.
-    console.log(`  ...   after the reload and before the undo the version line reads ${JSON.stringify(upgraded.lineAfterReload)}`);
     check(upgraded.storedVersion === '9.9.9' && upgraded.pageVersion === '9.9.9',
       'and the undo writes what the page now holds, naming the version installed rather than the one in the stack entry',
       `file ${upgraded.storedVersion}, page ${upgraded.pageVersion}, entry ${upgraded.entry?.version}`);

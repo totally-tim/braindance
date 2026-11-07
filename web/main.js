@@ -1774,6 +1774,10 @@ async function reloadEffects() {
   try {
     programs = assembleShaders(SPINES, fetched);
     open = serialiseProjectBody();
+    // The versions the file names, where they differ from what the page stamped, so the version
+    // line below is about the document and not about the set this page held before the reload.
+    const filed = new Map(effectVersionSkew.map((s) => [s.id, s.wanted]));
+    if (open.requires) open.requires = open.requires.map((e) => ({ ...e, version: filed.get(e.id) ?? e.version }));
   } catch (err) {
     throw effectRefusal(`the installed effects changed and this page could not read them: ${err.message}`);
   }
@@ -1825,6 +1829,11 @@ async function reloadEffects() {
   }
   refusedEffectSignature = null;
   if (history.baseline !== null) history.baseline = history.snapshot();
+  // A page opened on a take holds no document for the line to be about.
+  if (openedProjectName === null && effectVersionSkew.length) {
+    effectVersionSkew = [];
+    paintMissingEffects();
+  }
   return fetched.map((p) => ({ id: p.id, version: p.manifest.version, rev: p.rev }));
 }
 
@@ -3544,11 +3553,11 @@ const history = {
     } finally {
       this.restoring = false;
     }
-    if (effectVersionSkew.length) {
-      effectVersionSkew = [];
-      paintMissingEffects();
-    }
     if (openedProjectName !== null && !projectDiverged) {
+      if (effectVersionSkew.length) {
+        effectVersionSkew = [];
+        paintMissingEffects();
+      }
       writeOpenProject(serialiseProjectBody()).catch((err) => {
         if (err.stale) stopWritingProject(err);
         else say(`this undo could not be written to ${openedProjectName}: ${err.message}`);
