@@ -932,8 +932,8 @@ async function removeHeld(dir, id, path, { hash, verifiedElsewhere, marksRead, o
     if (err.code !== 'ENOENT') console.warn(`[library] ${id} was removed but its marks log was not: ${err.message}`);
   });
   markLogCache.delete(marksPathFor(dir, actual));
-  await unlink(indexPathFor(path)).catch(() => {});
   forgetCapture(path);
+  await unlink(indexPathFor(path)).catch(() => {});
   return { removed: `${id}.knct`, hash: actual };
 }
 
@@ -983,8 +983,8 @@ async function removeUnreadableHeld(dir, id, path, { hash, verifiedElsewhere, ow
     );
   }
   await unlink(target);
-  await unlink(indexPathFor(target)).catch(() => {});
   forgetCapture(target);
+  await unlink(indexPathFor(target)).catch(() => {});
   return { removed: `${id}.knct`, hash: null };
 }
 
@@ -1032,8 +1032,8 @@ export async function removeName(dir, id, { keep, hash, owns = () => false }) {
       }
     }
     await unlink(path);
-    await unlink(indexPathFor(path)).catch(() => {});
     forgetCapture(path);
+    await unlink(indexPathFor(path)).catch(() => {});
     return { removed: `${id}.knct`, kept: `${keep}.knct`, hash, sameFile };
   });
 }
@@ -1096,9 +1096,9 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
 
     if (id.toLowerCase() === to.toLowerCase() && sameTake(openedStat, takeIdentity(target))) {
       await rename(from, target);
+      forgetCapture(from);
       await rename(indexPathFor(from), indexPathFor(target))
         .catch(() => unlink(indexPathFor(from)).catch(() => {}));
-      forgetCapture(from);
       forgetCapture(target);
       return { renamed: `${id}.knct`, id: to, file: `${to}.knct`, hash: index.hash };
     }
@@ -1136,9 +1136,9 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
         throw err;
       }
     }
+    forgetCapture(from);
     await rename(indexPathFor(from), indexPathFor(target))
       .catch(() => unlink(indexPathFor(from)).catch(() => {}));
-    forgetCapture(from);
     forgetCapture(target);
     return { renamed: `${id}.knct`, id: to, file: `${to}.knct`, hash: index.hash };
   });
