@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import fsp, { mkdtemp, readFile, rename, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
+import fsp, { mkdtemp, readdir, readFile, rename, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,7 +15,8 @@ import {
 import {
   cachedIndex, cloudExtent, decimatePayload, forgetCapture, indexPathFor, openCapture, readHelloCached,
 } from '../server/capture.js';
-import { DEPTH_H, DEPTH_W } from '../web/format.js';
+import { scanTakes } from '../server/library.js';
+import { CAPTURE_FORMAT, DEPTH_H, DEPTH_W } from '../web/format.js';
 
 function makeFramePayload({ colour = Buffer.from([0xff, 0xd8, 0xff, 0xd9]), ts = 1000n, fill = 1200 } = {}) {
   const depthBytes = DEPTH_W * DEPTH_H * 2;
@@ -227,6 +228,79 @@ test('a forget landing during the sidecar rename takes the sidecar back out', as
     await writeFile(path, makeCaptureBytes(2));
     await cachedIndex(path);
     assert.equal(existsSync(indexPathFor(path)), false, 'the sidecar outlived the forget');
+  } finally {
+    forgetCapture(path);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a forget landing during the scratch write leaves the sidecar the name already has', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'braindance-write-forget-'));
+  const path = join(dir, 'take.knct');
+  const realWrite = fsp.writeFile;
+  t.after(() => {
+    fsp.writeFile = realWrite;
+    syncBuiltinESMExports();
+  });
+  fsp.writeFile = async (to, data) => {
+    await realWrite(to, data);
+    if (String(to).endsWith('.tmp')) forgetCapture(path);
+  };
+  syncBuiltinESMExports();
+  try {
+    await realWrite(path, makeCaptureBytes(2));
+    await realWrite(indexPathFor(path), 'the replacement take\'s sidecar');
+    await cachedIndex(path);
+    assert.equal(await readFile(indexPathFor(path), 'utf8'), 'the replacement take\'s sidecar');
+    assert.deepEqual((await readdir(dir)).filter((name) => name.endsWith('.tmp')), [], 'the scratch stayed behind');
+  } finally {
+    forgetCapture(path);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a scan forgotten during its stat is not the one the next caller waits on', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'braindance-stat-forget-'));
+  try {
+    const path = join(dir, 'take.knct');
+    await writeFile(path, makeCaptureBytes(2));
+    const forgottenRead = cachedIndex(path);
+    forgetCapture(path);
+    await Promise.all([forgottenRead, cachedIndex(path)]);
+    assert.equal(existsSync(indexPathFor(path)), true, 'the second caller waited on the forgotten scan and filed nothing');
+  } finally {
+    forgetCapture(join(dir, 'take.knct'));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a listing that stats a take just before its forget files nothing for it', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'braindance-listing-forget-'));
+  const path = join(dir, 'take.knct');
+  const realStat = fsp.stat;
+  t.after(() => {
+    fsp.stat = realStat;
+    syncBuiltinESMExports();
+  });
+  // The listing's own stat only: the scan stats the name again, and a forget there is another test.
+  fsp.stat = async (at, ...rest) => {
+    const st = await realStat(at, ...rest);
+    if (at === path) {
+      fsp.stat = realStat;
+      syncBuiltinESMExports();
+      forgetCapture(path);
+    }
+    return st;
+  };
+  syncBuiltinESMExports();
+  try {
+    await writeFile(path, Buffer.concat([
+      encodeMessage(TYPE_HELLO, Buffer.from(JSON.stringify({ fx: 366, fy: 366, cx: 256, cy: 212, format: CAPTURE_FORMAT }))),
+      encodeMessage(TYPE_FRAME, makeFramePayload()),
+    ]));
+    const { takes } = await scanTakes(dir);
+    assert.equal(takes.length, 1);
+    assert.equal(existsSync(indexPathFor(path)), false, 'the listing filed a sidecar past the forget');
   } finally {
     forgetCapture(path);
     await rm(dir, { recursive: true, force: true });

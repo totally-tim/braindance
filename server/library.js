@@ -8,7 +8,7 @@ import { readdir, readFile, writeFile, appendFile, stat, unlink, rename, link, m
 import { pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
 import { basename, dirname, join, resolve } from 'node:path';
-import { cachedIndex, forgetCapture, indexPathFor, captureIdFor, loadIndex, readHelloCached } from './capture.js';
+import { cachedIndex, forgetCapture, forgetsOf, indexPathFor, captureIdFor, loadIndex, readHelloCached } from './capture.js';
 
 export { VALID_ID };
 
@@ -302,6 +302,7 @@ const carriesRefusals = (take) => Array.isArray(take.openRefusals)
 async function describeTake(dir, file, recording, markFiles = null) {
   const path = join(dir, file);
   const id = captureIdFor(path);
+  const seen = forgetsOf(path);
   const st = await stat(path);
 
   // The take being written is described without being scanned: its size and mtime move, so the
@@ -332,9 +333,9 @@ async function describeTake(dir, file, recording, markFiles = null) {
     };
   }
 
-  const index = await cachedIndex(path, null, st);
+  const index = await cachedIndex(path, null, st, seen);
   const stamps = index.frames.stampMs;
-  const hello = await readHelloCached(path, index, st);
+  const hello = await readHelloCached(path, index, st, seen);
   const log = await readMarkLogCached(dir, index.hash, markFiles);
   const marks = resolveMarks(log);
   // The recorder's `kind: 'drop'` record, which carries no `sourceMs` and so never resolves as a
@@ -661,6 +662,7 @@ async function downloadClaimed(node, take, dir, ownsFile) {
   // Opened first and asked about by the file opened: a name found free and then read by name can
   // be taken by the recorder in between, and the read would scan the take it is writing.
   let target = plain;
+  const seen = forgetsOf(plain);
   const held = await open(plain, 'r').catch(() => null);
   if (held) {
     try {
@@ -668,7 +670,7 @@ async function downloadClaimed(node, take, dir, ownsFile) {
         throw new Error(`${take.id} is being recorded on this machine right now, under the name `
           + `this download would check first: download ${take.id} once that take has closed`);
       }
-      const local = await loadIndex(plain, held).catch(() => null);
+      const local = await loadIndex(plain, held, null, seen).catch(() => null);
       if (local?.hash !== take.hash) target = join(dir, `${take.id}-${take.hash.slice(7, 15)}.knct`);
     } finally {
       await held.close();
