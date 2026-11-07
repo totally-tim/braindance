@@ -10952,7 +10952,7 @@ async function createProjectUnder(pick, body) {
     });
     const saved = await res.json().catch(() => null);
     if (res.ok && !saved?.error) return saved;
-    if (res.status !== 409) throw documentRefusal(res, saved);
+    if (!saved?.stale) throw documentRefusal(res, saved);
     // The name went while this was being decided. Out of the reckoning, and ask for the next.
     taken.add(name);
   }

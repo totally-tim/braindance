@@ -252,6 +252,14 @@ test('a version this build does not write is refused before anything reaches the
   assert.deepEqual(await s.list(), []);
 });
 
+test('a document is one object: anything else is refused with nothing on disk', async () => {
+  const s = await store();
+  for (const [body, says] of [[null, /carried null/], [[], /carried an array/], [7, /carried a number/], ['text', /carried a string/]]) {
+    assert.match(await refused(() => s.write('not-a-document', body, ABSENT_REV)) ?? '', says);
+    assert.equal(await s.currentRev('not-a-document'), ABSENT_REV, `${JSON.stringify(body)} reached the disk`);
+  }
+});
+
 test('a refused write does not refuse the writes queued behind it', async () => {
   const s = await store();
   const base = await s.write('Queued', { clips: [] }, ABSENT_REV);
