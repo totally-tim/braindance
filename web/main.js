@@ -7163,11 +7163,13 @@ addEventListener('keydown', (e) => {
     case '[': case ']': {
       e.preventDefault();
       if (!clipGestureLive()) { say('select a clip before moving to a mark'); return; }
-      const here = timeline.programSec;
+      // On the output grid, because a mark rarely sits on it: a seek lands on the mark's nearest
+      // frame, and compared in seconds the mark is still ahead of or behind the frame it landed on.
+      const here = timeline.frame;
       const seconds = markSecondsInOrder().filter(reachableInClip);
       const to = e.key === '['
-        ? seconds.filter((s) => s < here - 1e-6).pop()
-        : seconds.find((s) => s > here + 1e-6);
+        ? seconds.filter((s) => timeline.frameAt(s) < here).pop()
+        : seconds.find((s) => timeline.frameAt(s) > here);
       if (to !== undefined) goTo(to);
       return;
     }
@@ -8047,10 +8049,12 @@ let selectedMark = null; // The currently selected mark object, or null
 const clampToClip = (sec, total) => Math.max(0, Math.min(total, sec));
 
 /**
- * Whether a seek here would land where it was asked: `frameAt` clamps every seek into in..out.
+ * Whether a seek here would land where it was asked: `frameAt` clamps every seek into in..out, and
+ * the out point's sub-frame tail rounds to a frame past the last one the range holds.
  */
 const reachableInClip = (programSec) => !timeline
-  || (programSec >= timeline.clipInSec - 1e-6 && programSec <= timeline.clipOutSec + 1e-6);
+  || (programSec >= timeline.clipInSec - 1e-6 && programSec <= timeline.clipOutSec + 1e-6
+    && timeline.frameAt(programSec) === timeline.frameOf(programSec));
 
 const markSecondsInOrder = () => {
   const total = view.duration;

@@ -1118,6 +1118,27 @@ const MUTATIONS = {
     ]],
   },
 
+  // Must redden the two sub-frame mark rows that press a key across a mark off the grid.
+  'mark-keys-compare-seconds': {
+    file: 'web/main.js',
+    edits: [
+      ['      const here = timeline.frame;\n      const seconds = markSecondsInOrder().filter(reachableInClip);',
+        '      const here = timeline.programSec;\n      const seconds = markSecondsInOrder().filter(reachableInClip);'],
+      ["        ? seconds.filter((s) => timeline.frameAt(s) < here).pop()\n        : seconds.find((s) => timeline.frameAt(s) > here);",
+        "        ? seconds.filter((s) => s < here - 1e-6).pop()\n        : seconds.find((s) => s > here + 1e-6);"],
+    ],
+  },
+
+  // Must redden the sub-frame tail rows: a mark past the last frame the range holds is offered.
+  'tail-mark-counts-as-reachable': {
+    file: 'web/main.js',
+    edits: [[
+      '  || (programSec >= timeline.clipInSec - 1e-6 && programSec <= timeline.clipOutSec + 1e-6\n'
+      + '    && timeline.frameAt(programSec) === timeline.frameOf(programSec));',
+      '  || (programSec >= timeline.clipInSec - 1e-6 && programSec <= timeline.clipOutSec + 1e-6);',
+    ]],
+  },
+
   // Must redden only the click rows.
   'tick-seeks-outside-the-trim': {
     file: 'web/main.js',
@@ -8209,6 +8230,76 @@ try {
     check(near(afterClickingInside, trim.inside, TOL),
       'and the tick the trim keeps still seeks to itself, so the refusal above is about reachability rather than about a ruler that stopped working',
       `${afterClickingInside.toFixed(3)}s against the kept mark at ${trim.inside.toFixed(3)}s`);
+
+    // Marks off the output grid, which is where a mark pressed live sits. At 30fps 980ms rounds
+    // down to frame 29 and 990ms rounds up to frame 30, so each is ahead of or behind the frame a
+    // seek lands it on. Rate 1 and the whole take, so a program second is the mark's own.
+    await page.evaluate('__kinect.keyframes.setSpeed(1)');
+    await page.evaluate('__kinect.editor.setClipRange(0, null)');
+    await page.evaluate(`__kinect.editor.setMarks([
+      { id: 'early', sourceMs: 500, label: 'early' },
+      { id: 'rounds-down', sourceMs: 980, label: 'rounds down' },
+      { id: 'rounds-up', sourceMs: 990, label: 'rounds up' },
+      { id: 'late', sourceMs: 2000, label: 'late' },
+    ])`);
+    await settle();
+    check((await read()).outputFps === 30 && await page.evaluate('__kinect.editor.markProgramSec(0.98)') === 0.98,
+      'the program runs at 30fps and rate 1, so the marks below sit where their comments say',
+      `${(await read()).outputFps}fps, 980ms at ${await page.evaluate('__kinect.editor.markProgramSec(0.98)')}s`);
+    const frameNow = async () => (await read()).frame;
+    const pressAndRead = async (key) => {
+      await page.keyboard.press(key);
+      await settle();
+      return frameNow();
+    };
+    await page.evaluate('__kinect.timeline.transport().seek(0)');
+    await settle();
+    await focusStage();
+    const forwardFrames = [];
+    for (let i = 0; i < 4; i++) forwardFrames.push(await pressAndRead(']'));
+    check(JSON.stringify(forwardFrames) === '[15,29,30,60]',
+      'the next-mark key walks forward across marks off the output grid and is never held by one, so a mark that rounded down does not catch the press that follows it',
+      `frames ${forwardFrames.join(' ')}`);
+    const backFrames = [];
+    for (let i = 0; i < 3; i++) backFrames.push(await pressAndRead('['));
+    check(JSON.stringify(backFrames) === '[30,29,15]',
+      'and the previous-mark key walks back the same way, so a mark that rounded up does not catch it either',
+      `frames ${backFrames.join(' ')}`);
+
+    // The tail of a sub-frame out point: 0.99s holds frames up to 29, and 985ms rounds to 30.
+    await page.evaluate('__kinect.timeline.transport().seek(0)');
+    await settle();
+    await page.evaluate('__kinect.editor.setClipRange(0, 0.99)');
+    await page.evaluate(`__kinect.editor.setMarks([
+      { id: 'kept', sourceMs: 500, label: 'kept' },
+      { id: 'tail', sourceMs: 985, label: 'tail' },
+    ])`);
+    await settle();
+    const tailRange = await page.evaluate('__kinect.timeline.transport().inOutFrames');
+    check(tailRange.from === 0 && tailRange.to === 29,
+      'a sub-frame out point leaves a tail past its last frame, so a mark can sit inside the seconds and outside the frames',
+      JSON.stringify(tailRange));
+    await focusStage();
+    const tailFrames = [await pressAndRead(']'), await pressAndRead(']')];
+    check(JSON.stringify(tailFrames) === '[15,15]',
+      'the next-mark key does not offer a mark in that tail, which a seek would clamp onto a frame it is not at',
+      `frames ${tailFrames.join(' ')}`);
+    const tailTick = await page.evaluate(`(() => {
+      const ticks = globalThis.__kinect.library.markTicks();
+      const lefts = ticks.map((t) => t.left);
+      return lefts.indexOf(Math.max(...lefts));
+    })()`);
+    // The out handle is drawn over a tick five milliseconds from it, and the handle is not under test.
+    await page.evaluate("document.getElementById('tOut').style.display = 'none'");
+    await page.locator('#tMarks .tmk').nth(tailTick).click();
+    await page.evaluate("document.getElementById('tOut').style.display = ''");
+    await settle();
+    const tailNote = await page.evaluate("document.getElementById('tNote').textContent");
+    check(await frameNow() === 15 && /outside the clip range/.test(tailNote),
+      'and pressing its tick says the mark is outside the clip range rather than seeking to the last frame',
+      `frame ${await frameNow()}, note "${tailNote.slice(0, 80)}"`);
+    await page.evaluate('__kinect.editor.setClipRange(0, null)');
+    await page.evaluate(`__kinect.keyframes.setSpeed(${RATE})`);
 
     await page.evaluate(`__kinect.editor.setMarks([
       { id: 'ordinary', sourceMs: 3000, label: 'ordinary' },
