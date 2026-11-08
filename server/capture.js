@@ -108,13 +108,18 @@ export const captureIdFor = (capturePath) => basename(capturePath).replace(/\.kn
 // Numbers each scan's scratch sidecar, taken on the tick the scan writes so no two in flight share one.
 let indexWrites = 0;
 
+// How many times each path has been forgotten. A read notes this before it opens or stats the name,
+// and a read that finds it moved describes bytes the name no longer holds, so it files nothing.
+const forgets = new Map();
+export const forgetsOf = (capturePath) => forgets.get(resolve(capturePath)) ?? 0;
+
 /**
  * One sequential pass that produces the index and the content hash together. With `handle`, the
  * pass reads that open file and never the name, which can have been given to another file since.
  * `frames` lists the type 2 messages and `colour` the type 3; a type this build does not know is
- * walked past and listed nowhere.
+ * walked past and listed nowhere. `seen` is `forgetsOf` from before the name was opened.
  */
-export async function buildIndex(capturePath, handle = null) {
+export async function buildIndex(capturePath, handle = null, seen = forgetsOf(capturePath)) {
   // Stamped before the read: a pre-scan mtime no longer matches on the next load if the capture
   // is written to meanwhile, where an after-scan stamp would certify the race.
   const before = handle ? await handle.stat() : await stat(capturePath);
@@ -224,6 +229,9 @@ export async function buildIndex(capturePath, handle = null) {
     colour,
   };
 
+  const forgotten = () => forgetsOf(capturePath) !== seen;
+  if (forgotten()) return index;
+
   const sidecar = indexPathFor(capturePath);
   // Two ids differing only in case are two cache keys and one file on APFS and NTFS, so two scans
   // of one take can overlap: with one scratch name the first rename moves it away from the second.
@@ -231,7 +239,15 @@ export async function buildIndex(capturePath, handle = null) {
   try {
     // Written aside and renamed, so a crash cannot leave a sidecar that parses and lies.
     await writeFile(scratch, JSON.stringify(index));
+    if (forgotten()) {
+      await unlink(scratch).catch(() => {});
+      return index;
+    }
     await rename(scratch, sidecar);
+    // A remover forgets before it unlinks the sidecar, so a rename reaching the disk after that
+    // unlink is seen here, and one reaching it before is unlinked there. A replacement's sidecar
+    // caught by this costs one scan.
+    if (forgotten()) await unlink(sidecar).catch(() => {});
   } catch (err) {
     console.error(`[capture] could not write ${sidecar}: ${err.message}`);
     // A numbered scratch is never written again, so one left here by a failed write stays for good.
@@ -265,8 +281,8 @@ function indexDescribes(cached, size) {
   return lists(cached?.frames, STAMP_BYTES) && lists(cached?.colour, COLOUR_STAMP_BYTES);
 }
 
-/** The sidecar when it still describes the file, else a scan. `handle` as for `buildIndex`. */
-export async function loadIndex(capturePath, handle = null, preStat = null) {
+/** The sidecar when it still describes the file, else a scan. `handle` and `seen` as for `buildIndex`. */
+export async function loadIndex(capturePath, handle = null, preStat = null, seen = forgetsOf(capturePath)) {
   const st = preStat ?? (handle ? await handle.stat() : await stat(capturePath));
   try {
     // The sidecar is three orders of magnitude smaller than the take, so this is the one read
@@ -280,7 +296,7 @@ export async function loadIndex(capturePath, handle = null, preStat = null) {
     }
   } catch {
   }
-  return buildIndex(capturePath, handle);
+  return buildIndex(capturePath, handle, seen);
 }
 
 export class Capture {
@@ -530,7 +546,7 @@ const helloCache = new Map();
 // every poll fails the staleness test and used to start its own full read plus sha256.
 const indexPending = new Map();
 
-export async function cachedIndex(capturePath, handle = null, preStat = null) {
+export async function cachedIndex(capturePath, handle = null, preStat = null, seen = forgetsOf(capturePath)) {
   const path = resolve(capturePath);
   const st = preStat ?? (handle ? await handle.stat() : await stat(path));
   const held = indexCache.get(path);
@@ -539,16 +555,13 @@ export async function cachedIndex(capturePath, handle = null, preStat = null) {
     const running = indexPending.get(path);
     if (running) return running;
   }
-  const started = loadIndex(path, handle, st);
-  if (!handle) indexPending.set(path, started);
+  const started = loadIndex(path, handle, st, seen);
+  // Not when forgotten during the stat: the next caller wants the replacement and would wait on this.
+  if (!handle && forgetsOf(path) === seen) indexPending.set(path, started);
   started.then(
     (index) => {
-      // Only if this scan is still the one in flight: `forgetCapture` clears the entry when the
-      // file changes underneath, and a later-finishing scan describes bytes now gone.
-      if (handle || indexPending.get(path) === started) {
-        indexCache.set(path, index);
-        if (!handle && indexPending.get(path) === started) indexPending.delete(path);
-      }
+      if (forgetsOf(path) === seen) indexCache.set(path, index);
+      if (!handle && indexPending.get(path) === started) indexPending.delete(path);
     },
     () => { if (!handle && indexPending.get(path) === started) indexPending.delete(path); },
   );
@@ -580,7 +593,7 @@ export async function readHelloOnce(capturePath, index) {
 }
 
 /** Memoised hello read keyed on the file's `(bytes, mtimeMs)` so library polls skip preads. */
-export async function readHelloCached(capturePath, index, st = null) {
+export async function readHelloCached(capturePath, index, st = null, seen = forgetsOf(capturePath)) {
   if (!index?.hello) return null;
   const path = resolve(capturePath);
   const bytes = st?.size ?? index.bytes;
@@ -588,7 +601,7 @@ export async function readHelloCached(capturePath, index, st = null) {
   const held = helloCache.get(path);
   if (held && held.bytes === bytes && held.mtimeMs === mtimeMs) return held.hello;
   const hello = await readHelloOnce(path, index);
-  helloCache.set(path, { bytes, mtimeMs, hello });
+  if (forgetsOf(path) === seen) helloCache.set(path, { bytes, mtimeMs, hello });
   return hello;
 }
 
@@ -597,6 +610,7 @@ export async function readHelloCached(capturePath, index, st = null) {
 // 26, where nothing can catch it.
 export function forgetCapture(capturePath) {
   const path = resolve(capturePath);
+  forgets.set(path, forgetsOf(path) + 1);
   indexCache.delete(path);
   helloCache.delete(path);
   indexPending.delete(path);
@@ -617,10 +631,11 @@ export function openCapture(capturePath) {
   let pending = openCaptures.get(path);
   if (!pending) {
     let doomedBeforeResolve = false;
+    const seen = forgetsOf(path);
     pending = (async () => {
       const handle = await open(path, 'r');
       try {
-        const index = await cachedIndex(path, handle);
+        const index = await cachedIndex(path, handle, null, seen);
         return new Capture(path, index, handle);
       } catch (err) {
         await handle.close().catch(() => {});

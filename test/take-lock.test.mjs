@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import {
   appendMarks, marksPathFor, mergeMarkLog, readMarkLog, removeName, removeTake, renameTake, takeFileFor,
 } from '../server/library.js';
-import { cachedIndex, indexPathFor, openCapture, openCaptureCount } from '../server/capture.js';
+import { cachedIndex, forgetCapture, indexPathFor, openCapture, openCaptureCount } from '../server/capture.js';
 import { encodeMessage, TYPE_FRAME, TYPE_HELLO } from '../server/protocol.js';
 
 const capture = (seed) => Buffer.concat([
@@ -199,6 +199,19 @@ test('renameTake forgets the .KNCT spelling it moved the take away from', async 
     await renameTake(dir, 'clip', 'moved', { hash });
     assert.deepEqual((await readdir(dir)).filter((name) => /\.knct$/i.test(name)), ['moved.knct']);
     await released();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('renameTake notes the forget count on the .KNCT spelling it opens, so a take forgotten once still files its sidecar', async () => {
+  const { dir, stored, hash } = await openedUpperCaseTake(25);
+  try {
+    // A forget earlier in the server's life, and no sidecar left, so the rename has to scan.
+    forgetCapture(stored);
+    await rm(indexPathFor(stored));
+    await renameTake(dir, 'clip', 'moved', { hash });
+    assert.ok(existsSync(indexPathFor(join(dir, 'moved.knct'))), 'the rename scanned the take and filed no sidecar');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

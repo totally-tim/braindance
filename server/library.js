@@ -8,7 +8,7 @@ import { readdir, readFile, writeFile, appendFile, stat, unlink, rename, link, m
 import { pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
 import { basename, dirname, join, resolve } from 'node:path';
-import { cachedIndex, forgetCapture, indexPathFor, captureIdFor, loadIndex, readHelloCached } from './capture.js';
+import { cachedIndex, forgetCapture, forgetsOf, indexPathFor, captureIdFor, loadIndex, readHelloCached } from './capture.js';
 
 export { VALID_ID };
 
@@ -302,6 +302,7 @@ const carriesRefusals = (take) => Array.isArray(take.openRefusals)
 async function describeTake(dir, file, recording, markFiles = null) {
   const path = join(dir, file);
   const id = captureIdFor(path);
+  const seen = forgetsOf(path);
   const st = await stat(path);
 
   // The take being written is described without being scanned: its size and mtime move, so the
@@ -332,9 +333,9 @@ async function describeTake(dir, file, recording, markFiles = null) {
     };
   }
 
-  const index = await cachedIndex(path, null, st);
+  const index = await cachedIndex(path, null, st, seen);
   const stamps = index.frames.stampMs;
-  const hello = await readHelloCached(path, index, st);
+  const hello = await readHelloCached(path, index, st, seen);
   const log = await readMarkLogCached(dir, index.hash, markFiles);
   const marks = resolveMarks(log);
   // The recorder's `kind: 'drop'` record, which carries no `sourceMs` and so never resolves as a
@@ -664,6 +665,7 @@ async function downloadClaimed(node, take, dir, ownsFile) {
   // Opened first and asked about by the file opened: a name found free and then read by name can
   // be taken by the recorder in between, and the read would scan the take it is writing.
   let target = plain;
+  const seen = forgetsOf(plain);
   const held = await open(plain, 'r').catch(() => null);
   if (held) {
     try {
@@ -671,7 +673,7 @@ async function downloadClaimed(node, take, dir, ownsFile) {
         throw new Error(`${take.id} is being recorded on this machine right now, under the name `
           + `this download would check first: download ${take.id} once that take has closed`);
       }
-      const local = await loadIndex(plain, held).catch(() => null);
+      const local = await loadIndex(plain, held, null, seen).catch(() => null);
       if (local?.hash !== take.hash) target = join(dir, `${take.id}-${take.hash.slice(7, 15)}.knct`);
     } finally {
       await held.close();
@@ -938,8 +940,8 @@ async function removeHeld(dir, id, path, { hash, verifiedElsewhere, marksRead, o
     if (err.code !== 'ENOENT') console.warn(`[library] ${id} was removed but its marks log was not: ${err.message}`);
   });
   markLogCache.delete(marksPathFor(dir, actual));
-  await unlink(indexPathFor(path)).catch(() => {});
   forgetCapture(path);
+  await unlink(indexPathFor(path)).catch(() => {});
   return { removed: `${id}.knct`, hash: actual };
 }
 
@@ -979,8 +981,8 @@ async function removeUnreadableHeld(dir, id, target, { hash, verifiedElsewhere, 
     );
   }
   await unlink(target);
-  await unlink(indexPathFor(target)).catch(() => {});
   forgetCapture(target);
+  await unlink(indexPathFor(target)).catch(() => {});
   return { removed: `${id}.knct`, hash: null };
 }
 
@@ -1030,8 +1032,8 @@ export async function removeName(dir, id, { keep, hash, owns = () => false }) {
       }
     }
     await unlink(path);
-    await unlink(indexPathFor(path)).catch(() => {});
     forgetCapture(path);
+    await unlink(indexPathFor(path)).catch(() => {});
     return { removed: `${id}.knct`, kept: `${keep}.knct`, hash, sameFile };
   });
 }
@@ -1065,6 +1067,8 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
     // Opened and asked about by the file opened, as `downloadClaimed` does: while this waited for
     // the lock the name could have gone to the recorder's next take, which a read by name would scan.
     from = await storedTakeFile(dir, id);
+    // Noted on the spelling opened, because the caches key the count by that path.
+    const seen = forgetsOf(from);
     const opened = await open(from, 'r').catch((err) => {
       throw err.code === 'ENOENT' ? new Error(`${id} is no longer in ${root}`) : err;
     });
@@ -1075,7 +1079,7 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
         throw new Error(`${id} is being recorded right now: stop the take before renaming it`);
       }
       openedStat = await opened.stat();
-      index = await loadIndex(from, opened);
+      index = await loadIndex(from, opened, null, seen);
     } finally {
       await opened.close();
     }
@@ -1088,9 +1092,9 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
 
     if (id.toLowerCase() === to.toLowerCase() && sameTake(openedStat, takeIdentity(target))) {
       await rename(from, target);
+      forgetCapture(from);
       await rename(indexPathFor(from), indexPathFor(target))
         .catch(() => unlink(indexPathFor(from)).catch(() => {}));
-      forgetCapture(from);
       forgetCapture(target);
       return { renamed: `${id}.knct`, id: to, file: `${to}.knct`, hash: index.hash };
     }
@@ -1128,9 +1132,9 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
         throw err;
       }
     }
+    forgetCapture(from);
     await rename(indexPathFor(from), indexPathFor(target))
       .catch(() => unlink(indexPathFor(from)).catch(() => {}));
-    forgetCapture(from);
     forgetCapture(target);
     return { renamed: `${id}.knct`, id: to, file: `${to}.knct`, hash: index.hash };
   });
