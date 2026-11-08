@@ -1774,6 +1774,10 @@ async function reloadEffects() {
   try {
     programs = assembleShaders(SPINES, fetched);
     open = serialiseProjectBody();
+    // The versions the file names, where they differ from what the page stamped, so the version
+    // line below is about the document and not about the set this page held before the reload.
+    const filed = new Map(effectVersionSkew.map((s) => [s.id, s.wanted]));
+    if (open.requires) open.requires = open.requires.map((e) => ({ ...e, version: filed.get(e.id) ?? e.version }));
   } catch (err) {
     throw effectRefusal(`the installed effects changed and this page could not read them: ${err.message}`);
   }
@@ -1825,6 +1829,8 @@ async function reloadEffects() {
   }
   refusedEffectSignature = null;
   if (history.baseline !== null) history.baseline = history.snapshot();
+  // A page opened on a take holds no document for the line to be about.
+  if (openedProjectName === null) clearVersionLine();
   return fetched.map((p) => ({ id: p.id, version: p.manifest.version, rev: p.rev }));
 }
 
@@ -3122,10 +3128,7 @@ function checkProject(project) {
       ...Object.keys(parked.project.params), ...Object.keys(parked.project.tracks)].map(effectOf),
   )];
   parked.requires = parkedIds.map((id) => (project.requires ?? []).find((e) => e.id === id));
-  const versionSkew = (project.requires ?? [])
-    .filter((e) => typeof e?.id === 'string' && effectInstalled(e.id))
-    .map((e) => ({ id: e.id, wanted: e.version, installed: versionOf(e.id) }))
-    .filter((e) => e.wanted !== e.installed);
+  const versionSkew = versionSkewOf(project.requires);
 
   if (!Array.isArray(project.composition.camera)) {
     throw new Error('a project composition carries a camera track as an array of keys');
@@ -3508,10 +3511,7 @@ const history = {
     this.stack.push(this.baseline);
     if (this.stack.length > UNDO_LIMIT) this.stack.shift();
     this.baseline = now;
-    if (effectVersionSkew.length) {
-      effectVersionSkew = [];
-      paintMissingEffects();
-    }
+    clearVersionLine();
     // Every change is written to the project's own file. A page holding no document has no file
     // to write into and writes nothing at all, and a tab the store has refused has stopped.
     if (openedProjectName !== null && !projectDiverged) {
@@ -3538,12 +3538,16 @@ const history = {
     try {
       restoreProject(parsed);
       this.stack.pop();
-      this.baseline = previous;
+      // Read back rather than taken from `previous`, as the write below is: an effect installed,
+      // upgraded or removed since that entry was pushed makes the restored page a different body.
+      this.baseline = this.snapshot();
     } finally {
       this.restoring = false;
     }
+    // A stack entry carries the versions this page stamped, so what it raised is not about the file.
+    clearVersionLine();
     if (openedProjectName !== null && !projectDiverged) {
-      writeOpenProject(parsed).catch((err) => {
+      writeOpenProject(serialiseProjectBody()).catch((err) => {
         if (err.stale) stopWritingProject(err);
         else say(`this undo could not be written to ${openedProjectName}: ${err.message}`);
       });
@@ -6398,6 +6402,13 @@ if (gizmo) {
 // Built from `OUTPUT_RATES` rather than the markup, so there is one list of rates.
 for (const rate of OUTPUT_RATES) ui.fps?.appendChild(new Option(String(rate), String(rate)));
 
+/** Drops the version line, once what the page holds is what the file names. */
+function clearVersionLine() {
+  if (!effectVersionSkew.length) return;
+  effectVersionSkew = [];
+  paintMissingEffects();
+}
+
 /** The badge that says which effects this document names and this build has not got. */
 function paintMissingEffects() {
   if (!ui.missing) return;
@@ -8363,6 +8374,11 @@ function refuseRequires(what, requires, names) {
 
 /** What version of an effect this build has, off the package that answered for it. */
 const versionOf = (id) => effectPackages.find((p) => p.id === id)?.manifest.version ?? 'unknown';
+/** The version line a requires list raises: each installed effect it names at another version. */
+const versionSkewOf = (requires) => (requires ?? [])
+  .filter((e) => typeof e?.id === 'string' && effectInstalled(e.id))
+  .map((e) => ({ id: e.id, wanted: e.version, installed: versionOf(e.id) }))
+  .filter((e) => e.wanted !== e.installed);
 
 /** The requires list a set of value names derives, one entry per effect touched. */
 const requiresFor = (names) => effectIdsIn(names).map((id) => ({ id, version: versionOf(id) }));
@@ -10964,10 +10980,14 @@ async function createProjectUnder(pick, body) {
 }
 
 /** Where a page lands once it holds a document: what it writes into, and what it is called. */
-function enterProject(saved) {
+function enterProject(saved, body) {
   openedProjectName = saved.name;
   openedProjectRev = saved.rev;
   lastSavedAt = Date.now();
+  // From the body written, not cleared: an effect reload while the write was queued can leave
+  // the page running a version the new file does not name.
+  effectVersionSkew = versionSkewOf(body.requires);
+  paintMissingEffects();
   showProjectInUrl(saved.name);
   paintProjectCommands();
 }
@@ -10996,8 +11016,9 @@ function mintName(ids, taken) {
 async function mintProjectFrom(ids) {
   await openTake(ids[0]);
   if (ids.length > 1) await addClipsFromTakes(await takesNamed(ids.slice(1)), clips[0].end);
-  const saved = await createProjectUnder((taken) => mintName(ids, taken), serialiseProjectBody());
-  enterProject(saved);
+  const body = serialiseProjectBody();
+  const saved = await createProjectUnder((taken) => mintName(ids, taken), body);
+  enterProject(saved, body);
   // From the document, the way a load starts: the clips this mint just laid down are what the
   // file says, so there is nothing behind them to undo back to.
   history.begin();
@@ -11014,7 +11035,7 @@ async function duplicateProject() {
   const saved = await queueProjectWrite(() => createProjectUnder(
     (taken) => (from === null ? nextUntitledName(taken) : copyName(from, taken)), body,
   ));
-  enterProject(saved);
+  enterProject(saved, body);
   // A file nobody else holds, so whatever refused the last one has nothing to say about this.
   projectDiverged = false;
   if (ui.diverged) ui.diverged.title = '';
