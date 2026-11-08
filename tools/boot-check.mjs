@@ -1426,15 +1426,21 @@ async function main() {
       }
       while (Date.now() < deadline && location.search === from) await new Promise((r) => setTimeout(r, 50));
       const moved = location.search;
-      const name = new URLSearchParams(moved).get('project');
-      const file = (await (await fetch('/projects/' + encodeURIComponent(name))).json()).body;
-      const filed = file?.requires?.find((e) => e.id === id)?.version ?? null;
-      const line = k.library.effectVersionSkew();
+      // Still on the file copied from means the copy never landed, and that file's line proves nothing.
+      const entered = moved !== from;
+      let filed = null;
+      let line = null;
+      if (entered) {
+        const name = new URLSearchParams(moved).get('project');
+        const file = (await (await fetch('/projects/' + encodeURIComponent(name))).json()).body;
+        filed = file?.requires?.find((e) => e.id === id)?.version ?? null;
+        line = k.library.effectVersionSkew();
+      }
       await fetch('/effects/' + id, { method: 'DELETE', headers: json });
       await k.effects.reload();
-      return { id, held, installed, moved, filed, line };
+      return { id, held, installed, from, moved, entered, filed, line };
     })()`);
-    check(raced.held === 1 && raced.installed === 200 && raced.moved !== '' && raced.filed !== null && raced.filed !== '7.7.7'
+    check(raced.entered === true && raced.held === 1 && raced.installed === 200 && raced.filed !== null && raced.filed !== '7.7.7'
       && JSON.stringify(raced.line) === JSON.stringify([{ id: raced.id, wanted: raced.filed, installed: '7.7.7' }]),
       'and a copy whose write waited out an effect upgrade raises the line its own file gives it, '
       + 'naming the version it was written with',
