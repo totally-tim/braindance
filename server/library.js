@@ -1064,10 +1064,11 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
   }
   // Under both names' locks, so no removal or install in this process lands on either mid-rename.
   return withTakeLock([from, target], async () => {
-    const seen = forgetsOf(from);
     // Opened and asked about by the file opened, as `downloadClaimed` does: while this waited for
     // the lock the name could have gone to the recorder's next take, which a read by name would scan.
     from = await storedTakeFile(dir, id);
+    // Noted on the spelling opened, because the caches key the count by that path.
+    const seen = forgetsOf(from);
     const opened = await open(from, 'r').catch((err) => {
       throw err.code === 'ENOENT' ? new Error(`${id} is no longer in ${root}`) : err;
     });
