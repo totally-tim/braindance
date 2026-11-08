@@ -238,8 +238,14 @@ const MUTATIONS = {
 
   'copy-keeps-the-version-line': {
     file: 'web/main.js',
-    edits: [['  lastSavedAt = Date.now();\n  clearVersionLine();\n', '  lastSavedAt = Date.now();\n']],
-    fails: 'the row that copies a document with a version line, and that row alone',
+    edits: [['  effectVersionSkew = versionSkewOf(body.requires);\n  paintMissingEffects();\n', '']],
+    fails: 'the two copy rows: the line about the file copied from stays on the copy',
+  },
+
+  'copy-clears-the-line-it-wrote': {
+    file: 'web/main.js',
+    edits: [['  effectVersionSkew = versionSkewOf(body.requires);\n  paintMissingEffects();\n', '  clearVersionLine();\n']],
+    fails: 'the row that reloads the effects while the copy is queued, and that row alone',
   },
 
   'reload-reads-the-line-off-the-page': {
@@ -1376,6 +1382,63 @@ async function main() {
     check(copied.before?.length === 1 && /copy/.test(copied.moved) && JSON.stringify(copied.after) === '[]' && JSON.stringify(copied.reloaded) === '[]',
       'and a copy of a document with a version line has none, and no reload brings it back',
       JSON.stringify(copied));
+
+    // An effect reload landing while the copy waits for its write: the copy names what the page
+    // ran when it was taken, so the line is about that file, as a fresh load of it would say. The
+    // page's own fetch holds the write, so no timer decides which of the two lands first.
+    const raced = await inProject.page.evaluate(`(async () => {
+      const k = globalThis.__kinect;
+      const json = { 'Content-Type': 'application/json' };
+      await k.effects.reload();
+      const from = location.search;
+      const id = k.library.serialiseProjectBody().requires?.[0]?.id ?? null;
+      if (id === null) return { id };
+      const realFetch = globalThis.fetch;
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      let held = 0;
+      let installed = null;
+      globalThis.fetch = async (url, init) => {
+        if (init?.method === 'PUT' && String(url).startsWith('/projects/') && String(url).endsWith('?rev=absent')) {
+          held += 1;
+          await gate;
+        }
+        return realFetch(url, init);
+      };
+      const deadline = Date.now() + 10000;
+      try {
+        document.getElementById('menuDuplicateProject').click();
+        while (Date.now() < deadline && held === 0) await new Promise((r) => setTimeout(r, 20));
+        const pkg = await (await realFetch('/effects/' + id)).json();
+        const chunks = {};
+        for (const { name } of pkg.files.filter((f) => f.name !== 'manifest.json')) {
+          chunks[name] = await (await realFetch('/effects/' + id + '/file/' + name)).text();
+        }
+        installed = (await realFetch('/effects/' + id, {
+          method: 'PUT',
+          headers: json,
+          body: JSON.stringify({ manifest: { ...pkg.manifest, version: '7.7.7' }, chunks }),
+        })).status;
+        await k.effects.reload();
+      } finally {
+        release();
+        globalThis.fetch = realFetch;
+      }
+      while (Date.now() < deadline && location.search === from) await new Promise((r) => setTimeout(r, 50));
+      const moved = location.search;
+      const name = new URLSearchParams(moved).get('project');
+      const file = (await (await fetch('/projects/' + encodeURIComponent(name))).json()).body;
+      const filed = file?.requires?.find((e) => e.id === id)?.version ?? null;
+      const line = k.library.effectVersionSkew();
+      await fetch('/effects/' + id, { method: 'DELETE', headers: json });
+      await k.effects.reload();
+      return { id, held, installed, moved, filed, line };
+    })()`);
+    check(raced.held === 1 && raced.installed === 200 && raced.moved !== '' && raced.filed !== null && raced.filed !== '7.7.7'
+      && JSON.stringify(raced.line) === JSON.stringify([{ id: raced.id, wanted: raced.filed, installed: '7.7.7' }]),
+      'and a copy whose write waited out an effect upgrade raises the line its own file gives it, '
+      + 'naming the version it was written with',
+      JSON.stringify(raced));
     await inProject.page.close();
   }
 

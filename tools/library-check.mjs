@@ -263,8 +263,8 @@ const MUTATIONS = {
   },
   // The version a document was authored against, compared with nothing.
   'skew-goes-unreported': { file: 'web/main.js', edits: [[
-    '    .filter((e) => e.wanted !== e.installed);',
-    '    .filter(() => false);',
+    '  .filter((e) => e.wanted !== e.installed);',
+    '  .filter(() => false);',
   ]],
     fails: 'the version a document was authored against, compared with nothing, which is how it '
       + 'shipped. Reddens the two rows about the mismatched document - the hook and the '
