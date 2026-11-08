@@ -92,7 +92,7 @@ fixture, server or browser first (`timeline-check`, `keyframe-check`, `export-ch
 A mutated run prints the expected failure row when its entry carries a `fails:` field.
 For other entries, read the catch from the assertions that fired.
 
-Four tables are too large to reproduce here — `editor-check` declares 207, `library-check` 187,
+Four tables are too large to reproduce here — `editor-check` declares 209, `library-check` 187,
 `registry-check` 60 and `effect-check` 42. Their sections give the count and the enumerate
 command prints the names.
 
@@ -696,7 +696,7 @@ because `rebuildLanes` writes the second one onto the strip itself. Sections 13 
 state the sections before them leave. Two sweeps must never run at once, and `web/` must not be
 edited under a running one.
 
-207 controls, listed by `node tools/editor-check.mjs --mutate __enumerate__`. A mutated run is judged against the standing red set
+209 controls, listed by `node tools/editor-check.mjs --mutate __enumerate__`. A mutated run is judged against the standing red set
 rather than against zero, so it reports the assertions that fired beyond it and names the row a
 control is required to redden — as with this one, which `syntax-check`'s own bullet control
 anchors on:
