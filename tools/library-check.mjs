@@ -723,7 +723,7 @@ const MUTATIONS = {
   // The document store restamps the version instead of checking it, so a project from a build
   // this one is not lands looking like one this build wrote.
   'store-restamps-version': { file: 'server/library.js', edits: [[
-    '    if (body?.version !== undefined && body.version !== this.version) {',
+    '    if (body.version !== undefined && body.version !== this.version) {',
     '    if (false) {',
   ]] },
   // A replay server records.
@@ -1126,7 +1126,7 @@ const MUTATIONS = {
   },
   // Removing a name stops asking whether the recorder owns either one.
   'remove-name-during-a-shoot': { file: 'server/library.js', edits: [[
-    '  if (owns(path) || owns(kept)) throw', '  if (false) throw',
+    '    if (owns(path) || owns(kept)) throw', '    if (false) throw',
   ]],
     fails: 'the mid-shoot second-name row, and the row after it: the refusal is gone and the kept '
       + 'name is scanned, which writes the index of the growing take',
@@ -1308,6 +1308,25 @@ const MUTATIONS = {
   ]] },
   // The gallery goes back to painting only `library.takes`, so a file caught into `unreadable`
   // by `scanTakes` is hidden from the page.
+  'unreadable-row-duplicates': { file: 'web/projects.js', edits: [[
+    '  buildMenu(row, more, project, refusal);',
+    '  buildMenu(row, more, project);',
+  ]],
+    fails: 'the two unreadable-row rows of the projects page: Duplicate is offered on a row this page '
+      + 'cannot draw, and a press on the row the store would file writes a copy',
+  },
+  'any-refusal-takes-the-next-name': { file: 'web/projects.js', edits: [[
+    '    if (!answer?.stale) throw new Error(answer?.error ?? `HTTP ${res.status}`);',
+    '    if (res.status !== 409) throw new Error(answer?.error ?? `HTTP ${res.status}`);',
+  ]],
+    fails: 'the one-request row of the projects page: a refusal about something else walks twelve names',
+  },
+  'duplicate-never-tries-the-next-name': { file: 'web/projects.js', edits: [[
+    '    if (!answer?.stale) throw new Error(answer?.error ?? `HTTP ${res.status}`);',
+    '    throw new Error(answer?.error ?? `HTTP ${res.status}`);',
+  ]],
+    fails: 'the next-free-name row of the projects page, and nothing else',
+  },
   'gallery-hides-unreadable': { file: 'web/library.js', edits: [[
     '  if (unreadable.length > 0) {',
     '  if (false) {',
@@ -4391,7 +4410,90 @@ async function runChecks() {
       + 'take\'s duration and the take is what is missing');
     check(errors.length === 0, 'the projects page raises no page error drawing either of them',
       errors.slice(0, 2).join(' | '));
+
+    // A row this page cannot draw has no body to copy: invalid JSON lists as `null`, and a document
+    // of another version is one the store refuses to file under a new name.
+    const NOT_JSON = 'projects-page-not-json';
+    const OTHER_VERSION = 'projects-page-other-version';
+    // The one of the three the store would file, which is what makes the press row able to fail.
+    const NO_CLIPS = 'projects-page-no-clips';
+    const unreadableNames = [NOT_JSON, OTHER_VERSION, NO_CLIPS]; // Last, for a press that navigates.
+    writeFileSync(join(WORK, 'projects', `${NOT_JSON}.json`), '{not json');
+    writeFileSync(join(WORK, 'projects', `${OTHER_VERSION}.json`),
+      JSON.stringify({ version: DOCUMENT_VERSIONS.project - 1, clips: [] }));
+    writeFileSync(join(WORK, 'projects', `${NO_CLIPS}.json`), JSON.stringify({ version: DOCUMENT_VERSIONS.project }));
+    const documentsOnDisk = () => readdirSync(join(WORK, 'projects')).sort().join(' ');
+    await page.evaluate('globalThis.__projects.refresh()');
+    await page.waitForFunction(
+      `globalThis.__projects.rows().filter((r) => ${JSON.stringify(unreadableNames)}.includes(r.name)).length === 3`,
+      null, { timeout: 20000 },
+    ).catch(() => { /* the row below says so */ });
+    const unreadableRows = (await page.evaluate('globalThis.__projects.rows()'))
+      .filter((r) => unreadableNames.includes(r.name));
+    const inert = (r) => JSON.stringify(r.disabled) === '["duplicate"]' && r.duplicateTitle === r.unreadable;
+    check(unreadableRows.length === 3 && unreadableRows.every(inert),
+      'a project this page cannot draw offers Rename and Delete and not Duplicate, and the disabled item says why',
+      JSON.stringify(unreadableRows.map((r) => ({ name: r.name, disabled: r.disabled, title: r.duplicateTitle }))));
+    const beforePress = documentsOnDisk();
+    const pressDuplicate = async (name) => {
+      const row = page.locator(`.row[data-name="${name}"]`);
+      await row.locator('[data-act="more"]').click();
+      // Forced, for a trusted press on the disabled button: a dispatched click reaches its handler
+      // whether it is disabled or not.
+      await row.locator('[data-item="duplicate"]').click({ force: true });
+      await row.locator('[data-act="more"]').click({ timeout: 2000 }).catch(() => { /* the row below says so */ });
+    };
+    for (const name of unreadableNames) await pressDuplicate(name);
+    await page.waitForTimeout(500);
+    check(new URL(page.url()).pathname === '/projects' && documentsOnDisk() === beforePress,
+      'and pressing it writes no document and leaves the page where it is',
+      `${page.url()}: ${documentsOnDisk()}`);
+    if (new URL(page.url()).pathname !== '/projects') {
+      await page.goto(projectsPage(macUrl));
+      await page.waitForFunction('globalThis.__projects !== undefined', null, { timeout: 20000 });
+    }
+
+    // A refusal that is not about the name stops at the first PUT and is said as the server said it.
+    const refusal = 'this store refused the document for a reason that has nothing to do with its name';
+    const creates = [];
+    const answerCreates = async (route) => {
+      if (route.request().method() !== 'PUT') { await route.continue(); return; }
+      creates.push(new URL(route.request().url()).pathname);
+      const staleNow = staleFirst && creates.length === 1;
+      await route.fulfill({
+        // A 400 ends the walk on a build that retries every 409, so each mutation fails its own row.
+        status: staleFirst && !staleNow ? 400 : 409,
+        contentType: 'application/json',
+        body: JSON.stringify(staleNow
+          ? { error: 'there is already a project named that', stale: true, rev: 'sha256:x' }
+          : { error: refusal }),
+      });
+    };
+    let staleFirst = false;
+    await page.route('**/projects/**', answerCreates);
+    await page.locator(`.row[data-name="${PRESENT}"] [data-act="more"]`).click();
+    await page.locator(`.row[data-name="${PRESENT}"] [data-item="duplicate"]`).click();
+    await page.waitForFunction(`document.getElementById('note')?.textContent.length > 0`, null, { timeout: 5000 })
+      .catch(() => { /* the row below says so */ });
+    const refusedNote = await page.evaluate(`document.getElementById('note')?.textContent ?? ''`);
+    check(creates.length === 1 && refusedNote === refusal,
+      'a Duplicate the store refuses for another reason makes one request and says the refusal',
+      `${creates.length} PUT, note "${refusedNote.slice(0, 90)}"`);
+    creates.length = 0;
+    staleFirst = true;
+    await page.locator(`.row[data-name="${PRESENT}"] [data-act="more"]`).click();
+    await page.locator(`.row[data-name="${PRESENT}"] [data-item="duplicate"]`).click();
+    await page.waitForFunction(`document.getElementById('note')?.textContent.length > 0`, null, { timeout: 5000 })
+      .catch(() => { /* the row below says so */ });
+    check(creates.length === 2 && creates[0] !== creates[1],
+      'and a name another tab took a moment ago still moves on to the next free one',
+      creates.map(decodeURIComponent).join(' then '));
+    await page.unroute('**/projects/**', answerCreates);
+
     await page.close();
+    for (const file of readdirSync(join(WORK, 'projects'))) {
+      if (unreadableNames.some((name) => file.startsWith(name))) rmSync(join(WORK, 'projects', file));
+    }
     await writeDoc(macUrl, 'projects', PRESENT, null, 'DELETE');
     await writeDoc(macUrl, 'projects', DARK, null, 'DELETE');
     await writeDoc(macUrl, 'projects', TRIMMED, null, 'DELETE');
