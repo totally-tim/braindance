@@ -8,7 +8,7 @@ import { readdir, readFile, writeFile, appendFile, stat, unlink, rename, link, m
 import { pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
 import { basename, dirname, join, resolve } from 'node:path';
-import { cachedIndex, forgetCapture, indexPathFor, captureIdFor, loadIndex, readHelloCached } from './capture.js';
+import { cachedIndex, forgetCapture, forgetsOf, indexPathFor, captureIdFor, loadIndex, readHelloCached } from './capture.js';
 
 export { VALID_ID };
 
@@ -302,6 +302,7 @@ const carriesRefusals = (take) => Array.isArray(take.openRefusals)
 async function describeTake(dir, file, recording, markFiles = null) {
   const path = join(dir, file);
   const id = captureIdFor(path);
+  const seen = forgetsOf(path);
   const st = await stat(path);
 
   // The take being written is described without being scanned: its size and mtime move, so the
@@ -332,9 +333,9 @@ async function describeTake(dir, file, recording, markFiles = null) {
     };
   }
 
-  const index = await cachedIndex(path, null, st);
+  const index = await cachedIndex(path, null, st, seen);
   const stamps = index.frames.stampMs;
-  const hello = await readHelloCached(path, index, st);
+  const hello = await readHelloCached(path, index, st, seen);
   const log = await readMarkLogCached(dir, index.hash, markFiles);
   const marks = resolveMarks(log);
   // The recorder's `kind: 'drop'` record, which carries no `sourceMs` and so never resolves as a
@@ -412,6 +413,9 @@ export async function localTakeFile(dir, id) {
     .find((name) => isKnct(name) && captureIdFor(name) === id);
   return file ? join(dir, file) : null;
 }
+
+/** The file a take id names, in the spelling the caches are keyed by, or the plain name when none is there. */
+const storedTakeFile = async (dir, id) => (await localTakeFile(dir, id)) ?? join(dir, `${id}.knct`);
 
 export async function scanTakes(dir, owns = () => false) {
   const files = (await directoryNames(dir, { what: 'captures directory' })).filter(isKnct);
@@ -661,6 +665,7 @@ async function downloadClaimed(node, take, dir, ownsFile) {
   // Opened first and asked about by the file opened: a name found free and then read by name can
   // be taken by the recorder in between, and the read would scan the take it is writing.
   let target = plain;
+  const seen = forgetsOf(plain);
   const held = await open(plain, 'r').catch(() => null);
   if (held) {
     try {
@@ -668,7 +673,7 @@ async function downloadClaimed(node, take, dir, ownsFile) {
         throw new Error(`${take.id} is being recorded on this machine right now, under the name `
           + `this download would check first: download ${take.id} once that take has closed`);
       }
-      const local = await loadIndex(plain, held).catch(() => null);
+      const local = await loadIndex(plain, held, null, seen).catch(() => null);
       if (local?.hash !== take.hash) target = join(dir, `${take.id}-${take.hash.slice(7, 15)}.knct`);
     } finally {
       await held.close();
@@ -862,9 +867,12 @@ export async function removeTake(dir, id, { hash, verifiedElsewhere = null, mark
   const path = join(dir, `${id}.knct`);
   // The marks log's lock as well, so no marks write lands between the hash and the unlink.
   const log = VALID_HASH.test(hash ?? '') ? [marksPathFor(dir, hash)] : [];
-  return withTakeLock([path, ...log], () => (unreadable
-    ? removeUnreadableHeld(dir, id, path, { hash, verifiedElsewhere, ownsFile })
-    : removeHeld(dir, id, path, { hash, verifiedElsewhere, marksRead, ownsFile })));
+  return withTakeLock([path, ...log], async () => {
+    const stored = await storedTakeFile(dir, id);
+    return unreadable
+      ? removeUnreadableHeld(dir, id, stored, { hash, verifiedElsewhere, ownsFile })
+      : removeHeld(dir, id, stored, { hash, verifiedElsewhere, marksRead, ownsFile });
+  });
 }
 
 /**
@@ -932,31 +940,21 @@ async function removeHeld(dir, id, path, { hash, verifiedElsewhere, marksRead, o
     if (err.code !== 'ENOENT') console.warn(`[library] ${id} was removed but its marks log was not: ${err.message}`);
   });
   markLogCache.delete(marksPathFor(dir, actual));
-  await unlink(indexPathFor(path)).catch(() => {});
   forgetCapture(path);
+  await unlink(indexPathFor(path)).catch(() => {});
   return { removed: `${id}.knct`, hash: actual };
 }
 
 // `removeTake` for a file in `unreadable`: re-runs `describeTake` under the lock so a file that
 // finished writing or was replaced since the listing is refused rather than unlinked without a hash.
-async function removeUnreadableHeld(dir, id, path, { hash, verifiedElsewhere, ownsFile }) {
+async function removeUnreadableHeld(dir, id, target, { hash, verifiedElsewhere, ownsFile }) {
   if (hash !== undefined || (verifiedElsewhere !== undefined && verifiedElsewhere !== null)) {
     throw new Error(
       `${id} cannot be scanned here, not the ${hash ?? verifiedElsewhere} `
       + 'this removal named: the library moved underneath the request and nothing was removed',
     );
   }
-  let target = path;
-  const handle = await open(target, 'r').catch(async (err) => {
-    if (err.code === 'ENOENT') {
-      const matched = await localTakeFile(dir, id);
-      if (matched) {
-        target = matched;
-        return open(target, 'r');
-      }
-    }
-    throw err;
-  });
+  const handle = await open(target, 'r');
   let checked;
   try {
     checked = await handle.stat();
@@ -983,8 +981,8 @@ async function removeUnreadableHeld(dir, id, path, { hash, verifiedElsewhere, ow
     );
   }
   await unlink(target);
-  await unlink(indexPathFor(target)).catch(() => {});
   forgetCapture(target);
+  await unlink(indexPathFor(target)).catch(() => {});
   return { removed: `${id}.knct`, hash: null };
 }
 
@@ -1000,11 +998,13 @@ export async function removeName(dir, id, { keep, hash, owns = () => false }) {
   if (id.toLowerCase() === keep.toLowerCase()) {
     throw new Error(`${id} and ${keep} are one name, so removing it would leave the take no name at all`);
   }
-  const path = join(dir, `${id}.knct`);
-  const kept = join(dir, `${keep}.knct`);
-  // Asking which take a name holds reads the file, and the take being written has no hash yet.
-  if (owns(path) || owns(kept)) throw new Error(`${owns(path) ? id : keep} is being recorded right now: stop the take first`);
+  let path = join(dir, `${id}.knct`);
+  let kept = join(dir, `${keep}.knct`);
   return withTakeLock([path, kept], async () => {
+    path = await storedTakeFile(dir, id);
+    kept = await storedTakeFile(dir, keep);
+    // Asking which take a name holds reads the file, and the take being written has no hash yet.
+    if (owns(path) || owns(kept)) throw new Error(`${owns(path) ? id : keep} is being recorded right now: stop the take first`);
     const dropping = takeIdentity(path);
     const keeping = takeIdentity(kept);
     if (dropping === null) throw new Error(`${id} is not in ${resolve(dir)}, so there is no name to remove`);
@@ -1032,8 +1032,8 @@ export async function removeName(dir, id, { keep, hash, owns = () => false }) {
       }
     }
     await unlink(path);
-    await unlink(indexPathFor(path)).catch(() => {});
     forgetCapture(path);
+    await unlink(indexPathFor(path)).catch(() => {});
     return { removed: `${id}.knct`, kept: `${keep}.knct`, hash, sameFile };
   });
 }
@@ -1066,14 +1066,10 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
   return withTakeLock([from, target], async () => {
     // Opened and asked about by the file opened, as `downloadClaimed` does: while this waited for
     // the lock the name could have gone to the recorder's next take, which a read by name would scan.
-    const opened = await open(from, 'r').catch(async (err) => {
-      if (err.code === 'ENOENT') {
-        const matched = await localTakeFile(dir, id);
-        if (matched) {
-          from = matched;
-          return open(from, 'r');
-        }
-      }
+    from = await storedTakeFile(dir, id);
+    // Noted on the spelling opened, because the caches key the count by that path.
+    const seen = forgetsOf(from);
+    const opened = await open(from, 'r').catch((err) => {
       throw err.code === 'ENOENT' ? new Error(`${id} is no longer in ${root}`) : err;
     });
     let index;
@@ -1083,7 +1079,7 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
         throw new Error(`${id} is being recorded right now: stop the take before renaming it`);
       }
       openedStat = await opened.stat();
-      index = await loadIndex(from, opened);
+      index = await loadIndex(from, opened, null, seen);
     } finally {
       await opened.close();
     }
@@ -1096,9 +1092,9 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
 
     if (id.toLowerCase() === to.toLowerCase() && sameTake(openedStat, takeIdentity(target))) {
       await rename(from, target);
+      forgetCapture(from);
       await rename(indexPathFor(from), indexPathFor(target))
         .catch(() => unlink(indexPathFor(from)).catch(() => {}));
-      forgetCapture(from);
       forgetCapture(target);
       return { renamed: `${id}.knct`, id: to, file: `${to}.knct`, hash: index.hash };
     }
@@ -1136,9 +1132,9 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
         throw err;
       }
     }
+    forgetCapture(from);
     await rename(indexPathFor(from), indexPathFor(target))
       .catch(() => unlink(indexPathFor(from)).catch(() => {}));
-    forgetCapture(from);
     forgetCapture(target);
     return { renamed: `${id}.knct`, id: to, file: `${to}.knct`, hash: index.hash };
   });
@@ -1167,7 +1163,7 @@ export async function revealTake(dir, id, { command = [] } = {}) {
     throw new Error(`no file manager is known for ${process.platform}, so there is nothing to open a take in`);
   }
   const root = resolve(dir);
-  const path = (await localTakeFile(root, id)) ?? join(root, `${id}.knct`);
+  const path = await storedTakeFile(root, id);
   if (resolve(path) !== join(root, basename(path))) throw new Error(`refusing to reveal outside ${root}`);
   await stat(path);
   const args = shape.args(path);
@@ -1386,7 +1382,11 @@ export class DocumentStore {
 
   /** Writes a document, after checking the version and the revision. */
   async write(name, body, rev) {
-    if (body?.version !== undefined && body.version !== this.version) {
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      const carried = body === null ? 'null' : Array.isArray(body) ? 'an array' : `a ${typeof body}`;
+      throw new Error(`a ${this.kind} is one JSON object, and this write carried ${carried}: nothing was written`);
+    }
+    if (body.version !== undefined && body.version !== this.version) {
       throw new Error(
         `this ${this.kind} says version ${JSON.stringify(body.version)}, and this build writes `
         + `version ${this.version}: refused rather than restamped, because a document this build `

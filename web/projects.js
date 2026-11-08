@@ -154,14 +154,14 @@ function placeMenu(menu, toggle) {
   }
 }
 
-function buildMenu(row, toggle, project) {
+function buildMenu(row, toggle, project, unreadable = null) {
   const menu = document.createElement('div');
   menu.className = 'menu';
   menu.role = 'menu';
   menu.hidden = true;
   const items = [
     { item: 'rename', label: 'Rename…', cls: 'mi', run: () => askRename(project) },
-    { item: 'duplicate', label: 'Duplicate', cls: 'mi', run: () => duplicate(project) },
+    { item: 'duplicate', label: 'Duplicate', cls: 'mi', run: () => duplicate(project), refusal: unreadable },
     { item: 'delete', label: 'Delete…', cls: 'mi danger', run: () => askDelete(project) },
   ];
   for (const entry of items) {
@@ -171,6 +171,10 @@ function buildMenu(row, toggle, project) {
     }, { item: entry.item });
     b.dataset.item = entry.item;
     b.role = 'menuitem';
+    if (entry.refusal) {
+      b.disabled = true;
+      b.title = entry.refusal;
+    }
   }
   row.appendChild(menu);
   toggle.addEventListener('click', (e) => {
@@ -287,7 +291,7 @@ function buildUnreadableRow(project, refusal) {
   more.setAttribute('aria-haspopup', 'menu');
   more.setAttribute('aria-expanded', 'false');
   more.setAttribute('aria-label', `More actions for ${project.name}`);
-  buildMenu(row, more, project);
+  buildMenu(row, more, project, refusal);
   return row;
 }
 
@@ -451,7 +455,7 @@ async function createUnder(pick, body) {
     });
     const answer = await res.json().catch(() => null);
     if (res.ok && !answer?.error) return name;
-    if (res.status !== 409) throw new Error(answer?.error ?? `HTTP ${res.status}`);
+    if (!answer?.stale) throw new Error(answer?.error ?? `HTTP ${res.status}`);
     taken.add(name);
   }
   throw new Error('twelve names in a row were taken while this copy was being made');
@@ -588,6 +592,9 @@ globalThis.__projects = {
       dark: s.classList.contains('dark'),
     })),
     menu: [...el.querySelectorAll('.menu .mi')].map((b) => b.dataset.item),
+    disabled: [...el.querySelectorAll('.menu .mi:disabled')].map((b) => b.dataset.item),
+    duplicateTitle: el.querySelector('.menu [data-item="duplicate"]')?.title ?? null,
+    unreadable: el.dataset.unreadable ?? null,
   })),
 
   showing: (name) => {

@@ -5,11 +5,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { appendMarks, marksPathFor, mergeMarkLog, readMarkLog, removeTake, renameTake } from '../server/library.js';
-import { cachedIndex } from '../server/capture.js';
+import {
+  appendMarks, marksPathFor, mergeMarkLog, readMarkLog, removeName, removeTake, renameTake, takeFileFor,
+} from '../server/library.js';
+import { cachedIndex, forgetCapture, indexPathFor, openCapture, openCaptureCount } from '../server/capture.js';
 import { encodeMessage, TYPE_FRAME, TYPE_HELLO } from '../server/protocol.js';
 
 const capture = (seed) => Buffer.concat([
@@ -130,6 +132,86 @@ test('removeTake on an unreadable file refuses requests carrying hash or verifie
     assert.equal(done.removed, 'BROKEN-UPPER.knct');
     assert.equal(done.hash, null);
     assert.equal(existsSync(brokenPath), false, 'unlinks the unreadable file when no hash or verifiedElsewhere was supplied');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// A take the library opened through its own `.KNCT` spelling, and how to ask afterwards whether
+// every cache keyed by that spelling let go of it.
+async function openedUpperCaseTake(seed) {
+  const dir = await mkdtemp(join(tmpdir(), 'braindance-upper-take-'));
+  const stored = join(dir, 'clip.KNCT');
+  await writeFile(stored, capture(seed));
+  const { hash } = await cachedIndex(stored);
+  const st = await stat(stored);
+  const before = openCaptureCount();
+  await openCapture(await takeFileFor(dir, hash));
+  assert.equal(openCaptureCount(), before + 1);
+  const released = async () => {
+    assert.equal(openCaptureCount(), before, 'the descriptor opened through the .KNCT spelling is still held');
+    await assert.rejects(cachedIndex(stored, null, st), { code: 'ENOENT' }, 'the index stayed cached under .KNCT');
+  };
+  return { dir, stored, hash, released };
+}
+
+test('removeTake acts on the spelling on disk, so a .KNCT take leaves nothing cached behind it', async () => {
+  const { dir, stored, hash, released } = await openedUpperCaseTake(21);
+  try {
+    await removeTake(dir, 'clip', { hash });
+    assert.deepEqual(await readdir(dir), []);
+    assert.equal(existsSync(indexPathFor(stored)), false);
+    await released();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('removeName resolves both names, so one .KNCT name goes and the other stays', async () => {
+  const { dir, stored, hash, released } = await openedUpperCaseTake(22);
+  try {
+    await link(stored, join(dir, 'kept.KNCT'));
+    await removeName(dir, 'clip', { keep: 'kept', hash });
+    assert.deepEqual((await readdir(dir)).filter((name) => name.endsWith('.KNCT')), ['kept.KNCT']);
+    await released();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('removeName asks who owns the spelling it resolved, so a take being written under .KNCT is refused', async () => {
+  const { dir, stored, hash, released } = await openedUpperCaseTake(24);
+  try {
+    await link(stored, join(dir, 'kept.KNCT'));
+    const being = (path) => path === stored;
+    await assert.rejects(removeName(dir, 'clip', { keep: 'kept', hash, owns: being }), /is being recorded right now/);
+    assert.ok(existsSync(stored));
+    await removeName(dir, 'clip', { keep: 'kept', hash });
+    await released();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('renameTake forgets the .KNCT spelling it moved the take away from', async () => {
+  const { dir, hash, released } = await openedUpperCaseTake(23);
+  try {
+    await renameTake(dir, 'clip', 'moved', { hash });
+    assert.deepEqual((await readdir(dir)).filter((name) => /\.knct$/i.test(name)), ['moved.knct']);
+    await released();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('renameTake notes the forget count on the .KNCT spelling it opens, so a take forgotten once still files its sidecar', async () => {
+  const { dir, stored, hash } = await openedUpperCaseTake(25);
+  try {
+    // A forget earlier in the server's life, and no sidecar left, so the rename has to scan.
+    forgetCapture(stored);
+    await rm(indexPathFor(stored));
+    await renameTake(dir, 'clip', 'moved', { hash });
+    assert.ok(existsSync(indexPathFor(join(dir, 'moved.knct'))), 'the rename scanned the take and filed no sidecar');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
