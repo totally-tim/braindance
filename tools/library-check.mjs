@@ -1126,7 +1126,7 @@ const MUTATIONS = {
   },
   // Removing a name stops asking whether the recorder owns either one.
   'remove-name-during-a-shoot': { file: 'server/library.js', edits: [[
-    '  if (owns(path) || owns(kept)) throw', '  if (false) throw',
+    '    if (owns(path) || owns(kept)) throw', '    if (false) throw',
   ]],
     fails: 'the mid-shoot second-name row, and the row after it: the refusal is gone and the kept '
       + 'name is scanned, which writes the index of the growing take',
