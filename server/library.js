@@ -413,6 +413,9 @@ export async function localTakeFile(dir, id) {
   return file ? join(dir, file) : null;
 }
 
+/** The file a take id names, in the spelling the caches are keyed by, or the plain name when none is there. */
+const storedTakeFile = async (dir, id) => (await localTakeFile(dir, id)) ?? join(dir, `${id}.knct`);
+
 export async function scanTakes(dir, owns = () => false) {
   const files = (await directoryNames(dir, { what: 'captures directory' })).filter(isKnct);
   const markFiles = await readdir(join(dir, 'marks')).then((list) => new Set(list), () => null);
@@ -862,9 +865,12 @@ export async function removeTake(dir, id, { hash, verifiedElsewhere = null, mark
   const path = join(dir, `${id}.knct`);
   // The marks log's lock as well, so no marks write lands between the hash and the unlink.
   const log = VALID_HASH.test(hash ?? '') ? [marksPathFor(dir, hash)] : [];
-  return withTakeLock([path, ...log], () => (unreadable
-    ? removeUnreadableHeld(dir, id, path, { hash, verifiedElsewhere, ownsFile })
-    : removeHeld(dir, id, path, { hash, verifiedElsewhere, marksRead, ownsFile })));
+  return withTakeLock([path, ...log], async () => {
+    const stored = await storedTakeFile(dir, id);
+    return unreadable
+      ? removeUnreadableHeld(dir, id, stored, { hash, verifiedElsewhere, ownsFile })
+      : removeHeld(dir, id, stored, { hash, verifiedElsewhere, marksRead, ownsFile });
+  });
 }
 
 /**
@@ -939,24 +945,14 @@ async function removeHeld(dir, id, path, { hash, verifiedElsewhere, marksRead, o
 
 // `removeTake` for a file in `unreadable`: re-runs `describeTake` under the lock so a file that
 // finished writing or was replaced since the listing is refused rather than unlinked without a hash.
-async function removeUnreadableHeld(dir, id, path, { hash, verifiedElsewhere, ownsFile }) {
+async function removeUnreadableHeld(dir, id, target, { hash, verifiedElsewhere, ownsFile }) {
   if (hash !== undefined || (verifiedElsewhere !== undefined && verifiedElsewhere !== null)) {
     throw new Error(
       `${id} cannot be scanned here, not the ${hash ?? verifiedElsewhere} `
       + 'this removal named: the library moved underneath the request and nothing was removed',
     );
   }
-  let target = path;
-  const handle = await open(target, 'r').catch(async (err) => {
-    if (err.code === 'ENOENT') {
-      const matched = await localTakeFile(dir, id);
-      if (matched) {
-        target = matched;
-        return open(target, 'r');
-      }
-    }
-    throw err;
-  });
+  const handle = await open(target, 'r');
   let checked;
   try {
     checked = await handle.stat();
@@ -1000,11 +996,13 @@ export async function removeName(dir, id, { keep, hash, owns = () => false }) {
   if (id.toLowerCase() === keep.toLowerCase()) {
     throw new Error(`${id} and ${keep} are one name, so removing it would leave the take no name at all`);
   }
-  const path = join(dir, `${id}.knct`);
-  const kept = join(dir, `${keep}.knct`);
-  // Asking which take a name holds reads the file, and the take being written has no hash yet.
-  if (owns(path) || owns(kept)) throw new Error(`${owns(path) ? id : keep} is being recorded right now: stop the take first`);
+  let path = join(dir, `${id}.knct`);
+  let kept = join(dir, `${keep}.knct`);
   return withTakeLock([path, kept], async () => {
+    path = await storedTakeFile(dir, id);
+    kept = await storedTakeFile(dir, keep);
+    // Asking which take a name holds reads the file, and the take being written has no hash yet.
+    if (owns(path) || owns(kept)) throw new Error(`${owns(path) ? id : keep} is being recorded right now: stop the take first`);
     const dropping = takeIdentity(path);
     const keeping = takeIdentity(kept);
     if (dropping === null) throw new Error(`${id} is not in ${resolve(dir)}, so there is no name to remove`);
@@ -1066,14 +1064,8 @@ export async function renameTake(dir, id, requested, { hash, ownsFile = () => fa
   return withTakeLock([from, target], async () => {
     // Opened and asked about by the file opened, as `downloadClaimed` does: while this waited for
     // the lock the name could have gone to the recorder's next take, which a read by name would scan.
-    const opened = await open(from, 'r').catch(async (err) => {
-      if (err.code === 'ENOENT') {
-        const matched = await localTakeFile(dir, id);
-        if (matched) {
-          from = matched;
-          return open(from, 'r');
-        }
-      }
+    from = await storedTakeFile(dir, id);
+    const opened = await open(from, 'r').catch((err) => {
       throw err.code === 'ENOENT' ? new Error(`${id} is no longer in ${root}`) : err;
     });
     let index;
@@ -1167,7 +1159,7 @@ export async function revealTake(dir, id, { command = [] } = {}) {
     throw new Error(`no file manager is known for ${process.platform}, so there is nothing to open a take in`);
   }
   const root = resolve(dir);
-  const path = (await localTakeFile(root, id)) ?? join(root, `${id}.knct`);
+  const path = await storedTakeFile(root, id);
   if (resolve(path) !== join(root, basename(path))) throw new Error(`refusing to reveal outside ${root}`);
   await stat(path);
   const args = shape.args(path);
