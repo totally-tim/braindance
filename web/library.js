@@ -3,6 +3,7 @@
 // rendered poster - and a tile's height is CSS, which `library.html` enforces.
 
 import { VALID_ID } from '/format.js';
+import { formatIntervalLabel } from '/format.js';
 import { pollRecordState } from '/record-poll.js';
 import { testTimer } from '/test-timers.js';
 import { createSkim, divisorFor, paintMarks, timesFor } from './take-draw.js';
@@ -431,6 +432,7 @@ function buildTile(take) {
   tile.innerHTML = `
     <div class="skim"><canvas></canvas><span class="t">00:00</span>
       ${divisor > 1 ? `<span class="coarse">decimated ÷${divisor}</span>` : ''}
+      ${take.timelapseIntervalMs > 0 ? `<span class="tl">timelapse ${formatIntervalLabel(take.timelapseIntervalMs / 1000)}</span>` : ''}
       <div class="flags"></div></div>
     <div class="bar"><span class="done"></span><span class="pos"></span></div>
     <div class="meta">
@@ -796,6 +798,7 @@ function openViewer(key) {
   document.getElementById('vFacts').replaceChildren(...[
     gb(take.bytes),
     take.recording === true ? 'recording now' : `${countOf(take.frames)} frames`,
+    take.timelapseIntervalMs > 0 ? `timelapse ${formatIntervalLabel(take.timelapseIntervalMs / 1000)}` : '',
     (take.marks ?? []).length ? `${take.marks.length} mark${take.marks.length === 1 ? '' : 's'}` : 'no marks',
     stamp(take.capturedAt),
     take.hash ? `${take.hash.slice(0, 15)}…` : '',

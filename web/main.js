@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import {
   CLIP_CEILING, DEPTH_H, DEPTH_W, DOCUMENT_VERSIONS, POINTS, VALID_ID, copyName, documentNameRefusal,
-  effectIdsIn, effectOf, nextUntitledName, presetCarriesLookName, snapScalar,
+  durationLabel, effectIdsIn, effectOf, formatIntervalLabel, nextUntitledName, presetCarriesLookName, snapScalar,
+  TIMELAPSE_FPS, TIMELAPSE_MAX_SEC, TIMELAPSE_MIN_SEC, timelapseIntervalRefusal,
   versionRefusal, captureFormatRefusal, requiresEntryRefusal, requiresListRefusal,
 } from './format.js';
 import { pollRecordState } from './record-poll.js';
@@ -6215,6 +6216,10 @@ const ui = {
   missing: document.getElementById('tMissing'),
   recGo: document.getElementById('recGo'),
   recMark: document.getElementById('recMark'),
+  recTimelapse: document.getElementById('recTimelapse'),
+  recIntervalRow: document.getElementById('recIntervalRow'),
+  recInterval: document.getElementById('recInterval'),
+  recIntervalOut: document.getElementById('recIntervalOut'),
   recNote: document.getElementById('recNote'),
   recSpace: document.getElementById('recSpace'),
   recRange: document.getElementById('recRange'),
@@ -11636,11 +11641,24 @@ async function loadProjectNamed(name, offered = null) {
 }
 
 // Record, mark and remaining time. On the live viewer and nowhere else.
-let recordState = { armed: false, recording: false, takeId: null, startedAt: null };
+let recordState = { armed: false, recording: false, takeId: null, startedAt: null, timelapseIntervalMs: null };
+let lastRecordStorage = null;
+
+function paintTimelapseOutput() {
+  if (!ui.recInterval || !ui.recIntervalOut) return;
+  const sec = Number(ui.recInterval.value);
+  if (timelapseIntervalRefusal(sec) === null) {
+    const speedup = sec * TIMELAPSE_FPS;
+    ui.recIntervalOut.value = Number.isInteger(speedup) ? `${speedup}×` : `${Number(speedup.toFixed(1))}×`;
+  } else {
+    ui.recIntervalOut.value = '—';
+  }
+}
 
 function paintRecord(storage) {
   if (!ui.recGo) return;
   const rec = recordState.recording;
+  const active = rec || Boolean(recordState.armed);
   // A server that cannot record says so on the button rather than failing when pressed.
   const blocked = recordState.cannotRecord ?? null;
   ui.recGo.disabled = Boolean(blocked);
@@ -11653,6 +11671,19 @@ function paintRecord(storage) {
   shell.dockRec.textContent = ui.recGo.textContent;
   shell.dockRec.setAttribute('aria-pressed', String(rec));
   shell.dockMark.disabled = ui.recMark.disabled;
+  const activeIntervalMs = recordState.timelapseIntervalMs ?? null;
+  if (ui.recTimelapse && ui.recIntervalRow && ui.recInterval) {
+    if (active) {
+      ui.recTimelapse.checked = activeIntervalMs !== null;
+      if (activeIntervalMs !== null) ui.recInterval.value = String(activeIntervalMs / 1000);
+    }
+    const locked = active || Boolean(blocked);
+    ui.recTimelapse.disabled = locked;
+    ui.recTimelapse.parentElement.classList.toggle('disabled', locked);
+    ui.recInterval.disabled = locked;
+    ui.recIntervalRow.hidden = !ui.recTimelapse.checked;
+    paintTimelapseOutput();
+  }
   const costly = recordState.monitors?.costingTheTake ?? [];
   const monitorWarning = !rec && costly.length
     ? `${costly.length} consumer${costly.length > 1 ? 's are' : ' is'} reading over the network `
@@ -11660,28 +11691,72 @@ function paintRecord(storage) {
       + `monitors are at ÷${recordState.monitors.cap.divisor} ×${recordState.monitors.cap.stride} `
       + 'or coarser and the webcam is detached'
     : null;
+  const tlLabel = activeIntervalMs !== null ? formatIntervalLabel(activeIntervalMs / 1000) : '';
   ui.recNote.textContent = blocked ?? monitorWarning ?? (rec
     ? `${recordState.takeId} · ${recordState.frames} frames`
+      + (tlLabel ? ` · timelapse ${tlLabel}` : '')
       + (recordState.dropped ? ` · ${recordState.dropped} dropped to a slow disk` : '')
-    : (recordState.armed ? 'armed, waiting for the sensor' : 'not recording'));
-  if (storage) {
-    // A directory that is not there is a different problem from one that is full.
-    ui.recSpace.textContent = storage.error ?? `${storage.label} left at current settings`;
-    // Load-bearing rather than polish: with manual-only deletion the card genuinely fills.
-    ui.recSpace.classList.toggle('low', Boolean(storage.error) || storage.secondsLeft < 15 * 60);
+    : (recordState.armed
+      ? (tlLabel ? `armed (timelapse ${tlLabel}), waiting for the sensor` : 'armed, waiting for the sensor')
+      : 'not recording'));
+  if (storage) lastRecordStorage = storage;
+  if (lastRecordStorage) {
+    if (lastRecordStorage.error) {
+      // A directory that is not there is a different problem from one that is full.
+      ui.recSpace.textContent = lastRecordStorage.error;
+      ui.recSpace.classList.add('low');
+    } else if (!active && ui.recTimelapse?.checked) {
+      const sec = Number(ui.recInterval.value);
+      const valid = timelapseIntervalRefusal(sec) === null
+        && Number.isFinite(lastRecordStorage.frameBytes) && lastRecordStorage.frameBytes > 0;
+      if (valid) {
+        const secondsLeft = lastRecordStorage.freeBytes / (lastRecordStorage.frameBytes / sec);
+        ui.recSpace.textContent = `${durationLabel(secondsLeft)} left at current settings`;
+        // Load-bearing rather than polish: with manual-only deletion the card genuinely fills.
+        ui.recSpace.classList.toggle('low', secondsLeft < 15 * 60);
+      } else {
+        ui.recSpace.textContent = 'invalid interval';
+        ui.recSpace.classList.add('low');
+      }
+    } else {
+      ui.recSpace.textContent = `${lastRecordStorage.label} left at current settings`;
+      // Load-bearing rather than polish: with manual-only deletion the card genuinely fills.
+      ui.recSpace.classList.toggle('low', lastRecordStorage.secondsLeft < 15 * 60);
+    }
   }
 }
 
 // This page's tick of the shared poll, so the record button can ask again at once.
 let askRecordState = async () => {};
 
+if (ui.recInterval) {
+  ui.recInterval.min = String(TIMELAPSE_MIN_SEC);
+  ui.recInterval.max = String(TIMELAPSE_MAX_SEC);
+  ui.recInterval.addEventListener('input', () => paintRecord(null));
+  ui.recInterval.addEventListener('change', () => paintRecord(null));
+}
+if (ui.recTimelapse) {
+  ui.recTimelapse.addEventListener('change', () => paintRecord(null));
+}
+
 if (ui.recGo) {
   ui.recGo.addEventListener('click', async () => {
+    const stopping = recordState.recording || recordState.armed;
+    let payload = {};
+    if (!stopping && ui.recTimelapse?.checked) {
+      const sec = Number(ui.recInterval.value);
+      const refusal = timelapseIntervalRefusal(sec);
+      if (refusal) {
+        ui.recNote.textContent = refusal;
+        return;
+      }
+      payload = { intervalSec: sec };
+    }
     ui.recGo.disabled = true;
     try {
       // A route that changes something refuses a request that does not declare JSON.
-      const res = await fetch(recordState.recording || recordState.armed ? '/record/stop' : '/record/start', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      const res = await fetch(stopping ? '/record/stop' : '/record/start', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
       });
       const body = await res.json();
       if (body.error) ui.recNote.textContent = body.error;

@@ -344,7 +344,7 @@ async function bootLibraryModule(fetchImpl, transformSource = (s) => s) {
   const doc = createLibraryDom();
   const resolveWeb = (f) => JSON.stringify(new URL(`../web/${f}`, import.meta.url).href);
   let src = readFileSync(new URL('../web/library.js', import.meta.url), 'utf8')
-    .replace("from '/format.js'", `from ${resolveWeb('format.js')}`)
+    .replaceAll("from '/format.js'", `from ${resolveWeb('format.js')}`)
     .replace("from '/record-poll.js'", `from ${resolveWeb('record-poll.js')}`)
     .replace("from '/test-timers.js'", `from ${resolveWeb('test-timers.js')}`)
     .replace("from './take-draw.js'", `from ${resolveWeb('take-draw.js')}`)

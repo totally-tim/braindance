@@ -10,17 +10,17 @@ import { Readable, Transform } from 'node:stream';
 import { basename, dirname, join, resolve } from 'node:path';
 import { cachedIndex, forgetCapture, forgetsOf, indexPathFor, captureIdFor, loadIndex, readHelloCached } from './capture.js';
 
-export { VALID_ID };
+export { VALID_ID, durationLabel };
 
 // A node's hash reaches a filename, so it is held to this before it can be joined to a path.
 export const VALID_HASH = /^sha256:[0-9a-f]{64}$/;
 
-import { DOCUMENT_VERSIONS, VALID_ID, captureFormatRefusal, documentNameRefusal } from '../web/format.js';
+import { DOCUMENT_VERSIONS, VALID_ID, captureFormatRefusal, documentNameRefusal, durationLabel } from '../web/format.js';
 import { POLLED_NODE_FIELDS } from '../web/record-poll.js';
 
 
 // Measured on this sensor: 424KB of depth plus 51KB of colour per frame at 30fps.
-const FRAME_BYTES = 486 * 1024;
+export const FRAME_BYTES = 486 * 1024;
 // One colour camera frame at 1920x1080; `docs/performance.md` says where the number comes from.
 export const COLOUR_FRAME_BYTES = 215082;
 const NOMINAL_FPS = 30;
@@ -261,6 +261,10 @@ function manifestRefusal(take) {
     return `has hasHello ${JSON.stringify(take.hasHello)}`;
   }
   if (take.format !== undefined && !count(take.format)) return `has format ${JSON.stringify(take.format)}`;
+  if (take.timelapseIntervalMs !== undefined && take.timelapseIntervalMs !== null
+    && !(num(take.timelapseIntervalMs) && take.timelapseIntervalMs > 0)) {
+    return `has timelapseIntervalMs ${JSON.stringify(take.timelapseIntervalMs)}`;
+  }
   if (take.hello !== null) {
     const h = take.hello;
     if (!h || typeof h !== 'object' || !['fx', 'fy', 'cx', 'cy'].every((k) => num(h[k]))) {
@@ -324,6 +328,7 @@ async function describeTake(dir, file, recording, markFiles = null) {
       dropped: null,
       hasHello: null,
       format: null,
+      timelapseIntervalMs: null,
       hello: null,
       openRefusals,
       openable: openRefusals.length === 0,
@@ -345,6 +350,8 @@ async function describeTake(dir, file, recording, markFiles = null) {
 
   const fromHello = Number.isFinite(hello?.startedAt) && hello.startedAt > 0;
   const format = hello?.format ?? null;
+  const timelapseIntervalMs = Number.isFinite(hello?.timelapseIntervalMs) && hello.timelapseIntervalMs > 0
+    ? hello.timelapseIntervalMs : null;
 
   // Push order is badge order, since `cannotOpen` quotes the first. The format band is a gate
   // because `captureFormatRefusal` answers the empty string for a take that opens, and an empty
@@ -367,6 +374,7 @@ async function describeTake(dir, file, recording, markFiles = null) {
     dropped,
     hasHello: Boolean(index.hello),
     format,
+    timelapseIntervalMs,
     hello: hello ? { fx: hello.fx, fy: hello.fy, cx: hello.cx, cy: hello.cy } : null,
     openRefusals,
     openable: openRefusals.length === 0,
@@ -593,15 +601,6 @@ export async function remaining(dir, bytesPerSec = nominalTakeRate(false)) {
   const freeBytes = fs.bavail * fs.bsize;
   const secondsLeft = bytesPerSec > 0 ? freeBytes / bytesPerSec : Infinity;
   return { freeBytes, bytesPerSec, secondsLeft, label: durationLabel(secondsLeft), error: null };
-}
-
-export function durationLabel(sec) {
-  if (!Number.isFinite(sec)) return 'unbounded';
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
-  if (m > 0) return `${m}m ${String(Math.floor(sec % 60)).padStart(2, '0')}s`;
-  return `${Math.floor(sec)}s`;
 }
 
 

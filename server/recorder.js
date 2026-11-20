@@ -5,9 +5,10 @@
 import { createWriteStream, fstatSync, openSync, readdirSync } from 'node:fs';
 import { once } from 'node:events';
 import { join } from 'node:path';
-import { encodeMessage, TYPE_HELLO, TYPE_COLOR } from './protocol.js';
+import { encodeMessage, HEADER_BYTES, TYPE_HELLO, TYPE_COLOR } from './protocol.js';
 import { buildIndex, cachedIndex, forgetCapture } from './capture.js';
 import { appendMarks, remaining, MIN_TAKE_SEC, durationLabel, sameTake, takeIdentity } from './library.js';
+import { TIMELAPSE_FPS, formatIntervalLabel, timelapseIntervalRefusal } from '../web/format.js';
 
 // `2026-07-31-take3`. Synchronous, because opening a take must finish in the same turn as the
 // hello or the frames behind it find no file.
@@ -32,14 +33,36 @@ const MAX_NAME_ATTEMPTS = 64;
 // the parse loop and take the live monitor with it.
 export const MAX_TAKE_BUFFER = 64 * 1024 * 1024;
 
+// Validates an optional timelapse interval in seconds and returns integer milliseconds, or null.
+function parseTimelapseIntervalMs(intervalSec) {
+  if (intervalSec === null || intervalSec === undefined) return null;
+  const refusal = timelapseIntervalRefusal(intervalSec);
+  if (refusal) {
+    const err = new Error(refusal);
+    err.status = 400;
+    throw err;
+  }
+  return Math.round(intervalSec * 1000);
+}
+
+// Copies the framed wire message so the caller's slice is never mutated, rewriting its u64 stamp.
+function rewriteMessageStamp(raw, byteOffset, stampMs) {
+  const copy = Buffer.from(raw);
+  copy.writeBigUInt64LE(BigInt(stampMs), byteOffset);
+  return copy;
+}
+
 // Fails soft, because the hello is the one message a take cannot do without, so an unparsable one
 // is passed through unchanged.
-function stampHello(helloPayload, startedAt) {
+function stampHello(helloPayload, startedAt, timelapseIntervalMs = null) {
   const raw = Buffer.from(helloPayload);
   try {
     const hello = JSON.parse(raw.toString('utf8'));
     if (hello === null || typeof hello !== 'object' || Array.isArray(hello)) return raw;
-    return Buffer.from(JSON.stringify({ ...hello, startedAt }), 'utf8');
+    const extra = timelapseIntervalMs !== null
+      ? { timelapseIntervalMs, timelapseFps: TIMELAPSE_FPS }
+      : {};
+    return Buffer.from(JSON.stringify({ ...hello, startedAt, ...extra }), 'utf8');
   } catch {
     console.warn('[recorder] the hello is not JSON this build can read, so the take carries it '
       + 'through unchanged - its date will be the sensor\'s rather than this take\'s');
@@ -97,6 +120,7 @@ export class Recorder {
     // Armed and recording are different states: a restart closes the take while the operator's
     // intention is unchanged, so the next hello opens the next take with nobody pressing.
     this.armed = false;
+    this.timelapseIntervalMs = null;
     this.take = null;
     // Every take whose close is still running. A set, because `split()` closes the old take
     // unawaited while the replacement's hello opens the next, so a restart holds two at once.
@@ -120,7 +144,16 @@ export class Recorder {
       // the index and the hash exist. Every owned take, because a restart owns two and a tile has
       // to repaint when either close finishes; sorted, so a surface compares it as a set.
       writingIds: this.ownedTakes().map((owned) => owned.id).sort(),
+      timelapseIntervalMs: take ? take.timelapseIntervalMs : (this.armed ? this.timelapseIntervalMs : null),
     };
+  }
+
+  /** Source milliseconds of the open take's current moment, compressed for timelapse takes. */
+  currentSourceMs() {
+    const take = this.take;
+    if (!take) return 0;
+    if (take.timelapseIntervalMs !== null) return take.lastTimelapseStampMs ?? 0;
+    return Math.max(0, Date.now() - take.startedAt);
   }
 
   /** The open take and every take whose close is still running. */
@@ -142,15 +175,22 @@ export class Recorder {
 
   // Refuses when the disk cannot hold a sensible minimum, because with manual-only deletion the
   // card genuinely does fill mid-shoot.
-  async start(helloPayload) {
+  async start(helloPayload, options = {}) {
+    // Validate arguments before checking sensor state so malformed intervals always fail cleanly.
+    const intervalMs = parseTimelapseIntervalMs(options?.intervalSec ?? null);
     // A replay server refuses at the door: its frames come off a file on a loop, so their stamps
     // repeat, and one take is one continuous stream with monotonic stamps.
     const blocked = this.cannotRecord();
     if (blocked) throw new Error(blocked);
-    if (this.armed) return this.state;
+    if (this.armed) {
+      if (this.timelapseIntervalMs !== intervalMs) {
+        throw new Error('a take is already armed or recording - stop it before changing timelapse settings');
+      }
+      return this.state;
+    }
     // The rate the library reports, not a constant: the refusal and the readout have to divide by
     // the same number.
-    const left = await remaining(this.dir, this.rateOf());
+    const left = await remaining(this.dir, this.rateOf(intervalMs));
     if (left.error) throw new Error(`refusing to start a take: ${left.error}`);
     if (left.secondsLeft < MIN_TAKE_SEC) {
       throw new Error(
@@ -158,6 +198,7 @@ export class Recorder {
         + `${durationLabel(MIN_TAKE_SEC)} minimum - a take that dies partway through is a loss`,
       );
     }
+    this.timelapseIntervalMs = intervalMs;
     this.armed = true;
     if (helloPayload) this.open(helloPayload);
     this.onChange(this.state);
@@ -184,6 +225,7 @@ export class Recorder {
           // Disarmed, because looking armed while writing nothing is the failure to avoid.
           console.error(`[recorder] cannot open ${path}: ${err.message} - recording is off`);
           this.armed = false;
+          this.timelapseIntervalMs = null;
           this.onChange(this.state);
           return;
         }
@@ -194,6 +236,7 @@ export class Recorder {
     if (!take) {
       console.error(`[recorder] no free take name after ${MAX_NAME_ATTEMPTS} tries - recording is off`);
       this.armed = false;
+      this.timelapseIntervalMs = null;
       this.onChange(this.state);
       return;
     }
@@ -207,6 +250,7 @@ export class Recorder {
         const failed = this.take;
         this.take = null;
         this.armed = false;
+        this.timelapseIntervalMs = null;
         // Into *this* take's log, even though it ended badly: nulling the take without
         // flushing left them for the next take, at a source time meaningless there.
         settle(failed);
@@ -224,7 +268,8 @@ export class Recorder {
     // The take's own wall clock: the sensor says hello once per grabber process, so every take in
     // a session used to carry one identical stamp and the library sorted on it.
     const startedAt = Date.now();
-    const stamped = stampHello(helloPayload, startedAt);
+    const timelapseIntervalMs = this.timelapseIntervalMs;
+    const stamped = stampHello(helloPayload, startedAt, timelapseIntervalMs);
     const helloMessage = encodeMessage(TYPE_HELLO, stamped);
     stream.write(helloMessage);
     this.take = {
@@ -234,6 +279,11 @@ export class Recorder {
       identity: fstatSync(take.fd),
       stream,
       startedAt,
+      timelapseIntervalMs,
+      nextCaptureStampMs: null,
+      timelapseSeq: 0,
+      lastTimelapseStampMs: null,
+      wantColourStampMs: null,
       frames: 0,
       bytes: 0,
       dropped: 0,
@@ -246,7 +296,10 @@ export class Recorder {
       inFlightHead: 0,
       pendingMarks: [],
     };
-    console.log(`[recorder] take ${take.id} open`);
+    console.log(
+      `[recorder] take ${take.id} open`
+      + (timelapseIntervalMs !== null ? ` (timelapse every ${formatIntervalLabel(timelapseIntervalMs / 1000)})` : ''),
+    );
     this.onChange(this.state);
   }
 
@@ -256,6 +309,24 @@ export class Recorder {
     const take = this.take;
     if (!take) return;
     const colour = raw.readUInt32LE(4) === TYPE_COLOR;
+    // In timelapse mode, gate before touching the disk or backpressure queue so skipped frames
+    // cost nothing. Each kept frame arms a one-shot latch for one matching 1080p colour frame.
+    if (take.timelapseIntervalMs !== null) {
+      if (colour) {
+        if (take.wantColourStampMs === null || raw.length < HEADER_BYTES + 8) return;
+      } else {
+        if (raw.length < HEADER_BYTES + 16) return;
+        const sensorStampMs = Number(raw.readBigUInt64LE(HEADER_BYTES + 8));
+        if (take.nextCaptureStampMs !== null && sensorStampMs < take.nextCaptureStampMs) return;
+        if (take.nextCaptureStampMs === null) {
+          take.nextCaptureStampMs = sensorStampMs + take.timelapseIntervalMs;
+        } else {
+          // Advance by whole intervals so late frames do not drift the schedule or burst on resume.
+          const steps = Math.floor((sensorStampMs - take.nextCaptureStampMs) / take.timelapseIntervalMs) + 1;
+          take.nextCaptureStampMs += steps * take.timelapseIntervalMs;
+        }
+      }
+    }
     // Drained on the frame path rather than only when something asks for state, which is what
     // bounds the queue by the buffer ceiling below instead of by the length of the take.
     settle(take);
@@ -263,6 +334,7 @@ export class Recorder {
     // killed, having reported itself healthy throughout.
     if (take.stream.writableLength > MAX_TAKE_BUFFER) {
       if (colour) {
+        if (take.timelapseIntervalMs !== null) take.wantColourStampMs = null;
         take.droppedColour++;
         return;
       }
@@ -283,6 +355,18 @@ export class Recorder {
     if (take.stalling) {
       take.stalling = false;
       console.log(`[recorder] take ${take.id}: the disk caught up, ${take.dropped} frames dropped in the gap`);
+    }
+    if (take.timelapseIntervalMs !== null) {
+      if (colour) {
+        raw = rewriteMessageStamp(raw, HEADER_BYTES, take.wantColourStampMs);
+        take.wantColourStampMs = null;
+      } else {
+        const outStampMs = Math.round((take.timelapseSeq * 1000) / TIMELAPSE_FPS);
+        take.timelapseSeq++;
+        take.lastTimelapseStampMs = outStampMs;
+        take.wantColourStampMs = outStampMs;
+        raw = rewriteMessageStamp(raw, HEADER_BYTES + 8, outStampMs);
+      }
     }
     take.stream.write(raw);
     take.accepted += raw.length;
@@ -306,6 +390,7 @@ export class Recorder {
   async closeAll(reason) {
     const wasArmed = this.armed;
     this.armed = false;
+    this.timelapseIntervalMs = null;
     // `close` runs first and moves the open take into `closing`, so a Set holds its close once.
     const closes = new Set([this.close(reason), ...[...this.closing].map((take) => take.closed)]);
     const failed = (await Promise.allSettled(closes)).find((result) => result.status === 'rejected');
@@ -378,6 +463,7 @@ export class Recorder {
 
   async stop() {
     this.armed = false;
+    this.timelapseIntervalMs = null;
     const done = await this.close('stopped');
     this.onChange(this.state);
     return done;

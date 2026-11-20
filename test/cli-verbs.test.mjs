@@ -21,9 +21,15 @@ test('every verb parses its arguments through the command table', () => {
 test('arguments refuse malformed input and URL overrides environment', () => {
   for (const words of [[], ['sensor'], ['record', 'stop', 'extra'], ['camera', 'color', 'maybe'],
     ['output', 'size', '-1x3'], ['output', 'mode', 'bad'], ['output', 'set', 'x='],
-    ['output', 'set', 'x=NaN'], ['status', '--wait'], ['status', '--unknown'], ['status', '--url']]) {
+    ['output', 'set', 'x=NaN'], ['status', '--wait'], ['status', '--unknown'], ['status', '--url'],
+    ['status', '--interval', '5'], ['record', 'stop', '--interval', '5'],
+    ['record', 'start', '--interval'], ['record', 'start', '--interval='],
+    ['record', 'start', '--interval', '0'], ['record', 'start', '--interval', '-2'],
+    ['record', 'start', '--interval', 'abc'], ['record', 'start', '--interval', '90000']]) {
     assert.throws(() => parse(words));
   }
+  assert.deepEqual(parse(['record', 'start', '--interval', '5']).body, { intervalSec: 5 });
+  assert.deepEqual(parse(['record', 'start', '--interval=0.5']).body, { intervalSec: 0.5 });
   assert.equal(parse(['status'], { BRAINDANCE_URL: 'http://localhost:1234' }).url, 'http://localhost:1234');
   assert.equal(parse(['--url', 'http://localhost:5678', 'status'], { BRAINDANCE_URL: 'http://localhost:1234' }).url, 'http://localhost:5678');
   assert.equal(parse(['--url=https://studio.example/braindance/', 'status']).url, 'https://studio.example/braindance');

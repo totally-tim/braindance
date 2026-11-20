@@ -85,6 +85,7 @@ Region. The Record tab is open, showing the record and mark buttons, "not record
 recording time left, colour camera and low light toggles, the monitor's depth and every Nth
 sliders, and the OBS output settings with both source URLs.](media/viewer.png)
 
+- **timelapse** skips frames between intervals and writes each kept frame at 30fps spacing so long shoots do not fill the disk and open ready to play.
 - **mark** drops a mark at the current frame. Marks show up on the media library's scrub bar
   and the editor's ruler.
 - **stop** closes the take. The `.knct` capture and its `.idx` index land in `captures/`, and
@@ -251,6 +252,7 @@ braindance sensor wake --wait
 braindance camera color on
 braindance camera low-light off
 braindance record start
+braindance record start --interval 5
 braindance record mark
 braindance record stop
 braindance output mode camera

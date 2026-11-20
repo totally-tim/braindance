@@ -262,7 +262,8 @@
      only while it is parked at an end it cannot reach anyway. */
   #cameraGroup .row output { flex: 0 0 auto; white-space: nowrap; }
   #panel .row select,
-  #panel .row input[type=text] {
+  #panel .row input[type=text],
+  #panel .row input[type=number] {
     flex: 1;
     min-width: 0;
     height: 29px;
@@ -271,6 +272,7 @@
     border-radius: 0;
     background: var(--paper-1);
     color: var(--ink);
+    color-scheme: dark;
     font: inherit;
     font-size: 11px;
   }
@@ -1506,11 +1508,17 @@
       </div>
     </div>
 
-    <!-- The shooting controls: record, mark and how much time is left. -->
+    <!-- The shooting controls: record, mark, timelapse and how much time is left. -->
     <div class="group" id="recordGroup" data-panel-tab="record">
       <div class="btnrow">
         <button id="recGo" type="button">record</button>
         <button id="recMark" type="button" disabled>mark</button>
+      </div>
+      <label class="check"><input id="recTimelapse" type="checkbox"> timelapse</label>
+      <div class="row" id="recIntervalRow" hidden>
+        <span>every (s)</span>
+        <input id="recInterval" type="number" min="0.1" max="86400" step="0.1" value="1" aria-label="Timelapse interval in seconds">
+        <output id="recIntervalOut">30×</output>
       </div>
       <div id="recNote">not recording</div>
       <div id="recSpace">&nbsp;</div>

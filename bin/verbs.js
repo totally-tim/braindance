@@ -1,3 +1,5 @@
+import { timelapseIntervalRefusal } from '../web/format.js';
+
 const exact = (args, count) => { if (args.length !== count) throw new Error('wrong number of arguments'); };
 const empty = (args) => { exact(args, 0); return {}; };
 const toggle = (key) => (args) => {
@@ -56,6 +58,7 @@ export function parse(argv, env = {}) {
   let url = env.BRAINDANCE_URL || 'http://127.0.0.1:8080';
   let json = false;
   let wait = false;
+  let interval = null;
   let literal = false;
   const words = [];
   for (let i = 0; i < argv.length; i++) {
@@ -67,6 +70,15 @@ export function parse(argv, env = {}) {
       const val = word.slice('--url='.length);
       if (!val) throw new Error('--url needs a URL');
       url = val;
+    }
+    else if (word === '--interval') {
+      if (!argv[i + 1]) throw new Error('--interval needs a number of seconds');
+      interval = argv[++i];
+    }
+    else if (word.startsWith('--interval=')) {
+      const val = word.slice('--interval='.length);
+      if (!val) throw new Error('--interval needs a number of seconds');
+      interval = val;
     }
     else if (word === '--json') json = true;
     else if (word === '--wait') wait = true;
@@ -83,7 +95,15 @@ export function parse(argv, env = {}) {
   });
   if (!spec) throw new Error('unknown command; use --help');
   if (wait && spec.verb !== 'sensor wake') throw new Error('--wait is only for sensor wake');
-  return { ...spec, body: spec.body(words.slice(spec.verb.split(' ').length)), url: target.origin + basePath, json, wait };
+  if (interval !== null && spec.verb !== 'record start') throw new Error('--interval is only for record start');
+  const body = spec.body(words.slice(spec.verb.split(' ').length));
+  if (interval !== null) {
+    const sec = Number(interval);
+    const refusal = timelapseIntervalRefusal(sec);
+    if (refusal) throw new Error(refusal);
+    body.intervalSec = sec;
+  }
+  return { ...spec, body, url: target.origin + basePath, json, wait };
 }
 
 export function format(value, prefix = '') {
