@@ -14,6 +14,7 @@ the checkout.
 | `--port N` | `8080` | The port to listen on. |
 | `--host ADDR` | `127.0.0.1` | The address to bind. A non-loopback address makes the server reachable from other machines; `::1` stays loopback. |
 | `--record` | off | Arms the first take at boot. |
+| `--timelapse S` | off | Arms the boot take in timelapse mode, keeping one frame every `S` seconds (`0.1` to `86400`). Requires `--record`. |
 | `--standby-after S` | `600` | Idle seconds before sensor standby; `0` disables it. Checked every five seconds. |
 | `--replay PATH` | none | Loops a recorded capture instead of reading a sensor. |
 | `--pipeline NAME` | the grabber's own pick | Depth processor: `gl`, `cl` or `cpu`. Handed to the grabber. |
@@ -171,7 +172,7 @@ Exit codes: 0 success, 1 server refusal, 2 invalid arguments or no server respon
 | `sensor status` | Sensor health. |
 | `sensor standby` | Stop the grabber; refuse while recording or armed. |
 | `sensor wake [--wait]` | Start the grabber; optionally wait up to 60 seconds for live, for an absent sensor, or for the wait to run out. |
-| `record start`, `record stop`, `record mark` | Control the current take. |
+| `record start [--interval S]`, `record stop`, `record mark` | Control the current take. `--interval` records a timelapse, keeping one frame every `S` seconds (`0.1` to `86400`) stamped at 30fps. |
 | `camera color on\|off`, `camera low-light on\|off` | Update the camera; color changes restart a running grabber. |
 | `output` | Read the server's OBS output state. |
 | `output mode camera\|mirror` | Select program camera or the last relayed operator view. |
@@ -527,6 +528,7 @@ are doing. `r` starts and stops a take and `m` marks a running one.
 | --- | --- |
 | record | Starts a take, and stops the one running. |
 | mark | Marks the running take at the moment you press. |
+| timelapse, every (s) | Keeps one frame per interval (0.1 to 86400 seconds) and one matching 1080p colour frame when colour is on, stamped at 30fps so the take opens at playback speed. |
 | colour camera | Whether the colour stream runs at all. With it on, a take records the colour camera's 1080p picture as well; with it off, exposure means nothing and the control says so. |
 | Standby / Wake sensor | Stop or start the sensor while keeping the server up. An armed or running take refuses standby. |
 | low light | The sensor's low-light exposure mode. |
@@ -988,7 +990,7 @@ hash, `sha256:` and 64 hex digits, percent-encoded; `:id` is its name.
 | `/sensor/camera` | GET, POST | Camera booleans, availability and reason; writes return whether a restart was requested. |
 | `/output` | GET, POST | OBS mode, size, preset name and merged parameter edits. |
 | `/record/state` | GET | Whether a take is running. |
-| `/record/start` | POST | Starts a take. |
+| `/record/start` | POST | Starts a take. Optional `intervalSec` (`0.1` to `86400`) records a timelapse stamped at 30fps. |
 | `/record/stop` | POST | Stops it. |
 | `/record/mark` | POST | Marks the running take. |
 | `/jobs` | GET, POST | Lists the queue and the job files it refused, and enqueues a render. |

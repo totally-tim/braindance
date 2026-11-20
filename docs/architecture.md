@@ -148,7 +148,10 @@ framing, so a capture holds the type 1 and type 2 messages as the grabber framed
 3 colour camera messages when colour is on. While armed it asks the grabber for the colour camera
 itself, so what a take holds does not depend on whether a webcam was being watched. The one edit
 is the hello: `stampHello` rewrites `startedAt` to when this take began before writing it, and
-leaves a hello it cannot parse as an object untouched. The
+leaves a hello it cannot parse as an object untouched. In timelapse mode, the recorder keeps one
+frame per configured interval (measured on the sensor's monotonic clock) plus at most one matching
+type 3 colour frame per kept frame, rewrites both timestamps onto a 30fps playback clock so the take
+opens at playback speed, and stamps `timelapseIntervalMs` and `timelapseFps` into the hello. The
 recorder refuses a take it lacks the disk for, and `MIN_TAKE_SEC` is 120: a take that never started
 is a decision, one that dies at eighty percent is a loss.
 

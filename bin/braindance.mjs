@@ -5,7 +5,7 @@ import { parse, format, VERBS } from './verbs.js';
 async function main() {
   if (process.argv.slice(2).some((arg) => arg === '--help' || arg === '-h')) {
     console.log('braindance [--url URL] [--json] <verb>\n' + VERBS.map((row) => `  ${row.verb}`).join('\n')
-      + '\nUse sensor wake --wait, camera color|low-light on|off, output mode camera|mirror,\noutput size WxH, output preset NAME, or output set key=value ... (JSON values).');
+      + '\nUse sensor wake --wait, record start [--interval SEC], camera color|low-light on|off,\noutput mode camera|mirror, output size WxH, output preset NAME, or output set key=value ... (JSON values).');
     return;
   }
   let command;

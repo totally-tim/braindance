@@ -18,7 +18,8 @@ import {
   downloadsInFlight, hashFile, localTakeFile, markLogPath, markWriteCount, mergeMarkLog, readMarkLog, readMarks, reconcile, remaining,
   adoptNamedMarkLogs, removeName, removeTake, renameTake, resolveMarks, revealSupport, revealTake, scanTakes, takeFileFor,
 } from './library.js';
-import { COLOUR_FRAME_BYTES, nominalTakeRate } from './library.js';
+import { COLOUR_FRAME_BYTES, FRAME_BYTES, nominalTakeRate } from './library.js';
+import { timelapseIntervalRefusal } from '../web/format.js';
 import { EffectStore } from './effect-store.js';
 import { RESERVED_EFFECT_IDS, doorRefusal, forkRefusal } from './effect-door.js';
 import { cloudSpine } from '../web/cloud-shader.js';
@@ -54,6 +55,19 @@ const HOST = flag('--host', LOOPBACK);
 const REPLAY = flag('--replay');
 // Recording is a runtime action; this only says whether the first take arms itself at hello.
 const RECORD = has('--record');
+const HAS_TIMELAPSE = has('--timelapse');
+const TIMELAPSE_RAW = flag('--timelapse');
+if (HAS_TIMELAPSE) {
+  if (!RECORD) throw new Error('--timelapse requires --record');
+  if (TIMELAPSE_RAW === null || TIMELAPSE_RAW.trim() === '') {
+    throw new Error('--timelapse needs a number of seconds');
+  }
+}
+const TIMELAPSE_SEC = HAS_TIMELAPSE ? Number(TIMELAPSE_RAW) : null;
+if (TIMELAPSE_SEC !== null) {
+  const bad = timelapseIntervalRefusal(TIMELAPSE_SEC);
+  if (bad) throw new Error(`--timelapse: ${bad}`);
+}
 // The host that started this process owns its stdin: a `stop` line asks for the shutdown a signal
 // does, and end-of-file means the host is gone. Windows delivers no SIGTERM, so the pipe is its channel.
 const STOP_ON_STDIN = has('--stop-on-stdin');
@@ -510,7 +524,7 @@ async function serveLibrary(req, res) {
     node: node ? { name: node.name, url: node.url, reachable: there !== null, error: node.lastError } : null,
     takes,
     unreadable: here.unreadable,
-    storage: await remaining(CAPTURES_DIR, recordingRate()),
+    storage: await remaining(CAPTURES_DIR, recordingRate(recorder.state.timelapseIntervalMs)),
     recording: recorder.state,
     reveal: revealAvailability(req),
   });
@@ -1082,6 +1096,15 @@ function attachedMonitors() {
 // spelled out rather than a bare `force`, so the log line reads as a decision.
 const serveRecordStart = shooting(async (req, res) => {
   const body = await readBody(req);
+  const intervalSec = body.intervalSec ?? null;
+  if (intervalSec !== null) {
+    const bad = timelapseIntervalRefusal(intervalSec);
+    if (bad) {
+      const err = new Error(bad);
+      err.status = 400;
+      throw err;
+    }
+  }
   const costly = consumersCostingTheTake();
   if (costly.length && body.acceptMonitorCost !== true) {
     const at = costly.map((c) => `${c.kind} at ${c.at}`).join(', ');
@@ -1098,7 +1121,7 @@ const serveRecordStart = shooting(async (req, res) => {
   }
   recordingStarts++;
   try {
-    const state = await recorder.start(helloJson);
+    const state = await recorder.start(helloJson, { intervalSec });
     wakeSensor?.();
     sendJson(res, state);
   } finally { recordingStarts--; }
@@ -1107,9 +1130,9 @@ const serveRecordStop = shooting(async (req, res) => sendJson(res, { stopped: aw
 const serveRecordMark = shooting(async (req, res) => {
   const body = await readBody(req);
   // The moment the operator pressed, supplied by the caller when it knows - the monitor does - and
-  // taken from the take's elapsed wall clock when it does not. In the body and only in the body.
+  // taken from the take's source clock (compressed in timelapse mode) when it does not.
   const sourceMs = Number(body.sourceMs ?? NaN);
-  const at = Number.isFinite(sourceMs) ? sourceMs : Date.now() - (recorder.state.startedAt ?? Date.now());
+  const at = Number.isFinite(sourceMs) ? sourceMs : recorder.currentSourceMs();
   sendJson(res, recorder.mark(at, body.label));
 });
 
@@ -1246,7 +1269,7 @@ const serveJobRequeue = async (req, res, args) => {
     sendJson(res, { error }, status);
   }
 };
-const serveRemaining = async (req, res) => sendJson(res, await remaining(CAPTURES_DIR, recordingRate()));
+const serveRemaining = async (req, res) => sendJson(res, await remaining(CAPTURES_DIR, recordingRate(recorder.state.timelapseIntervalMs)));
 
 // The downloads currently moving bytes, so a transfer that takes minutes reads as one. The rate
 // is over the whole transfer, because a rate sampled between two polls of wifi swings by three.
@@ -1291,12 +1314,17 @@ const serveSensorHealth = (req, res) => sendJson(res, {
 // check built only out of 409s would pass against a server that refused everything.
 const serveRecordState = async (req, res) => {
   const costly = consumersCostingTheTake();
+  const state = recorder.state;
+  const storage = {
+    ...await remaining(CAPTURES_DIR, recordingRate(state.timelapseIntervalMs)),
+    frameBytes: recordingFrameBytes(),
+  };
   sendJson(res, {
-    ...recorder.state,
+    ...state,
     // The library page spans both machines, so on an editing station every fact this route
     // reported was about a recorder that station does not have. Null on the node itself.
     node: node ? await node.recordState() : null,
-    storage: await remaining(CAPTURES_DIR, recordingRate()),
+    storage,
     monitors: {
       cap: RECORDING_CAP,
       attached: wss.clients.size,
@@ -1331,7 +1359,7 @@ const serveRecordState = async (req, res) => {
 
 async function serveLocalTakes(req, res) {
   const here = await localTakes();
-  sendJson(res, { here: HERE_NAME, ...here, storage: await remaining(CAPTURES_DIR, recordingRate()) });
+  sendJson(res, { here: HERE_NAME, ...here, storage: await remaining(CAPTURES_DIR, recordingRate(recorder.state.timelapseIntervalMs)) });
 }
 
 const output = new Output({ presets: PRESETS, effects: EFFECTS });
@@ -1825,11 +1853,19 @@ const stats = { frames: 0, dropped: 0, bytes: 0, colourBytes: 0, since: Date.now
 let observedBytesPerSec = 0;
 // And of the colour camera's messages, which arrive only while something asks for them.
 let observedColourBytesPerSec = 0;
+// Size of one recorded frame (depth + registered colour, plus one 1080p colour frame when on).
+const recordingFrameBytes = () => {
+  const depthFrame = (observedBytesPerSec > 0 && observedFps > 0)
+    ? observedBytesPerSec / observedFps
+    : FRAME_BYTES;
+  return depthFrame + (camera.color ? COLOUR_FRAME_BYTES : 0);
+};
 // What a take would write each second, which is what the remaining-time report and the refusal to
-// start divide free space by. With colour on a take records the colour camera too: measured while
-// it flows, and otherwise one colour frame per depth frame, the most the camera sends. Before
-// anything has arrived, the nominal rate.
-const recordingRate = () => {
+// start divide free space by. In timelapse mode, one frame lands per interval; otherwise full rate.
+const recordingRate = (intervalMs = null) => {
+  if (intervalMs !== null && intervalMs > 0) {
+    return recordingFrameBytes() / (intervalMs / 1000);
+  }
   if (!(observedBytesPerSec > 0)) return nominalTakeRate(camera.color);
   if (!camera.color) return observedBytesPerSec;
   return observedBytesPerSec + (observedColourBytesPerSec > 0 ? observedColourBytesPerSec : observedFps * COLOUR_FRAME_BYTES);
@@ -2122,7 +2158,7 @@ const recorder = new Recorder({
         + 'side of the link, and takes are shot on the node'
       : null),
   // So the refusal to start a take and the remaining-time readout divide by the same number.
-  rateOf: () => recordingRate(),
+  rateOf: (intervalMs) => recordingRate(intervalMs),
   // Every monitor sees the recording state change: the control arrives over HTTP, the state comes
   // back on the socket every client is already listening to. Arming and disarming also move the
   // colour camera's demand.
@@ -2474,7 +2510,7 @@ function startLive() {
   // *before* the grabber is spawned, because a hello arriving during that disk read would find the
   // recorder disarmed and start no take at all.
   if (RECORD) {
-    recorder.start(null).then(spawnGrabber, (err) => {
+    recorder.start(null, { intervalSec: TIMELAPSE_SEC }).then(spawnGrabber, (err) => {
       console.error(`[recorder] ${err.message}`);
       spawnGrabber();
     });

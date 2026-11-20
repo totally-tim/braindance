@@ -232,6 +232,58 @@ export const decimalsOf = (x) => {
 };
 
 /**
+ * Bounds and playback rate for timelapse recording. A timelapse take skips sensor frames between
+ * intervals and stamps each kept frame at `TIMELAPSE_FPS` so the take opens at playback speed.
+ */
+export const TIMELAPSE_MIN_SEC = 0.1;
+export const TIMELAPSE_MAX_SEC = 86400;
+export const TIMELAPSE_FPS = 30;
+
+/** Whether a timelapse interval in seconds is usable, as a sentence or null. */
+export function timelapseIntervalRefusal(sec) {
+  if (typeof sec !== 'number' || !Number.isFinite(sec)) {
+    return `timelapse interval ${JSON.stringify(sec)} is not a finite number of seconds`;
+  }
+  if (sec < TIMELAPSE_MIN_SEC || sec > TIMELAPSE_MAX_SEC) {
+    return `timelapse interval must be between ${TIMELAPSE_MIN_SEC}s and ${TIMELAPSE_MAX_SEC}s, got ${sec}s`;
+  }
+  return null;
+}
+
+/** Human-readable interval for a timelapse setting, such as `0.5s`, `5s`, `1m 30s`, `1h`. */
+export function formatIntervalLabel(sec) {
+  if (!Number.isFinite(sec) || sec <= 0) return '';
+  if (sec < 60) {
+    const rounded = Number(sec.toFixed(2));
+    return `${rounded}s`;
+  }
+  const total = Math.round(sec);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const parts = [];
+  if (h > 0) parts.push(`${h}h`);
+  if (m > 0) parts.push(`${m}m`);
+  if (s > 0) parts.push(`${s}s`);
+  return parts.join(' ');
+}
+
+/** Remaining recording duration formatted for readouts and disk-space refusals. */
+export function durationLabel(sec) {
+  if (!Number.isFinite(sec)) return 'unbounded';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
+  if (m > 0) return `${m}m ${String(Math.floor(sec % 60)).padStart(2, '0')}s`;
+  return `${Math.floor(sec)}s`;
+}
+
+/** Minimum free bytes required for a timelapse take: hello header plus two openable frames. */
+export function minTimelapseBytes(frameBytes) {
+  return Math.ceil(frameBytes * 2) + 4096;
+}
+
+/**
  * Where a scalar lands: clamped into its bounds, snapped onto the step grid its `min`
  * anchors, and rounded to the decimals `min` and `step` imply. The install door runs this
  * rather than describing it. Without the `toFixed` trip, `0 + 55 * 0.01` is
