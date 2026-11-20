@@ -42,7 +42,7 @@ const MUTATIONS = {
   'one-spelling-for-every-module': {
     file: 'web/library.js',
     edits: [
-      ["import { VALID_ID } from '/format.js';", "import { VALID_ID } from './format.js';"],
+      ["import { VALID_ID, formatIntervalLabel } from '/format.js';", "import { VALID_ID, formatIntervalLabel } from './format.js';"],
       ["import { pollRecordState } from '/record-poll.js';", "import { pollRecordState } from './record-poll.js';"],
       ["import { testTimer } from '/test-timers.js';", "import { testTimer } from './test-timers.js';"],
     ],

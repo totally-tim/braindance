@@ -2,8 +2,7 @@
 // scrubs it through the same frame API the editor reads. Nothing is stored - no proxy, no
 // rendered poster - and a tile's height is CSS, which `library.html` enforces.
 
-import { VALID_ID } from '/format.js';
-import { formatIntervalLabel } from '/format.js';
+import { VALID_ID, formatIntervalLabel } from '/format.js';
 import { pollRecordState } from '/record-poll.js';
 import { testTimer } from '/test-timers.js';
 import { createSkim, divisorFor, paintMarks, timesFor } from './take-draw.js';
