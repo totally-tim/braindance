@@ -72,12 +72,12 @@ export function parse(argv, env = {}) {
       url = val;
     }
     else if (word === '--interval') {
-      if (!argv[i + 1]) throw new Error('--interval needs a number of seconds');
+      if (!argv[i + 1] || !argv[i + 1].trim()) throw new Error('--interval needs a number of seconds');
       interval = argv[++i];
     }
     else if (word.startsWith('--interval=')) {
       const val = word.slice('--interval='.length);
-      if (!val) throw new Error('--interval needs a number of seconds');
+      if (!val.trim()) throw new Error('--interval needs a number of seconds');
       interval = val;
     }
     else if (word === '--json') json = true;

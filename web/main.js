@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import {
   CLIP_CEILING, DEPTH_H, DEPTH_W, DOCUMENT_VERSIONS, POINTS, VALID_ID, copyName, documentNameRefusal,
   durationLabel, effectIdsIn, effectOf, formatIntervalLabel, nextUntitledName, presetCarriesLookName, snapScalar,
-  TIMELAPSE_FPS, TIMELAPSE_MAX_SEC, TIMELAPSE_MIN_SEC, timelapseIntervalRefusal,
+  TIMELAPSE_FPS, TIMELAPSE_MAX_SEC, TIMELAPSE_MIN_SEC, minTimelapseBytes, timelapseIntervalRefusal,
   versionRefusal, captureFormatRefusal, requiresEntryRefusal, requiresListRefusal,
 } from './format.js';
 import { pollRecordState } from './record-poll.js';
@@ -11710,10 +11710,15 @@ function paintRecord(storage) {
       const valid = timelapseIntervalRefusal(sec) === null
         && Number.isFinite(lastRecordStorage.frameBytes) && lastRecordStorage.frameBytes > 0;
       if (valid) {
-        const secondsLeft = lastRecordStorage.freeBytes / (lastRecordStorage.frameBytes / sec);
-        ui.recSpace.textContent = `${durationLabel(secondsLeft)} left at current settings`;
-        // Load-bearing rather than polish: with manual-only deletion the card genuinely fills.
-        ui.recSpace.classList.toggle('low', secondsLeft < 15 * 60);
+        if (lastRecordStorage.freeBytes < minTimelapseBytes(lastRecordStorage.frameBytes)) {
+          ui.recSpace.textContent = 'not enough disk space for two timelapse frames';
+          ui.recSpace.classList.add('low');
+        } else {
+          const secondsLeft = lastRecordStorage.freeBytes / (lastRecordStorage.frameBytes / sec);
+          ui.recSpace.textContent = `${durationLabel(secondsLeft)} left at current settings`;
+          // Load-bearing rather than polish: with manual-only deletion the card genuinely fills.
+          ui.recSpace.classList.toggle('low', secondsLeft < 15 * 60);
+        }
       } else {
         ui.recSpace.textContent = 'invalid interval';
         ui.recSpace.classList.add('low');

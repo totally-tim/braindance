@@ -24,6 +24,7 @@ test('arguments refuse malformed input and URL overrides environment', () => {
     ['output', 'set', 'x=NaN'], ['status', '--wait'], ['status', '--unknown'], ['status', '--url'],
     ['status', '--interval', '5'], ['record', 'stop', '--interval', '5'],
     ['record', 'start', '--interval'], ['record', 'start', '--interval='],
+    ['record', 'start', '--interval', '   '], ['record', 'start', '--interval=   '],
     ['record', 'start', '--interval', '0'], ['record', 'start', '--interval', '-2'],
     ['record', 'start', '--interval', 'abc'], ['record', 'start', '--interval', '90000']]) {
     assert.throws(() => parse(words));

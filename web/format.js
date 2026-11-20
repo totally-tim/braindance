@@ -278,6 +278,11 @@ export function durationLabel(sec) {
   return `${Math.floor(sec)}s`;
 }
 
+/** Minimum free bytes required for a timelapse take: hello header plus two openable frames. */
+export function minTimelapseBytes(frameBytes) {
+  return Math.ceil(frameBytes * 2) + 4096;
+}
+
 /**
  * Where a scalar lands: clamped into its bounds, snapped onto the step grid its `min`
  * anchors, and rounded to the decimals `min` and `step` imply. The install door runs this

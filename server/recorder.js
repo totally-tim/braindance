@@ -7,8 +7,8 @@ import { once } from 'node:events';
 import { join } from 'node:path';
 import { encodeMessage, HEADER_BYTES, TYPE_HELLO, TYPE_COLOR } from './protocol.js';
 import { buildIndex, cachedIndex, forgetCapture } from './capture.js';
-import { appendMarks, remaining, MIN_TAKE_SEC, durationLabel, sameTake, takeIdentity } from './library.js';
-import { TIMELAPSE_FPS, formatIntervalLabel, timelapseIntervalRefusal } from '../web/format.js';
+import { appendMarks, remaining, FRAME_BYTES, MIN_TAKE_SEC, durationLabel, sameTake, takeIdentity } from './library.js';
+import { TIMELAPSE_FPS, formatIntervalLabel, minTimelapseBytes, timelapseIntervalRefusal } from '../web/format.js';
 
 // `2026-07-31-take3`. Synchronous, because opening a take must finish in the same turn as the
 // hello or the frames behind it find no file.
@@ -50,6 +50,30 @@ function rewriteMessageStamp(raw, byteOffset, stampMs) {
   const copy = Buffer.from(raw);
   copy.writeBigUInt64LE(BigInt(stampMs), byteOffset);
   return copy;
+}
+
+// Writes one matched timelapse colour frame through the same backpressure guard as normal mode.
+function writeTimelapseColour(take, raw, outStampMs) {
+  settle(take);
+  if (take.stream.writableLength > MAX_TAKE_BUFFER) {
+    take.droppedColour++;
+    return;
+  }
+  const msg = rewriteMessageStamp(raw, HEADER_BYTES, outStampMs);
+  take.stream.write(msg);
+  take.accepted += msg.length;
+}
+
+// Flushes a held pre-depth colour frame when no later colour arrived before the next depth or stop.
+function flushPendingTimelapseColour(take) {
+  const pending = take.pendingColour;
+  if (!pending) return;
+  take.pendingColour = null;
+  if (take.stream.destroyed || take.stream.writableEnded) return;
+  if (pending.prev && !pending.prev.used) {
+    pending.prev.used = true;
+    writeTimelapseColour(take, pending.prev.raw, pending.outStampMs);
+  }
 }
 
 // Fails soft, because the hello is the one message a take cannot do without, so an unparsable one
@@ -190,13 +214,26 @@ export class Recorder {
     }
     // The rate the library reports, not a constant: the refusal and the readout have to divide by
     // the same number.
-    const left = await remaining(this.dir, this.rateOf(intervalMs));
+    const rate = this.rateOf(intervalMs);
+    const left = await remaining(this.dir, rate);
     if (left.error) throw new Error(`refusing to start a take: ${left.error}`);
     if (left.secondsLeft < MIN_TAKE_SEC) {
       throw new Error(
         `refusing to start a take: ${left.label} left at current settings, under the `
         + `${durationLabel(MIN_TAKE_SEC)} minimum - a take that dies partway through is a loss`,
       );
+    }
+    if (intervalMs !== null) {
+      // Intervals longer than MIN_TAKE_SEC have a tiny average byte rate, so verify the disk can
+      // hold at least the hello and two frames (the minimum openable take) up front.
+      const frameBytes = Number.isFinite(rate) && rate > 0 ? rate * (intervalMs / 1000) : FRAME_BYTES;
+      const minBytes = minTimelapseBytes(frameBytes);
+      if (left.freeBytes < minBytes) {
+        throw new Error(
+          `refusing to start a take: ${(left.freeBytes / 1024).toFixed(0)} KB free, under the `
+          + `${(minBytes / 1024).toFixed(0)} KB minimum for two timelapse frames and hello`,
+        );
+      }
     }
     this.timelapseIntervalMs = intervalMs;
     this.armed = true;
@@ -283,7 +320,8 @@ export class Recorder {
       nextCaptureStampMs: null,
       timelapseSeq: 0,
       lastTimelapseStampMs: null,
-      wantColourStampMs: null,
+      latestColour: null,
+      pendingColour: null,
       frames: 0,
       bytes: 0,
       dropped: 0,
@@ -310,22 +348,42 @@ export class Recorder {
     if (!take) return;
     const colour = raw.readUInt32LE(4) === TYPE_COLOR;
     // In timelapse mode, gate before touching the disk or backpressure queue so skipped frames
-    // cost nothing. Each kept frame arms a one-shot latch for one matching 1080p colour frame.
+    // cost nothing. Colour is matched to each retained depth frame by original source timestamp
+    // because the native grabber's colour encoder thread can emit colour before or after depth.
+    let sensorStampMs = null;
     if (take.timelapseIntervalMs !== null) {
       if (colour) {
-        if (take.wantColourStampMs === null || raw.length < HEADER_BYTES + 8) return;
-      } else {
-        if (raw.length < HEADER_BYTES + 16) return;
-        const sensorStampMs = Number(raw.readBigUInt64LE(HEADER_BYTES + 8));
-        if (take.nextCaptureStampMs !== null && sensorStampMs < take.nextCaptureStampMs) return;
-        if (take.nextCaptureStampMs === null) {
-          take.nextCaptureStampMs = sensorStampMs + take.timelapseIntervalMs;
-        } else {
-          // Advance by whole intervals so late frames do not drift the schedule or burst on resume.
-          const steps = Math.floor((sensorStampMs - take.nextCaptureStampMs) / take.timelapseIntervalMs) + 1;
-          take.nextCaptureStampMs += steps * take.timelapseIntervalMs;
+        if (raw.length < HEADER_BYTES + 8) return;
+        const colourStampMs = Number(raw.readBigUInt64LE(HEADER_BYTES));
+        const held = { stampMs: colourStampMs, raw: Buffer.from(raw), used: false };
+        take.latestColour = held;
+        const pending = take.pendingColour;
+        if (!pending) return;
+        if (colourStampMs < pending.depthSensorStampMs) {
+          pending.prev = held;
+          return;
         }
+        const prev = pending.prev && !pending.prev.used ? pending.prev : null;
+        const usePrev = prev !== null
+          && Math.abs(prev.stampMs - pending.depthSensorStampMs) <= Math.abs(colourStampMs - pending.depthSensorStampMs);
+        const chosen = usePrev ? prev : held;
+        const outStampMs = pending.outStampMs;
+        take.pendingColour = null;
+        chosen.used = true;
+        writeTimelapseColour(take, chosen.raw, outStampMs);
+        return;
       }
+      if (raw.length < HEADER_BYTES + 16) return;
+      sensorStampMs = Number(raw.readBigUInt64LE(HEADER_BYTES + 8));
+      if (take.nextCaptureStampMs !== null && sensorStampMs < take.nextCaptureStampMs) return;
+      if (take.nextCaptureStampMs === null) {
+        take.nextCaptureStampMs = sensorStampMs + take.timelapseIntervalMs;
+      } else {
+        // Advance by whole intervals so late frames do not drift the schedule or burst on resume.
+        const steps = Math.floor((sensorStampMs - take.nextCaptureStampMs) / take.timelapseIntervalMs) + 1;
+        take.nextCaptureStampMs += steps * take.timelapseIntervalMs;
+      }
+      flushPendingTimelapseColour(take);
     }
     // Drained on the frame path rather than only when something asks for state, which is what
     // bounds the queue by the buffer ceiling below instead of by the length of the take.
@@ -334,7 +392,6 @@ export class Recorder {
     // killed, having reported itself healthy throughout.
     if (take.stream.writableLength > MAX_TAKE_BUFFER) {
       if (colour) {
-        if (take.timelapseIntervalMs !== null) take.wantColourStampMs = null;
         take.droppedColour++;
         return;
       }
@@ -356,21 +413,25 @@ export class Recorder {
       take.stalling = false;
       console.log(`[recorder] take ${take.id}: the disk caught up, ${take.dropped} frames dropped in the gap`);
     }
+    let outStampMs = null;
     if (take.timelapseIntervalMs !== null) {
-      if (colour) {
-        raw = rewriteMessageStamp(raw, HEADER_BYTES, take.wantColourStampMs);
-        take.wantColourStampMs = null;
-      } else {
-        const outStampMs = Math.round((take.timelapseSeq * 1000) / TIMELAPSE_FPS);
-        take.timelapseSeq++;
-        take.lastTimelapseStampMs = outStampMs;
-        take.wantColourStampMs = outStampMs;
-        raw = rewriteMessageStamp(raw, HEADER_BYTES + 8, outStampMs);
-      }
+      outStampMs = Math.round((take.timelapseSeq * 1000) / TIMELAPSE_FPS);
+      take.timelapseSeq++;
+      take.lastTimelapseStampMs = outStampMs;
+      raw = rewriteMessageStamp(raw, HEADER_BYTES + 8, outStampMs);
     }
     take.stream.write(raw);
     take.accepted += raw.length;
     if (!colour) take.inFlight.push(take.accepted);
+    if (take.timelapseIntervalMs !== null && !colour) {
+      const held = take.latestColour && !take.latestColour.used ? take.latestColour : null;
+      if (held && held.stampMs >= sensorStampMs) {
+        held.used = true;
+        writeTimelapseColour(take, held.raw, outStampMs);
+      } else {
+        take.pendingColour = { depthSensorStampMs: sensorStampMs, outStampMs, prev: held };
+      }
+    }
   }
 
   // The close is kept on the take, because `closeAll` has to wait for one a grabber restart began
@@ -405,6 +466,7 @@ export class Recorder {
     if (!take) return null;
     this.take = null;
     this.closing.add(take);
+    flushPendingTimelapseColour(take);
     take.stream.end();
     let closeError = null;
     try {

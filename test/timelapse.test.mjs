@@ -8,8 +8,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Recorder } from '../server/recorder.js';
-import { buildIndex, colourAfterFrames, readHelloOnce } from '../server/capture.js';
-import { MIN_TAKE_SEC, readMarks, scanTakes } from '../server/library.js';
+import { buildIndex, colourAfterFrames, openCapture, readHelloOnce } from '../server/capture.js';
+import { MIN_TAKE_SEC, readMarks, remaining, scanTakes } from '../server/library.js';
 import { encodeMessage, HEADER_BYTES, TYPE_COLOR, TYPE_FRAME } from '../server/protocol.js';
 import {
   CAPTURE_FORMAT,
@@ -45,10 +45,10 @@ function makeFrame(stampMs, bytes = 256) {
   return encodeMessage(TYPE_FRAME, payload);
 }
 
-function makeColour(stampMs, jpegBytes = 64) {
+function makeColour(stampMs, jpegBytes = 64, tag = 0xab) {
   const payload = Buffer.alloc(8 + jpegBytes);
   payload.writeBigUInt64LE(BigInt(stampMs), 0);
-  payload.fill(0xab, 8);
+  payload.fill(tag, 8);
   return encodeMessage(TYPE_COLOR, payload);
 }
 
@@ -175,6 +175,67 @@ test('timelapse skips frames between intervals, rewrites 30fps stamps, matches 1
   });
 });
 
+test('timelapse selects 1080p colour by closest original source timestamp across arrival orders', async () => {
+  await inTempDir(async (dir) => {
+    const recorder = new Recorder({ dir });
+    await recorder.start(HELLO, { intervalSec: 1 });
+
+    // Native grabber order: colour(1000) arrives before depth(1010), followed by colour(1033).
+    // Closest to 1010 is 1000 (delta 10ms vs 23ms), so frame 0 must keep tag 0x11.
+    recorder.write(makeColour(1000, 64, 0x11));
+    recorder.write(makeFrame(1010, 64));
+    recorder.write(makeColour(1033, 64, 0x22));
+    recorder.write(makeFrame(1043, 64));
+
+    // Encoder backlog order: colour(1967) before depth(2010), then late colour(2005) and colour(2033).
+    // Closest to 2010 is 2005 (delta 5ms), so frame 1 must keep tag 0x44.
+    recorder.write(makeColour(1967, 64, 0x33));
+    recorder.write(makeFrame(2010, 64));
+    recorder.write(makeColour(2005, 64, 0x44));
+    recorder.write(makeColour(2033, 64, 0x55));
+
+    // Final frame with colour arriving just before depth and stop() before any later colour.
+    // Must flush tag 0x66 on close so the final frame keeps its matched colour.
+    recorder.write(makeColour(3005, 64, 0x66));
+    recorder.write(makeFrame(3010, 64));
+
+    const closed = await recorder.stop();
+    assert.equal(closed.frames, 3);
+    assert.equal(closed.colourFrames, 3);
+
+    const capture = await openCapture(closed.path);
+    try {
+      const tags = [];
+      for (let i = 0; i < capture.colourCount; i++) {
+        const payload = await capture.readColour(i);
+        tags.push(payload[8]);
+      }
+      assert.deepEqual(tags, [0x11, 0x44, 0x66]);
+      assert.deepEqual(capture.index.colour.stampMs, capture.index.frames.stampMs);
+    } finally {
+      await capture.close();
+    }
+  });
+});
+
+test('timelapse disk check reserves space for hello and two frames even when average rate clears MIN_TAKE_SEC', async () => {
+  await inTempDir(async (dir) => {
+    const { freeBytes } = await remaining(dir, 1);
+    assert.ok(freeBytes > 0);
+    // At 86400s interval with one frame = 1.5x freeBytes, average secondsLeft is 57600s (>= 120s),
+    // yet the disk cannot hold even one frame. Start must refuse on the two-frame minimum.
+    const recorder = new Recorder({
+      dir,
+      rateOf: (intervalMs) => (freeBytes * 1.5) / (intervalMs / 1000),
+    });
+    await assert.rejects(
+      () => recorder.start(HELLO, { intervalSec: TIMELAPSE_MAX_SEC }),
+      /two timelapse frames and hello/,
+    );
+    assert.equal(recorder.state.armed, false);
+  });
+});
+
 test('timelapse schedule avoids cumulative drift and does not burst after a sensor pause', async () => {
   await inTempDir(async (dir) => {
     const recorder = new Recorder({ dir });
@@ -242,10 +303,14 @@ test('timelapse preserves setting across grabber split, ignores short frames, an
 
 test('server refuses --timelapse without --record and drives full timelapse flow through CLI and HTTP', async () => {
   await inTempDir(async (dir) => {
-    // Off-happy-path: --timelapse without --record must fail at boot.
+    // Off-happy-path: --timelapse without --record or without a value must fail at boot.
     const badBoot = await runNode([SERVER_BIN, '--timelapse', '5', '--captures', dir]);
     assert.notEqual(badBoot.code, 0);
     assert.match(badBoot.stderr, /--timelapse requires --record/);
+
+    const missingValBoot = await runNode([SERVER_BIN, '--captures', dir, '--record', '--timelapse']);
+    assert.notEqual(missingValBoot.code, 0);
+    assert.match(missingValBoot.stderr, /--timelapse needs a number of seconds/);
 
     // Build a minimal 4-frame synthetic sample quickly so the test runs offline without ffmpeg.
     const samplePath = join(dir, 'sample.knct');

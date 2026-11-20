@@ -55,10 +55,16 @@ const HOST = flag('--host', LOOPBACK);
 const REPLAY = flag('--replay');
 // Recording is a runtime action; this only says whether the first take arms itself at hello.
 const RECORD = has('--record');
+const HAS_TIMELAPSE = has('--timelapse');
 const TIMELAPSE_RAW = flag('--timelapse');
-const TIMELAPSE_SEC = TIMELAPSE_RAW !== null ? Number(TIMELAPSE_RAW) : null;
-if (TIMELAPSE_SEC !== null) {
+if (HAS_TIMELAPSE) {
   if (!RECORD) throw new Error('--timelapse requires --record');
+  if (TIMELAPSE_RAW === null || TIMELAPSE_RAW.trim() === '') {
+    throw new Error('--timelapse needs a number of seconds');
+  }
+}
+const TIMELAPSE_SEC = HAS_TIMELAPSE ? Number(TIMELAPSE_RAW) : null;
+if (TIMELAPSE_SEC !== null) {
   const bad = timelapseIntervalRefusal(TIMELAPSE_SEC);
   if (bad) throw new Error(`--timelapse: ${bad}`);
 }
